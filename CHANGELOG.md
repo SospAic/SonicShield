@@ -3,6 +3,37 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+## [1.0.1] - 2026-09-13
+
+### Fixed（修复，均由模拟器端到端验证发现）
+- **P0** 通知渠道缺失导致 FGS 崩溃循环：flutter_background_service 指定自定义
+  `notificationChannelId` 时不会自动创建 channel（其源码 L89-95）；
+  现于应用启动时统一创建全部通知渠道（BUG-007）。
+- **P0** 后台服务引擎的 MethodChannel 无 handler：MainActivity 仅注册 UI 引擎，
+  引擎隔离排布任务闹钟时 MissingPluginException 被静默吞掉，任务闹钟从未排布；
+  新建本地插件 `packages/native_bridge`（path 插件），注册到所有 Flutter 引擎（BUG-008）。
+- **P1** 主 FGS 携带 microphone 类型：Android 14+ while-in-use 语义下，
+  后台复活的 FGS 携带 microphone 被 SecurityException 拒绝；类型收窄为
+  `mediaPlayback|dataSync`，新增 `MicGuardService`（前台启动的 microphone
+  类型通行证服务）（BUG-009）。
+- **P2** Gradle wrapper 对镜像站 TLS 握手失败：`distributionUrl` 支持本地
+  `file://` 发行包（BUG-010）。
+
+### Added（新增）
+- **预置音效库**：60 条程序化合成音效（12 分类 × 5 条：敲击/撞击/拖拽/
+  门窗/玻璃/人声近似/动物/提示铃/警示/自然/电子/助眠底噪），
+  纯 Dart 物理声学合成（`tool/gen_sfx.dart`，固定种子可复现），MIT 零版权；
+  音源库页一键导入 + 单条试听。
+- 声音守卫 while-in-use 合规方案：前台启动的 MicGuardService +
+  状态栏麦克风提示（docs/05 §1.4）。
+
+### Verified（模拟器端到端实测，API 36 x86_64 AVD）
+- 合规门/守护开关/FGS 注册（isForeground=true）/任务创建/计划物化 14 条/
+  原生精确闹钟排布（`exactAllowReason=permission`）/仪表盘倒计时与系统闹钟一致
+- **ST-01 杀进程自愈**：`am kill` 后 5 秒内自动复活并重注册服务
+- 真实触发两次执行并完整审计（`schedule · play · failed · 无可用音源`，
+  失败为正确语义——未导入音源；导入预置库后即出声）
+
 ## [1.0.0] - 2026-09-12
 
 ### Added（新增）

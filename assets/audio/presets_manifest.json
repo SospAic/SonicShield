@@ -1,0 +1,503 @@
+{
+  "version": "1.0.0",
+  "sampleRate": 22050,
+  "license": "MIT（程序化合成，无采样素材）",
+  "generator": "tool/gen_sfx.dart (seed=20260913)",
+  "total": 60,
+  "categories": {
+    "knocks": 5,
+    "impacts": 5,
+    "drags": 5,
+    "doors": 5,
+    "glass": 5,
+    "human": 5,
+    "animals": 5,
+    "bells": 5,
+    "alarms": 5,
+    "nature": 5,
+    "tech": 5,
+    "ambient": 5
+  },
+  "items": [
+    {
+      "id": "knocks_door_single",
+      "category": "knocks",
+      "name": "敲门（单下）",
+      "desc": "中低频木门敲击",
+      "file": "presets/knocks_door_single.wav",
+      "durationMs": 500
+    },
+    {
+      "id": "knocks_door_triple",
+      "category": "knocks",
+      "name": "敲门（三连）",
+      "desc": "礼貌三连敲节奏",
+      "file": "presets/knocks_door_triple.wav",
+      "durationMs": 1600
+    },
+    {
+      "id": "knocks_table",
+      "category": "knocks",
+      "name": "敲桌",
+      "desc": "硬质桌面清脆敲击",
+      "file": "presets/knocks_table.wav",
+      "durationMs": 350
+    },
+    {
+      "id": "knocks_knuckle_rapid",
+      "category": "knocks",
+      "name": "急促指关节",
+      "desc": "快速连续指关节敲击",
+      "file": "presets/knocks_knuckle_rapid.wav",
+      "durationMs": 1200
+    },
+    {
+      "id": "knocks_window",
+      "category": "knocks",
+      "name": "敲窗",
+      "desc": "玻璃窗轻敲（高频轻脆）",
+      "file": "presets/knocks_window.wav",
+      "durationMs": 400
+    },
+    {
+      "id": "impacts_thud_heavy",
+      "category": "impacts",
+      "name": "重物落地",
+      "desc": "低频沉重闷响",
+      "file": "presets/impacts_thud_heavy.wav",
+      "durationMs": 1000
+    },
+    {
+      "id": "impacts_cabinet",
+      "category": "impacts",
+      "name": "柜门碰撞",
+      "desc": "木质柜门合上",
+      "file": "presets/impacts_cabinet.wav",
+      "durationMs": 550
+    },
+    {
+      "id": "impacts_ball_bounce",
+      "category": "impacts",
+      "name": "球体弹跳",
+      "desc": "弹性球两次落地",
+      "file": "presets/impacts_ball_bounce.wav",
+      "durationMs": 1000
+    },
+    {
+      "id": "impacts_books_drop",
+      "category": "impacts",
+      "name": "书本摔落",
+      "desc": "一摞书落地（多层冲击）",
+      "file": "presets/impacts_books_drop.wav",
+      "durationMs": 1100
+    },
+    {
+      "id": "impacts_muffled_boom",
+      "category": "impacts",
+      "name": "隔壁闷响",
+      "desc": "墙体另一侧的低频闷响",
+      "file": "presets/impacts_muffled_boom.wav",
+      "durationMs": 1200
+    },
+    {
+      "id": "drags_chair_short",
+      "category": "drags",
+      "name": "拖椅子（短促）",
+      "desc": "椅腿与地板摩擦",
+      "file": "presets/drags_chair_short.wav",
+      "durationMs": 1100
+    },
+    {
+      "id": "drags_chair_long",
+      "category": "drags",
+      "name": "拖椅子（长距离）",
+      "desc": "持续拖拽 3 秒",
+      "file": "presets/drags_chair_long.wav",
+      "durationMs": 3000
+    },
+    {
+      "id": "drags_box_slide",
+      "category": "drags",
+      "name": "拖箱子",
+      "desc": "纸箱/木箱在地板滑动",
+      "file": "presets/drags_box_slide.wav",
+      "durationMs": 2000
+    },
+    {
+      "id": "drags_floor_scrape",
+      "category": "drags",
+      "name": "地板刮擦",
+      "desc": "重物刮过地面（刺耳高频）",
+      "file": "presets/drags_floor_scrape.wav",
+      "durationMs": 1600
+    },
+    {
+      "id": "drags_desk_push",
+      "category": "drags",
+      "name": "桌面推物",
+      "desc": "物体被推过桌面",
+      "file": "presets/drags_desk_push.wav",
+      "durationMs": 1200
+    },
+    {
+      "id": "doors_creak",
+      "category": "doors",
+      "name": "开门吱呀",
+      "desc": "铰链摩擦的吱呀声",
+      "file": "presets/doors_creak.wav",
+      "durationMs": 1800
+    },
+    {
+      "id": "doors_slam",
+      "category": "doors",
+      "name": "关门砰",
+      "desc": "门板大力关上",
+      "file": "presets/doors_slam.wav",
+      "durationMs": 900
+    },
+    {
+      "id": "doors_latch",
+      "category": "doors",
+      "name": "锁扣",
+      "desc": "门锁扣上脆响",
+      "file": "presets/doors_latch.wav",
+      "durationMs": 250
+    },
+    {
+      "id": "doors_doorbell",
+      "category": "doors",
+      "name": "门铃（叮咚）",
+      "desc": "双音电子门铃",
+      "file": "presets/doors_doorbell.wav",
+      "durationMs": 1600
+    },
+    {
+      "id": "doors_knob_rattle",
+      "category": "doors",
+      "name": "拧门把手",
+      "desc": "把手转动金属声",
+      "file": "presets/doors_knob_rattle.wav",
+      "durationMs": 900
+    },
+    {
+      "id": "glass_clink",
+      "category": "glass",
+      "name": "玻璃轻碰",
+      "desc": "两只杯子轻碰",
+      "file": "presets/glass_clink.wav",
+      "durationMs": 700
+    },
+    {
+      "id": "glass_shatter",
+      "category": "glass",
+      "name": "玻璃碎裂",
+      "desc": "落地碎裂（噪声簇+高频爆）",
+      "file": "presets/glass_shatter.wav",
+      "durationMs": 1300
+    },
+    {
+      "id": "glass_cup_set",
+      "category": "glass",
+      "name": "杯放桌面",
+      "desc": "瓷杯轻放磕碰",
+      "file": "presets/glass_cup_set.wav",
+      "durationMs": 400
+    },
+    {
+      "id": "glass_bottle_cap",
+      "category": "glass",
+      "name": "瓶盖",
+      "desc": "汽水瓶盖脆响",
+      "file": "presets/glass_bottle_cap.wav",
+      "durationMs": 200
+    },
+    {
+      "id": "glass_ceramic_knock",
+      "category": "glass",
+      "name": "瓷碗磕",
+      "desc": "碗沿轻磕",
+      "file": "presets/glass_ceramic_knock.wav",
+      "durationMs": 500
+    },
+    {
+      "id": "human_cough",
+      "category": "human",
+      "name": "咳嗽",
+      "desc": "两声短促咳嗽",
+      "file": "presets/human_cough.wav",
+      "durationMs": 1100
+    },
+    {
+      "id": "human_throat_clear",
+      "category": "human",
+      "name": "清嗓",
+      "desc": "单声清嗓",
+      "file": "presets/human_throat_clear.wav",
+      "durationMs": 320
+    },
+    {
+      "id": "human_sneeze",
+      "category": "human",
+      "name": "喷嚏",
+      "desc": "快速吸气+喷发",
+      "file": "presets/human_sneeze.wav",
+      "durationMs": 800
+    },
+    {
+      "id": "human_sigh",
+      "category": "human",
+      "name": "叹气",
+      "desc": "长呼气叹声",
+      "file": "presets/human_sigh.wav",
+      "durationMs": 1400
+    },
+    {
+      "id": "human_hey_call",
+      "category": "human",
+      "name": "短促招呼（合成人声）",
+      "desc": "共振峰合成的「喂/嘿」类呼喊",
+      "file": "presets/human_hey_call.wav",
+      "durationMs": 850
+    },
+    {
+      "id": "animals_dog_bark_a",
+      "category": "animals",
+      "name": "狗吠（低沉）",
+      "desc": "中大型犬吠声近似",
+      "file": "presets/animals_dog_bark_a.wav",
+      "durationMs": 320
+    },
+    {
+      "id": "animals_dog_bark_b",
+      "category": "animals",
+      "name": "狗吠（清脆）",
+      "desc": "小型犬连续两声",
+      "file": "presets/animals_dog_bark_b.wav",
+      "durationMs": 900
+    },
+    {
+      "id": "animals_cat_meow",
+      "category": "animals",
+      "name": "猫叫",
+      "desc": "喵声近似（滑频共振峰）",
+      "file": "presets/animals_cat_meow.wav",
+      "durationMs": 900
+    },
+    {
+      "id": "animals_bird_chirp",
+      "category": "animals",
+      "name": "鸟鸣（婉转）",
+      "desc": "调频啁啾两声",
+      "file": "presets/animals_bird_chirp.wav",
+      "durationMs": 1200
+    },
+    {
+      "id": "animals_rooster",
+      "category": "animals",
+      "name": "公鸡打鸣",
+      "desc": "喔喔啼近似",
+      "file": "presets/animals_rooster.wav",
+      "durationMs": 1800
+    },
+    {
+      "id": "bells_bicycle",
+      "category": "bells",
+      "name": "自行车铃",
+      "desc": "双金属片叮铃",
+      "file": "presets/bells_bicycle.wav",
+      "durationMs": 1000
+    },
+    {
+      "id": "bells_wind_chime",
+      "category": "bells",
+      "name": "风铃",
+      "desc": "多管随机轻响",
+      "file": "presets/bells_wind_chime.wav",
+      "durationMs": 2400
+    },
+    {
+      "id": "bells_alarm_clock",
+      "category": "bells",
+      "name": "机械闹钟",
+      "desc": "经典双铃快速震响",
+      "file": "presets/bells_alarm_clock.wav",
+      "durationMs": 2200
+    },
+    {
+      "id": "bells_school",
+      "category": "bells",
+      "name": "上课铃",
+      "desc": "电铃持续响",
+      "file": "presets/bells_school.wav",
+      "durationMs": 2000
+    },
+    {
+      "id": "bells_temple",
+      "category": "bells",
+      "name": "钟磬",
+      "desc": "低沉大钟余韵",
+      "file": "presets/bells_temple.wav",
+      "durationMs": 4000
+    },
+    {
+      "id": "alarms_beep",
+      "category": "alarms",
+      "name": "电子哔",
+      "desc": "三短 beep",
+      "file": "presets/alarms_beep.wav",
+      "durationMs": 1200
+    },
+    {
+      "id": "alarms_siren",
+      "category": "alarms",
+      "name": "警报扫频",
+      "desc": "经典警笛往复",
+      "file": "presets/alarms_siren.wav",
+      "durationMs": 2400
+    },
+    {
+      "id": "alarms_countdown",
+      "category": "alarms",
+      "name": "倒计时哔",
+      "desc": "急促连哔提示",
+      "file": "presets/alarms_countdown.wav",
+      "durationMs": 2000
+    },
+    {
+      "id": "alarms_smoke",
+      "category": "alarms",
+      "name": "防火警报",
+      "desc": "高频断续鸣叫",
+      "file": "presets/alarms_smoke.wav",
+      "durationMs": 2200
+    },
+    {
+      "id": "alarms_buzzer",
+      "category": "alarms",
+      "name": "蜂鸣器",
+      "desc": "低沉持续蜂鸣",
+      "file": "presets/alarms_buzzer.wav",
+      "durationMs": 1500
+    },
+    {
+      "id": "nature_rain",
+      "category": "nature",
+      "name": "雨声",
+      "desc": "中雨（雨滴+底噪）",
+      "file": "presets/nature_rain.wav",
+      "durationMs": 5000
+    },
+    {
+      "id": "nature_rain_heavy",
+      "category": "nature",
+      "name": "暴雨",
+      "desc": "密集雨声",
+      "file": "presets/nature_rain_heavy.wav",
+      "durationMs": 5000
+    },
+    {
+      "id": "nature_thunder",
+      "category": "nature",
+      "name": "雷声",
+      "desc": "远雷滚鸣",
+      "file": "presets/nature_thunder.wav",
+      "durationMs": 4000
+    },
+    {
+      "id": "nature_wind",
+      "category": "nature",
+      "name": "风声",
+      "desc": "树梢夜风",
+      "file": "presets/nature_wind.wav",
+      "durationMs": 5000
+    },
+    {
+      "id": "nature_waves",
+      "category": "nature",
+      "name": "海浪",
+      "desc": "涌浪拍岸",
+      "file": "presets/nature_waves.wav",
+      "durationMs": 6000
+    },
+    {
+      "id": "tech_msg_pop",
+      "category": "tech",
+      "name": "消息提示",
+      "desc": "短促水滴音",
+      "file": "presets/tech_msg_pop.wav",
+      "durationMs": 160
+    },
+    {
+      "id": "tech_keyboard",
+      "category": "tech",
+      "name": "键盘敲击",
+      "desc": "机械键盘连击",
+      "file": "presets/tech_keyboard.wav",
+      "durationMs": 1400
+    },
+    {
+      "id": "tech_vibration",
+      "category": "tech",
+      "name": "手机振动",
+      "desc": "马达嗡嗡两下",
+      "file": "presets/tech_vibration.wav",
+      "durationMs": 1600
+    },
+    {
+      "id": "tech_mouse_click",
+      "category": "tech",
+      "name": "鼠标点击",
+      "desc": "清脆双击",
+      "file": "presets/tech_mouse_click.wav",
+      "durationMs": 500
+    },
+    {
+      "id": "tech_ups_beep",
+      "category": "tech",
+      "name": "设备提示",
+      "desc": "长哔一声",
+      "file": "presets/tech_ups_beep.wav",
+      "durationMs": 800
+    },
+    {
+      "id": "ambient_white",
+      "category": "ambient",
+      "name": "白噪音",
+      "desc": "全频带均匀噪声（遮蔽）",
+      "file": "presets/ambient_white.wav",
+      "durationMs": 8000
+    },
+    {
+      "id": "ambient_pink",
+      "category": "ambient",
+      "name": "粉噪音",
+      "desc": "低频偏多更柔和",
+      "file": "presets/ambient_pink.wav",
+      "durationMs": 8000
+    },
+    {
+      "id": "ambient_brown",
+      "category": "ambient",
+      "name": "棕噪音",
+      "desc": "深沉低频（助眠首选）",
+      "file": "presets/ambient_brown.wav",
+      "durationMs": 8000
+    },
+    {
+      "id": "ambient_rain_night",
+      "category": "ambient",
+      "name": "雨夜",
+      "desc": "雨声+远雷底",
+      "file": "presets/ambient_rain_night.wav",
+      "durationMs": 8000
+    },
+    {
+      "id": "ambient_fan",
+      "category": "ambient",
+      "name": "风扇",
+      "desc": "恒定气流传声器噪声",
+      "file": "presets/ambient_fan.wav",
+      "durationMs": 8000
+    }
+  ]
+}
