@@ -102,14 +102,34 @@ class _TaskTile extends ConsumerWidget {
               ),
           ],
         ),
-        trailing: Switch(
-          value: t.enabled,
-          onChanged: (v) async {
-            final repo = await ref.read(taskRepoProvider.future);
-            await repo.setEnabled(t.id, v);
-            ref.invalidate(taskListProvider);
-            await BackgroundServiceManager.instance.replan();
-          },
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (t.enabled)
+              IconButton(
+                icon: const Icon(Icons.skip_next_outlined),
+                tooltip: '跳过下一次',
+                onPressed: () async {
+                  final occ = await ref.read(occurrenceRepoProvider.future);
+                  final n = await occ.skipNextForTask(t.id);
+                  ref.invalidate(taskListProvider);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(
+                            n > 0 ? '已跳过「${t.name}」的下一次触发' : '没有待执行的下一次触发')));
+                  }
+                },
+              ),
+            Switch(
+              value: t.enabled,
+              onChanged: (v) async {
+                final repo = await ref.read(taskRepoProvider.future);
+                await repo.setEnabled(t.id, v);
+                ref.invalidate(taskListProvider);
+                await BackgroundServiceManager.instance.replan();
+              },
+            ),
+          ],
         ),
         onTap: () async {
           await context.push('/tasks/${t.id}/edit');

@@ -54,8 +54,20 @@ class EngineState {
 /// - 通道B（Doze/进程被杀）：原生 AlarmManager 精确闹钟唤醒前台服务，
 ///   服务启动即 executeDue() 补执行。
 /// 两通道汇合到同一状态机（occurrences 表），天然幂等。
+///
+/// runZonedGuarded：引擎隔离内任何未捕获异步异常（如插件注册告警、
+/// 单次 DB 抖动）只记录不致命——此前 isolate 会静默死亡，导致
+/// Timer 通道A 停摆（BUG-011 根因，docs/12 §5）。
 @pragma('vm:entry-point')
 Future<void> engineEntryPoint(ServiceInstance service) async {
+  await runZonedGuarded(() => _engineBody(service), (e, stack) {
+    // 引擎自愈日志：异常不终止 isolate，下一轮 tick 自动恢复。
+    // ignore: avoid_print
+    print('[sonic_shield][engine] unhandled: $e');
+  });
+}
+
+Future<void> _engineBody(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
   final db = await AppDatabase.open();
@@ -105,6 +117,8 @@ Future<void> engineEntryPoint(ServiceInstance service) async {
       maxDurationMs: durationMs > 0 ? durationMs : p.durationSecMin * 1000,
       fadeInMs: p.fadeInSec * 1000,
       fadeOutMs: p.fadeOutSec * 1000,
+      rampUpMs: p.rampUpSec * 1000,
+      loopFill: p.loopFill,
     );
     await logs.append(
         source: source,
@@ -117,11 +131,13 @@ Future<void> engineEntryPoint(ServiceInstance service) async {
   }
 
   Future<void> ttsAndLog(Task task, TtsAction t, String source) async {
+    final tts = FlutterTts();
     try {
-      final tts = FlutterTts();
-      await tts.setVolume(t.volume);
-      await tts.setLanguage('zh-CN');
-      await tts.speak(t.text);
+      // 整体超时保护：无 TTS 引擎的平台（如 AOSP 镜像）speak/setLanguage
+      // 可能永远不回调，此前会导致审计日志永远写不进去（BUG-011 关联）。
+      await tts.setVolume(t.volume).timeout(const Duration(seconds: 8));
+      await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
+      await tts.speak(t.text).timeout(const Duration(seconds: 15));
       await logs.append(
           source: source,
           action: 'tts',
@@ -135,6 +151,12 @@ Future<void> engineEntryPoint(ServiceInstance service) async {
           status: 'failed',
           taskId: task.id,
           message: e.toString());
+    } finally {
+      try {
+        await tts.stop().timeout(const Duration(seconds: 3));
+      } on Object {
+        // 清理失败不影响审计
+      }
     }
   }
 
@@ -176,42 +198,40 @@ Future<void> engineEntryPoint(ServiceInstance service) async {
     }
   }
 
-  bool runSingle(Task task, ActionConfig cfg, double volume, int durationMs,
-      String source) {
+  /// 动作执行统一串行 await：保证 occurrence 状态与审计日志严格一致
+  /// （此前 fire-and-forget 在 TTS 挂起时导致日志永远缺失——BUG-011 关联）。
+  Future<bool> runSingle(Task task, ActionConfig cfg, double volume,
+      int durationMs, String source) async {
     switch (cfg) {
       case final PlayAudioAction p:
-        unawaited(playAndLog(task, p, volume, durationMs, source));
+        await playAndLog(task, p, volume, durationMs, source);
         return true;
       case final TtsAction t:
-        unawaited(ttsAndLog(task, t, source));
+        await ttsAndLog(task, t, source);
         return true;
       case final NotifyAction n:
-        unawaited(() async {
-          await NotificationService.instance
-              .showEvent(title: n.title, body: n.body);
-          await logs.append(
-              source: source,
-              action: 'notify',
-              status: 'success',
-              taskId: task.id);
-        }());
+        await NotificationService.instance
+            .showEvent(title: n.title, body: n.body);
+        await logs.append(
+            source: source,
+            action: 'notify',
+            status: 'success',
+            taskId: task.id);
         return true;
       case final VibrateAction v:
-        unawaited(() async {
-          try {
-            await native.invokeMethod('vibrate', {'pattern': v.patternMs});
-            await logs.append(
-                source: source,
-                action: 'vibrate',
-                status: 'success',
-                taskId: task.id);
-          } on Object {
-            // 无震动能力平台静默
-          }
-        }());
+        try {
+          await native.invokeMethod('vibrate', {'pattern': v.patternMs});
+          await logs.append(
+              source: source,
+              action: 'vibrate',
+              status: 'success',
+              taskId: task.id);
+        } on Object {
+          // 无震动能力平台静默
+        }
         return true;
       case final RecordEvidenceAction rec:
-        unawaited(recordAndLog(task, rec.seconds, source));
+        await recordAndLog(task, rec.seconds, source);
         return true;
       case final CompositeAction c:
         return runSingle(task, c.primary, volume, durationMs, source);
@@ -230,9 +250,9 @@ Future<void> engineEntryPoint(ServiceInstance service) async {
           await NotificationService.instance
               .showEvent(title: pre.title, body: pre.body);
         }
-        return runSingle(task, cfg.primary, volume, durationMs, source);
+        return await runSingle(task, cfg.primary, volume, durationMs, source);
       }
-      return runSingle(task, cfg, volume, durationMs, source);
+      return await runSingle(task, cfg, volume, durationMs, source);
     } catch (e) {
       await logs.append(
           source: source,

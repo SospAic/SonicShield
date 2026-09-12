@@ -89,4 +89,19 @@ class OccurrenceRepository {
   /// 任务删除时级联清理其计划。
   Future<void> deleteForTask(String taskId) =>
       _db.db.delete('occurrences', where: 'task_id = ?', whereArgs: [taskId]);
+
+  /// 「跳过下一次」：把该任务最近的 pending 计划标记为 skipped。
+  /// 返回被跳过的条目数（0 或 1）。
+  Future<int> skipNextForTask(String taskId) async {
+    final rows = await _db.db.query(
+      'occurrences',
+      where: "task_id = ? AND status = 'pending' AND fire_at >= ?",
+      whereArgs: [taskId, DateTime.now().millisecondsSinceEpoch],
+      orderBy: 'fire_at ASC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return 0;
+    await markStatus(rows.first['id'] as String, OccurrenceStatus.skipped);
+    return 1;
+  }
 }

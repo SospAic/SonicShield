@@ -33,6 +33,8 @@ class PlaybackService {
     required int maxDurationMs,
     int fadeInMs = 0,
     int fadeOutMs = 0,
+    int rampUpMs = 0, // 渐强唤醒：音量 5%→目标 线性爬升
+    bool loopFill = false, // 短音效循环填充到目标时长
   }) async {
     final player = _player ??= AudioPlayer();
     final sw = Stopwatch()..start();
@@ -52,19 +54,29 @@ class PlaybackService {
         androidWillPauseWhenDucked: true,
       ));
 
-      // 2) 载入并播放。
+      // 2) 载入并播放。渐强唤醒优先于普通淡入。
       await player.setFilePath(path);
-      await player.setVolume(volume);
-      if (fadeInMs > 0) {
-        unawaited(_fadeIn(player, volume, fadeInMs));
+      if (rampUpMs > 0) {
+        await player.setVolume(volume * 0.05);
+        unawaited(_rampUp(player, volume, rampUpMs));
+      } else {
+        await player.setVolume(volume);
+        if (fadeInMs > 0) {
+          unawaited(_fadeIn(player, volume, fadeInMs));
+        }
+      }
+      if (loopFill) {
+        await player.setLoopMode(LoopMode.one); // 单曲循环填充
       }
       await player.play();
 
-      // 3) 随机时长控制：到点停止（若文件更短则自然结束）。
+      // 3) 随机时长控制：到点停止（非循环时若文件更短则自然结束）。
       final fileMs = (player.duration ?? Duration.zero).inMilliseconds;
       final target = maxDurationMs <= 0
           ? fileMs
-          : (fileMs <= 0 || fileMs > maxDurationMs ? maxDurationMs : fileMs);
+          : (loopFill || fileMs <= 0 || fileMs > maxDurationMs
+              ? maxDurationMs
+              : fileMs);
       if (target > 0) {
         await Future<void>.delayed(Duration(milliseconds: target));
       }
@@ -72,6 +84,7 @@ class PlaybackService {
         await _fadeOut(player, fadeOutMs);
       }
       await player.stop();
+      await player.setLoopMode(LoopMode.off);
       return PlayResult(ok: true, playedMs: sw.elapsedMilliseconds);
     } catch (e) {
       return PlayResult(
@@ -91,6 +104,15 @@ class PlaybackService {
     const steps = 20;
     for (var i = 1; i <= steps; i++) {
       await p.setVolume(target * i / steps);
+      await Future<void>.delayed(Duration(milliseconds: ms ~/ steps));
+    }
+  }
+
+  /// 渐强唤醒（Sleep Cycle 式）：5% 起线性爬升，步进柔和。
+  Future<void> _rampUp(AudioPlayer p, double target, int ms) async {
+    const steps = 40;
+    for (var i = 1; i <= steps; i++) {
+      await p.setVolume(target * (0.05 + 0.95 * i / steps));
       await Future<void>.delayed(Duration(milliseconds: ms ~/ steps));
     }
   }

@@ -47,6 +47,7 @@ sealed class ActionConfig {
 }
 
 /// 播放音频：随机挑选音源 + 随机时长 + 随机音量。
+/// v1.1 新增：渐强唤醒（rampUpSec）与循环填充（loopFill）。
 class PlayAudioAction extends ActionConfig {
   const PlayAudioAction({
     this.volumeMin = 0.6, // 0..1 系统流音量下限
@@ -57,6 +58,8 @@ class PlayAudioAction extends ActionConfig {
     this.fadeOutSec = 0,
     this.channel = AudioChannel.media,
     this.respectDnd = true,
+    this.rampUpSec = 0, // 渐强唤醒：音量从 5% 线性爬升到目标值的时长（0=关闭）
+    this.loopFill = false, // 短音效循环填充到随机时长（Sleep 式声景）
   })  : assert(volumeMin >= 0 && volumeMin <= 1),
         assert(volumeMax >= 0 && volumeMax <= 1),
         assert(volumeMin <= volumeMax),
@@ -70,6 +73,8 @@ class PlayAudioAction extends ActionConfig {
   final int fadeOutSec;
   final AudioChannel channel;
   final bool respectDnd;
+  final int rampUpSec;
+  final bool loopFill;
 
   factory PlayAudioAction.fromJson(Map<String, dynamic> j) => PlayAudioAction(
         volumeMin: (j['volumeMin'] as num? ?? 0.6).toDouble(),
@@ -82,6 +87,8 @@ class PlayAudioAction extends ActionConfig {
             ? AudioChannel.alarm
             : AudioChannel.media,
         respectDnd: j['respectDnd'] as bool? ?? true,
+        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
+        loopFill: j['loopFill'] as bool? ?? false,
       );
 
   @override
@@ -95,6 +102,8 @@ class PlayAudioAction extends ActionConfig {
         'fadeOutSec': fadeOutSec,
         'channel': channel == AudioChannel.alarm ? 'alarm' : 'media',
         'respectDnd': respectDnd,
+        'rampUpSec': rampUpSec,
+        'loopFill': loopFill,
       };
 }
 

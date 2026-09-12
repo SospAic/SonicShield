@@ -41,6 +41,10 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   double _volMin = 0.5, _volMax = 1.0;
   int _durMin = 3, _durMax = 15;
   bool _alarmChannel = false;
+  bool _loopFill = false;
+  int _rampUpSec = 0;
+
+  String get _rampUpLabel => _rampUpSec == 0 ? '关闭' : '$_rampUpSec 秒渐强';
   String _ttsText = '请注意，已开启录音取证';
   int _recordSec = 60;
 
@@ -100,6 +104,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _durMin = a.durationSecMin;
         _durMax = a.durationSecMax;
         _alarmChannel = a.channel == AudioChannel.alarm;
+        _rampUpSec = a.rampUpSec;
+        _loopFill = a.loopFill;
         _actionKind = ActionKindChoice.play;
       } else if (a is TtsAction) {
         _ttsText = a.text;
@@ -118,6 +124,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           _durMin = p.durationSecMin;
           _durMax = p.durationSecMax;
           _alarmChannel = p.channel == AudioChannel.alarm;
+          _rampUpSec = p.rampUpSec;
+          _loopFill = p.loopFill;
         }
       }
     });
@@ -329,6 +337,24 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         value: _alarmChannel,
         onChanged: (v) => setState(() => _alarmChannel = v),
       ),
+      SwitchListTile(
+        title: const Text('循环填充（声景模式）'),
+        subtitle: const Text('短音效循环播放，填满随机时长'),
+        value: _loopFill,
+        onChanged: (v) => setState(() => _loopFill = v),
+      ),
+      if (!_loopFill)
+        ListTile(
+          title: Text('渐强唤醒：$_rampUpLabel'),
+          subtitle: Slider(
+            value: _rampUpSec.toDouble(),
+            min: 0,
+            max: 300,
+            divisions: 20,
+            label: _rampUpLabel,
+            onChanged: (v) => setState(() => _rampUpSec = v.round()),
+          ),
+        ),
     ];
     switch (_actionKind) {
       case ActionKindChoice.play:
@@ -414,6 +440,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           durationSecMin: _durMin,
           durationSecMax: _durMax.clamp(_durMin, 120),
           channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
+          rampUpSec: _rampUpSec,
+          loopFill: _loopFill,
         );
       case ActionKindChoice.tts:
         action = TtsAction(text: _ttsText);
@@ -429,6 +457,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             durationSecMin: _durMin,
             durationSecMax: _durMax.clamp(_durMin, 120),
             channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
+            rampUpSec: _rampUpSec,
+            loopFill: _loopFill,
           ),
           prefixNotify: NotifyAction(title: '声盾 · 触发', body: _nameCtrl.text),
         );

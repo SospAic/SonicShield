@@ -116,6 +116,8 @@ adb shell dumpsys deviceidle whitelist +com.sonicshield.sonic_shield
 
 ## 7. 下一步工作（按优先级）
 
+> 2026-09-13 更新：v1.1.0 已交付（渐强唤醒/循环填充/跳过下一次/日志筛选导出/BUG-011 修复）。以下待办中"集成测试 drive"与"真实触发闭环"已完成。
+
 1. **P0** 真实触发闭环验证：首个闹钟 16:19:38（本会话进行中，见 docs/12 §8）；
    长期可在任务编辑器建"1 分钟后 fixedOnce"任务快速验证。
 2. **P0** `flutter drive` 集成测试三用例跑通（IT-01..03，绕过 wrapper 后应直接可用）。
