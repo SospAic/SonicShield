@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">声盾</string>
+    <string name="service_notification_title">声盾 SonicShield</string>
+    <string name="service_notification_text">调度引擎运行中 · 合法使用，禁止骚扰他人</string>
+</resources>

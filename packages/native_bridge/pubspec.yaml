@@ -1,0 +1,22 @@
+name: native_bridge
+description: >-
+  声盾原生桥本地插件：精确闹钟排布/电池白名单/厂商保活深链/震动/
+  麦克风前台服务。以 Flutter 本地插件（path 依赖）形式存在，
+  GeneratedPluginRegistrant 会将其注册到 UI 引擎与后台服务引擎，
+  从而解决"后台隔离中 MethodChannel 无 handler"的问题。
+version: 1.0.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.sonicshield.native_bridge
+        pluginClass: NativeBridgePlugin

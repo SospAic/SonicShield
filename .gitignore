@@ -1,0 +1,45 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+coverage/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.ipr
+*.iws
+
+# Android
+android/.gradle/
+android/local.properties
+android/key.properties
+**/android/**/gradle-wrapper.jar
+**/android/captures/
+*.jks
+*.keystore
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral
+**/ios/Flutter/flutter_export_environment.sh
+*.xcuserstate
+
+# 日志与本地产物
+*.log
+dist/
+*.apk
+*.aab
+*.ipa
+
+# 取证音频（敏感，永不入库）
+*.evidence.m4a

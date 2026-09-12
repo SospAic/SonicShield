@@ -1,0 +1,71 @@
+name: sonic_shield
+description: >-
+  声盾 SonicShield —— 跨平台音频自动化与自我保护工具。
+  支持定时/随机时间/随机日期/随机时长/随机音量播放音频或执行动作，
+  支持声音触发自动响应、系统级后台执行与精细电源管理。
+  仅限合法用途（取证记录、提醒、助眠、守护等），严禁用于骚扰他人。
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # ---- 状态管理与路由 ----
+  flutter_riverpod: ^2.5.1          # 编译期安全的 DI / 状态管理（行业主流）
+  go_router: ^14.2.7                # 声明式路由，支持深链
+
+  # ---- 数据层 ----
+  sqflite: ^2.3.3+1                 # SQLite（零代码生成，稳定可靠）
+  sqflite_common_ffi: ^2.3.3        # 桌面/测试环境 FFI 实现
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  shared_preferences: ^2.3.2        # 轻量 KV（开关/守卫标志）
+  uuid: ^4.5.1
+  intl: ^0.20.3
+
+  # ---- 音频 ----
+  just_audio: ^0.9.40               # 播放内核（gapless/音量曲线/裁剪）
+  audio_session: ^0.1.21            # 音频焦点与通道（media / alarm 穿透）
+  record: ^7.1.1                    # 麦克风采流（守卫模式 VAD 数据源）
+  flutter_tts: ^4.0.2               # TTS 喊话动作（如「已开启录音取证」）
+
+  # ---- 后台与调度 ----
+  flutter_background_service: ^5.0.10   # Android 前台服务 + Dart 后台隔离
+  flutter_local_notifications: ^17.2.3  # 通知 / iOS 日历触发 / 全屏意图
+  # 注：不引入 workmanager——计划滚动由引擎 Timer + 原生精确闹钟完成（docs/05），
+  #     其旧版依赖 Flutter v1 embedding，已与新 Flutter 不兼容。
+
+  # ---- 系统能力 ----
+  permission_handler: ^11.3.1
+  battery_plus: ^6.0.2              # 电量/充电状态（电源管理输入）
+  device_info_plus: ^10.1.2         # 厂商/机型识别（OEM 保活引导）
+  file_picker: ^8.1.2               # SAF 导入音频（免存储权限）
+  share_plus: ^10.0.2               # 导出日志/取证片段
+  timezone: ^0.9.4
+  flutter_timezone: ^3.0.1
+
+  # ---- 本地插件：原生桥（精确闹钟/电池白名单/麦克风FGS） ----
+  # 以 path 插件形式注册到所有 Flutter 引擎（含后台服务引擎），
+  # 修复后台隔离 MethodChannel 无 handler 的缺陷（docs/12 §6.2）。
+  native_bridge:
+    path: packages/native_bridge
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  mocktail: ^1.0.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/audio/
