@@ -7,40 +7,61 @@ import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
 
-/// 集成冒烟测试：真机/模拟器上运行（flutter test integration_test）。
+/// 集成冒烟测试：真机/模拟器上运行（flutter test integration_test -d <device>）。
 /// 验证：应用启动 -> 各页面可达 -> 调度端到端物化。
+///
+/// 注意：页面存在无限动画组件（加载进度条/倒计时刷新），因此使用固定
+/// pump 序列而非 pumpAndSettle（后者会因动画永不静止而超时）。
+Future<void> _settle(WidgetTester tester, {int ms = 1500}) async {
+  final end = DateTime.now().add(Duration(milliseconds: ms));
+  while (DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  await tester.pump();
+}
+
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
 
   testWidgets('应用启动并渲染守护仪表盘', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: SonicShieldApp()));
-    await tester.pumpAndSettle(const Duration(seconds: 2));
+    await _settle(tester, ms: 2500);
+    // 标题与守护开关卡片存在即认为渲染成功。
     expect(find.text('声盾 SonicShield'), findsWidgets);
+    expect(
+      find.textContaining('守护'),
+      findsWidgets,
+      reason: '仪表盘应包含守护卡片（开启或关闭态）',
+    );
   });
 
   testWidgets('底部导航六页可达', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: SonicShieldApp()));
-    await tester.pumpAndSettle(const Duration(seconds: 2));
+    await _settle(tester, ms: 2500);
 
     for (final label in ['任务', '音源', '守卫', '日志', '设置']) {
       await tester.tap(find.text(label).last);
-      await tester.pumpAndSettle(const Duration(seconds: 1));
+      await _settle(tester, ms: 800);
       expect(tester.takeException(), isNull, reason: '页面 $label 不应崩溃');
     }
   });
 
   test('端到端：任务定义 -> 物化 -> 计划条目可执行语义', () {
     const engine = ScheduleEngine();
+    // 使用「明天」作为日期范围：窗口不被 now 截断，且 8:00-21:00
+    // 与默认免打扰（22:00-07:00）不重叠 → 断言确定（3 条）。
+    final tomorrow = DateTime.now().add(const Duration(days: 1));
+    final day = DateTime(tomorrow.year, tomorrow.month, tomorrow.day);
     final task = Task(
       id: 'e2e-1',
       name: 'E2E',
       enabled: true,
       triggerType: TriggerType.randomWindow,
       trigger: RandomWindowTrigger(
-        dateRange: DateRange(start: DateTime.now(), end: DateTime.now()),
-        windowStart: const TimeSpec(hour: 0),
-        windowEnd: const TimeSpec(hour: 23, minute: 59),
+        dateRange: DateRange(start: day, end: day),
+        windowStart: const TimeSpec(hour: 8),
+        windowEnd: const TimeSpec(hour: 21),
         timesPerDay: 3,
         minGap: const Duration(minutes: 60),
       ),
@@ -54,11 +75,15 @@ void main() {
       updatedAt: DateTime.now(),
     );
     final entries = engine.materialize(task, DateTime.now());
-    expect(entries.length, 3);
+    expect(entries.length, 3, reason: '明日窗口应物化 3 条计划');
     for (final e in entries) {
       expect(e.occurrenceId, contains('e2e-1'));
       expect(e.volume, inInclusiveRange(0.4, 0.8));
       expect(e.durationMs, inInclusiveRange(3000, 15000));
+      expect(e.fireAt.hour, inInclusiveRange(8, 20));
     }
+    // 幂等：重算一致。
+    final again = engine.materialize(task, DateTime.now());
+    expect(again.map((e) => e.fireAt), entries.map((e) => e.fireAt));
   });
 }

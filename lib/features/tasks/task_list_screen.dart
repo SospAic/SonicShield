@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:uuid/uuid.dart';
+
 import '../../core/providers.dart';
+import '../../domain/models/task.dart';
 import '../../services/background_service_manager.dart';
 
 /// 任务列表：启停开关 / 下一触发时间 / 长按删除。
@@ -136,29 +139,55 @@ class _TaskTile extends ConsumerWidget {
           ref.invalidate(taskListProvider);
         },
         onLongPress: () async {
-          final ok = await showDialog<bool>(
+          final act = await showDialog<String>(
             context: context,
             builder: (ctx) => AlertDialog(
-              title: const Text('删除任务'),
-              content: Text('确定删除「${t.name}」？其计划与日志将一并清理。'),
+              title: Text('「${t.name}」'),
+              content: const Text('复制将创建一个默认停用的副本，可再编辑后启用。'),
               actions: [
                 TextButton(
-                    onPressed: () => Navigator.pop(ctx, false),
-                    child: const Text('取消')),
-                FilledButton(
-                    onPressed: () => Navigator.pop(ctx, true),
+                    onPressed: () => Navigator.pop(ctx, 'copy'),
+                    child: const Text('复制任务')),
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, 'delete'),
                     child: const Text('删除')),
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, null),
+                    child: const Text('取消')),
               ],
             ),
           );
-          if (ok == true) {
-            final repo = await ref.read(taskRepoProvider.future);
-            final occ = await ref.read(occurrenceRepoProvider.future);
+          if (act == null) return;
+          final repo = await ref.read(taskRepoProvider.future);
+          final occ = await ref.read(occurrenceRepoProvider.future);
+          if (act == 'copy') {
+            final now = DateTime.now();
+            await repo.upsert(Task(
+              id: const Uuid().v4(),
+              name: '${t.name}（副本）',
+              enabled: false, // 副本默认停用，防止意外触发
+              triggerType: t.triggerType,
+              trigger: t.trigger,
+              actionType: t.actionType,
+              action: t.action,
+              assetIds: t.assetIds,
+              cooldownSec: t.cooldownSec,
+              quietPolicy: t.quietPolicy,
+              priority: t.priority,
+              createdAt: now,
+              updatedAt: now,
+            ));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(const SnackBar(content: Text('已创建副本（默认停用）')));
+            }
+          }
+          if (act == 'delete') {
             await repo.delete(t.id);
             await occ.deleteForTask(t.id);
-            ref.invalidate(taskListProvider);
-            await BackgroundServiceManager.instance.replan();
           }
+          ref.invalidate(taskListProvider);
+          await BackgroundServiceManager.instance.replan();
         },
       ),
     );

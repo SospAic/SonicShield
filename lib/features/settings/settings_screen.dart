@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants.dart';
@@ -120,6 +121,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: const Icon(Icons.alarm),
             title: const Text('精确闹钟权限（Android 12+）'),
             onTap: () => NativeBridge.openExactAlarmSettings(),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings_remote),
+            title: const Text('远程遥控'),
+            subtitle: const Text('多端点公网遥控 · 指令组 · 对讲机'),
+            onTap: () => context.push('/remote'),
           ),
           const Divider(height: 32),
           ListTile(

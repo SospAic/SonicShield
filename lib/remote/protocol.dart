@@ -1,0 +1,195 @@
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:cryptography/cryptography.dart';
+
+/// 声盾远程遥控协议 v1（docs/14）。
+///
+/// 传输：MQTT（TLS），主题命名空间 `sonicshield/v1/{deviceId}/cmd|evt`。
+/// 安全：配对秘密 → HKDF-SHA256 → AES-256-GCM 端到端加密；
+/// 代理（MQTT broker）只见密文。AAD 绑定主题与设备 ID 防跨主题重放。
+///
+/// 消息信封（明文结构，加密后传输）：
+/// {v:1, id, ts, type, payload}
+///  - ts 单调毫秒；接收端拒绝 |now-ts| > 90s（防重放窗口）
+///  - id 每消息随机，接收端缓存去重（防窗口内重放）
+class RcMessage {
+  const RcMessage({
+    required this.id,
+    required this.ts,
+    required this.type,
+    this.payload = const {},
+    this.from = '',
+  });
+
+  final String id;
+  final int ts;
+  final String type;
+  final Map<String, dynamic> payload;
+  final String from; // 发送方 deviceId（调试/展示用，不参与鉴权）
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'id': id,
+        'ts': ts,
+        'type': type,
+        'payload': payload,
+        'from': from
+      };
+
+  static RcMessage? tryParse(Map<String, dynamic> j) {
+    if (j['v'] != 1 || j['type'] is! String) return null;
+    return RcMessage(
+      id: j['id'] as String? ?? '',
+      ts: (j['ts'] as num?)?.toInt() ?? 0,
+      type: j['type'] as String,
+      payload: (j['payload'] as Map?)?.cast<String, dynamic>() ?? const {},
+      from: j['from'] as String? ?? '',
+    );
+  }
+
+  static RcMessage now(String type,
+          [Map<String, dynamic> payload = const {}]) =>
+      RcMessage(
+        id: _randomId(),
+        ts: DateTime.now().millisecondsSinceEpoch,
+        type: type,
+        payload: payload,
+      );
+
+  static String _randomId() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final r = Random.secure();
+    return List.generate(12, (_) => chars[r.nextInt(chars.length)]).join();
+  }
+}
+
+// ---------------- 命令类型（控制器 → 端点） ----------------
+
+abstract final class RcCmd {
+  static const ping = 'ping'; // → pong {latencyHint}
+  static const statusGet = 'status.get'; // → status {engine,battery,tasks,next}
+  static const soundPlay =
+      'sound.play'; // {preset|assetId|category, volume, durationSec, loop}
+  static const taskList = 'task.list'; // → tasks [...]
+  static const taskToggle = 'task.toggle'; // {taskId, enabled}
+  static const taskSkipNext = 'task.skipNext'; // {taskId}
+  static const guardSet = 'guard.set'; // {enabled}
+  static const logsRecent = 'logs.recent'; // {limit}
+
+  /// 指令组（宏）：端点收到后【立即执行】。
+  /// payload: {scriptId, name, fromName, sentAt, steps: [...]}
+  /// steps 元素：{kind: play|tts|notify|vibrate|record|delay, ...参数}
+  static const scriptRun = 'script.run';
+
+  /// 终止当前指令组执行（携带 scriptId；'*' 表示终止任意当前执行）。
+  static const scriptStop = 'script.stop';
+
+  /// 对讲机（v1 整段模式，参考微信语音；v2 升级流式）：
+  /// ptt.voice {voiceId, durationMs, audioB64(aac, 端到端加密信封内)}
+  static const pttVoice = 'ptt.voice';
+}
+
+// ---------------- 事件类型（端点 → 控制器） ----------------
+
+abstract final class RcEvt {
+  static const pong = 'rc.pong';
+  static const status = 'rc.status';
+  static const tasks = 'rc.tasks';
+  static const logs = 'rc.logs';
+  static const ack = 'rc.ack'; // 通用回执 {ok, for: cmdId, data}
+  static const heartbeat = 'rc.heartbeat'; // 周期 60s
+  static const exec = 'rc.exec'; // 动作执行通知（审计镜像）
+  static const offline = 'rc.offline'; // LWT 由 broker 代发（明文哨兵，无敏感内容）
+  static const scriptState =
+      'rc.script'; // {scriptId, state: running|done|stopped, stepIndex}
+  static const pttAck = 'rc.ptt'; // {voiceId, ok, playedMs}
+}
+
+// ---------------- 加密编解码 ----------------
+
+final class RcCodec {
+  RcCodec._();
+
+  static final Hkdf _alg = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+  static final AesGcm _aes = AesGcm.with256bits();
+
+  /// 由配对秘密派生消息密钥。
+  /// [context]：`{endpointId}|cmd` 或 `{endpointId}|evt`——端点与控制器
+  /// 双方都能派生同方向密钥（每个配对、每个方向独立密钥）。
+  static Future<List<int>> deriveKey(String secret, String context) async {
+    final sk = await _alg.deriveKey(
+      secretKey: SecretKey(utf8.encode(secret)),
+      nonce: utf8.encode('sonicshield-rc-v1|$context'),
+      info: utf8.encode('sonicshield'),
+    );
+    return sk.extractBytes();
+  }
+
+  /// 加密：AES-256-GCM，AAD = topic（v1 简化：防跨主题移植密文）。
+  static Future<String> encode(
+    RcMessage msg,
+    List<int> key,
+    String topic,
+  ) async {
+    final nonce = _aes.newNonce();
+    final box = await _aes.encrypt(
+      utf8.encode(jsonEncode(msg.toJson())),
+      secretKey: SecretKey(key),
+      nonce: nonce,
+      aad: utf8.encode(topic),
+    );
+    final blob = <String, String>{
+      'n': base64Encode(nonce),
+      'c': base64Encode(box.cipherText),
+      'm': base64Encode(box.mac.bytes),
+    };
+    return base64Encode(utf8.encode(jsonEncode(blob)));
+  }
+
+  /// 解密；时间窗与去重校验由 [seenIds]/[maxSkewMs] 承担。
+  static Future<RcMessage?> decode(
+    String wire,
+    List<int> key,
+    String topic, {
+    Map<String, int> seenIds = const {},
+    int maxSkewMs = 90000,
+  }) async {
+    try {
+      final blob = (jsonDecode(utf8.decode(base64Decode(wire))) as Map)
+          .cast<String, String>();
+      final box = SecretBox(
+        base64Decode(blob['c']!),
+        nonce: base64Decode(blob['n']!),
+        mac: Mac(base64Decode(blob['m']!)),
+      );
+      final clear = await _aes.decrypt(
+        box,
+        secretKey: SecretKey(key),
+        aad: utf8.encode(topic),
+      );
+      final msg = RcMessage.tryParse(
+          (jsonDecode(utf8.decode(clear)) as Map).cast<String, dynamic>());
+      if (msg == null) return null;
+      final skew = (DateTime.now().millisecondsSinceEpoch - msg.ts).abs();
+      if (skew > maxSkewMs) return null; // 重放/时钟漂移保护
+      if (msg.id.isNotEmpty && seenIds.containsKey(msg.id)) return null;
+      return msg;
+    } on Object {
+      return null; // 解密失败（密钥不符/篡改）→ 静默丢弃
+    }
+  }
+
+  /// 生成配对码：8 位 Base32（Crockford 风格去易混字符），≈40bit 熵。
+  static String generatePairingCode() {
+    const chars = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+    final r = Random.secure();
+    final raw = List.generate(8, (_) => chars[r.nextInt(chars.length)]).join();
+    return '${raw.substring(0, 4)}-${raw.substring(4)}';
+  }
+
+  /// 设备 ID：16 位小写十六进制。
+  static String generateDeviceId() =>
+      List.generate(16, (_) => '0123456789abcdef'[Random.secure().nextInt(16)])
+          .join();
+}

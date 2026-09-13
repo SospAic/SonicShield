@@ -14,6 +14,9 @@ class NotificationService {
 
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
+
+  /// 供远程模块注册通知按钮回调（如指令组终止按钮）。
+  FlutterLocalNotificationsPlugin get plugin => _plugin;
   bool _ready = false;
 
   Future<void> ensure() async {

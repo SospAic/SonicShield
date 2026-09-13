@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/guard/guard_screen.dart';
 import '../features/logs/log_screen.dart';
+import '../features/remote/remote_screen.dart';
+import '../features/remote/script_builder_screen.dart';
 import '../features/settings/settings_screen.dart';
 import '../features/sounds/sound_library_screen.dart';
 import '../features/tasks/task_editor_screen.dart';
@@ -35,6 +37,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/tasks/:id/edit',
         builder: (_, s) => TaskEditorScreen(taskId: s.pathParameters['id']),
+      ),
+      GoRoute(path: '/remote', builder: (_, __) => const RemoteScreen()),
+      GoRoute(
+        path: '/remote/script-builder/:endpointId',
+        builder: (_, s) =>
+            ScriptBuilderScreen(endpointId: s.pathParameters['endpointId']!),
       ),
     ],
   );
