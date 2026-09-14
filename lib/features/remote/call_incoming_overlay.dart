@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../remote/call_service.dart';
@@ -41,6 +42,45 @@ class _OverlayView extends ConsumerStatefulWidget {
 }
 
 class _OverlayViewState extends ConsumerState<_OverlayView> {
+  final _remoteView = RTCVideoRenderer();
+  final _localView = RTCVideoRenderer();
+  bool _renderersReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initRenderers();
+    // 远端流到达时刷新渲染。
+    CallService.instance.remoteStreamChanges.listen((_) {
+      if (mounted) setState(() => _attachStreams());
+    });
+  }
+
+  Future<void> _initRenderers() async {
+    await _remoteView.initialize();
+    await _localView.initialize();
+    if (!mounted) return;
+    setState(() => _renderersReady = true);
+    _attachStreams();
+  }
+
+  void _attachStreams() {
+    final svc = CallService.instance;
+    _remoteView.srcObject = svc.remoteStream;
+    _localView.srcObject = svc.localStream;
+  }
+
+  @override
+  void dispose() {
+    try {
+      _remoteView.dispose();
+      _localView.dispose();
+    } on Object {
+      // ignore
+    }
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final svc = CallService.instance;
@@ -52,12 +92,37 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
           initialData: svc.currentPhase,
           builder: (context, snap) {
             final phase = snap.data ?? CallPhase.idle;
+            final hasMedia = _renderersReady && svc.remoteStream != null;
             return Column(
               children: [
                 Expanded(
                   child: Center(
                     child: phase == CallPhase.connected
-                        ? const _RemoteVideoPlaceholder()
+                        ? Stack(children: [
+                            // 远端全屏画面（无流时显示占位）。
+                            Positioned.fill(
+                              child: hasMedia
+                                  ? RTCVideoView(_remoteView,
+                                      objectFit: RTCVideoViewObjectFit
+                                          .RTCVideoViewObjectFitCover)
+                                  : const _RemoteVideoPlaceholder(),
+                            ),
+                            // 本地小窗（画中画，镜像）。
+                            if (_renderersReady && svc.localStream != null)
+                              Positioned(
+                                right: 12,
+                                top: 12,
+                                width: 110,
+                                height: 160,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: RTCVideoView(_localView,
+                                      mirror: true,
+                                      objectFit: RTCVideoViewObjectFit
+                                          .RTCVideoViewObjectFitCover),
+                                ),
+                              ),
+                          ])
                         : Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [

@@ -238,9 +238,17 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
               Text('已配对端点（${_endpoints.length}）',
                   style: Theme.of(context).textTheme.titleMedium),
               const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.qr_code_scanner),
+                tooltip: '扫码配对',
+                onPressed: () async {
+                  await context.push('/remote/pair-qr');
+                  await _load();
+                },
+              ),
               FilledButton.tonalIcon(
                 icon: const Icon(Icons.add, size: 18),
-                label: const Text('配对'),
+                label: const Text('手输'),
                 onPressed: _addPairDialog,
               ),
             ],

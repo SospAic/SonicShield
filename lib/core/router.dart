@@ -6,6 +6,7 @@ import '../features/dashboard/dashboard_screen.dart';
 import '../features/guard/guard_screen.dart';
 import '../features/logs/log_screen.dart';
 import '../features/remote/call_screen.dart';
+import '../features/remote/pair_qr_screen.dart';
 import '../features/remote/remote_screen.dart';
 import '../features/remote/script_builder_screen.dart';
 import '../features/settings/settings_screen.dart';
@@ -43,6 +44,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/remote/call',
         builder: (_, __) => const CallScreen(),
+      ),
+      GoRoute(
+        path: '/remote/pair-qr',
+        builder: (_, __) => const PairQrScreen(),
       ),
       GoRoute(
         path: '/remote/call/in-call',
