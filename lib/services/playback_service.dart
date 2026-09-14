@@ -25,6 +25,7 @@ class PlaybackService {
   PlaybackService();
 
   AudioPlayer? _player;
+  bool _mixStopped = false;
 
   Future<PlayResult> play({
     required String path,
@@ -92,6 +93,9 @@ class PlaybackService {
     }
   }
 
+  /// 终止当前混音（供引擎/UI 调用）。
+  void stopSoundscape() => _mixStopped = true;
+
   Future<void> stop() async {
     try {
       await _player?.stop();
@@ -129,4 +133,91 @@ class PlaybackService {
     await _player?.dispose();
     _player = null;
   }
+}
+
+/// 声景轨（混音输入）：已解析的文件路径 + 音量 + 循环。
+class SoundscapeTrackInput {
+  const SoundscapeTrackInput(
+      {required this.path, this.volume = 0.6, this.loop = true});
+
+  final String path;
+  final double volume;
+  final bool loop;
+}
+
+extension PlaybackSoundscape on PlaybackService {
+  /// 多轨混音：每轨独立 AudioPlayer 同时播放，durationMs 到点全部渐停。
+  /// 返回实际播放毫秒数。
+  Future<PlayResult> playSoundscape({
+    required List<SoundscapeTrackInput> tracks,
+    required int durationMs,
+    required AudioChannel channel,
+    int fadeOutMs = 3000,
+  }) async {
+    final sw = Stopwatch()..start();
+    if (tracks.isEmpty) {
+      return const PlayResult(ok: false, message: '声景无轨道');
+    }
+    final session = await AudioSession.instance;
+    await session.configure(AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playback,
+      androidAudioAttributes: AndroidAudioAttributes(
+        contentType: AndroidAudioContentType.music,
+        usage: channel == AudioChannel.alarm
+            ? AndroidAudioUsage.alarm
+            : AndroidAudioUsage.media,
+      ),
+      androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+      androidWillPauseWhenDucked: true,
+    ));
+
+    final players = <AudioPlayer>[];
+    try {
+      for (final t in tracks) {
+        final p = AudioPlayer();
+        players.add(p);
+        await p.setFilePath(t.path);
+        await p.setVolume(t.volume);
+        if (t.loop) await p.setLoopMode(LoopMode.one);
+      }
+      // 尽量同时起播。
+      for (final p in players) {
+        unawaited(p.play());
+      }
+      // 等待总时长，期间可被 stopSoundscape 打断（通过 _mixStopped 标志）。
+      while (sw.elapsedMilliseconds < durationMs) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (_mixStopped) break;
+      }
+      // 渐出后全停。
+      final fo = fadeOutMs.clamp(0, durationMs);
+      const steps = 12;
+      for (var s = 1; s <= steps; s++) {
+        for (final p in players) {
+          await p.setVolume(p.volume * (1 - s / steps));
+        }
+        await Future<void>.delayed(Duration(milliseconds: fo ~/ steps));
+      }
+      for (final p in players) {
+        await p.stop();
+        await p.dispose();
+      }
+      _mixStopped = false;
+      return PlayResult(ok: true, playedMs: sw.elapsedMilliseconds);
+    } catch (e) {
+      for (final p in players) {
+        try {
+          await p.dispose();
+        } on Object {
+          // ignore
+        }
+      }
+      _mixStopped = false;
+      return PlayResult(
+          ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
+    }
+  }
+
+  /// 终止当前混音（外部 stop() 或条件变化时调用）。
+  void stopSoundscape() => _mixStopped = true;
 }

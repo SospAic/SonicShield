@@ -15,7 +15,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const int dbVersion = 1;
+  static const int dbVersion = 2;
   static AppDatabase? _instance;
 
   static Future<AppDatabase> open([String? dirOverride]) async {
@@ -60,6 +60,7 @@ class AppDatabase {
         cooldown_sec INTEGER NOT NULL DEFAULT 300,
         quiet_policy TEXT NOT NULL DEFAULT 'skip',
         priority INTEGER NOT NULL DEFAULT 0,
+        condition_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )''');
@@ -118,7 +119,10 @@ class AppDatabase {
   }
 
   static Future<void> _onUpgrade(Database db, int oldV, int newV) async {
-    // v1 起步；迁移脚本按版本顺序追加。
+    // v1 → v2：任务条件层（2026-09，v1.3）。
+    if (oldV < 2) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
+    }
   }
 
   // ---------- kv ----------

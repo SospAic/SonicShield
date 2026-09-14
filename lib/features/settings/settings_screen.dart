@@ -1,9 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../core/providers.dart';
 import '../../core/constants.dart';
+import '../../domain/models/action.dart';
+import '../../domain/models/condition.dart';
+import '../../domain/models/task.dart';
+import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
@@ -20,6 +33,115 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String _powerMode = 'balanced';
   int _quietStart = ComplianceGuardrails.defaultQuietStartHour;
   int _quietEnd = ComplianceGuardrails.defaultQuietEndHour;
+
+  // ---------------- 任务备份（导出/导入，v1.3） ----------------
+
+  Future<void> _exportTasks() async {
+    try {
+      final repo = await ref.read(taskRepoProvider.future);
+      final tasks = await repo.listAll();
+      if (tasks.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('没有可导出的任务')));
+        }
+        return;
+      }
+      final payload = {
+        'app': 'sonic_shield',
+        'version': 1,
+        'exportedAt': DateTime.now().toIso8601String(),
+        'tasks': [
+          for (final t in tasks)
+            {
+              'id': t.id,
+              'name': t.name,
+              'trigger_type': t.triggerType.name,
+              'trigger_json': jsonEncode(t.trigger.toJson()),
+              'action_type': t.actionType.name,
+              'action_json': jsonEncode(t.action.toJson()),
+              'asset_ids': jsonEncode(t.assetIds),
+              'cooldown_sec': t.cooldownSec,
+              'quiet_policy': t.quietPolicy.name,
+              'priority': t.priority,
+              'condition_json': t.condition == null
+                  ? null
+                  : jsonEncode(t.condition!.toJson()),
+              'created_at': t.createdAt.millisecondsSinceEpoch,
+            },
+        ],
+      };
+      final dir = await getTemporaryDirectory();
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final path = '$dir/sonic_shield_tasks_$stamp.json';
+      await File(path).writeAsString(
+          const JsonEncoder.withIndent('  ').convert(payload),
+          flush: true);
+      if (mounted) {
+        await Share.shareXFiles([XFile(path)], subject: '声盾任务备份');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      }
+    }
+  }
+
+  Future<void> _importTasks() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.any);
+      if (result == null || result.files.single.path == null) return;
+      final raw = await File(result.files.single.path!).readAsString();
+      final payload = jsonDecode(raw) as Map<String, dynamic>;
+      if (payload['app'] != 'sonic_shield' || payload['tasks'] is! List) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('文件格式不符')));
+        }
+        return;
+      }
+      final repo = await ref.read(taskRepoProvider.future);
+      var imported = 0;
+      for (final tj in (payload['tasks'] as List)) {
+        final row = (tj as Map).cast<String, dynamic>();
+        final task = Task(
+          id: row['id'] as String? ?? const Uuid().v4(),
+          name: row['name'] as String? ?? '导入任务',
+          enabled: false, // 导入后默认停用，防意外触发
+          triggerType: TriggerType.values.byName(row['trigger_type'] as String),
+          trigger: TriggerConfig.fromJson(
+              jsonDecode(row['trigger_json'] as String)
+                  as Map<String, dynamic>),
+          actionType: ActionType.values.byName(row['action_type'] as String),
+          action: ActionConfig.fromJson(
+              jsonDecode(row['action_json'] as String) as Map<String, dynamic>),
+          assetIds: (jsonDecode(row['asset_ids'] as String? ?? '[]') as List)
+              .cast<String>(),
+          cooldownSec: row['cooldown_sec'] as int? ?? 300,
+          quietPolicy: QuietPolicy.values
+              .byName(row['quiet_policy'] as String? ?? 'skip'),
+          condition:
+              TaskCondition.fromJsonOrNull(row['condition_json'] as String?),
+          priority: row['priority'] as int? ?? 0,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(
+              row['created_at'] as int? ?? 0),
+          updatedAt: DateTime.now(),
+        );
+        await repo.upsert(task);
+        imported++;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入完成：$imported 条任务（默认停用）')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -127,6 +249,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('远程遥控'),
             subtitle: const Text('多端点公网遥控 · 指令组 · 对讲机'),
             onTap: () => context.push('/remote'),
+          ),
+          const Divider(height: 32),
+          Text('任务备份', style: Theme.of(context).textTheme.titleMedium),
+          ListTile(
+            leading: const Icon(Icons.upload_file),
+            title: const Text('导出任务（JSON）'),
+            subtitle: const Text('含条件与音源引用；导入后默认停用'),
+            onTap: _exportTasks,
+          ),
+          ListTile(
+            leading: const Icon(Icons.download),
+            title: const Text('导入任务（JSON）'),
+            onTap: _importTasks,
           ),
           const Divider(height: 32),
           ListTile(

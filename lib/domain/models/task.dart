@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'condition.dart';
 import '../../domain/models/action.dart';
 import '../../domain/models/trigger.dart';
 
@@ -16,6 +17,7 @@ class Task {
     required this.assetIds,
     required this.cooldownSec,
     required this.quietPolicy,
+    this.condition,
     required this.priority,
     required this.createdAt,
     required this.updatedAt,
@@ -36,6 +38,7 @@ class Task {
   final int cooldownSec;
 
   final QuietPolicy quietPolicy;
+  final TaskCondition? condition; // 执行前置条件（null=无条件，v1.3）
   final int priority; // 数值大者先执行（同刻冲突时）
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -50,6 +53,7 @@ class Task {
     List<String>? assetIds,
     int? cooldownSec,
     QuietPolicy? quietPolicy,
+    TaskCondition? condition,
     int? priority,
     DateTime? updatedAt,
   }) =>
@@ -64,6 +68,7 @@ class Task {
         assetIds: assetIds ?? this.assetIds,
         cooldownSec: cooldownSec ?? this.cooldownSec,
         quietPolicy: quietPolicy ?? this.quietPolicy,
+        condition: condition ?? this.condition,
         priority: priority ?? this.priority,
         createdAt: createdAt,
         updatedAt: updatedAt ?? DateTime.now(),
@@ -81,6 +86,8 @@ class Task {
         'cooldown_sec': cooldownSec,
         'quiet_policy': quietPolicy.name,
         'priority': priority,
+        'condition_json':
+            condition == null ? null : jsonEncode(condition!.toJson()),
         'created_at': createdAt.millisecondsSinceEpoch,
         'updated_at': updatedAt.millisecondsSinceEpoch,
       };
@@ -96,6 +103,7 @@ class Task {
         assetIds: _decodeAssetIds(r['asset_ids']),
         cooldownSec: r['cooldown_sec'] as int,
         quietPolicy: QuietPolicy.values.byName(r['quiet_policy'] as String),
+        condition: TaskCondition.fromJsonOrNull(r['condition_json'] as String?),
         priority: r['priority'] as int? ?? 0,
         createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
         updatedAt: DateTime.fromMillisecondsSinceEpoch(r['updated_at'] as int),

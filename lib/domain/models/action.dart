@@ -1,6 +1,7 @@
 /// 动作类型。
 enum ActionType {
   playAudio, // 播放音频（核心）
+  soundscape, // 声景混音（多轨叠加，v1.3）
   tts, // TTS 喊话（如固定提示语）
   notify, // 仅通知
   recordEvidence, // 录音取证（本地保存，带清晰标注）
@@ -10,6 +11,7 @@ enum ActionType {
 
   String get label => switch (this) {
         ActionType.playAudio => '播放音频',
+        ActionType.soundscape => '声景混音',
         ActionType.tts => '语音喊话',
         ActionType.notify => '发送通知',
         ActionType.recordEvidence => '录音取证',
@@ -42,6 +44,7 @@ sealed class ActionConfig {
         'record' => RecordEvidenceAction.fromJson(j),
         'vibrate' => VibrateAction.fromJson(j),
         'composite' => CompositeAction.fromJson(j),
+        'soundscape' => SoundscapeAction.fromJson(j),
         _ => throw ArgumentError('未知动作类型: ${j['kind']}'),
       };
 }
@@ -197,5 +200,62 @@ class CompositeAction extends ActionConfig {
         'kind': 'composite',
         'primary': primary.toJson(),
         if (prefixNotify != null) 'prefixNotify': prefixNotify!.toJson(),
+      };
+}
+
+/// 声景轨道：来源（预置分类或指定音源 ID）+ 音量 + 循环。
+class SoundscapeTrack {
+  const SoundscapeTrack({
+    this.presetCategory,
+    this.assetId,
+    this.volume = 0.6,
+    this.loop = true,
+  }) : assert(presetCategory != null || assetId != null);
+
+  final String? presetCategory; // 预置库分类（如 ambient/nature）
+  final String? assetId; // 指定音源 ID（优先于分类）
+  final double volume;
+  final bool loop;
+
+  Map<String, dynamic> toJson() => {
+        if (presetCategory != null) 'presetCategory': presetCategory,
+        if (assetId != null) 'assetId': assetId,
+        'volume': volume,
+        'loop': loop,
+      };
+
+  static SoundscapeTrack fromJson(Map<String, dynamic> j) => SoundscapeTrack(
+        presetCategory: j['presetCategory'] as String?,
+        assetId: j['assetId'] as String?,
+        volume: (j['volume'] as num? ?? 0.6).toDouble(),
+        loop: j['loop'] as bool? ?? true,
+      );
+}
+
+/// 声景混音：最多 4 轨同时叠加，总时长到点渐出。
+class SoundscapeAction extends ActionConfig {
+  const SoundscapeAction(
+      {required this.tracks, this.durationSec = 60, this.fadeOutSec = 5})
+      : assert(tracks.length >= 1 && tracks.length <= 4);
+
+  final List<SoundscapeTrack> tracks;
+  final int durationSec;
+  final int fadeOutSec;
+
+  factory SoundscapeAction.fromJson(Map<String, dynamic> j) => SoundscapeAction(
+        tracks: [
+          for (final t in (j['tracks'] as List?) ?? [])
+            SoundscapeTrack.fromJson((t as Map).cast<String, dynamic>()),
+        ],
+        durationSec: (j['durationSec'] as num? ?? 60).toInt(),
+        fadeOutSec: (j['fadeOutSec'] as num? ?? 5).toInt(),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'soundscape',
+        'tracks': [for (final t in tracks) t.toJson()],
+        'durationSec': durationSec,
+        'fadeOutSec': fadeOutSec,
       };
 }

@@ -44,6 +44,8 @@ class RemoteStore {
   static const _kDeviceName = 'rc_device_name';
   static const _kBroker = 'rc_broker';
   static const _kPaired = 'rc_paired';
+  static const _kScripts = 'rc_scripts';
+  static const _kOutbox = 'rc_outbox';
 
   /// 默认公共演示 broker（生产建议自建 EMQX/Mosquitto，docs/14 §6）。
   static const defaultBroker = 'broker.emqx.io';
@@ -84,5 +86,94 @@ class RemoteStore {
     final list = paired()..removeWhere((p) => p.deviceId == deviceId);
     await _prefs.setString(
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
+  }
+}
+
+/// 已保存的指令组模板（收藏）。
+class SavedScript {
+  const SavedScript({
+    required this.id,
+    required this.name,
+    required this.payload,
+    required this.savedAt,
+  });
+
+  final String id;
+  final String name;
+  final Map<String, dynamic> payload; // script.run payload
+  final DateTime savedAt;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'payload': payload,
+        'savedAt': savedAt.millisecondsSinceEpoch,
+      };
+
+  static SavedScript fromJson(Map<String, dynamic> j) => SavedScript(
+        id: j['id'] as String,
+        name: j['name'] as String? ?? '指令组',
+        payload: (j['payload'] as Map?)?.cast<String, dynamic>() ?? const {},
+        savedAt: DateTime.fromMillisecondsSinceEpoch(
+            (j['savedAt'] as num?)?.toInt() ?? 0),
+      );
+}
+
+extension RemoteStoreScripts on RemoteStore {
+  List<SavedScript> savedScripts() {
+    final raw = _prefs.getString(RemoteStore._kScripts);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return ((jsonDecode(raw) as List) as List<Map<String, dynamic>>)
+          .map(SavedScript.fromJson)
+          .toList();
+    } on Object {
+      return const [];
+    }
+  }
+
+  Future<void> saveScript(SavedScript s) async {
+    final list = savedScripts()..removeWhere((p) => p.id == s.id);
+    list.insert(0, s);
+    await _prefs.setString(RemoteStore._kScripts,
+        jsonEncode(list.map((p) => p.toJson()).toList()));
+  }
+
+  Future<void> deleteScript(String id) async {
+    final list = savedScripts()..removeWhere((p) => p.id == id);
+    await _prefs.setString(RemoteStore._kScripts,
+        jsonEncode(list.map((p) => p.toJson()).toList()));
+  }
+
+  // ---------- 离线 outbox（v1.3：端点离线时命令暂存，上线冲刷） ----------
+
+  List<Map<String, dynamic>> outbox() {
+    final raw = _prefs.getString(RemoteStore._kOutbox);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return ((jsonDecode(raw) as List) as List<Map<String, dynamic>>);
+    } on Object {
+      return const [];
+    }
+  }
+
+  Future<void> enqueue(String wire, String endpointId) async {
+    final list = outbox()
+      ..add({
+        'endpointId': endpointId,
+        'wire': wire,
+        'at': DateTime.now().millisecondsSinceEpoch
+      });
+    if (list.length > 200) list.removeRange(0, list.length - 200);
+    await _prefs.setString(RemoteStore._kOutbox, jsonEncode(list));
+  }
+
+  List<Map<String, dynamic>> drainOutbox(String endpointId) {
+    final all = outbox();
+    final mine = all.where((m) => m['endpointId'] == endpointId).toList();
+    if (mine.isEmpty) return const [];
+    _prefs.setString(RemoteStore._kOutbox,
+        jsonEncode(all.where((m) => m['endpointId'] != endpointId).toList()));
+    return mine;
   }
 }

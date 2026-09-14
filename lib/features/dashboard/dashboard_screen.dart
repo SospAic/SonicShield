@@ -7,6 +7,7 @@ import '../../core/providers.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
+import 'quick_scripts_card.dart';
 
 /// 守护仪表盘：引擎开关 / 下一触发倒计时 / 今日执行统计 / 权限体检。
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -55,6 +56,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             running: state?.running ?? false,
             guardActive: state?.guardActive ?? false,
           ),
+          const SizedBox(height: 12),
+          const QuickScriptsCard(),
           const SizedBox(height: 12),
           Card(
             child: Padding(

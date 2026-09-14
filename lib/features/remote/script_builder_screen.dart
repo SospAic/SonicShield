@@ -128,7 +128,7 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
     }
   }
 
-  Future<void> _send() async {
+  Future<void> _send({bool saveFirst = false}) async {
     final err = ScriptDraft(name: _nameCtrl.text, steps: _steps).validate();
     if (err != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
@@ -141,21 +141,28 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
     }
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
-    final controller = RcControllerService.instance;
-    final ok = await controller.sendScript(
-      _endpoint!,
-      RcScript(
-        scriptId: const Uuid().v4(),
-        name: _nameCtrl.text,
-        fromName: store.deviceName,
-        sentAt: DateTime.now().millisecondsSinceEpoch,
-        steps: [for (final s in _steps) s.toStep()],
-      ),
-      store,
+    final script = RcScript(
+      scriptId: const Uuid().v4(),
+      name: _nameCtrl.text,
+      fromName: store.deviceName,
+      sentAt: DateTime.now().millisecondsSinceEpoch,
+      steps: [for (final s in _steps) s.toStep()],
     );
+    if (saveFirst) {
+      await store.saveScript(SavedScript(
+        id: script.scriptId,
+        name: script.name,
+        payload: script.toJson(),
+        savedAt: DateTime.now(),
+      ));
+    }
+    final controller = RcControllerService.instance;
+    final ok = await controller.sendScript(_endpoint!, script, store);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(ok ? '指令组已发送，端点将立即执行' : '发送失败（端点离线或未连接）')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(ok
+              ? (saveFirst ? '已保存为模板并发送' : '指令组已发送，端点将立即执行')
+              : (saveFirst ? '已保存为模板（端点离线，上线后自动冲刷）' : '发送失败（端点离线或未连接）'))));
       if (ok) Navigator.of(context).pop();
     }
   }

@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show DartPluginRegistrant;
 
+import 'package:battery_plus/battery_plus.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -78,13 +81,95 @@ Future<void> _engineBody(ServiceInstance service) async {
   final playback = PlaybackService();
   final guard = SoundGuardService();
   const native = MethodChannel(Channels.method);
+  final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
 
   var guardEnabled = prefs.getBool('guard_enabled') ?? false;
   StreamSubscription<SoundEvent>? guardSub;
   String? lastAction;
 
+  /// 任务条件层评估（v1.3）：不满足 → 返回原因（写审计），满足 → null。
+  Future<String?> conditionFailed(Task task) async {
+    final c = task.condition;
+    if (c == null || !c.hasAny) return null;
+    var level = 100;
+    var charging = false;
+    try {
+      level = await battery.batteryLevel;
+      final st = await battery.batteryState;
+      charging = st == BatteryState.charging || st == BatteryState.full;
+    } on Object {
+      // 无电池平台视为满足电量条件
+    }
+    final ok = c.evaluate(
+        charging: charging, batteryLevel: level, now: DateTime.now());
+    if (ok) return null;
+    return c.describe();
+  }
+
   // ==================== 依赖底座（先声明后引用） ====================
+
+  Future<String?> assetPathById(String id) async {
+    final rows = await db.db
+        .query('audio_assets', where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : rows.first['path'] as String;
+  }
+
+  /// 按预置分类随机取一条（导入预置库时标签为 预置/<分类>）。
+  Future<String?> presetPathByCategory(String category) async {
+    final rows = await db.db.query('audio_assets',
+        where: 'tags LIKE ? AND tags LIKE ?',
+        whereArgs: ['%预置%', '%$category%'],
+        orderBy: 'RANDOM()',
+        limit: 1);
+    return rows.isEmpty ? null : rows.first['path'] as String;
+  }
+
+  /// 任意一条音源路径（按最近导入优先）。
+  Future<String?> pickAnyAssetPath() async {
+    final rows =
+        await db.db.query('audio_assets', orderBy: 'created_at DESC', limit: 1);
+    return rows.isEmpty ? null : rows.first['path'] as String;
+  }
+
+  /// 声景混音：逐轨解析路径（assetId 优先，其次预置分类随机），多轨叠加。
+  Future<void> soundscapeAndLog(
+      Task task, SoundscapeAction sc, String source) async {
+    final tracks = <SoundscapeTrackInput>[];
+    for (final t in sc.tracks) {
+      var path = t.assetId != null ? await assetPathById(t.assetId!) : null;
+      path ??= t.presetCategory != null
+          ? await presetPathByCategory(t.presetCategory!)
+          : null;
+      path ??= await pickAnyAssetPath();
+      if (path != null) {
+        tracks.add(
+            SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
+      }
+    }
+    if (tracks.isEmpty) {
+      await logs.append(
+          source: source,
+          action: 'soundscape',
+          status: 'failed',
+          taskId: task.id,
+          message: '无可解析的音轨');
+      return;
+    }
+    final r = await playback.playSoundscape(
+      tracks: tracks,
+      durationMs: sc.durationSec * 1000,
+      channel: AudioChannel.media,
+      fadeOutMs: sc.fadeOutSec * 1000,
+    );
+    await logs.append(
+        source: source,
+        action: 'soundscape',
+        status: r.ok ? 'success' : 'failed',
+        taskId: task.id,
+        durationMs: r.playedMs,
+        message: '${tracks.length} 轨 · ${r.message ?? ''}');
+  }
 
   Future<String?> pickAssetFor(Task task) async {
     if (task.assetIds.isEmpty) return null;
@@ -179,15 +264,23 @@ Future<void> _engineBody(ServiceInstance service) async {
           path: path);
       await Future<void>.delayed(Duration(seconds: seconds));
       await rec.stop();
+      // 取证哈希链（v1.3）：文件 SHA-256 入审计，供导出时校验完整性。
+      var sha256Hex = '';
+      try {
+        final bytes = await File(path).readAsBytes();
+        sha256Hex = sha256.convert(bytes).toString();
+      } on Object {
+        // 文件不可读时保留空哈希（审计仍记录路径与时间）
+      }
       await logs.append(
           source: source,
           action: 'record',
           status: 'success',
           taskId: task.id,
           durationMs: seconds * 1000,
-          message: path);
+          message: 'sha256=$sha256Hex path=$path');
       await NotificationService.instance
-          .showEvent(title: '声盾 · 取证完成', body: '已保存到应用私有目录');
+          .showEvent(title: '声盾 · 取证完成', body: '已保存到应用私有目录（含完整性哈希）');
     } catch (e) {
       await logs.append(
           source: source,
@@ -205,6 +298,9 @@ Future<void> _engineBody(ServiceInstance service) async {
     switch (cfg) {
       case final PlayAudioAction p:
         await playAndLog(task, p, volume, durationMs, source);
+        return true;
+      case final SoundscapeAction sc:
+        await soundscapeAndLog(task, sc, source);
         return true;
       case final TtsAction t:
         await ttsAndLog(task, t, source);
@@ -350,6 +446,19 @@ Future<void> _engineBody(ServiceInstance service) async {
         await occs.markStatus(o.id, OccurrenceStatus.skipped);
         continue;
       }
+      // 条件层（v1.3）：不满足则跳过并审计。
+      final condFail = await conditionFailed(task);
+      if (condFail != null) {
+        await occs.markStatus(o.id, OccurrenceStatus.skipped);
+        await logs.append(
+            source: 'schedule',
+            action: 'condition',
+            status: 'skipped',
+            taskId: task.id,
+            occurrenceId: o.id,
+            message: condFail);
+        continue;
+      }
       final ok =
           await runAction(task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule');
       await occs.markStatus(
@@ -368,6 +477,17 @@ Future<void> _engineBody(ServiceInstance service) async {
       final cooldown =
           Duration(seconds: math.max(cfg.cooldownSec, t.cooldownSec));
       if (last != null && at.difference(last) < cooldown) continue;
+      // 条件层（v1.3）：声音触发同样受前置条件约束。
+      final condFail = await conditionFailed(t);
+      if (condFail != null) {
+        await logs.append(
+            source: 'sound',
+            action: 'condition',
+            status: 'skipped',
+            taskId: t.id,
+            message: condFail);
+        continue;
+      }
       await runAction(t, 0.8, 0, 'sound');
       await occs.commitAll([
         PlannedOccurrence(

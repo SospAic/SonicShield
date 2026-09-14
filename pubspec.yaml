@@ -5,7 +5,7 @@ description: >-
   支持声音触发自动响应、系统级后台执行与精细电源管理。
   仅限合法用途（取证记录、提醒、助眠、守护等），严禁用于骚扰他人。
 publish_to: "none"
-version: 1.2.0+4
+version: 1.3.0+5
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -60,6 +60,7 @@ dependencies:
   # ---- 远程遥控模块（v1.2，可选开启，docs/14） ----
   mqtt_client: ^10.11.11        # MQTT 5.0 客户端（TCP/TLS/WebSocket）
   cryptography: ^2.9.0          # HKDF-SHA256 + AES-256-GCM 端到端加密
+  crypto: ^3.0.3                # SHA-256 取证哈希链（v1.3）
 
 dev_dependencies:
   flutter_test:

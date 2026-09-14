@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/providers.dart';
 import '../../domain/models/action.dart';
+import '../../domain/models/condition.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
@@ -44,6 +45,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   bool _loopFill = false;
   int _rampUpSec = 0;
 
+  // 声景混音（v1.3）
+  final List<SoundscapeTrack> _scTracks = [];
+  int _scDurationSec = 60;
+  int _scFadeOutSec = 5;
+
+  // 条件层（v1.3）
+  bool _condCharging = false;
+  int? _condMinBattery;
+  int? _condWinStart;
+  int? _condWinEnd;
+
   String get _rampUpLabel => _rampUpSec == 0 ? '关闭' : '$_rampUpSec 秒渐强';
   String _ttsText = '请注意，已开启录音取证';
   int _recordSec = 60;
@@ -70,6 +82,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       _nameCtrl.text = t.name;
       _type = t.triggerType;
       _loaded = true;
+      // 条件层回填（v1.3）。
+      final c = t.condition;
+      if (c != null) {
+        _condCharging = c.requireCharging;
+        _condMinBattery = c.minBatteryPct;
+        _condWinStart = c.windowStartMin;
+        _condWinEnd = c.windowEndMin;
+      }
       final tr = t.trigger;
       if (tr is FixedOnceTrigger) {
         _time = TimeOfDay.fromDateTime(tr.at);
@@ -107,6 +127,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _rampUpSec = a.rampUpSec;
         _loopFill = a.loopFill;
         _actionKind = ActionKindChoice.play;
+      } else if (a is SoundscapeAction) {
+        _scTracks.addAll(a.tracks);
+        _scDurationSec = a.durationSec;
+        _scFadeOutSec = a.fadeOutSec;
+        _actionKind = ActionKindChoice.soundscape;
       } else if (a is TtsAction) {
         _ttsText = a.text;
         _actionKind = ActionKindChoice.tts;
@@ -191,10 +216,177 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             ],
           ),
           ..._actionInputs(context),
+          const SizedBox(height: 16),
+          _section(context, '执行条件'),
+          ..._conditionInputs(context),
           const SizedBox(height: 24),
         ],
       ),
     );
+  }
+
+  /// 声景混音编辑区（v1.3）：1–4 轨（预置分类+音量+循环），总时长与渐出。
+  List<Widget> _soundscapeInputs(BuildContext ctx) {
+    const categories = <String, String>{
+      'ambient': '助眠底噪',
+      'nature': '自然',
+      'knocks': '敲击',
+      'impacts': '撞击',
+      'drags': '拖拽',
+      'doors': '门窗',
+      'glass': '玻璃',
+      'human': '人声',
+      'animals': '动物',
+      'bells': '铃声',
+      'alarms': '警示',
+      'tech': '电子',
+    };
+    return [
+      const SizedBox(height: 8),
+      for (var i = 0; i < _scTracks.length; i++)
+        Card(
+          child: ListTile(
+            leading:
+                Icon(Icons.layers, color: Theme.of(ctx).colorScheme.primary),
+            title: Text('轨道 ${i + 1}：'
+                '${categories[_scTracks[i].presetCategory] ?? _scTracks[i].presetCategory ?? '指定音源'}'
+                ' · ${(_scTracks[i].volume * 100).round()}%'
+                '${_scTracks[i].loop ? ' · 循环' : ''}'),
+            subtitle: Slider(
+              value: _scTracks[i].volume,
+              onChanged: (v) => setState(() => _scTracks[i] = SoundscapeTrack(
+                  presetCategory: _scTracks[i].presetCategory,
+                  assetId: _scTracks[i].assetId,
+                  volume: v,
+                  loop: _scTracks[i].loop)),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => setState(() => _scTracks.removeAt(i)),
+            ),
+          ),
+        ),
+      if (_scTracks.length < 4)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final e in categories.entries)
+                ActionChip(
+                  label:
+                      Text('＋${e.value}', style: const TextStyle(fontSize: 12)),
+                  onPressed: () => setState(() =>
+                      _scTracks.add(SoundscapeTrack(presetCategory: e.key))),
+                ),
+            ],
+          ),
+        ),
+      ListTile(
+        title: Text('总时长：$_scDurationSec 秒'),
+        subtitle: Slider(
+          value: _scDurationSec.toDouble(),
+          min: 15,
+          max: 600,
+          divisions: 39,
+          label: '$_scDurationSec s',
+          onChanged: (v) => setState(() => _scDurationSec = v.round()),
+        ),
+      ),
+      ListTile(
+        title: Text('渐出：$_scFadeOutSec 秒'),
+        subtitle: Slider(
+          value: _scFadeOutSec.toDouble(),
+          min: 1,
+          max: 15,
+          divisions: 14,
+          label: '$_scFadeOutSec s',
+          onChanged: (v) => setState(() => _scFadeOutSec = v.round()),
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+            '声景混音将多轨音源同时叠加播放（如雨声+雷声+风扇），'
+            '到点后自动渐出。需先在音源库导入预置音效。',
+            style: TextStyle(fontSize: 12)),
+      ),
+    ];
+  }
+
+  /// 条件层编辑区（v1.3）。
+  List<Widget> _conditionInputs(BuildContext ctx) {
+    return [
+      SwitchListTile(
+        title: const Text('仅充电时执行'),
+        value: _condCharging,
+        onChanged: (v) => setState(() => _condCharging = v),
+      ),
+      ListTile(
+        title: Text(
+            '最低电量：${_condMinBattery == null ? '不限' : '$_condMinBattery%'}'),
+        trailing: DropdownButton<int?>(
+          value: _condMinBattery,
+          hint: const Text('不限'),
+          items: [
+            const DropdownMenuItem(value: null, child: Text('不限')),
+            for (final v in [10, 20, 30, 50, 70])
+              DropdownMenuItem(value: v, child: Text('$v%')),
+          ],
+          onChanged: (v) => setState(() => _condMinBattery = v),
+        ),
+      ),
+      ListTile(
+        title: Text('时段窗口：${_condWinText()}'),
+        trailing: SizedBox(
+          width: 180,
+          child: Row(
+            children: [
+              Expanded(
+                child: DropdownButton<int?>(
+                  value: _condWinStart,
+                  hint: const Text('开始'),
+                  isExpanded: true,
+                  items: [
+                    const DropdownMenuItem(value: null, child: Text('不限')),
+                    for (var h = 0; h < 24; h++)
+                      DropdownMenuItem(
+                          value: h * 60,
+                          child: Text('${h.toString().padLeft(2, '0')}:00')),
+                  ],
+                  onChanged: (v) => setState(() => _condWinStart = v),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: DropdownButton<int?>(
+                  value: _condWinEnd,
+                  hint: const Text('结束'),
+                  isExpanded: true,
+                  items: [
+                    const DropdownMenuItem(value: null, child: Text('不限')),
+                    for (var h = 1; h <= 24; h++)
+                      DropdownMenuItem(
+                          value: h * 60 % 1440,
+                          child: Text(
+                              '${h % 24 == 0 ? '24' : (h).toString().padLeft(2, '0')}:00')),
+                  ],
+                  onChanged: (v) => setState(() => _condWinEnd = v),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  String _condWinText() {
+    if (_condWinStart == null || _condWinEnd == null) return '不限';
+    String hm(int m) =>
+        '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+    return '${hm(_condWinStart!)}–${hm(_condWinEnd!)}';
   }
 
   Widget _section(BuildContext ctx, String title) => Padding(
@@ -357,6 +549,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
     ];
     switch (_actionKind) {
+      case ActionKindChoice.soundscape:
+        return [const SizedBox(height: 8), ..._soundscapeInputs(context)];
       case ActionKindChoice.play:
         return [const SizedBox(height: 8), ...playInputs];
       case ActionKindChoice.tts:
@@ -443,6 +637,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           rampUpSec: _rampUpSec,
           loopFill: _loopFill,
         );
+      case ActionKindChoice.soundscape:
+        action = SoundscapeAction(
+          tracks: List<SoundscapeTrack>.from(_scTracks),
+          durationSec: _scDurationSec,
+          fadeOutSec: _scFadeOutSec,
+        );
       case ActionKindChoice.tts:
         action = TtsAction(text: _ttsText);
       case ActionKindChoice.record:
@@ -473,6 +673,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       trigger: trigger,
       actionType: switch (_actionKind) {
         ActionKindChoice.play => ActionType.playAudio,
+        ActionKindChoice.soundscape => ActionType.soundscape,
         ActionKindChoice.tts => ActionType.tts,
         ActionKindChoice.record => ActionType.recordEvidence,
         ActionKindChoice.notify => ActionType.notify,
@@ -482,6 +683,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       assetIds: _editing?.assetIds ?? const [],
       cooldownSec: 300,
       quietPolicy: QuietPolicy.skip,
+      condition: (_condCharging ||
+              _condMinBattery != null ||
+              (_condWinStart != null && _condWinEnd != null))
+          ? TaskCondition(
+              requireCharging: _condCharging,
+              minBatteryPct: _condMinBattery,
+              windowStartMin: _condWinStart,
+              windowEndMin: _condWinEnd,
+              windowEndNextDay: (_condWinEnd ?? 0) <= (_condWinStart ?? 0),
+            )
+          : null,
       priority: 0,
       createdAt: _editing?.createdAt ?? now,
       updatedAt: now,
@@ -500,6 +712,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
 
 enum ActionKindChoice {
   play,
+  soundscape,
   tts,
   record,
   notify,
@@ -508,6 +721,7 @@ enum ActionKindChoice {
 
   String get label => switch (this) {
         ActionKindChoice.play => '随机播放',
+        ActionKindChoice.soundscape => '声景混音',
         ActionKindChoice.tts => '语音播报',
         ActionKindChoice.record => '录音取证',
         ActionKindChoice.notify => '通知',

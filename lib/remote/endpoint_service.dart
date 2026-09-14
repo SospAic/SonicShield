@@ -439,11 +439,16 @@ class RcEndpointService {
   }
 
   /// 控制器侧发送：把消息按目标端点的密钥发到其 cmd 主题。
-  Future<bool> sendTo(
-      PairedEndpoint endpoint, RcMessage msg, RemoteStore store) async {
+  /// 未连接（或端点离线）时自动入 outbox，端点上线后冲刷（v1.3）。
+  Future<bool> sendTo(PairedEndpoint endpoint, RcMessage msg, RemoteStore store,
+      {bool enqueueOnFail = true}) async {
     final client = _client;
     if (client == null ||
         client.connectionStatus?.state != MqttConnectionState.connected) {
+      if (enqueueOnFail) {
+        final wireForLater = jsonEncode(msg.toJson());
+        await store.enqueue(wireForLater, endpoint.deviceId);
+      }
       return false;
     }
     final topic = 'sonicshield/v1/${endpoint.deviceId}/cmd';
@@ -454,6 +459,26 @@ class RcEndpointService {
     client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
         retain: false);
     return true;
+  }
+
+  /// 端点/连接恢复后冲刷该端点的暂存命令（按序重发）。
+  Future<int> flushOutbox(RemoteStore store, PairedEndpoint endpoint) async {
+    var sent = 0;
+    for (final m in store.drainOutbox(endpoint.deviceId)) {
+      final wire = m['wire'] as String?;
+      if (wire == null) continue;
+      final topic = 'sonicshield/v1/${endpoint.deviceId}/cmd';
+      final key =
+          await RcCodec.deriveKey(endpoint.secret, '${endpoint.deviceId}|cmd');
+      final clear = await RcCodec.decode(wire, key, topic);
+      if (clear == null) continue;
+      final reEnc = await RcCodec.encode(clear, key, topic);
+      final builder = MqttClientPayloadBuilder()..addString(reEnc);
+      _client?.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
+          retain: false);
+      sent++;
+    }
+    return sent;
   }
 
   Future<String?> _anyAssetPath() async {
