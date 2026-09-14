@@ -19,6 +19,7 @@ import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
+import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
 
 /// 设置页：电源模式 / 免打扰时段 / 保活引导 / 合规信息。
@@ -74,9 +75,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final dir = await getTemporaryDirectory();
       final stamp = DateTime.now().millisecondsSinceEpoch;
       final path = '$dir/sonic_shield_tasks_$stamp.json';
-      await File(path).writeAsString(
-          const JsonEncoder.withIndent('  ').convert(payload),
-          flush: true);
+      // 可选密码加密（v2.0）：输入密码 → PBKDF2+AES-GCM 加密备份。
+      final password = await _askPassword('加密备份（留空则明文导出）');
+      final body = const JsonEncoder.withIndent('  ').convert(payload);
+      if (password != null && password.isNotEmpty) {
+        final enc = await ExportCrypto.encrypt(body, password);
+        await File('$path.enc').writeAsString(enc, flush: true);
+        if (mounted) {
+          final messenger = ScaffoldMessenger.of(context);
+          await Share.shareXFiles([XFile('$path.enc')], subject: '声盾任务备份（加密）');
+          messenger.showSnackBar(
+              const SnackBar(content: Text('已导出加密备份——密码丢失将无法恢复，请妥善保管')));
+        }
+        return;
+      }
+      await File(path).writeAsString(body, flush: true);
       if (mounted) {
         await Share.shareXFiles([XFile(path)], subject: '声盾任务备份');
       }
@@ -88,11 +101,69 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
+  /// 密码输入对话框；返回 null = 用户取消。
+  Future<String?> _askPassword(String title, {bool confirm = true}) async {
+    final c1 = TextEditingController();
+    final c2 = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+                controller: c1,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: '密码')),
+            if (confirm)
+              TextField(
+                  controller: c2,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: '确认密码')),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return null;
+    if (c1.text.isEmpty) return '';
+    if (confirm && c1.text != c2.text) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('两次密码不一致')));
+      }
+      return null;
+    }
+    return c1.text;
+  }
+
   Future<void> _importTasks() async {
     try {
       final result = await FilePicker.platform.pickFiles(type: FileType.any);
       if (result == null || result.files.single.path == null) return;
-      final raw = await File(result.files.single.path!).readAsString();
+      var raw = await File(result.files.single.path!).readAsString();
+      // 加密备份（.enc）：输入密码解密（v2.0）。
+      if (result.files.single.name.endsWith('.enc')) {
+        final password = await _askPassword('解密备份', confirm: false);
+        if (password == null || password.isEmpty) return;
+        final plain = await ExportCrypto.decrypt(raw, password);
+        if (plain == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(const SnackBar(content: Text('解密失败：密码错误或文件损坏')));
+          }
+          return;
+        }
+        raw = plain;
+      }
       final payload = jsonDecode(raw) as Map<String, dynamic>;
       if (payload['app'] != 'sonic_shield' || payload['tasks'] is! List) {
         if (mounted) {
@@ -255,6 +326,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('视频通话'),
             subtitle: const Text('自动接通 · 家人守护场景'),
             onTap: () => context.push('/remote/call'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.insights),
+            title: const Text('统计看板'),
+            subtitle: const Text('7 天趋势 · 动作分布 · 状态占比'),
+            onTap: () => context.push('/stats'),
           ),
           const Divider(height: 32),
           Text('任务备份', style: Theme.of(context).textTheme.titleMedium),
