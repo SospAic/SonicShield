@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/guard/guard_screen.dart';
 import '../features/logs/log_screen.dart';
+import '../features/remote/call_screen.dart';
 import '../features/remote/remote_screen.dart';
 import '../features/remote/script_builder_screen.dart';
 import '../features/settings/settings_screen.dart';
@@ -39,6 +40,14 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, s) => TaskEditorScreen(taskId: s.pathParameters['id']),
       ),
       GoRoute(path: '/remote', builder: (_, __) => const RemoteScreen()),
+      GoRoute(
+        path: '/remote/call',
+        builder: (_, __) => const CallScreen(),
+      ),
+      GoRoute(
+        path: '/remote/call/in-call',
+        builder: (_, __) => const Scaffold(body: Center(child: Text('通话建立中…'))),
+      ),
       GoRoute(
         path: '/remote/script-builder/:endpointId',
         builder: (_, s) =>

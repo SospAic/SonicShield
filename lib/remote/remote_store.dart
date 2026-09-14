@@ -68,7 +68,7 @@ class RemoteStore {
     final raw = _prefs.getString(_kPaired);
     if (raw == null || raw.isEmpty) return const [];
     try {
-      return ((jsonDecode(raw) as List) as List<Map<String, dynamic>>)
+      return ((jsonDecode(raw) as List).cast<Map<String, dynamic>>())
           .map(PairedEndpoint.fromJson)
           .toList();
     } on Object {
@@ -124,7 +124,7 @@ extension RemoteStoreScripts on RemoteStore {
     final raw = _prefs.getString(RemoteStore._kScripts);
     if (raw == null || raw.isEmpty) return const [];
     try {
-      return ((jsonDecode(raw) as List) as List<Map<String, dynamic>>)
+      return ((jsonDecode(raw) as List).cast<Map<String, dynamic>>())
           .map(SavedScript.fromJson)
           .toList();
     } on Object {
@@ -149,11 +149,12 @@ extension RemoteStoreScripts on RemoteStore {
 
   List<Map<String, dynamic>> outbox() {
     final raw = _prefs.getString(RemoteStore._kOutbox);
-    if (raw == null || raw.isEmpty) return const [];
+    if (raw == null || raw.isEmpty) return [];
     try {
-      return ((jsonDecode(raw) as List) as List<Map<String, dynamic>>);
+      // 必须返回可变列表：enqueue/drain 会就地增删（压测发现的 BUG-012）。
+      return ((jsonDecode(raw) as List).cast<Map<String, dynamic>>()).toList();
     } on Object {
-      return const [];
+      return [];
     }
   }
 

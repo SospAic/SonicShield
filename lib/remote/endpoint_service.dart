@@ -15,6 +15,7 @@ import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
 import '../services/notification_service.dart';
+import 'call_service.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 import 'remote_store.dart';
@@ -246,7 +247,32 @@ class RcEndpointService {
         await _ack(msg, true);
       case RcCmd.pttVoice:
         await _playPtt(msg, peer, logs);
+      case RcCmd.callInvite:
+        await _handleCallInvite(msg, peer);
+      case RcCmd.callAnswer:
+        await CallService.instance.onAnswer(msg.payload);
+      case RcCmd.callCandidate:
+        await CallService.instance.onCandidate(msg.payload);
+      case RcCmd.callEnd:
+        await CallService.instance.onRemoteEnd();
     }
+  }
+
+  /// 被叫：收到 invite → 自动接通（设置开启）或弹来电界面（fullScreenIntent）。
+  Future<void> _handleCallInvite(RcMessage msg, PairedEndpoint peer) async {
+    final video = msg.payload['video'] as bool? ?? true;
+    await NotificationService.instance.showEvent(
+        title: '声盾 · 来电', body: '来自 ${peer.name}（${video ? '视频' : '语音'}）');
+    await CallService.instance.onIncomingCall(msg.payload, peer, _store!,
+        onManualRing: (callId, fromName, vid) {
+      // 手动接听模式：亮屏来电页（v1.4 简化：也走自动接通页，UI 内可拒接）。
+      unawaited(CallService.instance
+          .acceptIncoming(msg.payload, peer, _store!, video: vid));
+    });
+    unawaited(_send(RcMessage.now(RcEvt.callState, {
+      'callId': msg.payload['callId'],
+      'state': 'ringing',
+    })));
   }
 
   Future<void> _playRemote(

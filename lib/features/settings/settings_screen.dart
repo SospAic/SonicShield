@@ -250,6 +250,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             subtitle: const Text('多端点公网遥控 · 指令组 · 对讲机'),
             onTap: () => context.push('/remote'),
           ),
+          ListTile(
+            leading: const Icon(Icons.video_call),
+            title: const Text('视频通话'),
+            subtitle: const Text('自动接通 · 家人守护场景'),
+            onTap: () => context.push('/remote/call'),
+          ),
           const Divider(height: 32),
           Text('任务备份', style: Theme.of(context).textTheme.titleMedium),
           ListTile(

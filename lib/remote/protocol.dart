@@ -88,6 +88,14 @@ abstract final class RcCmd {
   /// 对讲机（v1 整段模式，参考微信语音；v2 升级流式）：
   /// ptt.voice {voiceId, durationMs, audioB64(aac, 端到端加密信封内)}
   static const pttVoice = 'ptt.voice';
+
+  /// 视频通话（v1.4，WebRTC + MQTT 信令，docs/16）：
+  /// call.invite {callId, video} → 被叫自动接通（可配置）
+  /// call.answer {callId, sdp} / call.candidate {callId, candidate} / call.end {callId}
+  static const callInvite = 'call.invite';
+  static const callAnswer = 'call.answer';
+  static const callCandidate = 'call.candidate';
+  static const callEnd = 'call.end';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------
@@ -104,6 +112,9 @@ abstract final class RcEvt {
   static const scriptState =
       'rc.script'; // {scriptId, state: running|done|stopped, stepIndex}
   static const pttAck = 'rc.ptt'; // {voiceId, ok, playedMs}
+  static const callState =
+      'rc.call'; // 通话状态镜像 {callId, state: ringing|connected|ended}
+  static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
 }
 
 // ---------------- 加密编解码 ----------------

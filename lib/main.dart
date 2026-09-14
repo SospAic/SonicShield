@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'remote/call_service.dart';
+import 'remote/remote_store.dart';
 import 'services/background_service_manager.dart';
 import 'remote/script_executor.dart';
 import 'services/notification_service.dart';
@@ -16,6 +19,11 @@ Future<void> main() async {
   // 远程指令组的「终止执行」通知按钮回调（docs/14 §5）。
   RcScriptExecutor.registerStopHandler(NotificationService.instance.plugin, () {
     RcScriptExecutor.instance.stop();
+  });
+  // 视频通话的 store 注入（ICE 候选发送需要，docs/16 §4）。
+  CallService.bindStore(() async {
+    final prefs = await SharedPreferences.getInstance();
+    return RemoteStore(prefs);
   });
   // 后台服务引擎先注册（不自动启动，由用户显式开启 —— 见 docs/05）。
   await BackgroundServiceManager.instance.init();
