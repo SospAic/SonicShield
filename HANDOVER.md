@@ -1,7 +1,7 @@
-# 交接文档 HANDOVER
+# 交接文档 HANDOVER（v1.6.0-alpha，2026-09-16）
 
-> 最后更新：2026-09-12 ｜ 交付会话：SonicShield v1.0.0 全自动开发会话
-> 本文档供下一会话/接手人**无缝衔接**。先读本文，再按需深入 docs/。
+> **给下一个会话的第一句话**：读本文档 §1-§3 恢复上下文，按 §6 的
+> 优先级清单继续，无需向用户重复确认任何已在 §8 记录的决策。
 
 ---
 
@@ -9,27 +9,37 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | ✅ 完整可构建（git 已初始化，v1.0.0 已提交） |
-| 单元测试 | ✅ 53/53 通过；调度引擎行覆盖 **92.7%**（全局 85%） |
-| 静态分析 | ✅ `flutter analyze` **No issues found!** |
-| Debug APK | ✅ 构建成功（arm64-v8a + x86_64） |
-| Release APK | ✅ 构建成功（AOT 验证通过，见 docs/12） |
-| 模拟器验证 | ✅ 全链路跑通（详见 §4 验证记录） |
-| 待办 | 集成测试 drive 化、真机长跑 M4、iOS 构建（需 macOS） |
+| 版本 | **1.6.0-alpha.1+9**（pubspec） |
+| 提交链 | v1.0.0→v1.0.1→v1.1.0→v1.2.0→v1.3.0→v1.4.0→v1.5.0→v2.0.0-alpha→(v1.6.0-alpha 本轮待提交) |
+| 测试 | **85/85 全绿**：61 功能（`--exclude-tags perf`）+ 24 压测（`--tags perf --concurrency=1`） |
+| analyze | **No issues found!** |
+| Release | ✅ 120.5MB（E:\SonicShield\build\app\outputs\flutter-apk\app-release.apk） |
+| 文档 | docs/00-16 + CHANGELOG + 测试报告（docs/12 含 §1-§9 全量数据） |
 
-## 2. 环境地图（全部已安装，直接可用）
+**产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
+核心红线：拒绝一切「未经授权控制他人设备」的实现（docs/16 §8 有完整
+决策记录与合法替代——扫码配对）。用户曾两次要求「免同意控制」，
+已答复并落地为合法形态，**下一会话不要再重新设计此决策**。
 
-| 组件 | 位置 | 版本 |
-|---|---|---|
-| Flutter SDK | `E:\dev\flutter` | 3.47.3 stable |
-| JDK | `E:\dev\jdk\jdk-21.0.2` | OpenJDK 21.0.2 |
-| Android SDK | `E:\dev\android-sdk` | platform-36 / build-tools 36.0.0 / NDK 28.2.13676358 / CMake 3.22.1 / platform-tools（adb） |
-| Gradle 发行包 | `%USERPROFILE%\.gradle\wrapper\dists\gradle-9.3.1-all\9ot9r568e8zfvvd4mn8rbu1j0\` | 9.3.1（腾讯镜像下载） |
-| Gradle 全局 init | `%USERPROFILE%\.gradle\init.d\mirror.gradle` | 阿里云镜像注入（buildscript） |
-| 模拟器 AVD | `~/.android/avd/sonic_test.avd`（手动创建，非 avdmanager） | API 36 x86_64 Pixel6 |
-| 安装包缓存 | `E:\dev\_downloads\`（原始 zip/日志） | — |
+## 2. 功能全景（已交付）
 
-**环境变量（每次新 shell 需要 export，Git Bash 示例）：**
+- **核心调度**：六触发（固定/每日/每周/随机窗口/随机间隔/声音触发）×
+  六动作（播放/声景混音/TTS/通知/取证录音/震动/组合）+ 条件层
+  （充电/电量/时段）+ 取证 SHA-256 哈希链
+- **后台**：双通道触发（引擎 Timer + 原生精确闹钟）+ 开机自恢复 +
+  8 厂商保活引导 + schema v2
+- **远程中心（v1.6 重构，`/remote`）**：4 子 Tab
+  - 控制台：Ping/状态快照/任务列表远程开关/分类音效/守卫开关/
+    音量/定位回传（camera.snap 暂缓）+ 事件流回执渲染
+  - 指令组：收藏模板一键发送 + 组装器（动作+时延，端点立即执行、
+    通知栏进度+终止按钮）
+  - 对讲机：整页 PTT（AAC≤60s 端到端加密）
+  - 通话：WebRTC P2P + MQTT E2EE 信令 + 自动接通 + RTCVideoView 渲染
+- **配对**：扫码配对（`/remote/pair-qr`）+ 手输备用
+- **数据**：统计看板（7 天趋势/分布/占比）+ 加密备份（PBKDF2 12 万次+
+  AES-256-GCM）+ 任务导出导入 + 审计日志 + 60 条合成音效库
+
+## 3. 环境地图（每次新 shell 必须 export）
 
 ```bash
 export PUB_HOSTED_URL="https://pub.flutter-io.cn"
@@ -37,105 +47,120 @@ export FLUTTER_STORAGE_BASE_URL="https://storage.flutter-io.cn"
 export JAVA_HOME="E:\\dev\\jdk\\jdk-21.0.2"
 export ANDROID_HOME="E:\\dev\\android-sdk"
 export PATH="/e/dev/flutter/bin:/e/dev/android-sdk/platform-tools:$PATH"
-export MSYS_NO_PATHCONV=1   # adb shell 里的 /sdcard 等路径防 Git Bash 转换
+export MSYS_NO_PATHCONV=1   # adb shell 内 /sdcard 路径防 Git Bash 转换
 ```
 
-## 3. 关键架构速记（改代码前必读）
+| 组件 | 位置 |
+|---|---|
+| Flutter 3.47.3 | E:\dev\flutter |
+| JDK 21 | E:\dev\jdk\jdk-21.0.2 |
+| Android SDK（36/NDK/CMake） | E:\dev\android-sdk |
+| Gradle 9.3.1 缓存 | %USERPROFILE%\.gradle\wrapper\dists\...9ot9...（wrapper 已指向 file:///E:/dev/gradle-dist/） |
+| 全局镜像 init | %USERPROFILE%\.gradle\init.d\mirror.gradle |
+| AVD sonic_test | headless 启动：`emulator -avd sonic_test -no-window -no-audio -gpu swiftshader_indirect -cores 2` |
 
-1. **双通道触发**：引擎隔离 Timer（通道A）+ 原生 AlarmManager 精确闹钟（通道B）。
-   两通道汇合到 `occurrences` 表状态机，天然幂等。详见 docs/04/05。
-2. **本地插件 `packages/native_bridge`**（本次交付的关键架构修复）：
-   - 原生桥（闹钟/电池白名单/厂商深链/震动/MicGuardService）以 **path 插件**
-     注册到**所有** Flutter 引擎（UI + 后台服务引擎）。
-   - 背景：MainActivity 只给 UI 引擎注册 MethodChannel handler，后台隔离
-     调用会 MissingPluginException → 任务闹钟从未排布。本地插件根治。
-   - 插件 build 脚本必须用 **Groovy**（`build.gradle`）——AGP 9 的 Kotlin DSL
-     不支持 `apply(plugin=...)` 字符串注册（无类型安全 DSL 访问器）。
-   - 插件不能引用 app 级依赖类（如 flutter_background_service 的类），
-     跨包启动服务用 `Intent().setClassName(...)`。
-3. **FGS 类型策略（Android 14+ while-in-use）**：
-   - 主服务 `mediaPlayback|dataSync`（**不含 microphone**——后台复活的
-     FGS 携带 microphone 类型会被 SecurityException 拒绝）；
-   - 麦克风由 `MicGuardService`（microphone 类型）承担，必须**用户前台
-     交互时**启动（守卫开关 → `NativeBridge.startMicService()`）。
-4. **通知渠道时序坑**：flutter_background_service 指定自定义
-   `notificationChannelId` 时**不会自动建 channel**（其源码 L89-95），
-   channel 缺失 → `CannotPostForegroundServiceNotificationException`
-   崩溃。已在 `main.dart` 最先调 `NotificationService.createServiceChannel()`。
-5. **确定性随机**：seed=FNV1a(taskId, 计划日)；计划物化幂等，重启不漂移。
-   改调度算法前先读 docs/04 并跑 `test/schedule_engine_test.dart`。
+**关键命令**：
+- 测试分层：`flutter test --exclude-tags perf`（功能）/ `flutter test --tags perf --concurrency=1`（压测；混跑会因 CPU 争用假红——这是特性不是 bug）
+- 构建：`flutter build apk --release`（必须带上述环境变量）
+- 模拟器装测：`scripts/emulator_test.ps1`
 
-## 4. 已验证记录（模拟器 emulator-5554，全部真实执行）
+## 4. 关键架构速记
 
-| 编号 | 场景 | 结果 |
+1. 双通道触发：Timer（存活期）+ AlarmManager 精确闹钟（Doze/被杀），
+   occurrences 表状态机幂等汇合。
+2. 本地插件 `packages/native_bridge`：原生桥注册到所有引擎
+   （修复后台 isolate 通道缺失，BUG-008）。
+3. FGS 类型：mediaPlayback|dataSync（不含 microphone——后台复活会被拒，
+   BUG-009）；麦克风走 MicGuardService 前台通行证。
+4. 通知渠道时序坑：自定义 channel id 必须启动时创建（BUG-007）。
+5. 引擎 isolate 全包 runZonedGuarded + 动作串行 await（BUG-011）。
+6. 远程协议：MQTT（默认 broker.emqx.io:1883）+ 配对码→HKDF→
+   AES-256-GCM；AAD 绑 topic；±90s 时间窗+去重。
+7. **插件兼容矩阵（AGP9 内置 Kotlin，排障核心资产）**：
+   mobile_scanner 锁 6.0.11（7.x ❌）｜camera 全版本 ❌（camerax kts
+   不兼容，41 编译错——camera.snap 因此暂缓）｜flutter_webrtc ✅｜
+   geolocator 13.x ✅（14.x 与 device_info_plus win32 冲突）
+8. Dart 陷阱已修复三处：`List<dynamic> as List<Map>` 运行时必抛
+   （BUG-012，用 .cast）；条件层 local 函数需先声明后引用；
+   开发期优先 Edit 工具而非 sed 多行替换（本会话多次 sed 手术事故）。
+
+## 5. 已验证记录（模拟器实测过的）
+
+合规门/守护/FGS/任务创建/计划物化/闹钟排布/倒计时一致/杀进程 5s 自愈/
+真实触发执行（schedule·play 三次 TTS 超时审计）/预置库 60 条导入试听/
+冷启动 1574ms/PSS 97MB/Monkey 400 零崩溃。**未实测**：双设备互通
+（视频/对讲/远程命令端到端）、真机 M4 长跑、Doze 深睡（模拟器限制）。
+
+## 6. 下一步优先级（按序执行）
+
+1. **P0 git 提交**：本轮 v1.6.0-alpha 全部变更（提交信息模板：
+   `feat: v1.6.0-alpha —— 远程中心 4 Tab 重构 + 设备完全控制命令`，
+   正文列控制台/指令组/对讲/通话 + 4 条设备命令 + camera 暂缓说明 +
+   85/85 + analyze 零 + 120.5MB）。
+2. **P0 双设备实测**：两台真机/模拟器各装 release 包，走完
+   扫码配对→控制台命令→指令组→对讲→视频通话全链路，结果补 docs/12。
+3. **P1 camera.snap 启用**：等 camera 插件发布 AGP9 兼容版（关注
+   pub.dev changelog），恢复 `endpoint_service._snapPhoto`（git 历史
+   提交里有完整实现可考）+ 恢复依赖 + 启用 docs/16 §9 表格项。
+4. **P1 YAMNet**：模型源当前不可达（tfhub/kaggle 403/404）；接口就绪，
+   用户放入 yamnet.tflite 即启用（docs/06 §6）。
+5. **P2** Opus 流式对讲、锁屏 PTT 小组件、TURN 配置、Drift 迁移、en 国际化。
+6. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
+
+## 7. 会话操作守则（血泪教训）
+
+- 修改多行代码用 Edit 工具；sed 多行替换在本仓库已引发 5+ 次文件损坏
+  （修复法：git checkout <file> 重做）。
+- flutter test 全量混跑会因压测用例 CPU 争用假红——必须分层（§3 命令）。
+- 构建前必查环境变量齐全（No Android SDK / Java-Gradle 不兼容报错
+  多为环境变量丢失）。
+- 用户会周期性要求「一次性完成所有任务+完整测试报告+全面更新文档+
+  自动恢复中断」——本轮已按此模式交付，保持该节奏。
+- 用户需求若触碰 §1 红线（免同意控制/隐蔽监控），按 docs/16 §8 答复
+  并转向合法替代，不要反复。
+
+## 8. 重要决策档案（不要重新讨论）
+
+| 决策 | 结论 | 位置 |
 |---|---|---|
-| V-01 | 全新安装 → 合规门弹窗渲染 → 点击同意 | ✅ |
-| V-02 | 合规确认持久化（重进不再弹） | ✅ |
-| V-03 | 开启守护 → FGS 注册（`isForeground=true`，channel=sonicshield_service） | ✅ |
-| V-04 | 任务编辑器六种触发/随机参数渲染 → 保存 | ✅ |
-| V-05 | 引擎物化 14 条计划（`replan(8 条计划)`）→ 仪表盘倒计时与系统闹钟一致（16:19:38） | ✅ |
-| V-06 | 原生精确闹钟排布（`dumpsys alarm`: AlarmWatchdogReceiver, RTC_WAKEUP, exactAllowReason=permission） | ✅ |
-| V-07 | **ST-01 杀进程自愈**：`am kill` → 5 秒内 RESPAWN 复活 + 服务重注册 | ✅ |
-| V-08 | Doze：模拟器不可深睡（充电限制）；白名单+14 条 AllowWhileIdle 闹钟确认 | ⚠️ 真机 M4 |
-| V-09 | UI 六页导航 | ✅（仪表盘/任务/编辑器已截图验证） |
+| 免同意远程控制他人设备 | 拒绝；合法替代=扫码配对+已配对自动信任 | docs/16 §8、docs/14 §7.5 |
+| 视频通话选型 | 方案 A（WebRTC+MQTT 信令），否决 SaaS/SFU | docs/16 §1 |
+| 自动接通 | 仅家人守护、默认关、无隐蔽模式 | docs/16 §6 |
+| camera 插件 | 全版本不兼容 AGP9，snap 暂缓（协议保留） | docs/16 §9 |
+| mobile_scanner | 锁 6.0.11 | pubspec 注释 |
+| 压测分层运行 | --tags perf 隔离，避免 CPU 争用假红 | test tags |
 
-## 5. 已知问题与 Workaround
+## 9. 交接对话（下一会话开场白，直接可用）
 
-| 问题 | 状态 | 方案 |
-|---|---|---|
-| `gradlew.bat` 直接跑会卡下载（wrapper 缓存校验怪癖） | 已绕过 | 用缓存 Gradle 直跑：`%USERPROFILE%\.gradle\wrapper\dists\gradle-9.3.1-all\9ot9r568e8zfvvd4mn8rbu1j0\gradle-9.3.1\bin\gradle.bat assembleDebug`；`flutter build` 正常（其内部触发 wrapper 需首次联网校验） |
-| `flutter test integration_test` 直跑失败（触发同一 wrapper 问题） | 已绕过 | 用 `flutter drive --driver=test_driver/integration_test.dart --target=integration_test/app_smoke_test.dart --use-application-binary=...apk -d <device>` |
-| 模拟器带窗启动被 360 拦截（QEMU 线程挂起） | 已定位 | headless 启动：`emulator -avd sonic_test -no-window -no-audio -gpu swiftshader_indirect -cores 2`；360 已卸载/关闭后可带窗 |
-| 模拟器 Doze 深睡不可用（USB 供电判定） | 环境限制 | 真机验证（M4） |
-| 重装 APK 后运行时权限全部清空 → FGS/通知崩溃 | 设计如此 | 重装后必须重新 `pm grant`（见 scripts/emulator_test.ps1） |
-
-## 6. 常用命令速查
-
-```bash
-# 测试
-flutter test                          # 53 单测
-flutter test --coverage               # + 覆盖率（coverage/lcov.info）
-flutter drive --driver=test_driver/integration_test.dart \
-  --target=integration_test/app_smoke_test.dart \
-  --use-application-binary=build/app/outputs/flutter-apk/app-debug.apk \
-  -d emulator-5554
-
-# 构建（推荐直接用缓存 Gradle）
-cd android && %USERPROFILE%\.gradle\wrapper\dists\gradle-9.3.1-all\9ot9r568e8zfvvd4mn8rbu1j0\gradle-9.3.1\bin\gradle.bat assembleDebug
-
-# 模拟器
-emulator -avd sonic_test -no-window -no-audio -gpu swiftshader_indirect -cores 2 &
-scripts/emulator_test.ps1             # 安装+授权+白名单+启动
-
-# 排障
-adb shell dumpsys alarm | grep AlarmWatchdog     # 任务闹钟排布
-adb shell dumpsys activity services com.sonicshield.sonic_shield
-adb logcat -d -b crash                            # 崩溃
-adb shell dumpsys deviceidle whitelist +com.sonicshield.sonic_shield
+```
+我继续 SonicShield（E:\SonicShield）的开发。请先读 HANDOVER.md
+恢复上下文（项目当前 v1.6.0-alpha，85/85 测试全绿、analyze 全零、
+release 120.5MB 已构建）。本轮按 HANDOVER §6 优先级执行：
+①先 git 提交当前全部变更（信息模板见 §6.1）；②准备双设备互通实测
+（给出两台模拟器的完整操作步骤）；③检查 camera 插件是否已发布
+AGP9 兼容版本，是则恢复 camera.snap（实现在 git 历史里）；
+④继续 §6 的 P1/P2 项。环境变量按 HANDOVER §3 export；遵守 §7
+操作守则（Edit 工具优先、测试分层、多行 sed 禁用）。
+完成后更新 docs/12 测试报告与 CHANGELOG 并提交。遇到中断自动恢复，
+保持「一次性完成+测试报告+文档同步」的交付节奏。
 ```
 
-## 7. 下一步工作（按优先级）
+## 10. 代码地图（新会话快速定位）
 
-> 2026-09-14 更新：v1.2.0（远程遥控）、v1.3.0（声景混音/条件层/备份/outbox）、
-> v1.4.0（视频通话）已交付；性能压测 14 用例全绿（docs/12 §9）；
-> 集成测试 3/3 与真实触发闭环已完成。新增待办：二维码扫码配对（v1.5）、
-> 双设备视频互通实测。
-## 7. 下一步工作（按优先级）
-
-> 2026-09-13 更新：v1.1.0 已交付（渐强唤醒/循环填充/跳过下一次/日志筛选导出/BUG-011 修复）。以下待办中"集成测试 drive"与"真实触发闭环"已完成。
-
-1. **P0** 真实触发闭环验证：首个闹钟 16:19:38（本会话进行中，见 docs/12 §8）；
-   长期可在任务编辑器建"1 分钟后 fixedOnce"任务快速验证。
-2. **P0** `flutter drive` 集成测试三用例跑通（IT-01..03，绕过 wrapper 后应直接可用）。
-3. **P1** 真机矩阵 M4：主流厂商 7×24 存活率 + 电耗（docs/09 §5 LT-01..05）。
-4. **P1** iOS：在 macOS 上 `bootstrap.sh` + `flutter build ipa`（Info.plist 已配好后台模式/BGTask/麦克风用途）。
-5. **P2** 守卫实时电平表（引擎→UI 电平流）、日志导出 CSV（路线图 v1.1）。
-6. **P2** 发布物：签名 keystore + `android/key.properties`（docs/10 §4）、商店文案合规自查（docs/08 §5）。
-
-## 8. 文档地图
-
-- 总入口：`README.md`（索引）→ `docs/00-文档索引.md`
-- 本会话真实测试数据：`docs/12-测试报告.md`
-- 架构决策：`docs/03`（ADR-001..008，ADR-008=本地插件）
-- 合规红线（法律边界）：`docs/08`
-- 变更记录：`CHANGELOG.md`
+| 模块 | 文件 |
+|---|---|
+| 调度引擎 | lib/domain/scheduling/schedule_engine.dart |
+| 条件层 | lib/domain/models/condition.dart |
+| 声景/动作模型 | lib/domain/models/action.dart |
+| 后台引擎 | lib/services/background_engine.dart |
+| 播放/混音 | lib/services/playback_service.dart |
+| 远程协议/加密 | lib/remote/protocol.dart |
+| 端点（被控） | lib/remote/endpoint_service.dart |
+| 控制器/PTT | lib/remote/controller_service.dart |
+| 视频通话 | lib/remote/call_service.dart |
+| 远程中心 4 Tab | lib/features/remote/remote_home_screen.dart + remote_console_tab.dart + remote_scripts_tab.dart + ptt_tab.dart |
+| 扫码配对 | lib/features/remote/pair_qr_screen.dart |
+| 统计看板 | lib/features/stats/stats_screen.dart |
+| 加密备份 | lib/services/export_crypto.dart |
+| 原生桥插件 | packages/native_bridge/ |
+| 压测套件 | test/performance_test.dart + test/performance_v2_test.dart |

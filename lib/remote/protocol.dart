@@ -96,6 +96,14 @@ abstract final class RcCmd {
   static const callAnswer = 'call.answer';
   static const callCandidate = 'call.candidate';
   static const callEnd = 'call.end';
+
+  /// 设备完全控制（v1.6，仅限已配对设备，docs/16 §9）：
+  /// device.status → rc.device；camera.snap → rc.photo；
+  /// location.get → rc.location；volume.set {media, alarm}
+  static const deviceStatus = 'device.status';
+  static const cameraSnap = 'camera.snap';
+  static const locationGet = 'location.get';
+  static const volumeSet = 'volume.set';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------
@@ -114,6 +122,9 @@ abstract final class RcEvt {
   static const pttAck = 'rc.ptt'; // {voiceId, ok, playedMs}
   static const callState =
       'rc.call'; // 通话状态镜像 {callId, state: ringing|connected|ended}
+  static const device = 'rc.device'; // 设备状态快照
+  static const photo = 'rc.photo'; // 拍照回传 {photoB64}
+  static const location = 'rc.location'; // 定位回传 {lat,lng,acc}
   static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
 }
 
@@ -203,4 +214,22 @@ final class RcCodec {
   static String generateDeviceId() =>
       List.generate(16, (_) => '0123456789abcdef'[Random.secure().nextInt(16)])
           .join();
+}
+
+/// 扫码配对 URI（v1.5）：
+/// sonicshield://pair/{deviceId(16位)}/{name(urlencoded)}/{code(8位)}
+abstract final class PairQrProtocol {
+  static const prefix = 'sonicshield://pair/';
+
+  /// 解析对端配对二维码；格式不符（ID/码长度、前缀）返回 null。
+  static ({String deviceId, String name, String code})? parseUri(String uri) {
+    if (!uri.startsWith(prefix)) return null;
+    final parts = uri.substring(prefix.length).split('/');
+    if (parts.length < 3) return null;
+    final id = parts[0];
+    final name = Uri.decodeComponent(parts[1]);
+    final code = parts[2].replaceAll('-', '').toUpperCase();
+    if (id.length != 16 || code.length != 8) return null;
+    return (deviceId: id, name: name, code: code);
+  }
 }

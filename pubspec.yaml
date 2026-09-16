@@ -5,7 +5,7 @@ description: >-
   支持声音触发自动响应、系统级后台执行与精细电源管理。
   仅限合法用途（取证记录、提醒、助眠、守护等），严禁用于骚扰他人。
 publish_to: "none"
-version: 2.0.0-alpha.1+8
+version: 1.6.0-alpha.1+9
 
 environment:
   sdk: ">=3.5.0 <4.0.0"
@@ -66,6 +66,7 @@ dependencies:
   mqtt_client: ^10.11.11        # MQTT 5.0 客户端（TCP/TLS/WebSocket）
   cryptography: ^2.9.0          # HKDF-SHA256 + AES-256-GCM 端到端加密
   crypto: ^3.0.3                # SHA-256 取证哈希链（v1.3）
+  geolocator: ^13.0.1            # 守护定位回传（v1.6，显式授权）
 
 dev_dependencies:
   flutter_test:

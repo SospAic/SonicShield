@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:path_provider/path_provider.dart';
@@ -40,6 +43,12 @@ class RcEndpointService {
   bool _running = false;
   final _seen = <String, int>{};
   Timer? _hb;
+
+  /// 解密成功的消息广播（控制器 UI 消费回执：rc.tasks/rc.status/rc.pong…）。
+  final _rcEvtCtrl = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get events => _rcEvtCtrl.stream;
+
+  final _playerChannel = const MethodChannel('sonic_shield/native');
 
   // 能力注入（由 UI/引擎层提供；端点不直接依赖播放单例）。
   Future<bool> Function(String path, double volume, int durationMs,
@@ -138,6 +147,13 @@ class RcEndpointService {
       _seen.removeWhere(
           (_, t) => DateTime.now().millisecondsSinceEpoch - t > 10 * 60 * 1000);
       await _dispatch(msg, peer);
+      if (!_rcEvtCtrl.isClosed) {
+        _rcEvtCtrl.add({
+          ...msg.toJson(),
+          'peerName': peer.name,
+          'peerId': peer.deviceId,
+        });
+      }
       return;
     }
   }
@@ -255,6 +271,94 @@ class RcEndpointService {
         await CallService.instance.onCandidate(msg.payload);
       case RcCmd.callEnd:
         await CallService.instance.onRemoteEnd();
+      case RcCmd.deviceStatus:
+        await _sendDeviceStatus(msg, peer);
+      case RcCmd.cameraSnap:
+        // v1.6 降级：camera 插件（camerax 实现）与 AGP9 内置 Kotlin 不兼容，
+        // 拍照回传暂缓启用（协议与 UI 保留；见 docs/16 §9 注记）。
+        await logs.append(
+            source: 'remote',
+            action: 'camera.snap',
+            status: 'skipped',
+            message: 'by ${peer.name} · 等待 camera 插件兼容');
+        await _ack(msg, false, data: 'camera.snap 暂未启用');
+      case RcCmd.locationGet:
+        await _sendLocation(msg, peer, logs);
+      case RcCmd.volumeSet:
+        await _setVolumes(msg, peer, logs);
+    }
+  }
+
+  /// 设备状态快照（v1.6）：电量/充电/版本/待执行计划数。
+  Future<void> _sendDeviceStatus(RcMessage msg, PairedEndpoint peer) async {
+    final occ = OccurrenceRepository(_db!);
+    var level = -1;
+    var charging = false;
+    try {
+      final st = await Battery().batteryState;
+      charging = st == BatteryState.charging || st == BatteryState.full;
+      level = await Battery().batteryLevel;
+    } on Object {
+      // 无电池平台
+    }
+    final next = await occ.pendingWithin(
+        DateTime.now(), DateTime.now().add(const Duration(days: 7)),
+        limit: 1);
+    await _send(RcMessage.now(RcEvt.device, {
+      'for': msg.id,
+      'deviceName': _store!.deviceName,
+      'batteryLevel': level,
+      'charging': charging,
+      'version': AppMeta.version,
+      'pendingCount': await occ.pendingCountAfter(DateTime.now()),
+      'nextFireAt':
+          next.isEmpty ? null : next.first.fireAt.millisecondsSinceEpoch,
+    }));
+  }
+
+  /// 守护定位回传（LOCATION 权限显式授权）。
+  Future<void> _sendLocation(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+          locationSettings:
+              const LocationSettings(accuracy: LocationAccuracy.medium));
+      await logs.append(
+          source: 'remote',
+          action: 'location',
+          status: 'success',
+          message: 'by ${peer.name} · ${pos.latitude},${pos.longitude}');
+      await _send(RcMessage.now(RcEvt.location, {
+        'for': msg.id,
+        'lat': pos.latitude,
+        'lng': pos.longitude,
+        'acc': pos.accuracy,
+        'fromName': _store!.deviceName,
+      }));
+    } on Object {
+      await _send(RcMessage.now(RcEvt.location,
+          {'for': msg.id, 'lat': null, 'lng': null, 'error': true}));
+    }
+  }
+
+  /// 音量设置（媒体/闹钟 0..1）。
+  Future<void> _setVolumes(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    try {
+      final media = (msg.payload['media'] as num?)?.toDouble();
+      final alarm = (msg.payload['alarm'] as num?)?.toDouble();
+      await _playerChannel.invokeMethod('volume.set', {
+        if (media != null) 'media': media,
+        if (alarm != null) 'alarm': alarm,
+      });
+      await logs.append(
+          source: 'remote',
+          action: 'volume.set',
+          status: 'success',
+          message: 'by ${peer.name}');
+      await _ack(msg, true);
+    } on Object {
+      await _ack(msg, false);
     }
   }
 
