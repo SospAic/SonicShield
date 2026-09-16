@@ -68,6 +68,21 @@ class NativeBridge {
   static Future<void> startMicService() => _invoke<Object?>('startMicService');
 
   static Future<void> stopMicService() => _invoke<Object?>('stopMicService');
+
+  /// 震动（毫秒节奏数组，遵循 Android Vibrator 语义：交替的
+  /// 静止/震动时长，首元素为起始静止时长）。无震动能力平台静默降级。
+  static Future<void> vibrate(List<int> patternMs) =>
+      _invoke<Object?>('vibrate', {'pattern': patternMs});
+
+  /// 设置媒体/闹钟音量（0..1 归一化，原生按流最大音量换算）。
+  /// 用于远程 volume.set（docs/16 §9），不影响铃声音量。
+  static Future<bool> setVolume({double? media, double? alarm}) async {
+    final r = await _invoke<bool>('volume.set', {
+      if (media != null) 'media': media,
+      if (alarm != null) 'alarm': alarm,
+    });
+    return r ?? false;
+  }
 }
 
 /// 避免与 services 包内其它 Channels 常量冲突的私有命名空间。

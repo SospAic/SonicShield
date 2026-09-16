@@ -126,6 +126,8 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
       secret: secret,
       pairedAt: DateTime.now(),
     ));
+    // 立即订阅新对端的 evt 主题（否则收不到其回执，BUG-013）。
+    await RcEndpointService.instance.refreshSubscriptions();
     await _load();
     if (mounted) {
       ScaffoldMessenger.of(context)
@@ -156,7 +158,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('远程遥控')),
+      appBar: AppBar(title: const Text('远程中心 · 设置')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -14,6 +15,7 @@ import android.provider.Settings
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodChannel
+import kotlin.math.roundToInt
 
 /**
  * 声盾原生桥插件。
@@ -25,7 +27,7 @@ import io.flutter.plugin.common.MethodChannel
  *
  * 通道：sonic_shield/native
  * 能力：精确闹钟（通道B 看门狗）/ 精确闹钟权限引导 / 电池白名单 /
- *       厂商自启动深链 / 震动 / 麦克风前台服务 / 开机自启标志。
+ *       厂商自启动深链 / 震动 / 音量设置 / 麦克风前台服务 / 开机自启标志。
  */
 class NativeBridgePlugin : FlutterPlugin {
 
@@ -94,6 +96,11 @@ class NativeBridgePlugin : FlutterPlugin {
                                     .map { (it as Number).toLong() }
                             vibrate(ctx, pattern)
                             result.success(true)
+                        }
+                        "volume.set" -> {
+                            val media = (call.argument<Number>("media"))?.toFloat()
+                            val alarm = (call.argument<Number>("alarm"))?.toFloat()
+                            result.success(setVolumes(ctx, media, alarm))
                         }
                         "startMicService" -> {
                             startMicService(ctx)
@@ -267,6 +274,37 @@ class NativeBridgePlugin : FlutterPlugin {
         } else {
             vibrator.vibrate(pattern.toLongArray(), -1)
         }
+    }
+
+    // ---------- 音量（远程 volume.set，docs/16 §9） ----------
+
+    /**
+     * 设置媒体/闹钟音量。入参为 0..1 归一化值，按各流最大音量换算为
+     * 绝对档位；只改媒体与闹钟流，不触碰铃声/通知音量（合规边界）。
+     * 需要 MODIFY_AUDIO_SETTINGS 权限（Manifest 已声明）。
+     */
+    private fun setVolumes(ctx: Context, media: Float?, alarm: Float?): Boolean {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var ok = false
+        if (media != null) {
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            am.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                (media.coerceIn(0f, 1f) * max).roundToInt(),
+                0,
+            )
+            ok = true
+        }
+        if (alarm != null) {
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            am.setStreamVolume(
+                AudioManager.STREAM_ALARM,
+                (alarm.coerceIn(0f, 1f) * max).roundToInt(),
+                0,
+            )
+            ok = true
+        }
+        return ok
     }
 
     // ---------- 麦克风前台服务（守卫的 while-in-use 通行证） ----------

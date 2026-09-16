@@ -43,3 +43,7 @@ dist/
 
 # 取证音频（敏感，永不入库）
 *.evidence.m4a
+
+# 本地工具状态（非项目产物）
+.flutter_tool_state
+.workbuddy-ai/

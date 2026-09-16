@@ -3,6 +3,50 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+## [1.6.1-alpha.1] - 2026-09-16
+
+> 主题：**打通远程链路**。v1.6 的远程中心与设备控制命令此前只做到
+> 「编译通过 + 代码路径存在」，接管审计发现回执链路、密钥派生、执行能力
+> 注入三处断裂，功能实际不可用。本轮修复 + 新增 10 例密钥契约回归测试。
+
+### Fixed（修复，均由接管审计发现，详见 docs/17）
+- **BUG-021（P0）端点收命令的密钥派生错误**：接收侧此前遍历对端配对表
+  用 `peer.secret / peer.deviceId` 派生密钥，与发送方用「接收方身份」
+  加密的参数永不相等 → **命令从未被成功解密**。现统一为「按接收方身份
+  派生」：接收方用自己的配对码 + 自己的 deviceId 解密。
+- **BUG-013（P0）控制器未订阅端点 evt 主题**：回执（rc.pong/rc.ack/
+  rc.status/rc.device/rc.location）与通话信令（call.answer/
+  call.candidate）全部不可达，视频通话必然停在 connecting。
+  新增 `refreshSubscriptions()`：连接建立、心跳、新增配对三处触发订阅。
+- **BUG-014（P0）v1.6 远程中心 4 Tab 未接入路由**：`RemoteHomeScreen` 等
+  4 个文件为孤儿代码，`/remote` 仍指向 v1.2 旧总览页。现 `/remote` 指向
+  远程中心（控制台/指令组/对讲机/通话），旧页迁至 `/remote/settings`
+  并由 AppBar 齿轮入口进入（保留模块开关/身份/代理/配对管理）。
+- **BUG-015（P1）端点执行能力未注入**：`playHandler`/`ttsHandler`/
+  `vibrateHandler` 全库无赋值 → sound.play、指令组 play/tts/vibrate、
+  PTT 播放全部空转。现于启动时注入（复用 PlaybackService / FlutterTts /
+  NativeBridge），并让预置分类解析内置回落。
+- **BUG-016（P1）`volume.set` 原生未实现**：Dart 侧调用但
+  `NativeBridgePlugin.kt` 无对应分支 → 恒返回失败回执。现原生补齐
+  （媒体/闹钟流，0..1 归一化换算，不触碰铃声音量）并提供
+  `NativeBridge.setVolume` 类型化封装。
+- **BUG-017（P1）端点服务无自恢复**：应用重启后即使 `rc_enabled=true`
+  也不启动端点，导致长期离线。现启动时按状态自动拉起。
+- **BUG-018（P2）版本与包名常量过期**：`AppMeta.version` 硬编码
+  `1.0.0`、`appPackage` 与实际 applicationId 不符 → 修正为
+  `1.6.1-alpha.1` / `com.sonicshield.sonic_shield`。
+- 离线哨兵 `rc.offline`（broker LWT 明文）此前无人消费，现解析并广播。
+
+### Added（新增）
+- `test/remote_crypto_test.dart`（10 例）：锁定密钥派生契约（cmd/evt 双向、
+  旧实现必须失败、方向隔离、配对码不符拒绝）、信封 `from` 序列化、
+  时间窗、去重、AAD 绑定主题。
+- 控制台在远程模块未启用时给出明确引导卡（端点未运行则命令不会被接收）。
+
+### Changed
+- `RemoteStore` 暴露 `pairingCode` / `ensurePairingCode()`，配对码读写统一。
+- `RcEndpointService.sendTo` 统一补发方标识（`from`），回执与审计可溯源。
+
 ## [1.5.0] - 2026-09-15
 
 ### Added（新增）—— v1.5

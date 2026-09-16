@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 
@@ -44,16 +45,12 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
       await store.setIdentity(id, '声盾-${id.substring(0, 4)}');
     }
     // 持久配对码：首次生成后固定（多台控制器可重复扫码配对本机）。
-    var code = prefs.getString('rc_pair_code');
-    if (code == null || code.length != 8) {
-      code = RcCodec.generatePairingCode().replaceAll('-', '');
-      await prefs.setString('rc_pair_code', code);
-    }
+    final code = await store.ensurePairingCode();
     if (!mounted) return;
     setState(() {
       _deviceId = store.deviceId;
       _deviceName = store.deviceName;
-      _pairCode = code!;
+      _pairCode = code;
     });
   }
 
@@ -88,6 +85,8 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
       secret: parsed.code,
       pairedAt: DateTime.now(),
     ));
+    // 立即订阅新对端的 evt 主题，否则收不到其回执与通话信令（BUG-013）。
+    await RcEndpointService.instance.refreshSubscriptions();
     if (mounted) {
       setState(() {
         _result = '已配对：${parsed.name}（${parsed.deviceId}）';

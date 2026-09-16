@@ -23,6 +23,7 @@ class RemoteConsoleTab extends ConsumerStatefulWidget {
 class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   List<PairedEndpoint> _endpoints = const [];
   String _selectedId = '';
+  bool _enabled = false;
   List<Map<String, dynamic>> _remoteTasks = [];
   Map<String, dynamic>? _lastStatus;
   Map<String, dynamic>? _lastDevice;
@@ -51,6 +52,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (!mounted) return;
     setState(() {
       _endpoints = store.paired();
+      _enabled = store.enabled;
       _selectedId = _endpoints.isEmpty
           ? ''
           : (_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId);
@@ -126,6 +128,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        if (!_enabled) _enableHint(),
         _endpointSelector(),
         const SizedBox(height: 12),
         _section('设备快照与动作'),
@@ -279,6 +282,20 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
       ],
     );
   }
+
+  /// 远程模块未启用时的引导（端点服务未运行则所有命令都不会被接收）。
+  Widget _enableHint() => Card(
+        color: Theme.of(context).colorScheme.errorContainer,
+        child: ListTile(
+          leading: const Icon(Icons.wifi_tethering_off),
+          title: const Text('远程模块未开启'),
+          subtitle: const Text('端点服务未运行：本机收不到命令，也收不到对端回执'),
+          trailing: TextButton(
+            onPressed: () => context.push('/remote/settings'),
+            child: const Text('去开启'),
+          ),
+        ),
+      );
 
   Widget _endpointSelector() {
     if (_endpoints.isEmpty) {

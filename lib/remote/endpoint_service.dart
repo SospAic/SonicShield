@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:battery_plus/battery_plus.dart';
-import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
@@ -17,6 +16,7 @@ import '../data/db/app_database.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
+import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
 import 'call_service.dart';
 import 'protocol.dart';
@@ -44,11 +44,12 @@ class RcEndpointService {
   final _seen = <String, int>{};
   Timer? _hb;
 
+  /// 本机配对码（共享秘密）：接收消息时用它派生解密密钥。
+  String _ownCode = '';
+
   /// 解密成功的消息广播（控制器 UI 消费回执：rc.tasks/rc.status/rc.pong…）。
   final _rcEvtCtrl = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get events => _rcEvtCtrl.stream;
-
-  final _playerChannel = const MethodChannel('sonic_shield/native');
 
   // 能力注入（由 UI/引擎层提供；端点不直接依赖播放单例）。
   Future<bool> Function(String path, double volume, int durationMs,
@@ -64,6 +65,8 @@ class RcEndpointService {
     _running = true;
     _store = store;
     _db = db;
+    // 接收侧密钥依赖本机配对码（发送方用它加密），必须在连接前就绪。
+    _ownCode = await store.ensurePairingCode();
     await _connect();
   }
 
@@ -87,8 +90,7 @@ class RcEndpointService {
           ..autoReconnect = true
           ..resubscribeOnAutoReconnect = true
           ..logging(on: false);
-    client.onConnected = () =>
-        client.subscribe('sonicshield/v1/$deviceId/cmd', MqttQos.atLeastOnce);
+    client.onConnected = () => unawaited(refreshSubscriptions());
 
     client.connectionMessage = MqttConnectMessage()
         .withClientIdentifier(deviceId)
@@ -117,6 +119,7 @@ class RcEndpointService {
       }
     });
     client.subscribe('sonicshield/v1/$deviceId/cmd', MqttQos.atLeastOnce);
+    await refreshSubscriptions();
 
     _hb?.cancel();
     _hb = Timer.periodic(const Duration(seconds: 60), (t) {
@@ -125,8 +128,30 @@ class RcEndpointService {
         t.cancel();
         return;
       }
+      // 心跳顺带补齐订阅：新增配对后无需重连即可收到对端回执（BUG-013）。
+      unawaited(refreshSubscriptions());
       unawaited(_send(RcMessage.now(RcEvt.heartbeat)));
     });
+  }
+
+  /// 订阅集合：本机 `cmd`（接收命令）+ 每个已配对端点的 `evt`（接收回执）。
+  ///
+  /// 端点把回执与通话信令（call.answer / call.candidate）发布到
+  /// `sonicshield/v1/{端点ID}/evt`；控制器若不订阅该主题，
+  /// 所有回执与信令永久不可达——视频通话会停在 connecting（BUG-013）。
+  Future<void> refreshSubscriptions() async {
+    final client = _client;
+    final store = _store;
+    if (client == null || store == null) return;
+    if (client.connectionStatus?.state != MqttConnectionState.connected) return;
+    final own = store.deviceId;
+    if (own.isNotEmpty) {
+      client.subscribe('sonicshield/v1/$own/cmd', MqttQos.atLeastOnce);
+    }
+    for (final p in store.paired()) {
+      if (p.deviceId.isEmpty || p.deviceId == own) continue;
+      client.subscribe('sonicshield/v1/${p.deviceId}/evt', MqttQos.atLeastOnce);
+    }
   }
 
   void _scheduleReconnect() {
@@ -136,26 +161,111 @@ class RcEndpointService {
     });
   }
 
+  /// 入站消息分派。
+  ///
+  /// 密钥模型（两端对称，按**接收方身份**派生）：
+  /// 发送方用「接收方 deviceId + 接收方配对码」加密；接收方用自己的
+  /// 配对码 + 自己的 deviceId 解密。因此本机既能解密他人发来的命令
+  /// （`{本机ID}|cmd`），也能解密对端广播给本机的回执（`{本机ID}|evt`）。
+  ///
+  /// 旧实现遍历对端列表用 `peer.secret / peer.deviceId` 派生，与发送方
+  /// 的加密参数永不相等 → 命令**从未被成功解密**（BUG-021）。
   Future<void> _handleRaw(String topic, String wire) async {
     final store = _store!;
-    // 逐配对尝试解密；密钥隔离：每个端点↔控制器配对独立。
-    for (final peer in store.paired()) {
-      final key = await RcCodec.deriveKey(peer.secret, '${peer.deviceId}|cmd');
-      final msg = await RcCodec.decode(wire, key, topic, seenIds: _seen);
-      if (msg == null) continue;
-      _seen[msg.id] = DateTime.now().millisecondsSinceEpoch;
-      _seen.removeWhere(
-          (_, t) => DateTime.now().millisecondsSinceEpoch - t > 10 * 60 * 1000);
-      await _dispatch(msg, peer);
-      if (!_rcEvtCtrl.isClosed) {
-        _rcEvtCtrl.add({
-          ...msg.toJson(),
-          'peerName': peer.name,
-          'peerId': peer.deviceId,
-        });
-      }
+    final ownId = store.deviceId;
+    final ownCode = _ownCode;
+    if (ownId.isEmpty || ownCode.isEmpty) return;
+
+    if (topic.endsWith('/evt')) {
+      await _handlePeerEvent(topic, wire, ownId, ownCode);
       return;
     }
+
+    final key = await RcCodec.deriveKey(ownCode, '$ownId|cmd');
+    final msg = await RcCodec.decode(wire, key, topic, seenIds: _seen);
+    if (msg == null) return;
+    _rememberSeen(msg.id);
+    await _dispatch(msg, _peerOf(msg));
+    _broadcast(msg, peerId: msg.from, peerName: _peerName(msg.from));
+  }
+
+  /// 对端广播的回执/信令（`{对端ID}/evt`）：仅解密并转发给 UI，不执行。
+  Future<void> _handlePeerEvent(
+      String topic, String wire, String ownId, String ownCode) async {
+    final parts = topic.split('/');
+    final peerId = parts.length >= 3 ? parts[2] : '';
+
+    // LWT 离线哨兵由 broker 代发，明文且无敏感内容，单独识别。
+    final trimmed = wire.trimLeft();
+    if (trimmed.startsWith('{')) {
+      try {
+        final j = jsonDecode(trimmed);
+        if (j is Map && j['type'] == RcEvt.offline) {
+          if (!_rcEvtCtrl.isClosed) {
+            _rcEvtCtrl.add({
+              'v': 1,
+              'id': '',
+              'ts': DateTime.now().millisecondsSinceEpoch,
+              'type': RcEvt.offline,
+              'payload': const <String, dynamic>{},
+              'from': peerId,
+              'peerId': peerId,
+              'peerName': _peerName(peerId),
+            });
+          }
+          return;
+        }
+      } on Object {
+        // 非明文哨兵 → 继续按密文处理
+      }
+    }
+
+    final key = await RcCodec.deriveKey(ownCode, '$ownId|evt');
+    final msg = await RcCodec.decode(wire, key, topic, seenIds: _seen);
+    if (msg == null) return;
+    _rememberSeen(msg.id);
+    _broadcast(msg, peerId: peerId, peerName: _peerName(peerId));
+  }
+
+  void _rememberSeen(String id) {
+    if (id.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _seen[id] = now;
+    _seen.removeWhere((_, t) => now - t > 10 * 60 * 1000);
+  }
+
+  void _broadcast(RcMessage msg, {String peerId = '', String peerName = ''}) {
+    if (_rcEvtCtrl.isClosed) return;
+    _rcEvtCtrl.add({
+      ...msg.toJson(),
+      if (peerId.isNotEmpty) 'peerId': peerId,
+      if (peerName.isNotEmpty) 'peerName': peerName,
+    });
+  }
+
+  String _peerName(String peerId) {
+    if (peerId.isEmpty) return '';
+    for (final p in _store?.paired() ?? const <PairedEndpoint>[]) {
+      if (p.deviceId == peerId) return p.name;
+    }
+    return peerId;
+  }
+
+  /// 命令发送方（由信封 `from` 反查配对表）。
+  ///
+  /// 能成功解密即证明其持有本机配对码（配对时物理在场授权），
+  /// 反查不到名称时给出占位标识，审计仍然完整。
+  PairedEndpoint _peerOf(RcMessage msg) {
+    for (final p in _store!.paired()) {
+      if (msg.from.isNotEmpty && p.deviceId == msg.from) return p;
+    }
+    final short = msg.from.length > 6 ? msg.from.substring(0, 6) : msg.from;
+    return PairedEndpoint(
+      deviceId: msg.from,
+      name: msg.from.isEmpty ? '已配对控制器' : '控制器 $short',
+      secret: _ownCode,
+      pairedAt: DateTime.now(),
+    );
   }
 
   Future<void> _dispatch(RcMessage msg, PairedEndpoint peer) async {
@@ -342,24 +452,20 @@ class RcEndpointService {
   }
 
   /// 音量设置（媒体/闹钟 0..1）。
+  ///
+  /// 走原生桥 `volume.set`（v1.6.1 补齐，此前原生侧无该分支导致
+  /// 命令恒返回失败回执——BUG-016）。仅影响媒体/闹钟流，不触碰铃声。
   Future<void> _setVolumes(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
-    try {
-      final media = (msg.payload['media'] as num?)?.toDouble();
-      final alarm = (msg.payload['alarm'] as num?)?.toDouble();
-      await _playerChannel.invokeMethod('volume.set', {
-        if (media != null) 'media': media,
-        if (alarm != null) 'alarm': alarm,
-      });
-      await logs.append(
-          source: 'remote',
-          action: 'volume.set',
-          status: 'success',
-          message: 'by ${peer.name}');
-      await _ack(msg, true);
-    } on Object {
-      await _ack(msg, false);
-    }
+    final media = (msg.payload['media'] as num?)?.toDouble();
+    final alarm = (msg.payload['alarm'] as num?)?.toDouble();
+    final ok = await NativeBridge.setVolume(media: media, alarm: alarm);
+    await logs.append(
+        source: 'remote',
+        action: 'volume.set',
+        status: ok ? 'success' : 'failed',
+        message: 'by ${peer.name}');
+    await _ack(msg, ok);
   }
 
   /// 被叫：收到 invite → 自动接通（设置开启）或弹来电界面（fullScreenIntent）。
@@ -386,9 +492,7 @@ class RcEndpointService {
         ((msg.payload['volume'] as num?)?.toDouble() ?? 0.9).clamp(0.0, 1.0);
     final durationSec = (msg.payload['durationSec'] as num?)?.toInt() ?? 5;
     final loop = msg.payload['loop'] as bool? ?? false;
-    var path = category != null && resolvePresetHandler != null
-        ? await resolvePresetHandler!(category)
-        : null;
+    var path = await _resolvePreset(category);
     path ??= await _anyAssetPath();
     var ok = false;
     if (path != null && playHandler != null) {
@@ -430,9 +534,7 @@ class RcEndpointService {
                   Duration(milliseconds: (sec * 1000).round())));
         case RcStepKind.play:
           final category = step.params['presetCategory'] as String?;
-          var path = category != null && resolvePresetHandler != null
-              ? await resolvePresetHandler!(category)
-              : null;
+          var path = await _resolvePreset(category);
           path ??= await _anyAssetPath();
           final vol = ((step.params['volume'] as num?)?.toDouble() ?? 0.9)
               .clamp(0.0, 1.0)
@@ -557,11 +659,21 @@ class RcEndpointService {
     if (client.connectionStatus?.state != MqttConnectionState.connected) return;
     final peers = store.paired();
     if (peers.isEmpty) return;
+    // 补发方标识（端点自己的 deviceId），便于控制器侧展示来源。
+    final out = msg.from.isEmpty
+        ? RcMessage(
+            id: msg.id,
+            ts: msg.ts,
+            type: msg.type,
+            payload: msg.payload,
+            from: store.deviceId,
+          )
+        : msg;
     final topic = 'sonicshield/v1/${store.deviceId}/evt';
     // 逐控制器密钥各发一份（端点↔控制器密钥独立）。
     for (final peer in peers) {
       final key = await RcCodec.deriveKey(peer.secret, '${peer.deviceId}|evt');
-      final wire = await RcCodec.encode(msg, key, topic);
+      final wire = await RcCodec.encode(out, key, topic);
       final builder = MqttClientPayloadBuilder()..addString(wire);
       client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
           retain: false);
@@ -572,11 +684,21 @@ class RcEndpointService {
   /// 未连接（或端点离线）时自动入 outbox，端点上线后冲刷（v1.3）。
   Future<bool> sendTo(PairedEndpoint endpoint, RcMessage msg, RemoteStore store,
       {bool enqueueOnFail = true}) async {
+    // 统一补发方标识：接收端据此反查发送方名称并渲染回执（不参与鉴权）。
+    final out = msg.from == store.deviceId
+        ? msg
+        : RcMessage(
+            id: msg.id,
+            ts: msg.ts,
+            type: msg.type,
+            payload: msg.payload,
+            from: store.deviceId,
+          );
     final client = _client;
     if (client == null ||
         client.connectionStatus?.state != MqttConnectionState.connected) {
       if (enqueueOnFail) {
-        final wireForLater = jsonEncode(msg.toJson());
+        final wireForLater = jsonEncode(out.toJson());
         await store.enqueue(wireForLater, endpoint.deviceId);
       }
       return false;
@@ -584,7 +706,7 @@ class RcEndpointService {
     final topic = 'sonicshield/v1/${endpoint.deviceId}/cmd';
     final key =
         await RcCodec.deriveKey(endpoint.secret, '${endpoint.deviceId}|cmd');
-    final wire = await RcCodec.encode(msg, key, topic);
+    final wire = await RcCodec.encode(out, key, topic);
     final builder = MqttClientPayloadBuilder()..addString(wire);
     client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
         retain: false);
@@ -614,6 +736,21 @@ class RcEndpointService {
   Future<String?> _anyAssetPath() async {
     final rows = await _db!.db
         .query('audio_assets', orderBy: 'created_at DESC', limit: 1);
+    return rows.isEmpty ? null : rows.first['path'] as String;
+  }
+
+  /// 按预置分类随机取一条（导入预置库时标签为 `预置/<分类>`）。
+  ///
+  /// 未注入 [resolvePresetHandler] 时回落到内置查询，保证 sound.play 与
+  /// 指令组 play 步骤在未显式注入时依然可用（BUG-015 关联）。
+  Future<String?> _resolvePreset(String? category) async {
+    if (category == null || category.isEmpty) return null;
+    if (resolvePresetHandler != null) return resolvePresetHandler!(category);
+    final rows = await _db!.db.query('audio_assets',
+        where: 'tags LIKE ? AND tags LIKE ?',
+        whereArgs: ['%预置%', '%$category%'],
+        orderBy: 'RANDOM()',
+        limit: 1);
     return rows.isEmpty ? null : rows.first['path'] as String;
   }
 

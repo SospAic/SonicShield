@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'protocol.dart';
+
 /// 已配对端点。
 class PairedEndpoint {
   const PairedEndpoint({
@@ -46,6 +48,7 @@ class RemoteStore {
   static const _kPaired = 'rc_paired';
   static const _kScripts = 'rc_scripts';
   static const _kOutbox = 'rc_outbox';
+  static const _kPairCode = 'rc_pair_code';
 
   /// 默认公共演示 broker（生产建议自建 EMQX/Mosquitto，docs/14 §6）。
   static const defaultBroker = 'broker.emqx.io';
@@ -63,6 +66,23 @@ class RemoteStore {
   }
 
   Future<void> setBroker(String v) => _prefs.setString(_kBroker, v);
+
+  /// 本机配对码（共享秘密）：对端扫码后即持有该值，用于派生消息密钥。
+  ///
+  /// 密钥模型是**按接收方身份派生**的：发送方用「接收方 deviceId +
+  /// 接收方配对码」加密，接收方用自己的配对码 + 自己的 deviceId 解密。
+  /// 因此本机需要随时能取到自己的配对码（见 RcEndpointService._handleRaw）。
+  String get pairingCode => _prefs.getString(_kPairCode) ?? '';
+
+  /// 首次使用时生成并持久化（多台控制器可重复扫码配对本机）。
+  Future<String> ensurePairingCode() async {
+    var code = pairingCode;
+    if (code.length != 8) {
+      code = RcCodec.generatePairingCode().replaceAll('-', '');
+      await _prefs.setString(_kPairCode, code);
+    }
+    return code;
+  }
 
   List<PairedEndpoint> paired() {
     final raw = _prefs.getString(_kPaired);

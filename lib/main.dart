@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'data/db/app_database.dart';
+import 'domain/models/action.dart';
 import 'remote/call_service.dart';
+import 'remote/endpoint_service.dart';
 import 'remote/remote_store.dart';
-import 'services/background_service_manager.dart';
 import 'remote/script_executor.dart';
+import 'services/background_service_manager.dart';
+import 'services/native_bridge.dart';
 import 'services/notification_service.dart';
+import 'services/playback_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,8 +31,60 @@ Future<void> main() async {
     final prefs = await SharedPreferences.getInstance();
     return RemoteStore(prefs);
   });
+  // 远程端点：注入执行能力 + 按启用状态自恢复（见下方说明）。
+  await _wireRemoteEndpoint();
   // 后台服务引擎先注册（不自动启动，由用户显式开启 —— 见 docs/05）。
   await BackgroundServiceManager.instance.init();
   await NotificationService.instance.ensure();
   runApp(const ProviderScope(child: SonicShieldApp()));
+}
+
+/// 远程端点启动装配（v1.6.1）。
+///
+/// 修复两个此前从未被端到端验证暴露的缺陷：
+/// 1. **执行能力未注入（BUG-015）**：`playHandler`/`ttsHandler`/
+///    `vibrateHandler` 全库无赋值 → 远程 sound.play、指令组 play/tts/vibrate
+///    步骤与 PTT 播放全部空转（只写审计、不出声）。此处统一注入，
+///    与引擎侧 `runSingle` 使用同一套 PlaybackService / NativeBridge。
+/// 2. **无自恢复（BUG-017）**：远程模块启用状态持久化在 `rc_enabled`，
+///    但此前仅由「远程遥控」页的开关触发 `start()`，应用重启后端点
+///    长期离线（收不到命令、无法自动接通）。此处按状态自动拉起。
+Future<void> _wireRemoteEndpoint() async {
+  final playback = PlaybackService();
+
+  RcEndpointService.instance
+    ..playHandler = (path, volume, durationMs, {loop = false}) async {
+      final r = await playback.play(
+        path: path,
+        channel: AudioChannel.media,
+        volume: volume,
+        maxDurationMs: durationMs,
+        loopFill: loop,
+      );
+      return r.ok;
+    }
+    ..ttsHandler = (text, volume) async {
+      final tts = FlutterTts();
+      try {
+        // 超时保护：无 TTS 引擎的平台 speak/setLanguage 可能永不回调。
+        await tts.setVolume(volume).timeout(const Duration(seconds: 8));
+        await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
+        await tts.speak(text).timeout(const Duration(seconds: 15));
+      } on Object {
+        // 无 TTS 引擎平台静默降级（审计由调用方记录）。
+      } finally {
+        try {
+          await tts.stop().timeout(const Duration(seconds: 3));
+        } on Object {
+          // 清理失败不影响主流程。
+        }
+      }
+    }
+    ..vibrateHandler = (pattern) => NativeBridge.vibrate(pattern);
+
+  final prefs = await SharedPreferences.getInstance();
+  final store = RemoteStore(prefs);
+  if (store.enabled && store.deviceId.isNotEmpty) {
+    await RcEndpointService.instance.start(store, await AppDatabase.open());
+  }
 }

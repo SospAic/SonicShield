@@ -38,8 +38,9 @@ record · flutter_background_service · flutter_local_notifications · TFLite �
 .\bootstrap.ps1          # macOS/Linux: bash bootstrap.sh
 # 3) 运行
 flutter run              # 连接模拟器或真机
-# 4) 测试
-flutter test             # 41 个单元测试
+# 4) 测试（必须分层：混跑会因压测 CPU 争用假红）
+flutter test --exclude-tags perf          # 功能层 71 例
+flutter test --tags perf --concurrency=1  # 压测层 24 例
 flutter analyze          # 0 error / 0 warning
 # 5) 构建
 flutter build apk --release
@@ -80,7 +81,8 @@ docs/                全套工程文档（立项/需求/架构/保活/合规/测
 | [13 预置音效库说明](docs/13-预置音效库说明.md) | 60 条合成音效的分类与合成技术 |
 | [14 远程遥控模块设计](docs/14-远程遥控模块设计.md) | MQTT 端到端加密/指令组/对讲机 |
 | [15 行业调研报告](docs/15-行业调研报告.md) | 九大赛道领先产品调研与借鉴矩阵 |
-| [HANDOVER](HANDOVER.md) | 交接文档（v1.3.0 已交付） |
+| [16 视频通话模块设计](docs/16-视频通话模块设计.md) | WebRTC 方案A、自动接通红线、设备控制命令 |
+| [17 接管审计与续作清单](docs/17-接管审计与续作清单.md) | 审计结论、缺陷清单与续作顺序 |
 | [HANDOVER](HANDOVER.md) | 交接文档：环境地图/已验证记录/下一步工作 |
 
 ## 许可与责任

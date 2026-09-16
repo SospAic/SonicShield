@@ -24,7 +24,16 @@ class _RemoteHomeScreenState extends State<RemoteHomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('远程中心 · ${_titles[_tab]}')),
+      appBar: AppBar(
+        title: Text('远程中心 · ${_titles[_tab]}'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.tune),
+            tooltip: '模块开关 · 身份 · 代理 · 配对管理',
+            onPressed: () => context.push('/remote/settings'),
+          ),
+        ],
+      ),
       body: _body(),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,

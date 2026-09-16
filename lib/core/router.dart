@@ -7,6 +7,7 @@ import '../features/guard/guard_screen.dart';
 import '../features/logs/log_screen.dart';
 import '../features/remote/call_screen.dart';
 import '../features/remote/pair_qr_screen.dart';
+import '../features/remote/remote_home_screen.dart';
 import '../features/remote/remote_screen.dart';
 import '../features/remote/script_builder_screen.dart';
 import '../features/stats/stats_screen.dart';
@@ -41,7 +42,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/tasks/:id/edit',
         builder: (_, s) => TaskEditorScreen(taskId: s.pathParameters['id']),
       ),
-      GoRoute(path: '/remote', builder: (_, __) => const RemoteScreen()),
+      GoRoute(path: '/remote', builder: (_, __) => const RemoteHomeScreen()),
+      GoRoute(
+        path: '/remote/settings',
+        builder: (_, __) => const RemoteScreen(),
+      ),
       GoRoute(path: '/stats', builder: (_, __) => const StatsScreen()),
       GoRoute(
         path: '/remote/call',
