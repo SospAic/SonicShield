@@ -63,6 +63,49 @@ class NativeBridge {
     return r ?? false;
   }
 
+  // ---------------- 环境状态（v1.7 条件层扩展） ----------------
+
+  /// 是否正在通话（含 VoIP/视频通话）。
+  ///
+  /// 由 `AudioManager.getMode()` 判定（MODE_IN_CALL / MODE_IN_COMMUNICATION），
+  /// **不需要任何权限** —— 这是刻意选择：用 `TelephonyManager` 读通话状态要
+  /// READ_PHONE_STATE，会给使用者增加授权负担，也与最小权限原则冲突。
+  ///
+  /// 返回 null 表示**本平台无法判定**（如 iOS 无对应桥接）。调用方按
+  /// "未通话"处理（与电池条件的既有约定一致），详见 `TaskCondition` 类文档。
+  static Future<bool?> isInCall() => _invoke<bool>('callState');
+
+  /// 当前网络类型。
+  ///
+  /// 取值：`wifi` / `cellular` / `ethernet` / `vpn` / `none` / `other` / `unknown`。
+  ///
+  /// **`unknown` 的语义是"无法判定"，不是"某种确定的网络"**：原生侧在
+  /// `ConnectivityManager` 取不到、或拿到了活跃网络却读不出 capabilities 时返回它，
+  /// 桥不可用时 Dart 侧也回落到它。`none` 才是"确实没有活跃网络"这个确定状态。
+  ///
+  /// 判定顺序（原生侧）为 wifi → cellular → ethernet → vpn，即**物理承载优先**：
+  /// 只有当前网络的 capabilities 里连物理承载都读不到时才会落到 `vpn`。
+  /// 因此 `vpn` 的语义是"活跃网络是 VPN 且未能读出底层承载"，而不是
+  /// "一定不在 Wi-Fi 下"。**在真实 VPN 场景下的取值尚未在设备上验证**
+  /// （见 docs/12 §18.6 观察项）。
+  static Future<String> networkType() async {
+    final r = await _invoke<String>('networkType');
+    return r ?? 'unknown';
+  }
+
+  /// 是否在 Wi-Fi 下；**无法判定时返回 null**（调用方按"满足"处理）。
+  ///
+  /// `unknown` 与桥不可用一样属于"无法判定"，必须返回 `null` 而不是 `false`：
+  /// 两者对条件层是完全相反的后果 —— `false` 会**拦下**任务并在审计里写
+  /// "不在 Wi-Fi 下"（一个我们其实不知道的原因），`null` 才按既有约定放行。
+  /// 把"读不到"误报成"不满足"正是 `TaskCondition` 类文档要避免的
+  /// "某平台读不到状态就把全部自动化静默停掉"（BUG-041）。
+  static Future<bool?> isOnWifi() async {
+    final t = await _invoke<String>('networkType');
+    if (t == null || t == 'unknown') return null;
+    return t == 'wifi';
+  }
+
   /// 守卫模式：前台启动麦克风类型 FGS（while-in-use 通行证）。
   /// 必须在用户前台交互（点击守卫开关）时调用（docs/05 §1.4）。
   static Future<void> startMicService() => _invoke<Object?>('startMicService');

@@ -24,6 +24,21 @@ class PlayResult {
 class PlaybackService {
   PlaybackService();
 
+  /// 按输出通道选择**音频焦点类型**（纯函数，便于测试锁定）。
+  ///
+  /// 依据 Android 官方音频焦点指引与行业惯例：
+  /// - `alarm`：抢占式 `gain` —— 闹钟/唤醒必须被听见，允许暂停他人播放；
+  /// - `media`：`gainTransientMayDuck` —— 短提示音只让别人的音乐**闪避**
+  ///   （压低音量）而非**暂停**。若对 media 也用 `gain`，使用者正在听的音乐会被
+  ///   打断再恢复，是明显的体验损伤，也容易被误读为"应用在抢音频"。
+  ///
+  /// 抽成静态函数是为了让这条决策可被单测锁定 —— 它藏在 `AudioSession.configure`
+  /// 的参数里，一旦被改回 `gain` 不会有任何编译或运行期报错，只会"听起来很烦"。
+  static AndroidAudioFocusGainType focusGainFor(AudioChannel channel) =>
+      channel == AudioChannel.alarm
+          ? AndroidAudioFocusGainType.gain
+          : AndroidAudioFocusGainType.gainTransientMayDuck;
+
   AudioPlayer? _player;
   bool _mixStopped = false;
 
@@ -51,7 +66,8 @@ class PlaybackService {
               ? AndroidAudioUsage.alarm
               : AndroidAudioUsage.media,
         ),
-        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        // 焦点类型按通道区分，见 focusGainFor() 的说明。
+        androidAudioFocusGainType: focusGainFor(channel),
         androidWillPauseWhenDucked: true,
       ));
 
@@ -167,7 +183,9 @@ extension PlaybackSoundscape on PlaybackService {
             ? AndroidAudioUsage.alarm
             : AndroidAudioUsage.media,
       ),
-      androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+      // 同单轨播放：media 通道用 mayDuck，避免打断使用者正在听的音乐。
+      // （扩展内引用静态成员必须带类型名限定。）
+      androidAudioFocusGainType: PlaybackService.focusGainFor(channel),
       androidWillPauseWhenDucked: true,
     ));
 

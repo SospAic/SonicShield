@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -20,6 +21,21 @@ Future<void> _settle(WidgetTester tester, {int ms = 1500}) async {
   await tester.pump();
 }
 
+/// 关掉**合规承诺**对话框（全新安装时必现）。
+///
+/// 该对话框是 `barrierDismissible: false`，会**挡住底部导航的点击** ——
+/// 不先确认，导航用例必然失败（且报错信息只显示"点了但命中不到"）。
+///
+/// 为什么"必现"而不是偶发：`flutter test integration_test/...` 每次运行都会
+/// **卸载应用**，`SharedPreferences` 里的"已确认"标记随之清空，
+/// 于是 `showComplianceGateOnce` 每次都会弹。
+Future<void> _dismissComplianceIfPresent(WidgetTester tester) async {
+  final accept = find.widgetWithText(FilledButton, '我已阅读并承诺合法使用');
+  if (accept.evaluate().isEmpty) return;
+  await tester.tap(accept);
+  await _settle(tester, ms: 600);
+}
+
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
@@ -27,6 +43,7 @@ void main() {
   testWidgets('应用启动并渲染守护仪表盘', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: SonicShieldApp()));
     await _settle(tester, ms: 2500);
+    await _dismissComplianceIfPresent(tester);
     // 标题与守护开关卡片存在即认为渲染成功。
     expect(find.text('声盾 SonicShield'), findsWidgets);
     expect(
@@ -36,12 +53,30 @@ void main() {
     );
   });
 
-  testWidgets('底部导航六页可达', (tester) async {
+  testWidgets('底部导航五页可达', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: SonicShieldApp()));
     await _settle(tester, ms: 2500);
+    // 必须先关掉合规承诺对话框，否则它（barrierDismissible=false）会挡住导航点击。
+    await _dismissComplianceIfPresent(tester);
 
-    for (final label in ['任务', '音源', '守卫', '日志', '设置']) {
-      await tester.tap(find.text(label).last);
+    // v1.7 信息架构定稿为 **5 个 TAB**：守护 / 自动化 / 远程 / 日志 / 设置
+    // （见 `lib/core/router.dart` 的 `_Shell._destinations`）。
+    //
+    // ⚠️ 本用例此前用的是 **IA 重构前的旧标签**（任务 / 音源 / 守卫）——
+    // 那三页已合并进「自动化」，于是 `find.text('任务').last` 命中零个控件，
+    // 抛 `Bad state: No element`。该用例**自 v1.7 IA 重构起就一直是红的**，
+    // 却长期没被发现：`integration_test/` 不在默认门禁
+    // （`flutter test --exclude-tags perf` 只跑 `test/`）内，只有手动驱动才会执行。
+    const tabs = ['守护', '自动化', '远程', '日志', '设置'];
+    for (final label in tabs) {
+      // 精确限定在 NavigationBar 内查找：仪表盘正文里也有「守护」等字样，
+      // 用 `.last` 是碰运气，容易随布局变化而错位。
+      final target = find.descendant(
+        of: find.byType(NavigationBar),
+        matching: find.text(label),
+      );
+      expect(target, findsWidgets, reason: '底部导航应存在「$label」TAB');
+      await tester.tap(target.first);
       await _settle(tester, ms: 800);
       expect(tester.takeException(), isNull, reason: '页面 $label 不应崩溃');
     }

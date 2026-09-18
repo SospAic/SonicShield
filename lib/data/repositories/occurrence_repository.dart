@@ -90,6 +90,16 @@ class OccurrenceRepository {
   Future<void> deleteForTask(String taskId) =>
       _db.db.delete('occurrences', where: 'task_id = ?', whereArgs: [taskId]);
 
+  /// 重新物化前清掉该任务的**未执行**计划（保留 done/failed/skipped 审计）。
+  ///
+  /// 远程 `task.upsert` 改了触发器/免打扰策略后，旧计划已与新定义不符；
+  /// 不清理会出现"改了每天 8:00 却仍在 7:00 响"的幽灵计划（docs/14 §2.1）。
+  Future<int> deletePendingForTask(String taskId) => _db.db.delete(
+        'occurrences',
+        where: "task_id = ? AND status = 'pending'",
+        whereArgs: [taskId],
+      );
+
   /// 「跳过下一次」：把该任务最近的 pending 计划标记为 skipped。
   /// 返回被跳过的条目数（0 或 1）。
   Future<int> skipNextForTask(String taskId) async {

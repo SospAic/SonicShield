@@ -9,14 +9,18 @@ import '../../domain/models/task.dart';
 import '../../services/background_service_manager.dart';
 
 /// 任务列表：启停开关 / 下一触发时间 / 长按删除。
+///
+/// [embedded] = true 时作为「自动化」分组页的子 TAB 使用，不再自带 AppBar。
 class TaskListScreen extends ConsumerWidget {
-  const TaskListScreen({super.key});
+  const TaskListScreen({super.key, this.embedded = false});
+
+  final bool embedded;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tasks = ref.watch(taskListProvider);
     return Scaffold(
-      appBar: AppBar(title: const Text('自动化任务')),
+      appBar: embedded ? null : AppBar(title: const Text('自动化任务')),
       floatingActionButton: FloatingActionButton.extended(
         icon: const Icon(Icons.add),
         label: const Text('新建任务'),

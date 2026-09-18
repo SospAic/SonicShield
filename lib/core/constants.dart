@@ -14,7 +14,7 @@ class AppMeta {
   static const String appPackage = 'com.sonicshield.sonic_shield';
 
   /// 与 pubspec.yaml 的 version 保持同步（远程回执上报，BUG-018）。
-  static const String version = '1.6.1-alpha.1';
+  static const String version = '1.7.0-alpha.1';
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换
 }

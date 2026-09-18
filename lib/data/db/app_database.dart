@@ -30,12 +30,39 @@ class AppDatabase {
     final db = await openDatabase(
       path,
       version: dbVersion,
-      onConfigure: (d) => d.execute('PRAGMA foreign_keys = ON'),
+      onConfigure: _onConfigure,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
     _instance = AppDatabase._(db);
     return _instance!;
+  }
+
+  /// 连接级 PRAGMA。
+  ///
+  /// **BUG-022（冷启动 `SQLITE_BUSY: database is locked`）根因**：
+  /// 后台引擎跑在 `flutter_background_service` 的**独立 FlutterEngine** 里，
+  /// 与主 isolate 不是同一个插件实例 —— `_instance` 这个进程内静态单例
+  /// 只能在一个引擎内去重，两个引擎各自持有**一条独立的原生连接**写同一个
+  /// 数据库文件，默认 rollback journal 模式下写锁互斥即直接报错。
+  ///
+  /// 修复：WAL（读不阻塞写、写不阻塞读）+ `busy_timeout`（写锁冲突时等待
+  /// 而非立刻失败）。二者都是持久/连接级设置，主引擎与后台引擎都会生效。
+  ///
+  /// > **踩坑（BUG-026）**：`PRAGMA` 是否可用 `execute` 取决于它**是否返回行**。
+  /// > `busy_timeout` / `journal_mode` 都会返回一行结果，而 sqflite Android 的
+  /// > `execute` 走 `execSQL`，遇到返回行的语句会抛
+  /// > `Queries can be performed using SQLiteDatabase query or rawQuery methods only.`
+  /// > 该异常会穿透 `openDatabase`，导致 `AppDatabase.open()` 失败 ——
+  /// > 而它被 `main()` 在 `runApp` **之前** await，于是整屏白屏。
+  /// > 统一用 `rawQuery`（它能容忍"无行"与"有行"两种情况）。
+  static Future<void> _onConfigure(Database db) async {
+    // 返回行 / 无返回行都安全：rawQuery 是唯一对两类 PRAGMA 都稳妥的入口。
+    await db.rawQuery('PRAGMA foreign_keys = ON');
+    await db.rawQuery('PRAGMA busy_timeout = 5000');
+    await db.rawQuery('PRAGMA journal_mode = WAL');
+    // 平衡断电安全与写入吞吐：WAL + NORMAL 不会在每次提交都 fsync。
+    await db.rawQuery('PRAGMA synchronous = NORMAL');
   }
 
   /// 测试/后台隔离用：注入独立实例。

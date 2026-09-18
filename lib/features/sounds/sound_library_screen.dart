@@ -15,8 +15,13 @@ import '../../services/playback_service.dart';
 
 /// 音源库：SAF 导入（免存储权限）+ 一键导入内置预置音效库
 /// （60 条程序化合成，12 分类，见 tool/gen_sfx.dart）+ 单条试听。
+///
+/// [embedded] = true 时作为「自动化」分组页的子 TAB 使用：保留「导入预置库」
+/// 操作（否则该能力在新 IA 下不可达），仅去掉标题与返回键。
 class SoundLibraryScreen extends ConsumerStatefulWidget {
-  const SoundLibraryScreen({super.key});
+  const SoundLibraryScreen({super.key, this.embedded = false});
+
+  final bool embedded;
 
   @override
   ConsumerState<SoundLibraryScreen> createState() => _SoundLibraryScreenState();
@@ -143,7 +148,9 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('音源库'),
+        automaticallyImplyLeading: false,
+        toolbarHeight: widget.embedded ? 52 : null,
+        title: widget.embedded ? null : const Text('音源库'),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 8),

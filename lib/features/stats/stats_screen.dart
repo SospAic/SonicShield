@@ -6,8 +6,12 @@ import '../../data/repositories/log_repository.dart';
 
 /// 统计看板（v2.0）：7 天执行趋势（柱状图）+ 动作分布 + 状态占比。
 /// 数据全部来自本地 exec_logs 聚合（SQL），无任何外传。
+///
+/// [embedded] = true 时作为「日志」分组页的子 TAB 使用，不再自带 AppBar。
 class StatsScreen extends ConsumerStatefulWidget {
-  const StatsScreen({super.key});
+  const StatsScreen({super.key, this.embedded = false});
+
+  final bool embedded;
 
   @override
   ConsumerState<StatsScreen> createState() => _StatsScreenState();
@@ -37,7 +41,9 @@ class _StatsScreenState extends ConsumerState<StatsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('统计看板')),
+      appBar: widget.embedded
+          ? null
+          : AppBar(title: const Text('统计看板')),
       body: FutureBuilder<StatsSnapshot>(
         future: _future,
         builder: (context, snap) {

@@ -32,9 +32,24 @@ Future<void> main() async {
     return RemoteStore(prefs);
   });
   // 远程端点：注入执行能力 + 按启用状态自恢复（见下方说明）。
-  await _wireRemoteEndpoint();
+  //
+  // 韧性（BUG-026 教训）：这里是 `runApp` **之前**的 await 链，任何一处
+  // 抛出都会让 `runApp` 永不执行 —— 表现为整屏白屏，用户完全无法自救
+  // （远程模块是可选的附加能力，不该有能力让主应用起不来）。
+  // 因此逐步隔离：远程装配失败只降级该模块，不阻断启动。
+  try {
+    await _wireRemoteEndpoint();
+  } on Object catch (e) {
+    // ignore: avoid_print
+    print('[sonic_shield] remote wiring failed (降级启动): $e');
+  }
   // 后台服务引擎先注册（不自动启动，由用户显式开启 —— 见 docs/05）。
-  await BackgroundServiceManager.instance.init();
+  try {
+    await BackgroundServiceManager.instance.init();
+  } on Object catch (e) {
+    // ignore: avoid_print
+    print('[sonic_shield] background service init failed (降级启动): $e');
+  }
   await NotificationService.instance.ensure();
   runApp(const ProviderScope(child: SonicShieldApp()));
 }

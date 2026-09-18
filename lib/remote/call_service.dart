@@ -19,15 +19,50 @@ enum CallPhase { idle, ringing, connecting, connected, ended }
 ///
 /// 媒体：getUserMedia（video+audio），DTLS-SRTP 传输加密（WebRTC 内建），
 /// 信令走声盾 MQTT 端到端加密通道（复用 RcCodec）。
-/// ICE：Google 公共 STUN；对称 NAT 场景需自建 TURN（文档说明，v1 不内置）。
+/// ICE：默认 Google 公共 STUN；对称 NAT 场景需自建 TURN
+/// （v1.7 S5 起支持在「远程 → 设置」配置，见 [CallService.iceServers]）。
 class CallService {
   CallService._();
   static final CallService instance = CallService._();
 
-  static const _iceServers = <Map<String, dynamic>>[
+  static const _stunServers = <Map<String, dynamic>>[
     {'urls': 'stun:stun.l.google.com:19302'},
     {'urls': 'stun:stun1.l.google.com:19302'},
   ];
+
+  /// 组装 ICE 服务器列表：STUN 必备 + **可选** TURN 中继。
+  ///
+  /// 未配置 TURN 时只返回 STUN —— 打洞成功与否取决于双方 NAT 类型，
+  /// 这是 WebRTC 的固有属性，不是缺陷。真正的问题在于"失败后不给原因"，
+  /// 所以失败路径统一由 [failureHint] 给出可操作提示。
+  static Future<List<Map<String, dynamic>>> iceServers() async {
+    final store = RemoteStore(await SharedPreferences.getInstance());
+    return [
+      ..._stunServers,
+      if (store.turnConfigured)
+        {
+          'urls': store.turnUrl,
+          if (store.turnUser.isNotEmpty) 'username': store.turnUser,
+          if (store.turnCred.isNotEmpty) 'credential': store.turnCred,
+        },
+    ];
+  }
+
+  /// ICE 失败时给使用者的可操作提示（**无 TURN 降级路径**）。
+  ///
+  /// 未配置 TURN 时不能只说"连接失败"：使用者会反复重试却无从下手。
+  /// 明确指向"对称 NAT + 配 TURN"，把不可诊断的失败变成可执行的下一步。
+  static String failureHint({required bool turnConfigured}) => turnConfigured
+      ? '直连与中继均失败：请检查 TURN 地址/账号是否有效，以及双方网络是否放行 UDP。'
+      : '直连失败：双方很可能都处于对称 NAT（常见于 4G/5G 或企业网）。'
+          '请在「远程 → 设置 → TURN 中继」填入自建 TURN 服务器后重试。';
+
+  /// 最近一次连接失败的可读原因；无失败时为 null。
+  String? get failureReason => _failureReason;
+  String? _failureReason;
+
+  final _failureCtrl = StreamController<String>.broadcast();
+  Stream<String> get failures => _failureCtrl.stream;
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
@@ -249,7 +284,7 @@ class CallService {
 
   Future<void> _createPc() async {
     final pc = _pc = await createPeerConnection({
-      'iceServers': _iceServers,
+      'iceServers': await iceServers(),
       'sdpSemantics': 'unified-plan',
     });
     _localStream?.getTracks().forEach(pc.addTrack);
@@ -261,8 +296,11 @@ class CallService {
     };
     pc.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _failureReason = null;
         _setPhase(CallPhase.connected);
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        // 无 TURN 降级：把"失败"变成"可诊断的失败"（S5）。
+        unawaited(_reportIceFailure());
         unawaited(_teardown());
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         unawaited(_teardown());
@@ -293,6 +331,14 @@ class CallService {
   /// store 提供者（由 UI/引擎注入，避免服务层直接依赖插件初始化时序）。
   static Future<RemoteStore> Function()? _storeRef;
   static void bindStore(Future<RemoteStore> Function() ref) => _storeRef = ref;
+
+  /// ICE 失败：记录可读原因并广播（S5 无 TURN 降级路径）。
+  Future<void> _reportIceFailure() async {
+    final store = RemoteStore(await SharedPreferences.getInstance());
+    final hint = failureHint(turnConfigured: store.turnConfigured);
+    _failureReason = hint;
+    if (!_failureCtrl.isClosed) _failureCtrl.add(hint);
+  }
 
   Future<void> _sendCallMsg(String type, Map<String, dynamic> payload,
       PairedEndpoint peer, RemoteStore store) async {

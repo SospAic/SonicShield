@@ -4,7 +4,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -173,10 +172,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         return;
       }
       final repo = await ref.read(taskRepoProvider.future);
-      var imported = 0;
+      // 先整体解析、再**一次性批量写入**：
+      //  · 批量路径只有一次平台通道往返（逐条 upsert 是 N 次，每次约 1.5ms）；
+      //  · 整批在同一事务里提交 —— 中途某条解析失败**不会留下半批已导入的任务**
+      //    （旧的逐条循环会留下"提示导入失败、但列表里已经多了一截"的中间态）。
+      final parsed = <Task>[];
       for (final tj in (payload['tasks'] as List)) {
         final row = (tj as Map).cast<String, dynamic>();
-        final task = Task(
+        parsed.add(Task(
           id: row['id'] as String? ?? const Uuid().v4(),
           name: row['name'] as String? ?? '导入任务',
           enabled: false, // 导入后默认停用，防意外触发
@@ -198,10 +201,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           createdAt: DateTime.fromMillisecondsSinceEpoch(
               row['created_at'] as int? ?? 0),
           updatedAt: DateTime.now(),
-        );
-        await repo.upsert(task);
-        imported++;
+        ));
       }
+      await repo.upsertMany(parsed);
+      final imported = parsed.length;
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('导入完成：$imported 条任务（默认停用）')));
@@ -315,24 +318,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('精确闹钟权限（Android 12+）'),
             onTap: () => NativeBridge.openExactAlarmSettings(),
           ),
-          ListTile(
-            leading: const Icon(Icons.settings_remote),
-            title: const Text('远程遥控'),
-            subtitle: const Text('多端点公网遥控 · 指令组 · 对讲机'),
-            onTap: () => context.push('/remote'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.video_call),
-            title: const Text('视频通话'),
-            subtitle: const Text('自动接通 · 家人守护场景'),
-            onTap: () => context.push('/remote/call'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.insights),
-            title: const Text('统计看板'),
-            subtitle: const Text('7 天趋势 · 动作分布 · 状态占比'),
-            onTap: () => context.push('/stats'),
-          ),
+          // 说明（v1.7）：此处曾列出「远程遥控 / 视频通话 / 统计看板」三项，
+          // 但它们只是 `context.go(...)` 导航快捷方式，**不含任何保活设置** ——
+          // 放在「后台保活」分区语义不成立，且新 IA 已把「远程」「日志」提升为
+          // 底部一级 TAB，快捷入口纯属冗余。故移除，保持本分区只放真正的
+          // 保活相关项（电池白名单 / 精确闹钟）。
           const Divider(height: 32),
           Text('任务备份', style: Theme.of(context).textTheme.titleMedium),
           ListTile(

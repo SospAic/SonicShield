@@ -11,8 +11,13 @@ import '../../core/providers.dart';
 enum _LogFilter { all, success, failed, skipped }
 
 /// 执行日志：审计视图 + 状态筛选 + CSV 导出。
+///
+/// [embedded] = true 时作为「日志」分组页的子 TAB 使用：保留导出操作，
+/// 仅去掉标题与返回键。
 class LogScreen extends ConsumerStatefulWidget {
-  const LogScreen({super.key});
+  const LogScreen({super.key, this.embedded = false});
+
+  final bool embedded;
 
   @override
   ConsumerState<LogScreen> createState() => _LogScreenState();
@@ -70,7 +75,9 @@ class _LogScreenState extends ConsumerState<LogScreen> {
     final logs = ref.watch(logListProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('执行日志'),
+        automaticallyImplyLeading: false,
+        toolbarHeight: widget.embedded ? 52 : null,
+        title: widget.embedded ? null : const Text('执行日志'),
         actions: [
           IconButton(
             icon: const Icon(Icons.ios_share),

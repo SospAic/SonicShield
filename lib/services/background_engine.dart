@@ -18,10 +18,13 @@ import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
 import '../domain/models/action.dart';
+import '../domain/models/condition.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/scheduling/schedule_engine.dart';
+import 'condition_env.dart';
 import 'notification_service.dart';
+import 'native_bridge.dart';
 import 'playback_service.dart';
 import 'sound_guard_service.dart';
 
@@ -88,10 +91,18 @@ Future<void> _engineBody(ServiceInstance service) async {
   StreamSubscription<SoundEvent>? guardSub;
   String? lastAction;
 
-  /// 任务条件层评估（v1.3）：不满足 → 返回原因（写审计），满足 → null。
-  Future<String?> conditionFailed(Task task) async {
-    final c = task.condition;
-    if (c == null || !c.hasAny) return null;
+  /// 读取一次平台环境（电量 / 充电 / 通话 / 网络），供一轮内**复用**。
+  ///
+  /// v1.7 扩展：新增通话状态与网络类型两个输入。
+  /// 读不到时留 `null` 并按"满足"处理（与电池条件的既有约定一致，
+  /// 避免某个平台读不到状态就把全部自动化静默停掉）；
+  /// Android 侧始终可判定，故实际防护不受影响。
+  ///
+  /// 这 4 次读取都是**平台通道往返**（设备上 ≈1.5–2ms/次）。
+  /// 改造前是**逐任务**读（一轮 N 个到期任务 = 4N 次往返），
+  /// 现在改为每轮读一次（固定 4 次，与 N 解耦）——
+  /// 同一轮内所有任务面对的是同一个物理环境。
+  Future<ConditionEnv> readConditionEnv() async {
     var level = 100;
     var charging = false;
     try {
@@ -101,10 +112,36 @@ Future<void> _engineBody(ServiceInstance service) async {
     } on Object {
       // 无电池平台视为满足电量条件
     }
-    final ok = c.evaluate(
-        charging: charging, batteryLevel: level, now: DateTime.now());
-    if (ok) return null;
-    return c.describe();
+    bool? inCall;
+    bool? onWifi;
+    try {
+      inCall = await NativeBridge.isInCall();
+      onWifi = await NativeBridge.isOnWifi();
+    } on Object {
+      // 桥不可用（如 iOS）→ 保持 null，按"满足"处理
+    }
+    return ConditionEnv(
+      charging: charging,
+      batteryLevel: level,
+      inCall: inCall,
+      onWifi: onWifi,
+    );
+  }
+
+  /// 任务条件层评估：不满足 → 返回**具体原因**（写审计），满足 → null。
+  ///
+  /// 消费**已读好的**环境快照（[ConditionEnv]），因此本函数不再触碰平台通道；
+  /// `now` 实时取值 —— 本地时钟无平台开销，且时段窗口按真实时刻判定更准。
+  String? conditionFailedIn(Task task, ConditionEnv env) {
+    // 未配置条件的老任务用**默认条件**兜底，而不是直接放行：
+    // `TaskCondition()` 的 skipInCall 默认为 true，因此"通话中不执行"这条
+    // 安全护栏对**所有**任务生效（含历史任务），不存在"没配过条件就漏掉"的洞。
+    // 使用者在编辑器里显式关掉该开关时，会落库一个 skipInCall=false 的条件对象，
+    // 从而正确覆盖默认值。
+    final c = task.condition ?? const TaskCondition();
+    if (!c.hasAny) return null;
+    // 返回**首个未满足条件**而不是整份条件描述：排障时要的是"为什么没执行"。
+    return c.firstUnmetIn(env, now: DateTime.now());
   }
 
   // ==================== 依赖底座（先声明后引用） ====================
@@ -430,6 +467,9 @@ Future<void> _engineBody(ServiceInstance service) async {
   Future<void> executeDue() async {
     final now = DateTime.now();
     final due = await occs.due(now, limit: SchedulerConfig.catchUpLimit);
+    // 本轮环境快照：**首次需要时**读一次，轮内所有到期任务复用。
+    // 惰性 → 若所有计划都在下面的"过期丢弃"分支被跳过，则一次平台读取都不会发生。
+    final env = RoundConditionEnv(read: readConditionEnv);
     for (final o in due) {
       if (now.difference(o.fireAt) > const Duration(minutes: 10)) {
         await occs.markStatus(o.id, OccurrenceStatus.skipped);
@@ -447,7 +487,7 @@ Future<void> _engineBody(ServiceInstance service) async {
         continue;
       }
       // 条件层（v1.3）：不满足则跳过并审计。
-      final condFail = await conditionFailed(task);
+      final condFail = conditionFailedIn(task, await env.value);
       if (condFail != null) {
         await occs.markStatus(o.id, OccurrenceStatus.skipped);
         await logs.append(
@@ -470,6 +510,9 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 声音事件 -> 执行所有启用的声音触发任务。
   Future<void> onSoundEvent(DateTime at, double peakDb) async {
     final all = await tasksRepo.listAll(enabledOnly: true);
+    // 本轮环境快照：本次声音事件会遍历**所有**声音触发任务，
+    // 同样只读一次平台状态（与 executeDue 同理）。
+    final env = RoundConditionEnv(read: readConditionEnv);
     for (final t
         in all.where((t) => t.triggerType == TriggerType.soundTriggered)) {
       final cfg = t.trigger as SoundTrigger;
@@ -478,7 +521,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           Duration(seconds: math.max(cfg.cooldownSec, t.cooldownSec));
       if (last != null && at.difference(last) < cooldown) continue;
       // 条件层（v1.3）：声音触发同样受前置条件约束。
-      final condFail = await conditionFailed(t);
+      final condFail = conditionFailedIn(t, await env.value);
       if (condFail != null) {
         await logs.append(
             source: 'sound',
@@ -547,6 +590,64 @@ Future<void> _engineBody(ServiceInstance service) async {
     await service.stopSelf();
   });
 
+  /// 远程「立即执行」（协议 v1.7，docs/14 §2.1）。
+  ///
+  /// 端点服务运行在**主 isolate**，无法直接调用本引擎的 `runAction`
+  /// （播放器/TTS/原生桥的插件实例都注册在引擎隔离内）。因此远程
+  /// `task.runNow` 走本通道转交执行，并把结果以 `rcRunResult` 回投，
+  /// 端点据此回 `rc.ack`——避免"回执成功但实际没出声"的假阳性。
+  service.on('runNow').listen((m) async {
+    final taskId = m?['taskId'] as String?;
+    final reqId = m?['reqId'] as String? ?? '';
+    if (taskId == null || taskId.isEmpty) return;
+    var ok = false;
+    var message = '';
+    try {
+      final task = await tasksRepo.get(taskId);
+      if (task == null) {
+        message = '任务不存在';
+      } else {
+        // 单任务路径：只评估一个任务，读一次即可（无需 RoundConditionEnv）。
+        final condFail = conditionFailedIn(task, await readConditionEnv());
+        if (condFail != null) {
+          message = '条件不满足：$condFail';
+          await logs.append(
+              source: 'remote',
+              action: 'runNow',
+              status: 'skipped',
+              taskId: task.id,
+              message: condFail);
+        } else {
+          // 物化期的音量/时长由调度器确定；远程立即执行取动作区间中点，
+          // 保持"计划即审计"语义（volume/duration 落库到 occurrence）。
+          final (vol, dur) = _nominalParams(task);
+          ok = await runAction(task, vol, dur, 'remote');
+          message = ok ? '已执行' : '执行失败';
+          await occs.commitAll([
+            PlannedOccurrence(
+              id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
+              taskId: task.id,
+              fireAt: DateTime.now(),
+              status: ok ? OccurrenceStatus.done : OccurrenceStatus.failed,
+              volume: vol,
+              durationMs: dur,
+            ),
+          ]);
+          lastAction = '${task.name} · 远程立即执行';
+        }
+      }
+    } on Object catch (e) {
+      message = e.toString();
+    }
+    service.invoke('rcRunResult', {
+      'reqId': reqId,
+      'taskId': taskId,
+      'ok': ok,
+      'message': message,
+    });
+    await broadcast();
+  });
+
   // ==================== 通道A：引擎主循环 ====================
 
   Timer.periodic(SchedulerConfig.engineTick, (_) {
@@ -566,4 +667,26 @@ Future<void> _engineBody(ServiceInstance service) async {
     service.invoke('guard', {'enabled': true}); // 守卫自恢复
   }
   await broadcast();
+}
+
+/// 远程「立即执行」的标称执行参数（音量/时长）。
+///
+/// 计划触发时这两个值由 [ScheduleEngine] 在物化期用 DPRNG 确定并落库；
+/// 而立即执行没有计划条目，取动作区间中值作为标称值，并同样落库，
+/// 保持"计划即审计"的一致性。合规上限同样生效。
+(double, int) _nominalParams(Task task) {
+  final play = switch (task.action) {
+    final PlayAudioAction p => p,
+    final CompositeAction c => switch (c.primary) {
+        final PlayAudioAction p => p,
+        _ => null,
+      },
+    _ => null,
+  };
+  if (play == null) return (0.8, 0);
+  const cap = ComplianceGuardrails.maxMediaVolumePercent / 100;
+  final hi = math.min(play.volumeMax, cap);
+  final vol = ((play.volumeMin + hi) / 2).clamp(0.0, 1.0).toDouble();
+  final dur = (((play.durationSecMin + play.durationSecMax) / 2) * 1000).round();
+  return (vol, dur);
 }

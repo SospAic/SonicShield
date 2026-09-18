@@ -18,6 +18,13 @@ class BackgroundServiceManager {
   EngineState? _last;
   EngineState? get last => _last;
 
+  /// 远程「立即执行」的待决请求（reqId → 完成器）。
+  ///
+  /// 引擎隔离内执行完毕后经 `rcRunResult` 回投；端点服务 await 该 Future
+  /// 后才回 `rc.ack`，避免"回执成功但实际没出声"（docs/14 §2.1）。
+  final _pendingRun = <String, Completer<RunNowResult>>{};
+  var _runSeq = 0;
+
   Future<void> init() async {
     await _svc.configure(
       androidConfiguration: AndroidConfiguration(
@@ -55,6 +62,15 @@ class BackgroundServiceManager {
       );
       _stateCtrl.add(_last!);
     });
+    _svc.on('rcRunResult').listen((m) {
+      final reqId = (m ?? <String, Object?>{})['reqId'] as String? ?? '';
+      final c = _pendingRun.remove(reqId);
+      if (c == null || c.isCompleted) return;
+      c.complete(RunNowResult(
+        ok: (m!['ok'] as bool?) ?? false,
+        message: (m['message'] as String?) ?? '',
+      ));
+    });
   }
 
   Future<bool> start() async {
@@ -71,6 +87,36 @@ class BackgroundServiceManager {
   Future<void> setPowerMode(String mode) async =>
       _svc.invoke('powerMode', {'mode': mode});
 
+  /// 远程「立即执行任务动作」：转交引擎隔离执行并等待结果。
+  ///
+  /// 引擎未运行时直接返回失败（调用方据此回 `rc.ack ok=false` 并给出
+  /// 可操作提示），不静默成功。
+  Future<RunNowResult> runNow(String taskId,
+      {Duration timeout = const Duration(seconds: 45)}) async {
+    if (!isRunning) {
+      return const RunNowResult(ok: false, message: '调度引擎未运行');
+    }
+    final reqId = 'run${_runSeq++}_${DateTime.now().microsecondsSinceEpoch}';
+    final completer = Completer<RunNowResult>();
+    _pendingRun[reqId] = completer;
+    // invoke 返回 void（fire-and-forget）：结果由 rcRunResult 回投。
+    _svc.invoke('runNow', {'taskId': taskId, 'reqId': reqId});
+    try {
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      _pendingRun.remove(reqId);
+      return const RunNowResult(ok: false, message: '引擎执行超时');
+    }
+  }
+
   bool get isRunning => _last?.running ?? false;
   bool get guardActive => _last?.guardActive ?? false;
+}
+
+/// 远程「立即执行」结果。
+class RunNowResult {
+  const RunNowResult({required this.ok, required this.message});
+
+  final bool ok;
+  final String message;
 }

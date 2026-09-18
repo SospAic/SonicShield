@@ -1,7 +1,52 @@
-# 交接文档 HANDOVER（v1.6.1-alpha.1，2026-09-16）
+# 交接文档 HANDOVER（v1.7.0-alpha.1，2026-09-19）
 
-> **给下一个会话的第一句话**：读本文档 §1-§3 恢复上下文，按 §6 的
-> 优先级清单继续，无需向用户重复确认任何已在 §8 记录的决策。
+> **给下一个会话的第一句话**：读 §0 五分钟上手 → §1 状态快照 → §6 优先级清单，
+> 即可无缝续作，**无需向用户重复确认任何已在 §8 记录的决策**。
+
+---
+
+## 0. 五分钟上手（TL;DR）
+
+**这个项目是什么**：合法个人音频自动化与自我保护工具（Flutter / Android + iOS）。
+红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
+合法替代是扫码配对。这条不要重新设计。
+
+**当前状态（2026-09-19）**：v1.7.0-alpha.1，功能层 **318/318** + 压测 **24/24** 全绿，
+`flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
+**唯一的 P0 阻塞是"没有真机"** —— 见 §6 第 1 项。
+
+**三条命令跑完全部门禁**（环境见 §3，**先关模拟器**再跑前两条）：
+
+```bash
+flutter analyze                                    # 必须 No issues found
+flutter test --exclude-tags perf                   # 期望 +318 / 318
+flutter test --tags perf --concurrency=1           # 期望 +24 / 24（必须分层，混跑假红）
+```
+
+**需要设备的两条**（先 `emulator -avd sonic_test -no-snapshot-save` 并等
+`sys.boot_completed=1`）：
+
+```bash
+flutter drive --profile --driver=test_driver/integration_test.dart \
+  --target=integration_test/perf_nfr_test.dart -d emulator-5554      # 期望 +6 / 6（AOT）
+flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3 / 3
+```
+
+**五条最容易踩的坑**（完整清单见 §7）：
+
+1. **`Edit` 会偶发 `EBUSY` 并静默不落盘**（报 success 但内容没进文件）→
+   改完关键文件**必须 grep 复核**。
+2. **`flutter build apk` 输出经管道会被 SIGTERM**（RC=1 + 无输出）→ **重定向到文件**。
+   与 `flutter test` 方向相反：**构建要落盘，测试要转换**（`tr '\r' '\n'`）。
+3. **别用 `env VAR=… flutter …` 包装**（PATH 上的 `env` 可能是 uv 风格 shim，
+   静默吞参数）→ **裸跑即可**；确需传变量用绝对路径 `/usr/bin/env`。
+4. **性能红灯先怀疑测量与阈值**，再看同一次运行里"**你没改过的那条路径**"
+   有没有同步劣化 —— 那是区分"代码回归"与"机器状态"最省事的证据。
+5. **`integration_test/` 不在默认门禁内** —— 它已经红过整整一个版本没人发现
+   （BUG-045）。改完引擎/路由**主动跑一遍** §0 的两条设备命令。
+
+**下一步做什么**：§6 优先级清单第 1 项（真机补测）是唯一 P0；
+若无真机，第 11 项（把 `integration_test/` 纳入常规门禁）是当前最高价值的可推进项。
 
 ---
 
@@ -9,19 +54,25 @@
 
 | 项 | 状态 |
 |---|---|
-| 版本 | **1.6.1-alpha.1+10**（pubspec） |
-| 提交链 | …→v1.5.0→v2.0.0-alpha→v1.6.0-alpha→(v1.6.1-alpha 本轮) |
-| 测试 | **功能层 71/71 全绿**（`--exclude-tags perf`）+ 压测层 24 例（本机负载敏感，见 §5） |
+| 版本 | **1.7.0-alpha.1+11**（pubspec） |
+| 提交链 | …→v1.5.0→v2.0.0-alpha→v1.6.0-alpha→v1.6.1-alpha→v1.7.0-alpha.1 |
+| 测试 | **功能层 318/318 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 `integration_test/native_bridge_test.dart` **6/6 × 3 种网络状态** + 冒烟 **3/3** |
 | analyze | **No issues found!** |
-| Release | ✅ 120.9MB（E:\SonicShield\build\app\outputs\flutter-apk\app-release.apk，本轮重建） |
-| 文档 | docs/00-17 + CHANGELOG + 测试报告（docs/12 含 §1-§10 全量数据） |
+| **NFR-04 AOT 绝对验收** | ✅ **已闭环**（2026-09-18 首次取得）：100 任务物化 **15ms / 预算 500ms**（33× 余量）；1000 任务 134ms / 预算 5000ms。`flutter drive --profile` → `+5 All tests passed!`（第十二轮新增条件层复用用例后为 **+6**） |
+| **任务批量写入** | ✅ **已闭环**（第十一轮，BUG-042）：`TaskRepository.upsertMany` 单事务单往返；AOT 实测 500 条 **1797ms → 170ms（10.6×）**；任务导入已改走批量 |
+| **AOT 门禁归一化** | ✅ **已闭环**（第十一轮，BUG-043）：逐条路径预算改为「本次实测往返成本 × 次数 × 3」，消除冷启必红 |
+| **条件层每轮复用** | ✅ **已闭环**（第十二轮，BUG-044）：一轮固定 4 次平台往返，与任务数解耦；AOT 50 任务 **584ms → 17ms（34×）** |
+| **v1.7 条件层设备端验证** | ✅ **已闭环**（第九/十轮）：`MODE_IN_CALL` 用模拟器真实通话覆盖；`wifi`/`cellular` 用模拟器虚拟 AP 覆盖；`NativeBridge` 另有 39 例宿主机契约锁 |
+| Release | ✅ app-release.apk（历史轮次）；app-profile.apk 148.0MB（AOT 验收用） |
+| 文档 | docs/00–18 + CHANGELOG + 测试报告（docs/12 含 §1–§21 全量数据）+ 续作主干 docs/17（每轮一节） |
+| **唯一 P0 阻塞** | **无真机接入**（`adb devices` 空）→ 见 §6 第 1 项 |
 
 **产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
 核心红线：拒绝一切「未经授权控制他人设备」的实现（docs/16 §8 有完整
 决策记录与合法替代——扫码配对）。用户曾两次要求「免同意控制」，
 已答复并落地为合法形态，**下一会话不要再重新设计此决策**。
 
-### 1.1 本轮（v1.6.1-alpha）做了什么
+### 1.1 第一轮（v1.6.1-alpha，2026-09-16）：接管审计修复（BUG-013…021）
 
 2026-09-16 接管审计（docs/17）发现：v1.6 的「远程中心 4 Tab + 设备控制
 命令」只做到「编译通过 + 代码路径存在」，**功能实际不可达**。本轮全部修复：
@@ -38,25 +89,255 @@
 
 新增回归测试 `test/remote_crypto_test.dart`（10 例），锁定密钥派生契约。
 
+### 1.2 临时协助会话（v1.7.0-alpha.1，S1–S5 代码完成）
+
+「临时码 + 访问密码」接入（ToDesk 式），设计见 **docs/18**（权威）。
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| S1 | 凭据/topic 派生/密钥/状态机（`assist.dart`） | ✅ |
+| S2 | 端点侧会话托管 + 权限门控 + MQTT 接线 | ✅ 单测 40 + 模拟器实测 |
+| S3 | 控制端接入 + 命令通道抽象 + 复用控制台 | ✅ 单测 55；⏳ 真机 E2E 未执行 |
+| S4 | 控制端审计面板 | ✅ |
+| S5 | 可选 TURN + 无 TURN 降级 | ✅ 单测 8；⏳ 对称 NAT 未验证 |
+
+**安全核心**（不要改动）：`topic = assist/hex(SHA-256(code|pw))[0:16]`。
+只窃听到临时码的攻击者**算不出主题**，因此拿不到握手密文 → 不存在离线字典
+攻击素材。若改成"用 code 做主题"（厂商常见做法），攻击者可枚举 30bit 主题
+长期收集密文再离线爆破。
+
+**本轮修掉的跨模块缺陷**（详见 CHANGELOG / docs/12 §14.3）：
+
+| BUG | 级别 | 内容 |
+|---|---|---|
+| BUG-031 | **P1** | **首次配对必然失败**：`paired()` 空表返回 `const []` + 级联 `..removeWhere` 抛异常，且调用方无 try/catch → 扫码后毫无反应 |
+| BUG-030 | P2 | 端点权限变更不刷新控制台按钮灰化 |
+| BUG-032 | P3 | 审计顺序依赖传输延迟（"收到"先于"发出"） |
+| BUG-033 | P3 | 性能用例测的是 JIT 冷启动（缺预热/单次采样） |
+| BUG-034 | P3 | `MT-01` 阈值严于 NFR-04 自身外推（口径待决） |
+
+**测试门禁已变**（上一会话记录的 93 已过期）：非性能 **318** + 性能 **24** = **342**。
+
+### 1.8 第十二轮（2026-09-18）：条件层**每轮复用**（BUG-044）+ 设备冒烟测试复活（BUG-045）
+
+取 docs/17 §18.7 第 5 项：条件评估 ≈4ms/任务（量大时应改为每轮复用）——
+清单里**唯一非硬件阻塞**的项。
+
+**① BUG-044（P3）成本随任务数线性增长**：一次条件评估读 4 次平台状态
+（电量/充电/通话/网络），每次 = 一次平台通道往返；而 `executeDue()` 一轮遍历
+**所有**到期计划 → **4N 次往返**。单任务 ≈4ms 可忽略，**50 个 ≈580ms、500 个 ≈5.8s**，
+且全部花在重复读取**同一个物理环境**上。
+
+修：拆成 `readConditionEnv()`（读一次）+ `conditionFailedIn(task, env)`（纯判定），
+两个遍历循环（`executeDue` / `onSoundEvent`）各持一个 `RoundConditionEnv` 快照。
+**`now` 刻意不进快照** —— 本地时钟无平台开销，实时取值让时段窗口判定更准。
+新增 `ConditionEnv` 值对象；`firstUnmetIn` 的判定逻辑**完全复用 `firstUnmet`**。
+
+**AOT 实测（真实 `Battery` + `NativeBridge`）**：50 任务 **584ms → 17ms（34×）**，
+本轮实际平台读取 **1 次**；从 4N 次往返变为**固定 4 次，与 N 解耦**。
+
+**② BUG-045（P2）设备冒烟测试自 v1.7 IA 重构起一直红**（本轮跑回归时发现）：
+- 合规承诺对话框（`barrierDismissible: false`）挡住导航点击，而
+  `flutter test integration_test/...` **每次卸载应用** → prefs 清空 → **每次必现**；
+- 导航标签仍是 IA 重构前的「任务/音源/守卫」，而 v1.7 定稿为
+  **5 TAB：守护/自动化/远程/日志/设置** → `Bad state: No element`。
+- **根因是"门禁覆盖面"的洞**：`integration_test/` 不在默认门禁内（只跑 `test/`），
+  于是它红了整整一个 IA 版本无人察觉。修复后冒烟 **3/3**。
+
+**③ 本轮踩坑**：`Edit` 两度 EBUSY **静默不落盘**（报 success 但内容不在文件里，
+一次由 `flutter analyze` 的 `Undefined name 'env'` 抓出）；
+且**自己写的并发用例抓出了自己实现的缺陷**（初版缓存结果值而非 Future →
+并发在途取值各读一次，`Actual: <3>`）。
+
+### 1.7 第十一轮（2026-09-18）：`TaskRepository.upsertMany`（BUG-042）+ AOT 门禁归一化（BUG-043）
+
+取 docs/17 §17.7 第 5 项后半句：`TaskRepository` 无批量 API（AOT CRUD 余量 1.3×）。
+这是 BUG-035 之后**最后一个"每次调用 = 一次平台通道往返"的真实批量写入路径**。
+
+**① BUG-042（P2）**：新增 `upsertMany`（`batch()` 单事务 / **单次**往返），
+`upsert` 与 `upsertMany` 共用 `static _row(Task)` 避免行映射漂移；
+唯一生产调用方（`settings_screen.dart` 的任务导入）由逐条 `await upsert()` 改为批量。
+
+> **第一收益是原子性，第二才是速度**：逐条循环中途失败会留下**半批启用中的任务**
+> —— 设置页报"导入失败"，列表里却已多出一截会真的放音。单事务天然免疫。
+
+**② BUG-043（P2）**：AOT 首跑（模拟器冷启）`任务 CRUD 500 次: 3340ms / 预算 2000ms → OVER`。
+排查确认**非代码回归**：同一次运行里**本轮未改动的** `exec_logs` 逐条路径**同步**劣化
+1.55 → 2.475ms/次（1.6×）→ 机器级劣化；热机复跑 1764ms 落在上一轮记录区间内。
+根因：成本 ∝ 往返次数，单次往返成本随机器状态浮动 1.6×，而 2000ms 预算热机余量仅 1.13×
+→ **冷启必红**。修：基准测量提前，逐条路径预算改为 `本次实测往返成本 × 次数 × 3`
+（基准行自身保留绝对护栏，否则"3× 自己"恒真）。
+
+**③ 回归锁**：`test/db_repository_test.dart` **+5 例**（含原子性锁）。
+原子性注入点用 `_ExplodingTask extends Task` 覆写 `toRow()` 抛错 —— 落在
+`commit()` **之前**（注入在之后就是恒真断言）。**已证伪**：临时改回逐条循环，
+`Actual: [Instance of 'Task', Instance of 'Task']` 残留恰好 2 条，随后恢复并 grep 复核。
+
+**④ AOT 量化**：任务 500 条写入 冷启 1797ms → 批量 170ms（**10.6×**）；
+热机 936 → 101ms（9.3×）。
+
+### 1.6 第十轮（2026-09-18）：`requireWifi` 网络分支设备端验证 + `NativeBridge` 宿主机契约锁
+
+第九轮 §16.8 把「`requireWifi` 的非 cellular 分支」记为"需真机"，
+但本轮发现**模拟器自带虚拟 AP**，于是把它推到了闭环；并补上第九轮暴露的空白 ——
+`NativeBridge` 的 Dart 侧契约**零覆盖**（本仓库此前没有任何测试用过 mock channel，
+日常 `flutter test` 完全不碰它）。
+
+**① 用模拟器内置虚拟 AP 制造 Wi-Fi（可复用技巧）**
+
+```bash
+adb shell cmd wifi connect-network AndroidWifi open   # 连上内置开放热点
+adb shell svc wifi disable                            # 回落到移动网络
+```
+
+同一套设备端用例跑三次构成 **A→B→A 往返**，每次 `+6 All tests passed!`：
+
+| 运行 | 活跃网络 | `networkType()` | `isOnWifi()` | `firstUnmet()` |
+|---|---|---|---|---|
+| R1 移动网络 | `100` MOBILE[NR] | `cellular` | `false` | `不在 Wi-Fi 下` |
+| R2 **Wi-Fi** | `101` WIFI | **`wifi`** | **`true`** | **`null`**（全满足） |
+| R3 关 Wi-Fi 回落 | `100` MOBILE[NR] | `cellular` | `false` | `不在 Wi-Fi 下` |
+
+R2 证明 `wifi` 分支成立；R3 证明取值**跟着真实网络状态走**，不是缓存污染。
+
+**② 新增 `test/native_bridge_test.dart`（39 例）—— 锁三层**
+
+| 层 | 锁什么 |
+|---|---|
+| 字面量 | 通道 `sonic_shield/native` + 方法名 `callState` / `networkType`（拼错只会得到静默 `null`） |
+| 契约 | 每个方法在「有值 / 返回 null / 抛异常 / 无实现」四种输入下的返回值 |
+| 后果 | 桥读数 × `TaskCondition` 的**最终决策**（用户可见面是"拦不拦"） |
+
+顺带补齐既有方法（`exactAlarmSupported` / `setExactAlarms` / `serviceShouldRun` /
+`isIgnoringBatteryOptimizations` / `setVolume`）的降级默认值。
+
+**③ BUG-041（P2，已修）：`isOnWifi()` 把"无法判定"当成了"不满足"**
+
+`networkType()` 的 `unknown` 语义是**无法判定**（原生取不到 `ConnectivityManager`、
+或拿到活跃网络却读不出 capabilities；桥不可用时 Dart 侧也回落到它），
+但原实现让 `unknown` 落到 `false` —— 而 `false` 在条件层是
+**"确定不在 Wi-Fi 下"** → 任务被拦下，审计写 `不在 Wi-Fi 下`（一个我们并不知道的原因）。
+这直接违反 `TaskCondition` 文档的既有约定（"无法判定时按满足处理……
+不会因为某个平台读不到状态就把全部自动化静默停掉"）。
+修复：`if (t == null || t == 'unknown') return null;`，
+并写明 `none`（确实没有活跃网络 → `false`）与 `unknown`（读不出来 → `null`）的差别。
+
+**④ 回归锁证伪（三个探针，均确认"能失败"后恢复）**
+
+| 探针 | 临时改动 | 实测 |
+|---|---|---|
+| A | `isOnWifi()` 的 `null` 分支 → `return false` | 3 例失败（`Expected: null / Actual: <false>`） |
+| B | 方法名 `callState` → `callStateX` | NB-H01 失败（`Expected: ['callState'] / Actual: ['callStateX']`） |
+| C | `isOnWifi()` 的 `unknown` 分支改回旧行为 | 2 例失败，串联用例 `Actual: '不在 Wi-Fi 下'` ← **实测复现 BUG-041 的用户可见后果** |
+
+**⑤ 门禁**：`flutter analyze` No issues found!；非性能 **301/301**；性能 **24/24**；
+新文件 **39/39**；设备层 **6/6 × 3 种网络状态**。总数 **286 → 325**（增量已同步回写）。
+
+### 1.5 第九轮（2026-09-18）：v1.7 条件层的**设备端验证**（桥接方法首次真实执行）
+
+第八轮新增的 Kotlin `callState` / `networkType` 当时**只验证到编译通过**
+（产物新鲜 ≠ 运行正确）。本轮把它们放到真实 Android 运行时上执行，
+并**用模拟器制造真实通话**（`am start -a android.intent.action.CALL -d tel:10086`
+→ `Audio mode = MODE_IN_CALL`、`mCallState=2`）来覆盖"通话中"分支。
+
+新增 `integration_test/native_bridge_test.dart`（6 例），**同一套用例跑两次**：
+
+| 场景 | `isInCall()` | `networkType()` | `firstUnmet()` | 结果 |
+|---|---|---|---|---|
+| 空闲 | `false` | `cellular` | `不在 Wi-Fi 下` | `+6 All tests passed!` |
+| **真实通话中** | **`true`** | `cellular` | **`通话中（不打扰通话）`** | `+6 All tests passed!` |
+
+挂断后 `Audio mode` 回到 `MODE_NORMAL` —— 取值翻转确由通话引起，而非环境漂移。
+
+**"零权限判定通话"获得三方证据**：①Manifest 声明 16 项权限、**无任何电话状态/
+通话日志类权限**（`dumpsys package` 实读）；②运行时 `Permission.phone = denied`；
+③在此前提下 `isInCall()` 仍能正确区分空闲/通话两种状态。
+
+**桥接调用成本**：600 次调用 1367ms（空闲）/ 1170ms（通话中）≈ **2.0–2.3ms/次**，
+与 BUG-035 的"每次平台通道往返 ≈1.5ms"同量级。推论：一次条件评估
+（`isInCall` + `isOnWifi`）≈ **4ms**，是每个到期任务每轮新增的开销。
+
+| BUG | 级别 | 内容 |
+|---|---|---|
+| **BUG-039** | P2 | `rc.offline` 离线哨兵**无 UI 消费**：端点已识别 LWT 并转发、docs/14 把"LWT 离线哨兵"列为可用性特性，但界面上完全看不到。修：新增离线横幅（"命令将入队，端点上线后自动执行"）+ 心跳恢复即消失 |
+| **BUG-040** | P3 | `networkType()` 的 Dart 契约漏了 `vpn`（Kotlin 会返回该值）→ 契约与实现不一致，`requireWifi` 的判定语义因此没有书面依据。修：补文档并说明 `vpn` 的真实语义（**物理承载优先**，仅当底层承载也读不到时才会落到 `vpn`） |
+
+> **计数更正（重要）**：`test/remote_console_tab_test.dart` 实为 **6 例**
+> （4 例 BUG-037/038 + 2 例 BUG-039），而 §1.4 与 docs/12 §16.5 只记了 4 例 ——
+> BUG-039 的修复与 2 例回归测试在第八轮门禁**之后**才落地，未回写文档。
+> 故当前真实基线是 **262 非性能 + 24 性能 = 286**，上一轮记的 260/284 少算这 2 例。
+> 两种独立方法互相印证：逐文件静态计数（`^\s*(test|testWidgets)\(`）合计 286、
+> 实跑 `+262` 与 `+24`。**前几轮的 237/260 是各自时刻的真实测量值，并非写错**，
+> 缺的是"门禁跑完后又有测试增量"这一步的补记。
+
+### 1.4 第七轮（2026-09-18）：远程控制台代码审计（BUG-037 / BUG-038）
+
+头部待办全依赖硬件且无真机，故按任务约定转「代码审计」。审计手段是
+**`RcCmd` / `RcEvt` 三向覆盖比对**（端点处理器 / 控制器发送 / 事件消费），
+一次性定位 5 条断链命令 —— 与 BUG-013/014/021 同一类。
+
+| BUG | 级别 | 内容 |
+|---|---|---|
+| **BUG-037** | P2 | 控制台「设备快照回执」卡片**永久不可见**（`device.status` 全项目无人发送 → `_lastDevice` 恒为 null）；`logs.recent` → `rc.logs` **收发两端皆断**。两者是 BUG-020 遗留清单里**唯一被漏掉**的一项。修：新增「设备状态」「端点日志」入口 + 消费 `rc.logs` + 渲染卡片 |
+| **BUG-038** | P3 | `_pendingAcks` 对 `status.get`/`device.status`/`location.get`/`logs.recent` 无界增长（响应是专用事件、端点不回 `rc.ack`，条目永不清理）。修：改传 `trackAck: false` |
+
+**新增 `test/remote_console_tab_test.dart` —— 该组件此前零覆盖**。
+可测性来自 `RcCommandChannel` 抽象（注入假通道即可，无需真机/broker）。
+**回归锁已验证"能失败"**：临时把 `trackAck` 改回 `true`，第 4 例确实失败，
+证明判据非恒真、泄漏真实存在，随后恢复。
+> ⚠️ 该文件现有 **6 例**（后续又加了 BUG-039 的 2 例离线哨兵用例），
+> 此处原先记的 4 例是当时状态，**以 §1.5 的计数更正为准**。
+
+**记录但未改**：`asset.list` / `preset.list` / `task.get` 亦为"端点有实现、
+控制器不发"，判定为有意保留（`task.list` 已返回完整定义；音效按钮用固定分类）。
+
+### 1.3 第六轮（2026-09-18）：NFR-04 的 AOT 绝对验收闭环 + 两处口径纠正
+
+| 项 | 内容 |
+|---|---|
+| **NFR-04 AOT 验收** | ✅ **闭环**。首次取得 AOT 数据：100 任务物化 **15ms / 500ms 预算**（33× 余量）、1000 任务 134ms / 5000ms。命令见 §3 |
+| ~~profile 构建被沙箱拦截~~ | ❌ **已证伪**：真因是 `env` 被同名脚本劫持（见 §3）。`flutter build apk --profile` 成功 148.0MB/421.2s |
+| **BUG-035（P2）** | 设备上 `exec_logs 5000 条写入` = 7755ms（预算 3000ms，**两次复跑位级一致**）。根因：每次 sqflite 调用 = 一次平台通道往返 **≈1.5ms**。修：新增 `LogRepository.appendMany()`（batch），**7036ms → 275ms（25.6×）** |
+| **BUG-036（P3）** | JIT 套件套用 AOT 绝对预算（100 任务 ≤500ms），而 JIT 实测 510ms、AOT 15ms（差 34×）→ 门禁边缘随机红绿。修：JIT 侧改为「实测基线 × 3」数量级护栏，绝对验收归位 AOT |
+
+> **BUG-036 ≠ BUG-034**：后者是"阈值严于其规范来源"（口径写错）；
+> 前者是"规范正确但**测量模式**用错了"。故本次不是放宽，而是两类阈值各归其位。
+
+**新增设备侧观察项**：`任务 CRUD 500 次` AOT 余量仅 1.3×（1477–1679ms / 2000ms），
+同属"每次调用 ≈1.5ms 平台往返"结构；未超标，但调用次数上升时需改走 batch。
+> **第十一轮已闭环**：`TaskRepository.upsertMany` 已补，任务导入改走批量（1797ms → 170ms）；
+> 该行预算亦已归一化（BUG-043），不再随机器冷暖红绿。
+
 ## 2. 功能全景（已交付）
 
 - **核心调度**：六触发（固定/每日/每周/随机窗口/随机间隔/声音触发）×
   六动作（播放/声景混音/TTS/通知/取证录音/震动/组合）+ 条件层
-  （充电/电量/时段）+ 取证 SHA-256 哈希链
+  （充电/电量/时段/**仅 Wi-Fi**/**通话中不执行**）+ 取证 SHA-256 哈希链
 - **后台**：双通道触发（引擎 Timer + 原生精确闹钟）+ 开机自恢复 +
   8 厂商保活引导 + schema v2
-- **远程中心（`/remote`，v1.6.1 起真正可达）**：4 子 Tab
-  - 控制台：Ping/状态快照/任务列表远程开关/分类音效/守卫开关/
-    音量/定位回传（camera.snap 暂缓）+ 事件流回执渲染
+- **信息架构（v1.7 定稿，5 个底部 TAB）**：守护 / 自动化 / 远程 / 日志 / 设置
+  - 子 TAB 用 `?t=` 深链（如 `/local?t=1`）；旧路径 `/tasks`、`/sounds`、
+    `/guard`、`/stats` 保留 redirect；底部导航用 `StatefulShellRoute.indexedStack`
+    保持各分支状态。
+  - 分组页骨架 `lib/core/widgets/section_scaffold.dart`；被聚合的页面都有
+    `embedded: true` 模式（去 AppBar 但**保留操作入口**）。
+  - 整页路由（不显底部导航）：任务编辑器、通话、对讲、扫码配对、指令组组装器。
+- **远程中心（`/remote`，v1.6.1 起真正可达）**：4 个子 TAB
+  - 控制台：Ping/设备状态快照/端点日志/任务列表远程开关/分类音效/守卫开关/
+    音量/定位回传（camera.snap 暂缓）+ 事件流回执渲染 + 离线哨兵横幅
   - 指令组：收藏模板一键发送 + 组装器（动作+时延，端点立即执行、
     通知栏进度+终止按钮）
   - 对讲机：整页 PTT（AAC≤60s 端到端加密）
   - 通话：WebRTC P2P + MQTT E2EE 信令 + 自动接通 + RTCVideoView 渲染
   - **设置入口**：AppBar 齿轮 → `/remote/settings`（模块开关/身份/代理/
-    配对管理；v1.2 旧总览页）
+    配对管理/TURN 中继；v1.2 旧总览页）
+- **临时协助会话（v1.7，S1–S5）**：ToDesk 式「9 位临时码 + 8 位访问密码」接入，
+  设计见 **docs/18**（权威）。端点侧发起、横幅常驻、一次性 + TTL 10 分钟、
+  权限默认全拒、全程审计；控制端经 `RcCommandChannel` 抽象驱动同一个控制台。
 - **配对**：扫码配对（`/remote/pair-qr`）+ 手输备用
 - **数据**：统计看板（7 天趋势/分布/占比）+ 加密备份（PBKDF2 12 万次+
-  AES-256-GCM）+ 任务导出导入 + 审计日志 + 60 条合成音效库
+  AES-256-GCM）+ 任务导出导入（走 `upsertMany` 批量路径）+ 审计日志 +
+  60 条合成音效库
 
 ## 3. 环境地图（每次新 shell 必须 export）
 
@@ -69,11 +350,18 @@ export PATH="/e/dev/flutter/bin:/e/dev/android-sdk/platform-tools:$PATH"
 export MSYS_NO_PATHCONV=1   # adb shell 内 /sdcard 路径防 Git Bash 转换
 ```
 
-**测试环境两个必踩的坑（v1.6.1 实测新增）**：
+**测试环境两个必踩的坑（第六/九/十二轮反复实测）**：
 
 ```bash
-# 1) Git Bash 不传递 ProgramFiles(x86) → flutter test 中止于 MSVC 探测
-env "PROGRAMFILES(X86)=C:\\Program Files (x86)" flutter test --exclude-tags perf
+# 1) ⚠️ 绝对不要用 `env "PROGRAMFILES(X86)=..." flutter ...` 这种包装！
+#    PATH 上名为 env 的第一个可执行文件是 uv 风格的 PATH 修补脚本
+#    （~/.local/bin/env，设计用途是 source 而非执行），
+#    它被当程序调用时**吞掉全部参数并返回 0** → 命令根本没跑、且无任何输出。
+#    2026-09-18 实测：裸 `flutter analyze` = 29.7s 有输出；
+#    `env ... flutter analyze` = 0.35s 无输出；`env FOO=bar bash -c 'echo x'` 也无输出。
+#    本机宿主已注入 ProgramFiles(x86)，**裸跑即可**；若确需设置，用绝对路径 /usr/bin/env。
+#    ✅ 2026-09-19 再次复核：三层门禁**全部裸跑正常**，无需该变量 ——
+#       `flutter test --tags perf --concurrency=1` → +24/24（未传 PROGRAMFILES(X86)）。
 # 2) 会话级代理会拦截 flutter_tester 回环 WebSocket
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 export NO_PROXY=127.0.0.1,localhost
@@ -86,11 +374,32 @@ export NO_PROXY=127.0.0.1,localhost
 | Android SDK（36/NDK/CMake） | E:\dev\android-sdk |
 | Gradle 9.3.1 缓存 | %USERPROFILE%\.gradle\wrapper\dists\...9ot9...（wrapper 已指向 file:///E:/dev/gradle-dist/） |
 | 全局镜像 init | %USERPROFILE%\.gradle\init.d\mirror.gradle |
-| AVD sonic_test | headless 启动：`emulator -avd sonic_test -no-window -no-audio -gpu swiftshader_indirect -cores 2` |
+| AVD | `sonic_test` / `sonic_b` —— **只跑一个**（两个同开会争内存，可能导致 analyze/test 被 SIGTERM） |
+
+**启动模拟器并等就绪**（设备端命令的前置；boot 约 30–60s）：
+
+```bash
+"$ANDROID_HOME/emulator/emulator.exe" -avd sonic_test -no-snapshot-save -no-boot-anim &
+until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" = "1" ]; do sleep 10; done
+```
+
+> 性能测量建议**先热机再测**：冷启模拟器的单次平台往返成本比热机高约 **1.6×**
+> （实测 2475µs vs 1565µs），会让绝对值型断言误红（BUG-043）。
 
 **关键命令**：
-- 测试分层：`flutter test --exclude-tags perf`（功能 71 例）/ `flutter test --tags perf --concurrency=1`（压测 24 例；混跑会因 CPU 争用假红——这是特性不是 bug）
-- 构建：`flutter build apk --release`（必须带上述环境变量）
+- 测试分层：`flutter test --exclude-tags perf`（功能 **318** 例）/
+  `flutter test --tags perf --concurrency=1`（压测 **24** 例；混跑会因 CPU 争用假红——这是特性不是 bug）
+- 构建：`flutter build apk --release` / `flutter build apk --profile`
+  （**输出必须重定向到文件**，见 §7）
+- **AOT 性能验收（绝对验收，可常态化跑；`flutter drive` 会自行重建 APK）**：
+  ```bash
+  flutter drive --driver=test_driver/integration_test.dart \
+    --target=integration_test/perf_nfr_test.dart --profile -d emulator-5554
+  ```
+- **设备端冒烟（`integration_test/` 不在默认门禁内，改完引擎/路由要主动跑）**：
+  ```bash
+  flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3/3
+  ```
 - 模拟器装测：`scripts/emulator_test.ps1`
 
 ## 4. 关键架构速记
@@ -120,10 +429,17 @@ export NO_PROXY=127.0.0.1,localhost
    不兼容，41 编译错——camera.snap 因此暂缓；**已核实 camera 0.12.1
    （2026-09-03）changelog 仍无 AGP9 支持**）｜flutter_webrtc ✅｜
    geolocator 13.x ✅（14.x 与 device_info_plus win32 冲突）
-8. Dart 陷阱已修复四处：`List<dynamic> as List<Map>` 运行时必抛
+8. **条件层架构（v1.7 + 第十二轮）**：`TaskCondition`（纯判定，`firstUnmet()` /
+   `firstUnmetIn(env, now:)`）+ `ConditionEnv`（平台来源输入的值对象）+
+   `RoundConditionEnv`（**每轮只读一次**平台环境并复用，惰性、缓存 **Future** 而非结果值）。
+   引擎侧拆为 `readConditionEnv()`（读平台）+ `conditionFailedIn(task, env)`（纯判定）；
+   `executeDue()` 与 `onSoundEvent()` 各持一个快照。**`now` 不进快照**（本地时钟无开销）。
+   一轮固定 4 次平台往返，与任务数解耦（AOT 50 任务 584ms → 17ms）。
+9. Dart 陷阱已修复多处：`List<dynamic> as List<Map>` 运行时必抛
    （BUG-012，用 .cast）；条件层 local 函数需先声明后引用；
-   开发期优先 Edit 工具而非 sed 多行替换（本会话多次 sed 手术事故）；
-   **本会话新增：Edit 偶发 EBUSY 未落盘 → 改完关键文件必须 grep 复核**。
+   **Dart 不能写局部 getter**（函数体内 `Type get x => …` 会被解析成局部函数，
+   需提到文件顶层）；开发期优先 Edit 工具而非 sed 多行替换（多次 sed 手术事故）；
+   **Edit 偶发 `EBUSY` 静默未落盘（累计 5 次）→ 改完关键文件必须 grep 复核**。
 
 ## 5. 已验证记录
 
@@ -131,31 +447,123 @@ export NO_PROXY=127.0.0.1,localhost
 杀进程 5s 自愈/真实触发执行/预置库 60 条导入试听/冷启动 1574ms/PSS 97MB/
 Monkey 400 零崩溃。
 
-**本轮静态与单元验证**：
-- `flutter analyze` → No issues found!
-- `flutter test --exclude-tags perf` → **71/71 All tests passed!**（61 基线 + 10 新增）
-- `flutter test --tags perf --concurrency=1` → 20/24（三次复跑 20/19/20）；
-  4 例纯耗时超标且**与本次改动无关**（调度物化/exec_logs 写入/MT-01），
-  跨轮波动 2–7 倍，判为**本机负载降频**，需空载机器复跑确认（docs/12 §10.3）。
+**v1.7.0-alpha.1 第十二轮（条件层每轮复用 + 设备冒烟复活，最新）**：
+- `test/condition_env_test.dart` → **12/12 全绿**（新增，含 8 条件 × 8 环境 = 64 组穷举等价性）。
+- 修 **BUG-044（P3）**：条件评估由"逐任务读平台"改为**每轮读一次并复用**
+  （`ConditionEnv` + `RoundConditionEnv`），成本与任务数解耦。
+- 修 **BUG-045（P2）**：`integration_test/app_smoke_test.dart` 自 v1.7 IA 重构起
+  一直红（合规弹窗未关 + 导航标签过期）→ **3/3**。
+- `flutter analyze` → No issues found!；非性能 **318/318**；性能 **24/24**；
+  `flutter drive --profile`（perf_nfr_test）→ **6/6**；设备冒烟 **3/3**。
+- AOT 实测（真实 `Battery` + `NativeBridge`）：条件评估 50 任务
+  **584ms → 17ms（34×）**，本轮实际平台读取 **1 次**。
+- 证伪：复用锁实测"能失败"（`Actual: <7>` 任务数 / `<3>` 并发）。
 
-**未实测**：双设备互通（视频/对讲/远程命令端到端）、真机 M4 长跑、
-Doze 深睡（模拟器限制）。
+**v1.7.0-alpha.1 第十一轮（任务批量写入 + AOT 门禁归一化）**：
+- `test/db_repository_test.dart` → **22/22 全绿**（含新增 5 例 `upsertMany` 回归锁）。
+- 修 **BUG-042（P2）**：`TaskRepository.upsertMany`（单事务/单往返）+ 任务导入改走批量。
+- 修 **BUG-043（P2）**：AOT 逐条路径预算改为自归一化，消除"冷启必红"。
+- `flutter analyze` → No issues found!；非性能 **306/306**；性能 **24/24**；
+  `flutter drive --profile`（perf_nfr_test）→ **5/5**。
+- AOT 实测：任务 500 条写入 **1797ms → 170ms（10.6×）**（冷启）/ 936 → 101ms（热机）。
+- 证伪：原子性锁实测"能失败"（残留恰好 2 条，具象复现 BUG-042）。
+
+**v1.7.0-alpha.1 第十轮（网络分支验证）**：
+- `test/native_bridge_test.dart` → **39/39 全绿**（新增，`NativeBridge` 首次有宿主机测试）。
+- `integration_test/native_bridge_test.dart` → **6/6 × 3 种网络状态**
+  （移动网络 / Wi-Fi / 关 Wi-Fi 回落），A→B→A 往返取值正确翻转（见 §1.6 表）。
+- `flutter analyze` → No issues found!；非性能 **301/301**；性能 **24/24**。
+- 修 **BUG-041（P2）**；三个证伪探针均确认新锁"能失败"。
+
+**v1.7.0-alpha.1 第九轮（桥接方法设备端验证）**：
+- `integration_test/native_bridge_test.dart` → **6/6 全绿**，且**同一套用例在
+  "空闲"与"真实通话中"两种设备状态下各跑一次、两次都全绿**（见 §1.5 表）。
+  这是本项目第一次让 v1.7 的 Kotlin 桥接方法**真正执行**，而非只验证编译。
+- 权限审计（`adb shell dumpsys package com.sonicshield.sonic_shield`）：
+  声明 16 项权限，**无任何电话状态/通话日志类权限**。
+- `flutter analyze` → No issues found!；`flutter test --exclude-tags perf` → **262/262**；
+  `flutter test --tags perf --concurrency=1` → **24/24**。
+
+**v1.7.0-alpha.1 静态与单元验证（2026-09-18 第八轮）**：
+- `flutter analyze` → No issues found!
+- `flutter test --exclude-tags perf` → **260/260 All tests passed!**（当时状态；
+  之后 BUG-039 又加了 2 例，现为 262，见 §1.5）
+- `flutter test --tags perf --concurrency=1` → **24/24 全绿** ✅
+  （JIT 护栏口径；绝对性能判定以 AOT 为准，见下）
+- `flutter build apk --debug` → 261.3MB（`assembleDebug` 519.8s）✅
+  —— 本轮改了 Kotlin（`NativeBridgePlugin.kt` 新增通话状态/网络类型），
+  构建通过即证明 Kotlin 编译无误
+- 本轮新增：条件层「通话中不执行」（默认开）+「仅 Wi-Fi」（均**零新增权限**）；
+  media 通道音频焦点由 `gain` 改为 `gainTransientMayDuck`；审计原因精确化
+
+**v1.7.0-alpha.1 第六轮（AOT 绝对验收，仍是当前 AOT 基线）**：
+- **`flutter build apk --profile` → app-profile.apk 148.0MB（assembleProfile 421.2s）** ✅
+  —— **推翻"profile/release 构建被沙箱拦截"的结论**（真因是 `env` 被同名脚本劫持，见 §3）
+- **NFR-04 AOT 绝对验收（首次取得，`flutter drive --profile -d emulator-5554`）** ✅
+  ```
+  00:21 +5: All tests passed!   （DRIVE_EXIT=0）
+  [NFR-AOT] NFR-04 · 100 任务物化: 15ms / 预算 500ms → PASS      （33× 余量）
+  [NFR-AOT] NFR-04 · 500 任务物化: 75ms / 预算 2500ms → PASS
+  [NFR-AOT] MT-01 · 1000 任务物化: 134ms / 预算 5000ms → PASS
+  [NFR-AOT] DPRNG planSeed 10 万次: 12ms / 预算 1000ms → PASS
+  [NFR-AOT] 任务 CRUD 500 次: 1553ms / 预算 2000ms → PASS
+  [NFR-AOT] exec_logs 5000 条逐条写入: 7036ms（1407µs/次）
+  [NFR-AOT] exec_logs 5000 条批量写入: 275ms / 预算 3000ms → PASS  （25.6× 加速）
+  [NFR-AOT] dailyCounts 万级聚合: 16ms / 预算 50ms → PASS
+  ```
+  AOT 数据复现性好（三次偏差 10–15%；`exec_logs 逐条` 两次位级一致），
+  且 `flutter drive --profile` 单次仅 **76–116s**（Gradle 增量）→ 可常态化跑。
+- `flutter build apk --debug` → 222.8MB（475s）✅
+- 设备：双 AVD（sonic_b + sonic_test）安装启动 ✅；**6 次冷启无 `SQLITE_BUSY`**；
+  **协助会话真实 broker 端到端集成测试通过** ✅
+  （`integration_test/assist_e2e_test.dart`，模拟器 + 公网 broker，全流程 8s：
+  握手 → accept → 默认全拒 → ping 回执 → 未授权命令被拒 → 放行同步 → 挂断）。
+  ⚠️ 残余未覆盖：**两个不同 Android 进程/机型**（无真机接入；双 AVD UI 自动化
+  触发 `System UI ANR` 且无深链只能盲点坐标）→ docs/12 §14.5。
+
+**未实测**：两个独立 Android 进程的真机握手、对称 NAT 降级、真实扬声器出声、
+双设备视频/对讲端到端、真机 M4 长跑、Doze 深睡（模拟器限制）、
+**`ethernet` / `vpn` 两种网络类型**（`wifi`/`cellular` 已用模拟器虚拟 AP 闭环；
+模拟器造不出以太网/VPN 场景）。
 
 ## 6. 下一步优先级（按序执行）
 
-1. **P0 双设备实测**（现在才具备可跑通条件）：两台真机/模拟器各装 release 包，
-   走完「互扫二维码配对 → 控制台命令（Ping/状态/任务开关/音量/定位）→
-   指令组（含终止）→ 对讲 → 视频通话」全链路，结果补 docs/12 §10.5。
-   注意：双方都要开启远程模块（否则端点离线）；对称 NAT 需自建 TURN。
-2. **P1 BUG-020 补 UI 入口**：`task.skipNext` / `logs.recent`（控制台）
-   与远程 `script.stop`（指令组 Tab）端点已实现但无入口。
-3. **P1 camera.snap 启用**：等 camera 插件发布 AGP9 兼容版（关注
+1. **P0 真机补测协助会话握手**（S3 验收的最后残余维度）：接一台真机
+   （`adb devices` 非空），按 docs/17 §12.5 步骤跑；真实 broker 链路已由
+   `integration_test/assist_e2e_test.dart` 覆盖，此步只补"两个独立 Android
+   进程/机型"维度（跨机型时钟偏差、厂商后台策略）。
+   注意：双方都要开启远程模块；broker 默认 `broker.emqx.io`（已验证可达）。
+2. ~~**P0 NFR-04 的 AOT 绝对验收**~~ → ✅ **第六轮已闭环**（100 任务物化 15ms /
+   预算 500ms，33× 余量）。后续若改调度引擎，按 §3 命令重跑即可（单次仅 76–116s）。
+3. ~~**P1 v1.7 条件层设备端验证**~~ → ✅ **第九/十轮已闭环**：通话分支（模拟器真实通话）
+   + `wifi`/`cellular`（模拟器虚拟 AP）+ `NativeBridge` 宿主机契约锁（39 例）。
+   残余仅 `ethernet` / `vpn` 两种网络类型，见上"未实测"。
+4. **P1 双设备实测**（配对 → 控制台 → 指令组 → 对讲 → 视频通话）补 docs/12 §10.5。
+   注：协助会话那一条链路的**单机双连接 E2E 已通过**
+   （`integration_test/assist_e2e_test.dart`，真实公网 broker，无进程内捷径），
+   此项残余的只是"两个独立 Android 进程/机型"这一维度。
+5. **P1 对称 NAT 场景验证**（S5 验收项）：需真实移动网络双端。
+6. **P1 camera.snap 启用**：等 camera 插件发布 AGP9 兼容版（关注
    pub.dev changelog），恢复 `endpoint_service._snapPhoto`（git 历史
    提交里有完整实现可考）+ 恢复依赖 + 启用 docs/16 §9 表格项。
-4. **P1 YAMNet**：模型源当前不可达（tfhub/kaggle 403/404）；接口就绪，
+7. **P1 YAMNet**：模型源当前不可达（tfhub/kaggle 403/404）；接口就绪，
    用户放入 yamnet.tflite 即启用（docs/06 §6）。
-5. **P2** Opus 流式对讲、锁屏 PTT 小组件、TURN 配置、Drift 迁移、en 国际化。
-6. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
+8. **P2** Opus 流式对讲、锁屏 PTT 小组件、Drift 迁移、en 国际化。
+9. ~~**P2（第六轮新增观察项）** `TaskRepository` 无批量 API~~ → ✅ **第十一轮已闭环**
+   （BUG-042）：`upsertMany` 已补（单事务/单往返），任务导入改走批量，
+   AOT 实测 500 条 **1797ms → 170ms（10.6×）**。同轮把 `任务 CRUD 500 次` 的
+   绝对预算改为**自归一化**（BUG-043），消除冷启必红。
+10. ~~**P3（第九轮新增观察项）** 条件评估的平台开销：一次条件评估 =
+    `isInCall` + `isOnWifi` ≈ **4ms**（实测 2.0–2.3ms/次）。当前每轮到期任务
+    各付一次，规模小可忽略；若单轮到期任务数上到数百，应改为**每轮评估一次并复用**
+    （同一轮内所有任务的环境条件相同）。~~
+    → ✅ **第十二轮已闭环（BUG-044）**：拆出 `readConditionEnv()` +
+    `conditionFailedIn()`，两个遍历循环各持一个 `RoundConditionEnv` 快照；
+    AOT 实测 50 任务 **584ms → 17ms（34×）**，一轮固定 4 次往返。
+11. **P2（第十二轮新增）** `integration_test/` **未纳入常规门禁**（BUG-045 暴露）：
+    默认门禁只跑 `test/`，于是设备冒烟测试红了整整一个 IA 版本无人察觉。
+    建议纳入 CI 或定期执行。解除条件：有一个带模拟器/真机的例行执行入口。
+12. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
 
 ## 7. 会话操作守则（血泪教训）
 
@@ -163,11 +571,83 @@ Doze 深睡（模拟器限制）。
   （修复法：git checkout <file> 重做）。
 - **Edit 偶发 `EBUSY: resource busy or locked` 静默不落盘**（本会话 3 次）：
   改完关键文件后用 grep/sed 复核内容，不要只看「Successfully edited」。
+- **`flutter build apk` 的输出经管道会被 SIGTERM**（退出码 1 + 无输出，
+  极易误判为"沙箱拦截"或"编译失败"）。**重定向到文件即正常**：
+  `flutter build apk --debug > /tmp/fbuild.log 2>&1`。
+  与 `flutter test` 需 `tr '\r' '\n'` 是同类输出处理问题但方向相反：
+  **构建要落盘，测试要转换**。
+- **⚠️ 绝对不要用 `env VAR=… flutter …` 包装命令（第六轮血泪教训）**：
+  PATH 上名为 `env` 的第一个可执行文件可能是 `~/.local/bin/env`，内容是 **uv 风格的
+  PATH 修补脚本**（`#!/bin/sh` + `case … export PATH`），设计用途是 **`source`**。
+  它被当作**程序**调用时，只在子 shell 里改 PATH 就退出，**不转发任何参数**
+  → 退出码 0、**无输出**、**目标命令根本没跑**，极难察觉。
+  实测对照：裸 `flutter analyze` = 29.7s 有输出；`env … flutter analyze` = 0.35s 无输出；
+  `env FOO=bar bash -c 'echo x'` 也无输出。
+  历史上"profile 构建被沙箱 SIGTERM"与"flutter test 放后台不执行"两个误判**都由此而来**，均已作废。
+  另：`export 'PROGRAMFILES(X86)=…'` 在 bash 下非法（变量名含括号），只能经 `env` 传入。
+  > ✅ **2026-09-19 复核结论：优先裸跑，不要加任何包装。**
+  > 第九/十轮与第十二轮三次实测，bash 中该变量**未设置**，而裸跑
+  > `flutter analyze` / `flutter test --exclude-tags perf` / `--tags perf` 三层
+  > **全部正常出结果**（318 / 24）。确需传递时用绝对路径
+  > `/usr/bin/env "PROGRAMFILES(X86)=C:\Program Files (x86)" flutter …`。
+- **模拟器可以造出真实运行环境，不必等真机**（第九/十轮）：
+  - 通话态：`adb shell am start -a android.intent.action.CALL -d tel:10086`
+    → `dumpsys audio` 显示 `MODE_IN_CALL`；挂断 `adb shell input keyevent 6`。
+  - Wi-Fi：`adb shell cmd wifi connect-network AndroidWifi open`（内置开放热点）
+    → `dumpsys connectivity` 显示 `Active default network` 的 `Transports: WIFI`；
+    回落用 `adb shell svc wifi disable`。
+  - **同一套用例在两种环境下各跑一次并对照输出**，比"跑一次通过"强得多 ——
+    它把"取值确实随环境翻转"也证明掉了。
+- **锁原生契约用 `TestDefaultBinaryMessenger.setMockMethodCallHandler`**（第十轮首次引入）：
+  可覆盖「有值 / 返回 null / 抛异常 / 无实现」四种输入，把**没有异常信号**的静默降级
+  变成可断言的行为。**锁"后果"（`firstUnmet` 的最终决策）比锁"返回值"更值钱** ——
+  后者容易被"改了实现但行为没变"糊弄过去。
+- **`flutter test integration_test/<f>.dart -d <device>` 跑完会卸载应用** →
+  想 `dumpsys package` 审权限必须**之后再 `adb install -r`**，否则返回空
+  （会被误读成"没有权限"的假阴性）。
+- **补了回归测试就必须重跑门禁并把数字改掉**：第九轮曾因 2 例测试在门禁之后落地
+  却未回写，导致 262 与记录的 260 对不上、白花一轮核查（docs/12 §18.9）。
+- **`android/gradlew` 不可直接使用**（缺 `gradle-wrapper.jar`，
+  报 `ClassNotFoundException: GradleWrapperMain`）→ 单独编译 Kotlin
+  只能走 `flutter build`，不能指望 gradlew。
 - flutter test 全量混跑会因压测用例 CPU 争用假红——必须分层（§3 命令）。
-- 构建前必查环境变量齐全（No Android SDK / Java-Gradle 不兼容报错
-  多为环境变量丢失）。
+- **`flutter test` 的输出在重定向到文件时可能为空**（compact reporter 用 `\r`
+  刷新同一行，`wc -l` 会显示 0 行）。可靠取数法：`flutter test ... 2>&1 |
+  tr '\r' '\n' | grep -E "All tests passed|Some tests failed|\[E\]|Expected:|Actual:"`。
+  更稳的做法：`... 2>&1 | tr '\r' '\n' > /tmp/x.log`，再对日志 grep（本轮采用）。
+- **性能用例必须预热 + 取 N 次最小值**（`test/perf_bench.dart`）。
+- **性能阈值要分清"绝对验收"与"回归护栏"**：NFR 的绝对预算只能在 **AOT** 下断言
+  （`integration_test/perf_nfr_test.dart`）；JIT 套件按"实测 JIT 基线 × 3"设数量级护栏。
+  两者可差 30 倍以上（100 任务物化：AOT 15ms / JIT 510ms），
+  套错会得到不可满足的断言（BUG-036）。
+- **往返受限路径的预算必须"自归一化"**（第十一轮 BUG-043）：凡是成本
+  ∝ 平台通道往返次数的用例，预算一律写成「**本次运行实测的往返成本 × 次数 × 3**」，
+  与机器冷暖解耦；**绝对值只对纯计算成立**。基准行自身不要归一化
+  （否则等于"3× 自己"、恒真断言）。
+- **性能红灯的交叉判据（第十二轮验证有效）**：先看**同一次运行里"你没改过的那条路径"**
+  有没有同步劣化 —— 那是区分"代码回归"与"机器状态"最省事的证据。
+  实测同一份 APK：冷启模拟器每次往返 2475µs / 热机 1565µs（**1.6×**），
+  冷启下 `任务 CRUD 500 次` 会从 1764ms 劣化到 3340ms。
+  **在意绝对值就先热机再测。**
+- **性能优化要先把"性质"变成可断言的量**（第十二轮）：例如"一轮只读一次平台环境"
+  要有 `readCount` 这样的出口，否则这个优化只能靠读代码相信，写不出回归锁。
+- **缓存 Future，不要缓存结果值**（第十二轮）：缓存结果值会让**并发在途**的取值
+  各读一次（`_cached` 要到 `await` 之后才赋值）→"每轮一次"被击穿。
+- **设备端用例必须能在"全新安装"状态跑通**（第十二轮 BUG-045）：
+  `flutter test integration_test/…` 每次都会**卸载应用**，`SharedPreferences` 随之清空 ——
+  依赖持久化状态（如合规承诺已确认）的用例会**必红**，且报错只显示"点了但命中不到"。
+- **`integration_test/` 不在默认门禁内**（第十二轮 BUG-045 暴露）：
+  `flutter test --exclude-tags perf` 只跑 `test/`。所以设备用例会**静默变红** ——
+  `app_smoke_test.dart` 就红了整整一个 IA 版本无人察觉。
+  **改完引擎/路由/信息架构，主动跑一遍 §3 的设备端冒烟命令。**
+- **AOT 验收可以常态化跑**：`flutter build apk --profile` 首次 421.2s，
+  之后每次 `flutter drive --profile` 仅 **76–116s**（Gradle 增量）。不要把它当"重活"。
 - 用户会周期性要求「一次性完成所有任务+完整测试报告+全面更新文档+
   自动恢复中断」——保持该节奏。
+- 构建前必查环境变量齐全（No Android SDK / Java-Gradle 不兼容报错
+  多为环境变量丢失）。
+- `adb.exe` 是 Windows 程序：给它传文件路径要用 Windows 形式
+  （`E:\...`），Git Bash 的 `/e/...` 会报 `failed to stat`。
 - 用户需求若触碰 §1 红线（免同意控制/隐蔽监控），按 docs/16 §8 答复
   并转向合法替代，不要反复。
 
@@ -182,45 +662,132 @@ Doze 深睡（模拟器限制）。
 | mobile_scanner | 锁 6.0.11 | pubspec 注释 |
 | 压测分层运行 | --tags perf 隔离，避免 CPU 争用假红 | test tags |
 | **远程密钥模型** | **按接收方身份派生；双方必须互扫二维码** | docs/17 §8、HANDOVER §4.6 |
-| **远程中心入口** | `/remote`=4 Tab 中心；`/remote/settings`=旧总览页（开关/配对） | docs/17 §8 |
+| **远程中心入口** | `/remote`=分组页；`/remote/settings`=旧总览页（开关/配对） | docs/17 §8 |
+| **协助会话安全核心** | `topic = assist/hex(SHA-256(code\|pw))[0:16]`；只知临时码者算不出主题 → 无离线爆破素材。**不可改成"用 code 做主题"** | docs/18 |
+| **协助会话硬边界** | 只能**端点侧发起**、横幅常驻可见、一次性 + TTL 10min、权限默认全拒（`RcPermGate`，失败关闭）、全程审计 | docs/18 |
+| **通话保护判定方式** | 用 `AudioManager.getMode()`（**零权限**、覆盖 VoIP）；**不要改回 `TelephonyManager`**（需 READ_PHONE_STATE） | docs/08 最小权限、§4.8 |
+| **media 音频焦点** | `gainTransientMayDuck`（让他人闪避）；**绝不对 media 用 `gain`**（会暂停他人音乐）。已抽 `focusGainFor()` + 测试锁定 | test/playback_focus_test.dart |
+| **条件层"无法判定"** | `inCall`/`onWifi` 为 `null` = **无法判定 → 按满足处理**（`unknown` ≠ `false`，BUG-041） | §4.8、docs/17 §17.4 |
+| **性能阈值分层** | 绝对验收只在 **AOT**（`perf_nfr_test.dart`）；JIT 套件按"实测基线 × 3"设数量级护栏；往返受限路径的预算**自归一化** | §7、docs/17 §18.4 |
+| **信息架构** | **5 个底部 TAB**（守护/自动化/远程/日志/设置）；子 TAB 用 `?t=` 深链；旧路径保留 redirect | docs/17 §18 |
+| **批量写入范式** | 单事务 / 单次平台往返（`appendMany` / `upsertMany`）；**第一收益是原子性** | §1.7、§1.8 |
 
 ## 9. 交接对话（下一会话开场白，直接可用）
 
+> 下面这段可以直接粘贴给下一个会话。它是**自包含**的：不依赖任何未写入
+> 仓库的上下文。
+
 ```
-我继续 SonicShield（E:\SonicShield）的开发。请先读 HANDOVER.md
-恢复上下文（项目当前 v1.6.1-alpha.1，功能层 71/71 全绿、analyze 全零）。
-本轮按 HANDOVER §6 优先级执行：
-①准备双设备互通实测（给出两台模拟器的完整操作步骤，注意双方都要
-开启远程模块、互扫二维码配对）；②补 BUG-020 的 UI 入口（task.skipNext /
-logs.recent / 远程 script.stop）；③检查 camera 插件是否已发布 AGP9
-兼容版本，是则恢复 camera.snap；④继续 §6 的 P1/P2 项。
-环境变量按 HANDOVER §3 export（含 ProgramFiles(x86) 与代理豁免两个坑）；
-遵守 §7 操作守则（Edit 工具优先、改完复核落盘、测试分层、多行 sed 禁用）。
-完成后更新 docs/12 测试报告与 CHANGELOG 并提交。遇到中断自动恢复，
-保持「一次性完成+测试报告+文档同步」的交付节奏。
+我继续 SonicShield（E:\SonicShield）的开发。请按下面四步无缝接续，不要问我
+已经记录过的决策。
+
+【第 1 步 · 恢复上下文（先做，别跳）】
+读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
+再读 docs/17 的最后一节（当前是 §19，第十二轮）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §21）拿真实门禁数据。
+项目当前是 v1.7.0-alpha.1：功能层 318/318、压测 24/24、analyze 零问题。
+
+【第 2 步 · 选一个未完成项（按 §6 顺序）】
+§6 第 1 项（真机补测协助会话握手）是唯一 P0，但**需要真机**：
+先跑 `adb devices`，为空就跳过，不要在这上面空转。
+若无真机，按顺序取下一个**不依赖硬件**的项 —— 当前最高价值的是
+§6 第 11 项：**把 `integration_test/` 纳入常规门禁**（BUG-045 暴露的覆盖洞：
+它已经红过整整一个版本没人发现）。
+再往后可选：三向覆盖比对审计其它模块（RcCmd/RcEvt 的端点/发送/消费三向比对，
+这个方法在本项目一次定位过 5 条断链命令）；或 docs/11 路线图的下一项。
+
+【第 3 步 · 执行纪律（务必遵守，这些是血泪教训）】
+· 环境变量按 HANDOVER §3 的**一个代码块** export；**不要用 `env VAR=… flutter …`
+  包装命令**（裸跑即可，实测三层门禁都正常）。
+· 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
+· 门禁必须**分层跑**，混跑会因 CPU 争用假红：
+    flutter analyze                          → 期望 No issues found
+    flutter test --exclude-tags perf         → 期望 +318 / 318
+    flutter test --tags perf --concurrency=1 → 期望 +24 / 24
+· 改多行代码**只用 Edit 工具**，禁用 sed 多行替换。
+  ⚠️ Edit 会偶发 `EBUSY` 并**静默不落盘**（报 success 但内容没进文件）——
+  **改完关键文件必须 grep 复核**。
+· 性能红灯**先怀疑测量与阈值**，再看"你没改过的那条路径"有没有同步劣化。
+· **写了回归锁就必须证伪它**（临时还原旧行为，确认用例真的会红，再恢复）。
+  恒真的断言等于没测。
+· 红线（§1 / §8）：拒绝「未经授权控制他人设备」与「隐蔽监控」，
+  合法替代是扫码配对。这条**不要重新设计**。
+
+【第 4 步 · 收尾（每轮都要做）】
+把真实执行数据写进 docs/12（新一节）、docs/17（新「第 N 轮」一节，
+含闭环项/新缺陷/门禁基线/仍未闭环）、CHANGELOG.md、HANDOVER.md（§1 状态表、
+§1.x 新轮次、§5 已验证记录、§6 勾掉已闭环项）。
+追加当天记忆日志并更新 MEMORY.md 的长期事实。
+**只报告真实执行过的内容，不接受推断结论；阻塞项要如实记录原因，不要假报完成。**
+遇到中断自动恢复，保持「一次性完成 + 完整测试报告 + 全面更新文档」的交付节奏。
 ```
+
+**给用户的交接会话开场（人类可读版）**：
+
+> 本轮已完成：v1.7.0-alpha.1 的条件层每轮复用（BUG-044，AOT 实测 34×）与
+> 设备冒烟测试复活（BUG-045）。门禁：analyze 干净 / 318 / 24 / AOT 6 / 冒烟 3。
+> 下一轮建议优先「把 `integration_test/` 纳入常规门禁」——它是唯一不依赖真机、
+> 且能防止"静默变红"的高价值项；真机接入后则优先补协助会话的双进程握手。
 
 ## 10. 代码地图（新会话快速定位）
 
+**核心逻辑**
+
 | 模块 | 文件 |
 |---|---|
-| 调度引擎 | lib/domain/scheduling/schedule_engine.dart |
-| 条件层 | lib/domain/models/condition.dart |
-| 声景/动作模型 | lib/domain/models/action.dart |
-| 后台引擎 | lib/services/background_engine.dart |
-| 播放/混音 | lib/services/playback_service.dart |
-| 远程协议/加密/密钥模型 | lib/remote/protocol.dart |
+| 路由 / 5 TAB 信息架构 | lib/core/router.dart（`_Shell._destinations` 是 TAB 标签的唯一真源） |
+| 分组页骨架（被聚合页的 `embedded: true` 模式） | lib/core/widgets/section_scaffold.dart |
+| 调度引擎（物化/免打扰/DPRNG） | lib/domain/scheduling/schedule_engine.dart |
+| 条件层判定 | lib/domain/models/condition.dart（`TaskCondition` + `ConditionEnv`） |
+| 条件层**环境快照缓存** | lib/services/condition_env.dart（`RoundConditionEnv`，每轮只读一次） |
+| 动作/声景模型 | lib/domain/models/action.dart |
+| 后台引擎（执行/审计/条件） | lib/services/background_engine.dart |
+| 播放/混音（含音频焦点策略） | lib/services/playback_service.dart |
+| 原生桥（Dart 侧） | lib/services/native_bridge.dart |
+| 权限申请 + 合规承诺门 | lib/services/permission_flow.dart |
+| 加密备份 | lib/services/export_crypto.dart |
+| 仓储（批量写：`upsertMany`/`appendMany`） | lib/data/repositories/{task,log,occurrence}_repository.dart |
+
+**远程模块**
+
+| 模块 | 文件 |
+|---|---|
+| 协议 / 加密 / 密钥模型 / 回执信封 | lib/remote/protocol.dart（`rcPayloadOf(m)` 读回执字段） |
 | 端点（被控） | lib/remote/endpoint_service.dart |
-| 控制器/PTT | lib/remote/controller_service.dart |
+| 控制器 / PTT | lib/remote/controller_service.dart |
 | 视频通话 | lib/remote/call_service.dart |
 | 配对与身份持久化 | lib/remote/remote_store.dart |
-| 远程中心 4 Tab | lib/features/remote/remote_home_screen.dart + remote_console_tab.dart + remote_scripts_tab.dart + ptt_tab.dart |
+| 指令组 | lib/remote/rc_script.dart + script_executor.dart |
+| **协助会话：协议 + 权限门控（两端共用）** | lib/remote/assist.dart（`RcPermGate` 默认全拒、失败关闭） |
+| **协助会话：端点托管** | lib/remote/assist_host.dart |
+| **协助会话：控制端接入** | lib/remote/assist_join.dart |
+| **控制台驱动抽象** | lib/remote/command_channel.dart（`PairedChannel` / `AssistChannel`） |
+| 远程任务线协议 | lib/remote/task_wire.dart |
+| 远程分组页（v1.7 IA） | lib/features/remote/remote_section.dart + remote_console_tab.dart + remote_tasks_tab.dart + remote_scripts_tab.dart + ptt_tab.dart |
 | 远程设置（旧总览页） | lib/features/remote/remote_screen.dart（`/remote/settings`） |
 | 扫码配对 | lib/features/remote/pair_qr_screen.dart |
-| 端点启动装配（handler 注入+自恢复） | lib/main.dart `_wireRemoteEndpoint()` |
-| 统计看板 | lib/features/stats/stats_screen.dart |
-| 加密备份 | lib/services/export_crypto.dart |
-| 原生桥插件 | packages/native_bridge/（NativeBridgePlugin.kt 含 volume.set） |
-| 压测套件 | test/performance_test.dart + test/performance_v2_test.dart |
-| 远程密钥契约测试 | test/remote_crypto_test.dart |
-| 接管审计与缺陷清单 | docs/17-接管审计与续作清单.md |
+| 协助会话界面 | lib/features/remote/assist_host_screen.dart + assist_join_screen.dart |
+| 端点启动装配（handler 注入 + 自恢复） | lib/main.dart `_wireRemoteEndpoint()` |
+
+**测试**
+
+| 层 | 文件 |
+|---|---|
+| 宿主机功能（`test/`，计入 318） | condition_env_test.dart、native_bridge_test.dart、db_repository_test.dart、remote_crypto_test.dart、remote_console_tab_test.dart、playback_focus_test.dart |
+| JIT 压测护栏（`--tags perf`，24 例） | test/performance_test.dart + performance_v2_test.dart（辅助库 test/perf_bench.dart） |
+| **AOT 绝对验收**（`flutter drive --profile`，6 例） | integration_test/perf_nfr_test.dart |
+| 设备端冒烟（3 例） | integration_test/app_smoke_test.dart |
+| 设备端桥接（6 例） | integration_test/native_bridge_test.dart |
+| 协助会话真实 broker E2E（1 例） | integration_test/assist_e2e_test.dart |
+
+**文档**
+
+| 用途 | 位置 |
+|---|---|
+| **续作主干**（每轮一节：闭环/新缺陷/门禁基线/未闭环） | docs/17-接管审计与续作清单.md |
+| 测试报告（每轮真实数据） | docs/12-测试报告.md |
+| 协助会话设计（权威） | docs/18 |
+| 合规红线 | docs/08 |
+| 远程协议 | docs/14 |
+| 视频通话/设备控制决策 | docs/16（§8 是"免同意控制"的完整决策记录） |
+| 开发路线图 | docs/11 |

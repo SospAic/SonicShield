@@ -13,8 +13,12 @@ import '../../services/permission_flow.dart';
 /// 声音守卫页：灵敏度/冷却配置、开关守卫、实时电平表。
 /// 说明：实时电平在引擎隔离内产生，v1 UI 以开关与状态展示为主；
 /// 电平表通过引擎广播事件实现（见 docs/06 协议）。
+///
+/// [embedded] = true 时作为「自动化」分组页的子 TAB 使用，不再自带 AppBar。
 class GuardScreen extends ConsumerStatefulWidget {
-  const GuardScreen({super.key});
+  const GuardScreen({super.key, this.embedded = false});
+
+  final bool embedded;
 
   @override
   ConsumerState<GuardScreen> createState() => _GuardScreenState();
@@ -73,7 +77,9 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     final engine = ref.watch(engineStateProvider);
     final guardOn = BackgroundServiceManager.instance.guardActive;
     return Scaffold(
-      appBar: AppBar(title: const Text('声音守卫')),
+      appBar: widget.embedded
+          ? null
+          : AppBar(title: const Text('声音守卫')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

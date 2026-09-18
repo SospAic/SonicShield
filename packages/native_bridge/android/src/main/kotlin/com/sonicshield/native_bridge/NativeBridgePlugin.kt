@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -126,6 +128,9 @@ class NativeBridgePlugin : FlutterPlugin {
                             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                                 .getBoolean(KEY_SHOULD_RUN, false),
                         )
+                        // ---- v1.7 条件层扩展：通话状态 / 网络类型 ----
+                        "callState" -> result.success(isInCall(ctx))
+                        "networkType" -> result.success(networkType(ctx))
                         else -> result.notImplemented()
                     }
                 } catch (e: Exception) {
@@ -189,6 +194,53 @@ class NativeBridgePlugin : FlutterPlugin {
             ctx, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+    }
+
+    // ---------- 环境状态（v1.7 条件层扩展） ----------
+
+    /**
+     * 是否正在通话（含 VoIP / 视频通话）。
+     *
+     * 用 [AudioManager.getMode] 判定而**不是** TelephonyManager：
+     * 读 TelephonyManager 的通话状态需要 READ_PHONE_STATE 运行时权限，
+     * 而本应用的原则是最小权限（docs/08）—— 一个"定时放音"工具没有任何理由
+     * 申请"读取通话状态与手机身份"。AudioManager 的 mode 是公开 API，
+     * **无需任何权限**，且对 VoIP（MODE_IN_COMMUNICATION）同样有效，
+     * 覆盖面比只认蜂窝通话的 TelephonyManager 更广。
+     *
+     * 覆盖：MODE_IN_CALL（蜂窝）、MODE_IN_COMMUNICATION（VoIP/视频）。
+     * 不含 MODE_RINGTONE（响铃中）—— 响铃时放音并非有害，且会与铃声混淆，
+     * 交由使用者用时段窗口控制。
+     */
+    private fun isInCall(ctx: Context): Boolean {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (am == null) return false
+        return am.mode == AudioManager.MODE_IN_CALL ||
+            am.mode == AudioManager.MODE_IN_COMMUNICATION
+    }
+
+    /**
+     * 当前网络类型：wifi / cellular / ethernet / none / other。
+     *
+     * 需要 ACCESS_NETWORK_STATE（normal 权限，安装即授予，无运行时弹窗）。
+     * 用 NetworkCapabilities 判定而不是旧版 `NetworkInfo.getType()`——
+     * 后者在 API 29 起已废弃。
+     */
+    private fun networkType(ctx: Context): String {
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager
+        if (cm == null) return "unknown"
+        val net = cm.activeNetwork
+        if (net == null) return "none"
+        val caps = cm.getNetworkCapabilities(net)
+        if (caps == null) return "unknown"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+            else -> "other"
+        }
     }
 
     // ---------- 电池 / 厂商 ----------

@@ -50,8 +50,41 @@ class RemoteStore {
   static const _kOutbox = 'rc_outbox';
   static const _kPairCode = 'rc_pair_code';
 
+  // ---- v1.7 S5：可选 TURN 中继（docs/18 §S5） ----
+  static const _kTurnUrl = 'rc_turn_url';
+  static const _kTurnUser = 'rc_turn_user';
+  static const _kTurnCred = 'rc_turn_cred';
+
   /// 默认公共演示 broker（生产建议自建 EMQX/Mosquitto，docs/14 §6）。
   static const defaultBroker = 'broker.emqx.io';
+
+  // ---------------- TURN 中继配置（S5） ----------------
+  //
+  // 为什么是"可选"：绝大多数家用网络靠 STUN 打洞即可直连；只有**双方都处于
+  // 对称 NAT**（常见于 4G/5G 移动网络、企业网）时才必须走中继。
+  // 内置公共 TURN 既不可靠也不合适（带宽/隐私），因此默认不配置，
+  // 由使用者在自建服务器上填 —— 声盾不替使用者做中继选型。
+
+  /// TURN 地址（如 `turn:example.com:3478`）；空串 = 未配置。
+  String get turnUrl => _prefs.getString(_kTurnUrl) ?? '';
+
+  String get turnUser => _prefs.getString(_kTurnUser) ?? '';
+
+  String get turnCred => _prefs.getString(_kTurnCred) ?? '';
+
+  /// 是否已配置可用的 TURN 中继。
+  bool get turnConfigured => turnUrl.trim().isNotEmpty;
+
+  /// 保存 TURN 配置（传空串即清除）。
+  Future<void> setTurn({
+    required String url,
+    required String user,
+    required String cred,
+  }) async {
+    await _prefs.setString(_kTurnUrl, url.trim());
+    await _prefs.setString(_kTurnUser, user.trim());
+    await _prefs.setString(_kTurnCred, cred);
+  }
 
   bool get enabled => _prefs.getBool(_kEnabled) ?? false;
   Future<void> setEnabled(bool v) => _prefs.setBool(_kEnabled, v);
@@ -84,26 +117,44 @@ class RemoteStore {
     return code;
   }
 
+  /// 读取配对表。
+  ///
+  /// **始终返回可变的新列表**（含空表）。历史上空表返回 `const []`，
+  /// 而调用方习惯写 `paired()..removeWhere(...)` 的级联 —— 在不可变列表上
+  /// 级联修改会抛 `Unsupported operation: Cannot remove from an unmodifiable
+  /// list`，症状是**首次配对（空表）必然失败**，且因为没有 try/catch，
+  /// 表现为"扫了码但界面毫无反应、也没有报错"（BUG-031）。
   List<PairedEndpoint> paired() {
     final raw = _prefs.getString(_kPaired);
-    if (raw == null || raw.isEmpty) return const [];
+    if (raw == null || raw.isEmpty) return <PairedEndpoint>[];
     try {
       return ((jsonDecode(raw) as List).cast<Map<String, dynamic>>())
           .map(PairedEndpoint.fromJson)
           .toList();
     } on Object {
-      return const [];
+      return <PairedEndpoint>[];
     }
   }
 
   Future<void> addPaired(PairedEndpoint e) async {
-    final list = [...paired()..removeWhere((p) => p.deviceId == e.deviceId), e];
+    final list = paired();
+    final i = list.indexWhere((p) => p.deviceId == e.deviceId);
+    if (i >= 0) {
+      // 同 deviceId 视为重新配对：**原位覆盖**而非追加。
+      // 追加会让该端点跑到列表末尾，而控制台默认选中 `paired().first` ——
+      // 于是"重新扫一次码"会悄悄换掉控制台的默认目标设备。
+      list[i] = e;
+    } else {
+      list.add(e);
+    }
     await _prefs.setString(
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
   }
 
   Future<void> removePaired(String deviceId) async {
-    final list = paired()..removeWhere((p) => p.deviceId == deviceId);
+    final list = [
+      ...paired().where((p) => p.deviceId != deviceId),
+    ];
     await _prefs.setString(
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
   }

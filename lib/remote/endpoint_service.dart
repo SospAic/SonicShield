@@ -16,13 +16,21 @@ import '../data/db/app_database.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
+import '../domain/models/task.dart';
+import '../domain/models/trigger.dart';
+import '../domain/scheduling/schedule_engine.dart';
+import '../services/background_service_manager.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
 import 'call_service.dart';
+import 'assist.dart';
+import 'assist_host.dart';
+import 'assist_join.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 import 'remote_store.dart';
 import 'script_executor.dart';
+import 'task_wire.dart';
 
 /// 远程遥控端点服务（被控端）。
 ///
@@ -67,13 +75,55 @@ class RcEndpointService {
     _db = db;
     // 接收侧密钥依赖本机配对码（发送方用它加密），必须在连接前就绪。
     _ownCode = await store.ensurePairingCode();
+    _wireAssist(store, db);
     await _connect();
+  }
+
+  /// 协助会话接线（docs/18 S2）：注入传输、审计、显示名与执行层入口。
+  ///
+  /// 密钥与会话状态**全部留在** [RcAssistHost] 内，本服务只提供字节通道与
+  /// 落库审计，避免会话密钥散落到网络层。
+  void _wireAssist(RemoteStore store, AppDatabase db) {
+    final assist = RcAssistHost.instance;
+    assist.bind(_MqttAssistTransport(this));
+    assist.endpointName = store.deviceName;
+    assist.audit = (action, status, message) => LogRepository(db).append(
+          source: 'assist',
+          action: action,
+          status: status,
+          message: message,
+        );
+    assist.onCommand = (msg) => _dispatch(msg, _assistPeer());
+
+    // 控制端侧（S3）：同一台设备也可以接入**别人**的会话。
+    final join = AssistJoinClient.instance;
+    join.bind(_MqttAssistTransport(this));
+    join.ctrlName = store.deviceName.isEmpty ? '声盾控制端' : store.deviceName;
+  }
+
+  /// 协助会话控制端的虚拟对端。
+  ///
+  /// 控制端**不是已配对设备**（这正是协助会话的价值：无需预先配对），
+  /// 因此没有配对秘密；这里只构造日志/展示所需的身份，`secret` 留空，
+  /// 任何把它当密钥用的路径都会立刻失败而不是静默用错密钥。
+  PairedEndpoint _assistPeer() {
+    final s = RcAssistHost.instance.session;
+    final name = s?.ctrlName ?? '';
+    return PairedEndpoint(
+      deviceId: 'assist',
+      name: name.isEmpty ? '协助控制端' : name,
+      secret: '',
+      pairedAt: DateTime.now(),
+    );
   }
 
   Future<void> stop() async {
     _running = false;
     _hb?.cancel();
     RcScriptExecutor.instance.stop();
+    // 先终止协助会话（此刻 _client 仍在，才能发出 close 并退订会合主题）。
+    await RcAssistHost.instance.close(reason: 'local', silent: true);
+    await AssistJoinClient.instance.leave(silent: true);
     _client?.disconnect();
     _client = null;
   }
@@ -152,6 +202,17 @@ class RcEndpointService {
       if (p.deviceId.isEmpty || p.deviceId == own) continue;
       client.subscribe('sonicshield/v1/${p.deviceId}/evt', MqttQos.atLeastOnce);
     }
+    // 协助会话进行中：重连后必须补订会合主题，否则握手与回执静默丢失
+    // （与 BUG-013 同类：订阅集合不补齐 → 对端永远收不到回执）。
+    final assist = RcAssistHost.instance.session;
+    if (assist != null) {
+      client.subscribe(assist.topic, MqttQos.atLeastOnce);
+    }
+    // 控制端侧接入的会话同样要补订。
+    final joined = AssistJoinClient.instance.topic;
+    if (joined.isNotEmpty) {
+      client.subscribe(joined, MqttQos.atLeastOnce);
+    }
   }
 
   void _scheduleReconnect() {
@@ -171,6 +232,22 @@ class RcEndpointService {
   /// 旧实现遍历对端列表用 `peer.secret / peer.deviceId` 派生，与发送方
   /// 的加密参数永不相等 → 命令**从未被成功解密**（BUG-021）。
   Future<void> _handleRaw(String topic, String wire) async {
+    // 协助会话会合主题与配对遥控主题**命名空间隔离**：它不依赖本机配对码，
+    // 密钥由「临时码 + 访问密码」派生，且受权限门控（docs/18 §4.4）。
+    //
+    // **必须按主题精确路由**：同一台设备可能既在托管会话（端点侧）又在接入
+    // 别人的会话（控制端侧），两个主题不同但前缀相同。若一律丢给 Host，
+    // Host 会拿自己的 ctlKey 去解密"别人会话"的报文 → 解密失败 →
+    // **误计入握手失败计数**，几次之后把自己的会话锁死。
+    if (topic.startsWith(RcAssist.topicPrefix)) {
+      if (RcAssistHost.instance.session?.topic == topic) {
+        await RcAssistHost.instance.onWire(wire);
+      } else if (AssistJoinClient.instance.topic == topic) {
+        await AssistJoinClient.instance.onWire(wire);
+      }
+      return;
+    }
+
     final store = _store!;
     final ownId = store.deviceId;
     final ownCode = _ownCode;
@@ -292,19 +369,19 @@ class RcEndpointService {
           'version': AppMeta.version,
         }));
       case RcCmd.taskList:
-        final list = await tasks.listAll();
-        await _send(RcMessage.now(RcEvt.tasks, {
-          'tasks': [
-            for (final t in list)
-              {
-                'id': t.id,
-                'name': t.name,
-                'enabled': t.enabled,
-                'triggerType': t.triggerType.name,
-                'actionType': t.actionType.name,
-              }
-          ],
-        }));
+        await _sendTaskList(msg);
+      case RcCmd.taskGet:
+        await _sendTask(msg);
+      case RcCmd.taskUpsert:
+        await _upsertTask(msg, peer, logs, tasks, occ);
+      case RcCmd.taskDelete:
+        await _deleteTask(msg, peer, logs, tasks, occ);
+      case RcCmd.taskRunNow:
+        await _runTaskNow(msg, peer, logs, tasks);
+      case RcCmd.assetList:
+        await _sendAssets(msg);
+      case RcCmd.presetList:
+        await _sendPresets(msg);
       case RcCmd.taskToggle:
         final id = msg.payload['taskId'] as String?;
         final enabled = msg.payload['enabled'] as bool? ?? false;
@@ -397,6 +474,216 @@ class RcEndpointService {
       case RcCmd.volumeSet:
         await _setVolumes(msg, peer, logs);
     }
+  }
+
+  // ==================== v1.7：远程任务 CRUD（docs/14 §2.1） ====================
+
+  /// 单次任务列表回传上限（防止对端拉爆 MQTT 报文）。
+  static const maxRemoteTaskList = 200;
+
+  /// 单次音源列表回传上限。
+  static const maxRemoteAssetList = 300;
+
+  /// 任务列表。
+  ///
+  /// `payload.full == true` 时每项为**完整线格式**（含 trigger/action 定义），
+  /// 供远程任务编辑页直接渲染；否则保持 v1 轻量形状（向后兼容）。
+  Future<void> _sendTaskList(RcMessage msg) async {
+    final full = msg.payload['full'] as bool? ?? false;
+    final list = await TaskRepository(_db!).listAll();
+    final capped = list.take(maxRemoteTaskList).toList();
+    await _send(RcMessage.now(RcEvt.tasks, {
+      'for': msg.id,
+      'full': full,
+      'total': list.length,
+      'tasks': [
+        for (final t in capped)
+          if (full)
+            TaskWire.toWire(t)
+          else
+            {
+              'id': t.id,
+              'name': t.name,
+              'enabled': t.enabled,
+              'triggerType': t.triggerType.name,
+              'actionType': t.actionType.name,
+            }
+      ],
+    }));
+  }
+
+  /// 单条任务完整定义。
+  Future<void> _sendTask(RcMessage msg) async {
+    final id = msg.payload['taskId'] as String?;
+    final t = id == null ? null : await TaskRepository(_db!).get(id);
+    if (t == null) {
+      await _ack(msg, false, data: '任务不存在');
+      return;
+    }
+    await _send(RcMessage.now(RcEvt.task, {
+      'for': msg.id,
+      'task': TaskWire.toWire(t),
+    }));
+  }
+
+  /// 新建/更新任务。
+  ///
+  /// 对端数据视为**不可信**：`TaskWire.fromWire` 白名单校验（枚举可解析、
+  /// 数值夹紧、集合有上限）失败即回 `ok=false`，绝不落库。
+  /// 成功 → 清理该任务旧 pending 计划 → 按新定义重新物化，否则新任务
+  /// 永远不会到期（docs/14 §2.1）。
+  Future<void> _upsertTask(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, TaskRepository tasks, OccurrenceRepository occ) async {
+    final raw = msg.payload['task'];
+    final j = raw is Map ? raw.cast<String, dynamic>() : null;
+    if (j == null) {
+      await _ack(msg, false, data: '缺少 task 定义');
+      return;
+    }
+    final task = TaskWire.fromWire(j);
+    if (task == null) {
+      await logs.append(
+          source: 'remote',
+          action: 'task.upsert',
+          status: 'failed',
+          message: 'by ${peer.name} · 定义校验失败');
+      await _ack(msg, false, data: '任务定义非法');
+      return;
+    }
+
+    final existed = await tasks.get(task.id) != null;
+    await tasks.upsert(task);
+    final dropped = await occ.deletePendingForTask(task.id);
+    final planned = await _rematerialize(task, occ);
+    await logs.append(
+        source: 'remote',
+        action: 'task.upsert',
+        status: 'success',
+        taskId: task.id,
+        message: 'by ${peer.name} · ${existed ? '更新' : '新建'}'
+            '「${task.name}」· 清理 $dropped 条旧计划 · 新计划 $planned 条');
+    await _send(RcMessage.now(RcEvt.task, {
+      'for': msg.id,
+      'task': TaskWire.toWire(task),
+    }));
+    await _ack(msg, true,
+        data: '${existed ? 'updated' : 'created'};planned=$planned');
+  }
+
+  /// 删除任务及其全部计划（含审计历史，与 UI 侧删除语义一致）。
+  Future<void> _deleteTask(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, TaskRepository tasks, OccurrenceRepository occ) async {
+    final id = msg.payload['taskId'] as String?;
+    if (id == null || id.isEmpty) {
+      await _ack(msg, false, data: '缺少 taskId');
+      return;
+    }
+    final existed = await tasks.get(id);
+    await tasks.delete(id);
+    await occ.deleteForTask(id);
+    await logs.append(
+        source: 'remote',
+        action: 'task.delete',
+        status: existed == null ? 'skipped' : 'success',
+        taskId: id,
+        message: 'by ${peer.name}${existed == null ? '' : ' · ${existed.name}'}');
+    await _ack(msg, existed != null, data: existed == null ? '任务不存在' : null);
+  }
+
+  /// 立即执行任务动作。
+  ///
+  /// 真实执行发生在**后台引擎隔离**（插件实例所在），此处只转交并等待结果；
+  /// 引擎未运行时明确回失败，不静默成功（docs/14 §2.1）。
+  Future<void> _runTaskNow(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, TaskRepository tasks) async {
+    final id = msg.payload['taskId'] as String?;
+    if (id == null || id.isEmpty) {
+      await _ack(msg, false, data: '缺少 taskId');
+      return;
+    }
+    final task = await tasks.get(id);
+    if (task == null) {
+      await _ack(msg, false, data: '任务不存在');
+      return;
+    }
+    final r = await BackgroundServiceManager.instance.runNow(id);
+    await logs.append(
+        source: 'remote',
+        action: 'task.runNow',
+        status: r.ok ? 'success' : 'failed',
+        taskId: id,
+        message: 'by ${peer.name} · ${r.message}');
+    await _send(RcMessage.now(RcEvt.exec, {
+      'for': msg.id,
+      'taskId': id,
+      'taskName': task.name,
+      'ok': r.ok,
+      'message': r.message,
+      'fromName': _store!.deviceName,
+    }));
+    await _ack(msg, r.ok, data: r.message);
+  }
+
+  /// 端点音源库（供远程任务选音源）。
+  Future<void> _sendAssets(RcMessage msg) async {
+    final limit = ((msg.payload['limit'] as num?)?.toInt() ?? maxRemoteAssetList)
+        .clamp(1, maxRemoteAssetList);
+    final assets = await AssetRepository(_db!).listAll();
+    await _send(RcMessage.now(RcEvt.assets, {
+      'for': msg.id,
+      'total': assets.length,
+      'assets': [
+        for (final a in assets.take(limit))
+          {
+            'id': a.id,
+            'name': a.name,
+            'durationMs': a.durationMs,
+            'tags': a.tags,
+          }
+      ],
+    }));
+  }
+
+  /// 端点预置音源分类（`audio_assets.tags` 形如 `预置/<分类>`）。
+  Future<void> _sendPresets(RcMessage msg) async {
+    final rows = await _db!.db.rawQuery(
+        "SELECT DISTINCT tags FROM audio_assets WHERE tags LIKE '%预置%'");
+    final cats = <String>{};
+    for (final r in rows) {
+      final tags = r['tags'] as String? ?? '';
+      try {
+        for (final t in (jsonDecode(tags) as List).cast<String>()) {
+          if (t.startsWith('预置/')) cats.add(t.substring(3));
+        }
+      } on Object {
+        // 标签列非 JSON（历史数据）→ 跳过
+      }
+    }
+    final sorted = cats.toList()..sort();
+    await _send(RcMessage.now(RcEvt.presets, {
+      'for': msg.id,
+      'categories': sorted,
+    }));
+  }
+
+  /// 按当前定义重新物化未来计划（幂等提交）。
+  Future<int> _rematerialize(Task task, OccurrenceRepository occ) async {
+    if (!task.enabled) return 0;
+    if (task.triggerType == TriggerType.soundTriggered) return 0;
+    final entries = const ScheduleEngine().materialize(task, DateTime.now());
+    if (entries.isEmpty) return 0;
+    await occ.commitAll([
+      for (final e in entries)
+        PlannedOccurrence(
+          id: e.occurrenceId,
+          taskId: e.taskId,
+          fireAt: e.fireAt,
+          status: OccurrenceStatus.pending,
+          volume: e.volume,
+          durationMs: e.durationMs,
+        ),
+    ]);
+    return entries.length;
   }
 
   /// 设备状态快照（v1.6）：电量/充电/版本/待执行计划数。
@@ -653,6 +940,14 @@ class RcEndpointService {
   }
 
   Future<void> _send(RcMessage msg) async {
+    // 协助会话期间的回执必须**原路返回会合主题**：对端不是已配对设备，
+    // 收不到 `{deviceId}/evt`，走下面那条路会静默丢弃（表现为"命令执行了
+    // 但控制端毫无反应"）。通道由 Zone 承载，见 [assistReplyZone]。
+    if (Zone.current[assistReplyZone] == true) {
+      await RcAssistHost.instance.sendReply(msg);
+      return;
+    }
+
     final store = _store;
     final client = _client;
     if (store == null || client == null) return;
@@ -760,3 +1055,38 @@ class RcEndpointService {
         '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
   }
 }
+
+/// [AssistTransport] 的 MQTT 实现：只负责"订阅 / 退订 / 发布字节"。
+///
+/// 定义在**同一文件内**是为了访问 [RcEndpointService] 的私有连接状态
+/// （Dart 私有性按库划分）；它刻意不持有任何密钥 —— 密文由
+/// [RcAssistHost] 加密后传入，密钥不出该模块。
+class _MqttAssistTransport implements AssistTransport {
+  _MqttAssistTransport(this._svc);
+
+  final RcEndpointService _svc;
+
+  @override
+  Future<void> subscribe(String topic) async {
+    final client = _svc._client;
+    if (client == null) return;
+    if (client.connectionStatus?.state != MqttConnectionState.connected) return;
+    client.subscribe(topic, MqttQos.atLeastOnce);
+  }
+
+  @override
+  Future<void> unsubscribe(String topic) async {
+    _svc._client?.unsubscribe(topic);
+  }
+
+  @override
+  Future<void> publishWire(String topic, String wire) async {
+    final client = _svc._client;
+    if (client == null) return;
+    if (client.connectionStatus?.state != MqttConnectionState.connected) return;
+    final builder = MqttClientPayloadBuilder()..addString(wire);
+    client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
+        retain: false);
+  }
+}
+

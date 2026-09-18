@@ -64,6 +64,18 @@ class RcMessage {
   }
 }
 
+/// 从事件信封中取出 `payload`。
+///
+/// [RcEndpointService.events] 广播的是 `msg.toJson()` 展开后的信封
+/// （`{v, id, ts, type, payload, from, peerId, peerName}`），端点回执的
+/// 业务字段全部在 **`payload` 之内**。UI 侧曾直接读顶层字段
+/// （如 `m['pendingCount']`）→ 恒为 null，回执面板永远显示空值（BUG-023）。
+/// 统一走本函数取值。
+Map<String, dynamic> rcPayloadOf(Map<String, dynamic> envelope) {
+  final p = envelope['payload'];
+  return p is Map ? p.cast<String, dynamic>() : const {};
+}
+
 // ---------------- 命令类型（控制器 → 端点） ----------------
 
 abstract final class RcCmd {
@@ -104,6 +116,27 @@ abstract final class RcCmd {
   static const cameraSnap = 'camera.snap';
   static const locationGet = 'location.get';
   static const volumeSet = 'volume.set';
+
+  // ---- v1.7：远程任务 CRUD（与本机「自动化 → 任务」完整对齐，docs/14 §2.1）----
+
+  /// 取单条任务完整定义：{taskId} → rc.task {task}
+  static const taskGet = 'task.get';
+
+  /// 新建/更新任务（按 id 幂等）：{task} → rc.ack
+  /// 成功后端点**重新物化 occurrence**（否则新任务永不到期）。
+  static const taskUpsert = 'task.upsert';
+
+  /// 删除任务及其待执行计划：{taskId} → rc.ack
+  static const taskDelete = 'task.delete';
+
+  /// 立即执行任务动作（不等待计划时刻）：{taskId} → rc.ack + rc.exec
+  static const taskRunNow = 'task.runNow';
+
+  /// 端点音源库：{limit?} → rc.assets {assets}
+  static const assetList = 'asset.list';
+
+  /// 端点预置音源分类：{} → rc.presets {categories}
+  static const presetList = 'preset.list';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------
@@ -115,7 +148,8 @@ abstract final class RcEvt {
   static const logs = 'rc.logs';
   static const ack = 'rc.ack'; // 通用回执 {ok, for: cmdId, data}
   static const heartbeat = 'rc.heartbeat'; // 周期 60s
-  static const exec = 'rc.exec'; // 动作执行通知（审计镜像）
+  static const exec =
+      'rc.exec'; // 动作执行通知 {for?, taskId, taskName, ok, message, fromName}
   static const offline = 'rc.offline'; // LWT 由 broker 代发（明文哨兵，无敏感内容）
   static const scriptState =
       'rc.script'; // {scriptId, state: running|done|stopped, stepIndex}
@@ -126,6 +160,11 @@ abstract final class RcEvt {
   static const photo = 'rc.photo'; // 拍照回传 {photoB64}
   static const location = 'rc.location'; // 定位回传 {lat,lng,acc}
   static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
+
+  // ---- v1.7：远程任务 CRUD 回执 ----
+  static const task = 'rc.task'; // 单条任务完整定义 {for, task}
+  static const assets = 'rc.assets'; // 音源库 {for, assets:[{id,name,durationMs,tags}]}
+  static const presets = 'rc.presets'; // 预置分类 {for, categories:[...]}
 }
 
 // ---------------- 加密编解码 ----------------

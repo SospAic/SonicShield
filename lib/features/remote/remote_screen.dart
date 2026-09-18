@@ -30,6 +30,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   String _deviceId = '';
   String _deviceName = '';
   String _broker = RemoteStore.defaultBroker;
+  String _turnUrl = '';
   List<PairedEndpoint> _endpoints = const [];
 
   @override
@@ -47,8 +48,81 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
       _deviceId = store.deviceId;
       _deviceName = store.deviceName;
       _broker = store.broker;
+      _turnUrl = store.turnUrl;
       _endpoints = store.paired();
     });
+  }
+
+  /// 编辑 TURN 中继配置（S5）。
+  ///
+  /// 不内置公共 TURN：中继会经手媒体流量，把使用者的通话交给来路不明的
+  /// 免费中继既不安全也不可靠。默认留空（纯 STUN 打洞），由使用者填自建服务。
+  Future<void> _editTurn() async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    final urlCtrl = TextEditingController(text: store.turnUrl);
+    final userCtrl = TextEditingController(text: store.turnUser);
+    final credCtrl = TextEditingController(text: store.turnCred);
+
+    // 跨 await 后必须复查 mounted 才能用 context（use_build_context_synchronously）。
+    if (!mounted) {
+      urlCtrl.dispose();
+      userCtrl.dispose();
+      credCtrl.dispose();
+      return;
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('TURN 中继'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '仅在双方都处于对称 NAT（常见于 4G/5G、企业网）时才需要。'
+                '留空即关闭中继。',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: urlCtrl,
+                decoration: const InputDecoration(
+                  labelText: '地址',
+                  hintText: 'turn:example.com:3478',
+                ),
+              ),
+              TextField(
+                controller: userCtrl,
+                decoration: const InputDecoration(labelText: '用户名（可选）'),
+              ),
+              TextField(
+                controller: credCtrl,
+                decoration: const InputDecoration(labelText: '密码（可选）'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      await store.setTurn(
+          url: urlCtrl.text, user: userCtrl.text, cred: credCtrl.text);
+      await _load();
+    }
+    urlCtrl.dispose();
+    userCtrl.dispose();
+    credCtrl.dispose();
   }
 
   Future<void> _toggleEnabled(bool v) async {
@@ -232,6 +306,22 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
                   await _load();
                 }
               },
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.swap_horiz),
+              title: const Text('TURN 中继（可选）'),
+              subtitle: Text(
+                _turnUrl.isEmpty
+                    ? '未配置：仅用 STUN 打洞。双方均为对称 NAT 时通话会直连失败'
+                    : '$_turnUrl（已启用中继）',
+                style: const TextStyle(fontSize: 12),
+              ),
+              isThreeLine: _turnUrl.isEmpty,
+              trailing: const Icon(Icons.edit, size: 18),
+              onTap: _editTurn,
             ),
           ),
           const SizedBox(height: 10),

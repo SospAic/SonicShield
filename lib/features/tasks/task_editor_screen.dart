@@ -11,13 +11,46 @@ import '../../services/background_service_manager.dart';
 
 /// 任务编辑器：触发方式 -> 时间参数 -> 动作 -> 音源 -> 保存。
 /// 编辑器刻意保持“单页分组 + 底部保存”，降低复杂度。
+///
+/// ## 远程目标模式（v1.7，docs/14 §2.1）
+///
+/// 传入 [remoteTarget] 时，编辑器不读也不写本机仓储，而是把构建好的
+/// [Task] 交给调用方注入的 [RemoteTaskTarget.save]（由「远程 → 任务」页
+/// 负责编码为线格式并发送 `task.upsert`）。
+/// 这样**一套编辑 UI 同时服务本机任务与端点任务**，无需为远程另写一份
+/// 表单 —— 这正是「远程与本机功能对齐」的落点：不是长得像，而是同一份实现。
 class TaskEditorScreen extends ConsumerStatefulWidget {
-  const TaskEditorScreen({super.key, this.taskId});
+  const TaskEditorScreen({
+    super.key,
+    this.taskId,
+    this.initialTask,
+    this.remoteTarget,
+  });
 
   final String? taskId;
 
+  /// 远程模式的初始定义（null = 远程新建）。
+  final Task? initialTask;
+
+  /// 非空即进入远程模式。
+  final RemoteTaskTarget? remoteTarget;
+
   @override
   ConsumerState<TaskEditorScreen> createState() => _TaskEditorScreenState();
+}
+
+/// 远程任务保存目标。
+class RemoteTaskTarget {
+  const RemoteTaskTarget({
+    required this.endpointName,
+    required this.save,
+  });
+
+  /// 端点名称（用于标题与保存失败提示）。
+  final String endpointName;
+
+  /// 发送任务定义；返回 false 表示端点拒绝或离线。
+  final Future<bool> Function(Task task) save;
 }
 
 class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
@@ -50,11 +83,16 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   int _scDurationSec = 60;
   int _scFadeOutSec = 5;
 
-  // 条件层（v1.3）
+  // 条件层（v1.3；v1.7 新增 Wi-Fi 与通话保护）
   bool _condCharging = false;
   int? _condMinBattery;
   int? _condWinStart;
   int? _condWinEnd;
+  bool _condWifi = false;
+
+  /// 通话中不执行。**默认开启**（安全默认，见 TaskCondition 类文档）：
+  /// 定时音频灌进通话里对双方都是干扰，且使用者无法预期。
+  bool _condSkipCall = true;
 
   String get _rampUpLabel => _rampUpSec == 0 ? '关闭' : '$_rampUpSec 秒渐强';
   String _ttsText = '请注意，已开启录音取证';
@@ -70,6 +108,24 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   }
 
   Future<void> _load() async {
+    // 远程模式（v1.7）：定义由调用方（端点任务页）从 `rc.task` 回执解析后传入，
+    // 不读本机仓储——远程任务属于端点设备，本机库里没有它。
+    final remote = widget.remoteTarget;
+    if (remote != null) {
+      final t = widget.initialTask;
+      if (t == null) {
+        setState(() => _loaded = true);
+        return;
+      }
+      setState(() {
+        _editing = t;
+        _nameCtrl.text = t.name;
+        _type = t.triggerType;
+        _loaded = true;
+        _applyTask(t);
+      });
+      return;
+    }
     if (widget.taskId == null) {
       _loaded = true;
       return;
@@ -82,13 +138,22 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       _nameCtrl.text = t.name;
       _type = t.triggerType;
       _loaded = true;
-      // 条件层回填（v1.3）。
+      _applyTask(t);
+    });
+  }
+
+  /// 把已解析的任务回填到编辑器的各控件（本机与远程模式共用）。
+  void _applyTask(Task t) {
+    {
+      // 条件层回填（v1.3；v1.7 新增字段）。
       final c = t.condition;
       if (c != null) {
         _condCharging = c.requireCharging;
         _condMinBattery = c.minBatteryPct;
         _condWinStart = c.windowStartMin;
         _condWinEnd = c.windowEndMin;
+        _condWifi = c.requireWifi;
+        _condSkipCall = c.skipInCall;
       }
       final tr = t.trigger;
       if (tr is FixedOnceTrigger) {
@@ -153,20 +218,20 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           _loopFill = p.loopFill;
         }
       }
-    });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     if (!_loaded) {
       return Scaffold(
-        appBar: AppBar(title: const Text('编辑任务')),
+        appBar: AppBar(title: Text(_titleText)),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.taskId == null ? '新建任务' : '编辑任务'),
+        title: Text(_titleText),
       ),
       bottomNavigationBar: SafeArea(
         child: Padding(
@@ -315,9 +380,22 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     ];
   }
 
-  /// 条件层编辑区（v1.3）。
+  /// 条件层编辑区（v1.3；v1.7 新增 Wi-Fi 与通话保护）。
   List<Widget> _conditionInputs(BuildContext ctx) {
     return [
+      // 安全护栏置顶：默认开启，且这是唯一"关掉会打扰他人"的开关。
+      SwitchListTile(
+        title: const Text('通话中不执行'),
+        subtitle: const Text('避免音频灌进通话（默认开启，建议保持）'),
+        value: _condSkipCall,
+        onChanged: (v) => setState(() => _condSkipCall = v),
+      ),
+      SwitchListTile(
+        title: const Text('仅 Wi-Fi 下执行'),
+        subtitle: const Text('移动网络下跳过，避免消耗流量'),
+        value: _condWifi,
+        onChanged: (v) => setState(() => _condWifi = v),
+      ),
       SwitchListTile(
         title: const Text('仅充电时执行'),
         value: _condCharging,
@@ -584,8 +662,41 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     }
   }
 
+  String get _titleText {
+    final remote = widget.remoteTarget;
+    if (remote != null) {
+      return widget.initialTask == null
+          ? '新建端点任务 · ${remote.endpointName}'
+          : '编辑端点任务 · ${remote.endpointName}';
+    }
+    return widget.taskId == null ? '新建任务' : '编辑任务';
+  }
+
+  /// 保存：远程模式走调用方注入的通道，本机模式写本地仓储并续算计划。
   Future<void> _save() async {
+    final task = _buildTask();
+    if (task == null) return;
+
+    final remote = widget.remoteTarget;
+    if (remote != null) {
+      final ok = await remote.save(task);
+      if (!mounted) return;
+      if (ok) {
+        Navigator.of(context).pop();
+      } else {
+        _toast(context, '端点未确认（离线或拒绝该定义），未写入端点');
+      }
+      return;
+    }
+
     final repo = await ref.read(taskRepoProvider.future);
+    await repo.upsert(task);
+    await BackgroundServiceManager.instance.replan();
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  /// 依据当前表单构建任务定义；校验失败返回 null（已提示用户）。
+  Task? _buildTask() {
     final now = DateTime.now();
 
     TriggerConfig trigger;
@@ -600,9 +711,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             time: TimeSpec(hour: _time.hour, minute: _time.minute));
       case TriggerType.weeklyAt:
         if (_weekdays.isEmpty) {
-          if (!mounted) return;
-          _toast(context, '请至少选择一个星期');
-          return;
+          if (mounted) _toast(context, '请至少选择一个星期');
+          return null;
         }
         trigger = WeeklyTrigger(
             weekdays: _weekdays,
@@ -683,24 +793,29 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       assetIds: _editing?.assetIds ?? const [],
       cooldownSec: 300,
       quietPolicy: QuietPolicy.skip,
+      // 注意 `!_condSkipCall`：关掉通话保护时必须落库一个显式 false 的条件对象，
+      // 否则引擎的默认条件（skipInCall=true）会把它覆盖回去，使用者的关闭动作
+      // 表现为"开关按了没用"。
       condition: (_condCharging ||
               _condMinBattery != null ||
-              (_condWinStart != null && _condWinEnd != null))
+              (_condWinStart != null && _condWinEnd != null) ||
+              _condWifi ||
+              !_condSkipCall)
           ? TaskCondition(
               requireCharging: _condCharging,
               minBatteryPct: _condMinBattery,
               windowStartMin: _condWinStart,
               windowEndMin: _condWinEnd,
               windowEndNextDay: (_condWinEnd ?? 0) <= (_condWinStart ?? 0),
+              requireWifi: _condWifi,
+              skipInCall: _condSkipCall,
             )
           : null,
       priority: 0,
       createdAt: _editing?.createdAt ?? now,
       updatedAt: now,
     );
-    await repo.upsert(task);
-    await BackgroundServiceManager.instance.replan();
-    if (mounted) Navigator.of(context).pop();
+    return task;
   }
 
   void _toast(BuildContext ctx, String msg) =>
