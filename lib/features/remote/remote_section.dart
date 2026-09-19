@@ -86,12 +86,10 @@ class RemoteCallEntry extends StatelessWidget {
           child: ListTile(
             leading: CircleAvatar(
               backgroundColor: scheme.primaryContainer,
-              child: Icon(Icons.videocam,
-                  color: scheme.onPrimaryContainer),
+              child: Icon(Icons.videocam, color: scheme.onPrimaryContainer),
             ),
             title: const Text('发起视频 / 语音通话'),
-            subtitle: const Text(
-                'WebRTC P2P · DTLS-SRTP 加密 · 支持自动接通（家人守护场景）'),
+            subtitle: const Text('WebRTC P2P · DTLS-SRTP 加密 · 支持自动接通（家人守护场景）'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/remote/call'),
           ),

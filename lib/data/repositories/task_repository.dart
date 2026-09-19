@@ -92,20 +92,42 @@ class AssetRepository {
     return rows.map(_fromRow).toList();
   }
 
+  /// 库内已有音源名集合 —— 「导入预置库」的**幂等判据**。
+  ///
+  /// 只取 `name` 一列：预置库导入要按名字去重，把整表读进内存既慢又没必要。
+  Future<Set<String>> nameSet() async {
+    final rows = await _db.db.query('audio_assets', columns: ['name']);
+    return rows.map((r) => r['name'] as String).toSet();
+  }
+
   Future<void> upsert(AudioAsset a) => _db.db.insert(
         'audio_assets',
-        {
-          'id': a.id,
-          'name': a.name,
-          'path': a.path,
-          'duration_ms': a.durationMs,
-          'size_bytes': a.sizeBytes,
-          'tags': jsonEncode(a.tags),
-          'weight': a.weight,
-          'created_at': a.createdAt.millisecondsSinceEpoch,
-        },
+        a.toRow(),
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+
+  /// **批量**写入（单事务 / **单次平台通道往返**）。
+  ///
+  /// 与 `TaskRepository.upsertMany` / `LogRepository.appendMany` 同一范式。
+  /// 「导入预置库」一次要写 **60** 条，逐条 `await upsert()` 就是 60 次
+  /// Dart→平台通道→原生 SQLite 往返（每次 ≈1.5ms，BUG-035 实测）。
+  ///
+  /// 但**第一收益仍是原子性**：逐条循环中途失败会留下**半套音源库**
+  /// —— 使用者看到「导入失败」，音源列表里却已经多出一截；
+  /// 单事务天然免疫（要么 60 条都在，要么一条都没有）。
+  ///
+  /// 空集合直接返回，不产生任何数据库操作。
+  Future<void> upsertMany(Iterable<AudioAsset> items) async {
+    final batch = _db.db.batch();
+    var n = 0;
+    for (final a in items) {
+      batch.insert('audio_assets', a.toRow(),
+          conflictAlgorithm: ConflictAlgorithm.replace);
+      n++;
+    }
+    if (n == 0) return;
+    await batch.commit(noResult: true);
+  }
 
   Future<void> delete(String id) =>
       _db.db.delete('audio_assets', where: 'id = ?', whereArgs: [id]);
@@ -144,4 +166,16 @@ class AudioAsset {
   final List<String> tags; // 供任务按标签筛选音源
   final double weight; // 随机权重
   final DateTime createdAt;
+
+  /// 行映射（`upsert` / `upsertMany` 共用，避免两条路径漂移）。
+  Map<String, Object?> toRow() => {
+        'id': id,
+        'name': name,
+        'path': path,
+        'duration_ms': durationMs,
+        'size_bytes': sizeBytes,
+        'tags': jsonEncode(tags),
+        'weight': weight,
+        'created_at': createdAt.millisecondsSinceEpoch,
+      };
 }

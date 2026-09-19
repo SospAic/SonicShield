@@ -31,7 +31,6 @@ abstract interface class AssistTransport {
 /// 自动传播，天然按调用链隔离，且不需要给 `_dispatch` 的每个调用点加参数。
 final Object assistReplyZone = Object();
 
-
 /// 一次协助会话的方向密钥对。
 ///
 /// - [ctlKey]：控制端 → 端点（端点用它解密收到的指令）
@@ -142,7 +141,8 @@ class RcAssistHost {
     _seenWires.clear();
 
     await _transport?.subscribe(topic);
-    await audit?.call('assist.start', 'success', '等待接入（TTL ${ttl.inMinutes} 分钟）');
+    await audit?.call(
+        'assist.start', 'success', '等待接入（TTL ${ttl.inMinutes} 分钟）');
 
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => tick());
@@ -214,10 +214,12 @@ class RcAssistHost {
     final k = _keys;
     if (s == null || k == null || s.phase != AssistPhase.active) return false;
     s.perms = perms;
-    await _publish(k.epKey, RcMessage.now(RcAssistCmd.perm, {
-      'sessionId': s.sessionId,
-      'perms': perms.toJson(),
-    }));
+    await _publish(
+        k.epKey,
+        RcMessage.now(RcAssistCmd.perm, {
+          'sessionId': s.sessionId,
+          'perms': perms.toJson(),
+        }));
     await audit?.call('assist.perm', 'success', _permSummary(perms));
     _emit();
     return true;
@@ -239,7 +241,8 @@ class RcAssistHost {
   static String? requiredPerm(String cmd) => RcPermGate.requiredPerm(cmd);
 
   /// 该权限位是否已放行。
-  static bool hasPerm(AssistPerms p, String perm) => RcPermGate.hasPerm(p, perm);
+  static bool hasPerm(AssistPerms p, String perm) =>
+      RcPermGate.hasPerm(p, perm);
 
   /// 该命令在当前权限下是否可执行。
   static bool allows(AssistPerms p, String cmd) => RcPermGate.allows(p, cmd);
@@ -307,12 +310,16 @@ class RcAssistHost {
       await audit?.call(
           'assist.deny', 'skipped', '${msg.type} · 权限「${need ?? '未登记'}」未放行');
       // 必须显式回执拒绝：否则控制端只会看到"点了没反应"，无限重试。
-      await _publish(k.epKey, RcMessage.now(RcEvt.ack, {
-        'ok': false,
-        'for': msg.id,
-        'forType': msg.type,
-        'data': need == null ? '已拒绝' : '权限未放行：${AssistPerms.labels[need] ?? need}',
-      }));
+      await _publish(
+          k.epKey,
+          RcMessage.now(RcEvt.ack, {
+            'ok': false,
+            'for': msg.id,
+            'forType': msg.type,
+            'data': need == null
+                ? '已拒绝'
+                : '权限未放行：${AssistPerms.labels[need] ?? need}',
+          }));
       return;
     }
 
@@ -352,8 +359,8 @@ class RcAssistHost {
     _keys = AssistKeySet(sessionId: s.sessionId, ctlKey: ctl, epKey: ep);
     s.phase = AssistPhase.active;
 
-    await audit?.call('assist.accept', 'success',
-        '控制端「${s.ctrlName}」已接入（权限默认全拒）');
+    await audit?.call(
+        'assist.accept', 'success', '控制端「${s.ctrlName}」已接入（权限默认全拒）');
     await _sendAccept(s, msg);
     _emit();
   }
@@ -361,13 +368,15 @@ class RcAssistHost {
   Future<void> _sendAccept(AssistSession s, RcMessage forMsg) async {
     final k = _keys;
     if (k == null) return;
-    await _publish(k.epKey, RcMessage.now(RcAssistCmd.accept, {
-      'for': forMsg.id,
-      'sessionId': s.sessionId,
-      'expiresAt': s.expiresAt.millisecondsSinceEpoch,
-      'epName': endpointName,
-      'perms': s.perms.toJson(),
-    }));
+    await _publish(
+        k.epKey,
+        RcMessage.now(RcAssistCmd.accept, {
+          'for': forMsg.id,
+          'sessionId': s.sessionId,
+          'expiresAt': s.expiresAt.millisecondsSinceEpoch,
+          'epName': endpointName,
+          'perms': s.perms.toJson(),
+        }));
   }
 
   Future<void> _reject(AssistSession s, String reason) async {
@@ -378,8 +387,8 @@ class RcAssistHost {
   /// 握手失败计数；达到上限立即作废整场会话（防在线暴力猜测）。
   Future<void> _onHandshakeFailure(AssistSession s, String why) async {
     final locked = s.registerFailure();
-    await audit?.call(
-        'assist.handshake', locked ? 'failed' : 'skipped', '$why（第 ${s.failures} 次）');
+    await audit?.call('assist.handshake', locked ? 'failed' : 'skipped',
+        '$why（第 ${s.failures} 次）');
     if (locked) {
       await close(reason: 'locked');
     } else {

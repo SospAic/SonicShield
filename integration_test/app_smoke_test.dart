@@ -7,6 +7,7 @@ import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
+import 'package:sonic_shield/features/sounds/sound_library_screen.dart';
 
 /// 集成冒烟测试：真机/模拟器上运行（flutter test integration_test -d <device>）。
 /// 验证：应用启动 -> 各页面可达 -> 调度端到端物化。
@@ -80,6 +81,26 @@ void main() {
       await _settle(tester, ms: 800);
       expect(tester.takeException(), isNull, reason: '页面 $label 不应崩溃');
     }
+  });
+
+  testWidgets('音源库页面在真实运行时渲染（BUG-047 改动的设备端验证）', (tester) async {
+    // 直接 pump 该页面：它现在是 `assetRepoProvider` 的**唯一**数据入口，
+    // 仓储解析失败（provider 抛错 / 表结构不匹配）只会表现为一块错误红屏，
+    // 而 `takeException()` 能把它变成可断言的失败。
+    await tester.pumpWidget(const ProviderScope(
+      child: MaterialApp(home: SoundLibraryScreen()),
+    ));
+    await _settle(tester, ms: 2500);
+    expect(tester.takeException(), isNull, reason: '音源库页面不应崩溃');
+
+    final empty = find.textContaining('暂无音源');
+    final list = find.byType(ListView);
+    expect(
+      empty.evaluate().isNotEmpty || list.evaluate().isNotEmpty,
+      isTrue,
+      reason: '仓储读取完成后必须落到"空库提示"或"音源列表"之一',
+    );
+    expect(find.text('音源库'), findsWidgets);
   });
 
   test('端到端：任务定义 -> 物化 -> 计划条目可执行语义', () {

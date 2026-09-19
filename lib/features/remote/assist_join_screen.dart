@@ -31,7 +31,8 @@ class AssistJoinScreen extends StatefulWidget {
 }
 
 class _AssistJoinScreenState extends State<AssistJoinScreen> {
-  late final AssistJoinClient _client = widget.client ?? AssistJoinClient.instance;
+  late final AssistJoinClient _client =
+      widget.client ?? AssistJoinClient.instance;
   final _codeCtrl = TextEditingController();
   final _pwCtrl = TextEditingController();
 
@@ -83,7 +84,9 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                       LengthLimitingTextInputFormatter(9),
                     ],
                     style: const TextStyle(
-                        fontSize: 24, letterSpacing: 4, fontFamily: 'monospace'),
+                        fontSize: 24,
+                        letterSpacing: 4,
+                        fontFamily: 'monospace'),
                     decoration: const InputDecoration(
                       labelText: '临时码（9 位数字）',
                       hintText: '000 000 000',
@@ -100,7 +103,9 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                       LengthLimitingTextInputFormatter(8),
                     ],
                     style: const TextStyle(
-                        fontSize: 24, letterSpacing: 4, fontFamily: 'monospace'),
+                        fontSize: 24,
+                        letterSpacing: 4,
+                        fontFamily: 'monospace'),
                     decoration: const InputDecoration(
                       labelText: '访问密码（8 位）',
                       hintText: 'ABCD EFGH',
@@ -126,7 +131,8 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.error_outline, color: scheme.error, size: 20),
+                        Icon(Icons.error_outline,
+                            color: scheme.error, size: 20),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(info.error!,
@@ -317,8 +323,7 @@ class _AuditSheet extends StatelessWidget {
     );
   }
 
-  static String _hms(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:'
+  static String _hms(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:'
       '${t.minute.toString().padLeft(2, '0')}:'
       '${t.second.toString().padLeft(2, '0')}';
 }

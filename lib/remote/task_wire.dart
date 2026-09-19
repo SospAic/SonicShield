@@ -155,11 +155,12 @@ abstract final class TaskWire {
     switch (j['kind']) {
       case 'play':
         final m = Map<String, dynamic>.from(j);
-        final (vLo, vHi) = _rangeD(m['volumeMin'], m['volumeMax'], 0, 1, 0.6, 1);
+        final (vLo, vHi) =
+            _rangeD(m['volumeMin'], m['volumeMax'], 0, 1, 0.6, 1);
         m['volumeMin'] = vLo;
         m['volumeMax'] = vHi;
-        final (dLo, dHi) =
-            _rangeI(m['durationSecMin'], m['durationSecMax'], 1, maxDurationSec, 3, 15);
+        final (dLo, dHi) = _rangeI(
+            m['durationSecMin'], m['durationSecMax'], 1, maxDurationSec, 3, 15);
         m['durationSecMin'] = dLo;
         m['durationSecMax'] = dHi;
         m['fadeInSec'] = _clampInt(m['fadeInSec'], 0, 600, 0);
@@ -214,7 +215,9 @@ abstract final class TaskWire {
         for (final t in tracks) {
           final tm = _asMap(t);
           if (tm == null) return null;
-          if (tm['presetCategory'] == null && tm['assetId'] == null) return null;
+          if (tm['presetCategory'] == null && tm['assetId'] == null) {
+            return null;
+          }
           cleaned.add(tm..['volume'] = _clampD(tm['volume'], 0, 1, 0.6));
         }
         return Map<String, dynamic>.from(j)
@@ -236,7 +239,9 @@ abstract final class TaskWire {
     j.forEach((k, v) {
       if (v is Map) {
         final m = v.map((a, b) => MapEntry('$a', b));
-        if (m['hour'] is num) m['hour'] = (m['hour'] as num).toInt().clamp(0, 23);
+        if (m['hour'] is num) {
+          m['hour'] = (m['hour'] as num).toInt().clamp(0, 23);
+        }
         if (m['minute'] is num) {
           m['minute'] = (m['minute'] as num).toInt().clamp(0, 59);
         }
@@ -244,9 +249,7 @@ abstract final class TaskWire {
       } else if (v is List) {
         out[k] = [
           for (final e in v)
-            e is Map
-                ? _clampTimeSpecs(e.map((a, b) => MapEntry('$a', b)))
-                : e
+            e is Map ? _clampTimeSpecs(e.map((a, b) => MapEntry('$a', b))) : e
         ];
       } else {
         out[k] = v;

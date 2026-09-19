@@ -81,8 +81,7 @@ class AssistChannel implements RcCommandChannel {
   final AssistJoinClient client;
 
   @override
-  String get label =>
-      client.epName.isEmpty ? '协助会话端点' : '${client.epName}（协助）';
+  String get label => client.epName.isEmpty ? '协助会话端点' : '${client.epName}（协助）';
 
   @override
   Stream<Map<String, dynamic>> get events => client.events;

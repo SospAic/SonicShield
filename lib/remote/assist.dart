@@ -398,4 +398,3 @@ abstract final class RcPermGate {
         RcStepKind.record => denyAll,
       };
 }
-

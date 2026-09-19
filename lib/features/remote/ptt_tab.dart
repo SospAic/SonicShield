@@ -5,11 +5,14 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../remote/controller_service.dart';
+import '../../remote/endpoint_service.dart';
+import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 
 /// 对讲机整页（v1.6，v1 整段模式）：
 /// 选择端点 → 按住说话（≤60s，AAC）→ 松开自动加密发送 →
-/// 端点自动播放并回执。v2 路线：Opus 流式分片（Zello 式实时）。
+/// 端点自动播放并回执（BUG-046：`rc.pttAck` 现已消费渲染）。
+/// v2 路线：Opus 流式分片（Zello 式实时）。
 class PttTab extends StatefulWidget {
   const PttTab({super.key});
 
@@ -24,11 +27,28 @@ class _PttTabState extends State<PttTab> {
   int _recSec = 0;
   Timer? _ticker;
   String? _lastResult;
+  StreamSubscription<Map<String, dynamic>>? _ackSub;
 
   @override
   void initState() {
     super.initState();
     _load();
+    // BUG-046：消费端点的 `rc.pttAck` 回执（此前广播无人消费）。
+    _ackSub = RcEndpointService.instance.events.listen((m) {
+      if (!mounted) return;
+      if (m['type'] == RcEvt.pttAck) {
+        final payload = rcPayloadOf(m);
+        final ok = payload['ok'] as bool? ?? false;
+        setState(() => _lastResult = ok ? '对端已播放 ✓' : '对端播放失败');
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    unawaited(_ackSub?.cancel());
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -92,12 +112,6 @@ class _PttTabState extends State<PttTab> {
         _recSec = 0;
       });
     }
-  }
-
-  @override
-  void dispose() {
-    _ticker?.cancel();
-    super.dispose();
   }
 
   @override

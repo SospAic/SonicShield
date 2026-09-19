@@ -1,4 +1,4 @@
-# 交接文档 HANDOVER（v1.7.0-alpha.1，2026-09-19）
+# 交接文档 HANDOVER（v1.7.1，2026-09-19）
 
 > **给下一个会话的第一句话**：读 §0 五分钟上手 → §1 状态快照 → §6 优先级清单，
 > 即可无缝续作，**无需向用户重复确认任何已在 §8 记录的决策**。
@@ -11,16 +11,16 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-19）**：v1.7.0-alpha.1，功能层 **318/318** + 压测 **24/24** 全绿，
+**当前状态（2026-09-19）**：v1.7.0-alpha.1，功能层 **336/336** + 压测 **24/24** 全绿，
 `flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
 **唯一的 P0 阻塞是"没有真机"** —— 见 §6 第 1 项。
 
-**三条命令跑完全部门禁**（环境见 §3，**先关模拟器**再跑前两条）：
+**一条命令跑完全部门禁**（第十三轮起，环境见 §3，**先关模拟器**）：
 
 ```bash
-flutter analyze                                    # 必须 No issues found
-flutter test --exclude-tags perf                   # 期望 +318 / 318
-flutter test --tags perf --concurrency=1           # 期望 +24 / 24（必须分层，混跑假红）
+bash scripts/gates.sh          # analyze + 功能 336 + 压测 24；EXIT=1 即有失败
+# 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
+# AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
 ```
 
 **需要设备的两条**（先 `emulator -avd sonic_test -no-snapshot-save` 并等
@@ -29,7 +29,7 @@ flutter test --tags perf --concurrency=1           # 期望 +24 / 24（必须分
 ```bash
 flutter drive --profile --driver=test_driver/integration_test.dart \
   --target=integration_test/perf_nfr_test.dart -d emulator-5554      # 期望 +6 / 6（AOT）
-flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3 / 3
+flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4 / 4
 ```
 
 **五条最容易踩的坑**（完整清单见 §7）：
@@ -46,7 +46,8 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3
    （BUG-045）。改完引擎/路由**主动跑一遍** §0 的两条设备命令。
 
 **下一步做什么**：§6 优先级清单第 1 项（真机补测）是唯一 P0；
-若无真机，第 11 项（把 `integration_test/` 纳入常规门禁）是当前最高价值的可推进项。
+若无真机，按 §6 顺序取下一个**不依赖硬件**的项 —— 当前是
+「继续三向覆盖比对审计其它模块」或「`rc.assets`/`rc.presets` 接线」。
 
 ---
 
@@ -54,12 +55,13 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3
 
 | 项 | 状态 |
 |---|---|
-| 版本 | **1.7.0-alpha.1+11**（pubspec） |
-| 提交链 | …→v1.5.0→v2.0.0-alpha→v1.6.0-alpha→v1.6.1-alpha→v1.7.0-alpha.1 |
-| 测试 | **功能层 318/318 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 `integration_test/native_bridge_test.dart` **6/6 × 3 种网络状态** + 冒烟 **3/3** |
+| 版本 | **1.7.1+12**（pubspec） |
+| 提交链 | …→v1.6.1→v1.7.0-alpha.1→**v1.7.1（本轮：门禁脚本+三向复扫+BUG-046）** |
+| 测试 | **功能层 336/336 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 `integration_test/native_bridge_test.dart` **6/6 × 3 种网络状态** + 冒烟 **4/4** |
 | analyze | **No issues found!** |
 | **NFR-04 AOT 绝对验收** | ✅ **已闭环**（2026-09-18 首次取得）：100 任务物化 **15ms / 预算 500ms**（33× 余量）；1000 任务 134ms / 预算 5000ms。`flutter drive --profile` → `+5 All tests passed!`（第十二轮新增条件层复用用例后为 **+6**） |
 | **任务批量写入** | ✅ **已闭环**（第十一轮，BUG-042）：`TaskRepository.upsertMany` 单事务单往返；AOT 实测 500 条 **1797ms → 170ms（10.6×）**；任务导入已改走批量 |
+| **音源批量写入** | ✅ **已闭环**（第十四轮，BUG-047）：`AssetRepository.upsertMany` + `AssetLibraryImporter`（幂等/回滚）；预置库 60 条由 60 次往返改为 **1 次**，且失败**不再留下半套库** |
 | **AOT 门禁归一化** | ✅ **已闭环**（第十一轮，BUG-043）：逐条路径预算改为「本次实测往返成本 × 次数 × 3」，消除冷启必红 |
 | **条件层每轮复用** | ✅ **已闭环**（第十二轮，BUG-044）：一轮固定 4 次平台往返，与任务数解耦；AOT 50 任务 **584ms → 17ms（34×）** |
 | **v1.7 条件层设备端验证** | ✅ **已闭环**（第九/十轮）：`MODE_IN_CALL` 用模拟器真实通话覆盖；`wifi`/`cellular` 用模拟器虚拟 AP 覆盖；`NativeBridge` 另有 39 例宿主机契约锁 |
@@ -116,7 +118,84 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3
 | BUG-033 | P3 | 性能用例测的是 JIT 冷启动（缺预热/单次采样） |
 | BUG-034 | P3 | `MT-01` 阈值严于 NFR-04 自身外推（口径待决） |
 
-**测试门禁已变**（上一会话记录的 93 已过期）：非性能 **318** + 性能 **24** = **342**。
+**测试门禁已变**（上一会话记录的 93 已过期）：非性能 **318** + 性能 **24** = **342**
+（截至第十四轮已增至非性能 **336** + 性能 **24** = **360**，见 §1.10）。
+
+### 1.10 第十四轮（2026-09-19）：音源库导入的**批量写入与原子性**（BUG-047）
+
+第十三轮闭环「`integration_test/` 纳入门禁」后，docs/17 §19.6 未闭环清单
+**只剩硬件阻塞项**，故按任务约定转「代码审计（重点看未覆盖的错误路径）」。
+审计沿用 BUG-035 → BUG-042 的同一把尺子：**还有没有"一次调用 = 一次平台通道
+往返"的批量写入路径漏网**。
+
+**BUG-047（P2）**：`lib/features/sounds/sound_library_screen.dart` 是最后一个。
+
+| 位置 | 改造前的问题 |
+|---|---|
+| `_importPresets()` | 循环内 `await db.insert(...)` × **60** → 60 次往返；第 k 条失败时前面 k−1 条**已落库**（界面说"导入失败"，音源列表里却已多出一截） |
+| `_import()`（本地导入） | 同形 → 孤儿文件 + 半批记录 |
+| `_listAssets()` / 删除按钮 | 直接操作 `db`，而 `AssetRepository` **已存在却只有端点服务在用** |
+| 删除音源 | **只删记录不删文件** → 每次"导入→删除"攒一个孤儿音频 |
+
+**修法**（与 BUG-042 同一范式，**第一收益是原子性**）：
+
+1. `AssetRepository.upsertMany`（`batch()` 单事务 / **单次往返**）、
+   `AudioAsset.toRow()`（两条写入路径共用行映射）、
+   `nameSet()`（只取 `name` 一列，作幂等判据）。
+2. **新增 `lib/services/preset_import.dart`**：`AssetLibraryImporter` =
+   幂等跳过 → 全部落盘 → **一次**写库 → 失败回滚（库内零新增 + 清理已落盘文件）。
+   **抽出来的理由**：界面依赖 `FilePicker`/`rootBundle`/`path_provider` 宿主机跑不起来，
+   而"失败会不会留下半套库"**恰恰是唯一值得写回归锁的性质**。
+3. 界面改为只经 `assetRepoProvider`；列表返回强类型 `AudioAsset`
+   （UI 不再自己 `jsonDecode(tags)`）；删除改为**先删记录、再删文件**
+   （反过来会留下指向不存在文件的记录，点试听即报错）。
+4. `existingNames` 是**可选**参数：预置库传 `repo.nameSet`（幂等），
+   本地导入不传（同名可多份，与改造前行为一致）。
+
+**回归锁 `test/asset_import_test.dart`（18 例）**：仓储原子性 / 两条写入路径行映射
+**逐列相同** / **N 条只调用一次 `saveAll`** / 幂等跳过且不触发落盘 / 全重名不开空事务 /
+**落盘失败→回滚文件+零新增** / **写库失败→清理全部文件** / 清理自身失败不掩盖原错 /
+端到端幂等 / 清单↔磁盘一致性（60 条 / 12 分类 / 文件存在 / **名字唯一**）。
+
+**证伪（三个探针，全部"能失败"后还原）**：
+
+| 探针 | 临时改动 | 实测 |
+|---|---|---|
+| A | `upsertMany` 改回逐条 `await insert` | 1 例失败（原子性锁） |
+| B | 导入器改回逐条 `saveAll([one])` | 4 例失败；`Actual: [[AudioAsset], [AudioAsset]]` **具象复现"半套库"** |
+| C | 去掉 `catch` 回滚 | 2 例失败（`Actual: []`） |
+
+**门禁**：analyze 全零；功能 **336/336**（318 → +18）；压测 **24/24**；
+`scripts/gates.sh` **EXIT=0**；设备冒烟 **4/4**（新增音源库渲染用例，证明新 provider
+在真实运行时能解析）；设备桥接 **6/6**；**AOT `flutter drive --profile` 6/6**
+（100 任务物化 **10ms / 预算 500ms**，往返基准 1449µs）。用例总数 **342 → 360**。
+
+### 1.9 第十三轮（2026-09-19）：统一门禁脚本 + `integration_test/` 纳入门禁 + 三向覆盖复扫（BUG-046）
+
+取 §6 第 11 项（当时唯一不依赖硬件的高价值项）。
+
+**① 门禁脚本统一**：`scripts/gates.sh` / `gates.ps1` —— 三层门禁
+（analyze / 功能 / 压测）+ 可选设备端（`WITH_DEVICE=1`）+ 可选 AOT（`WITH_AOT=1`），
+任何一步失败 `EXIT=1`；**CI 与本地同一套判据**。
+**证伪**：向 `test/models_json_test.dart` 注入必败用例 → 三层全部 `[FAIL]`、`EXIT=1`；
+还原后全绿 —— 脚本的失败路径真实有效，非恒真。
+
+**② `integration_test/` 纳入门禁**（BUG-045 的教训固化）：CI 的 emulator-test job
+由「只跑 app_smoke_test」扩为 **smoke + 桥接 + assist E2E 三件套**。
+
+**③ 三向覆盖比对复扫**（第七轮方法复用）：
+
+| 结果 | 明细 |
+|---|---|
+| RcCmd 断链 | **0**（v1.6.1 修复后无新断链） |
+| RcEvt 断链 | **1 → 0**：`rc.pttAck` 广播无人消费（BUG-046） |
+| 预留一致确认 | `rc.assets` / `rc.presets` / `rc.callMissed` 与预留命令配套，有意保留 |
+
+**④ BUG-046（P3）**：对讲机「对端已播放」回执端点已广播、UI 无监听 →
+`PttTab` 订阅 `RcEndpointService.events`，用 `rcPayloadOf(m)['ok']` 渲染
+（回执字段嵌套在 payload 内，**必须走 `rcPayloadOf`**，BUG-023 同类）。
+
+**⑤ 门禁**：analyze 全零；功能 **318/318**；压测 **24/24**；gates `EXIT=0`。
 
 ### 1.8 第十二轮（2026-09-18）：条件层**每轮复用**（BUG-044）+ 设备冒烟测试复活（BUG-045）
 
@@ -361,8 +440,7 @@ export MSYS_NO_PATHCONV=1   # adb shell 内 /sdcard 路径防 Git Bash 转换
 #    `env ... flutter analyze` = 0.35s 无输出；`env FOO=bar bash -c 'echo x'` 也无输出。
 #    本机宿主已注入 ProgramFiles(x86)，**裸跑即可**；若确需设置，用绝对路径 /usr/bin/env。
 #    ✅ 2026-09-19 再次复核：三层门禁**全部裸跑正常**，无需该变量 ——
-#       `flutter test --tags perf --concurrency=1` → +24/24（未传 PROGRAMFILES(X86)）。
-# 2) 会话级代理会拦截 flutter_tester 回环 WebSocket
+#       `flutter test --tags perf --concurrency=1` → +24/24（未传 PROGRAMFILES(X86)）。# 2) 会话级代理会拦截 flutter_tester 回环 WebSocket
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 export NO_PROXY=127.0.0.1,localhost
 ```
@@ -387,7 +465,7 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
 > （实测 2475µs vs 1565µs），会让绝对值型断言误红（BUG-043）。
 
 **关键命令**：
-- 测试分层：`flutter test --exclude-tags perf`（功能 **318** 例）/
+- 测试分层：`flutter test --exclude-tags perf`（功能 **336** 例）/
   `flutter test --tags perf --concurrency=1`（压测 **24** 例；混跑会因 CPU 争用假红——这是特性不是 bug）
 - 构建：`flutter build apk --release` / `flutter build apk --profile`
   （**输出必须重定向到文件**，见 §7）
@@ -398,7 +476,7 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
   ```
 - **设备端冒烟（`integration_test/` 不在默认门禁内，改完引擎/路由要主动跑）**：
   ```bash
-  flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +3/3
+  flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4/4
   ```
 - 模拟器装测：`scripts/emulator_test.ps1`
 
@@ -447,7 +525,22 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
 杀进程 5s 自愈/真实触发执行/预置库 60 条导入试听/冷启动 1574ms/PSS 97MB/
 Monkey 400 零崩溃。
 
-**v1.7.0-alpha.1 第十二轮（条件层每轮复用 + 设备冒烟复活，最新）**：
+**v1.7.0-alpha.1 第十四轮（音源库批量写入与原子性，最新）**：
+- `test/asset_import_test.dart` → **18/18 全绿**（新增；含原子性锁、单批调用锁、
+  双回滚锁、清单↔磁盘一致性锁）。
+- 修 **BUG-047（P2）**：`AssetRepository.upsertMany`（单事务/单往返）+
+  `AudioAsset.toRow()` + `nameSet()`；新增 `lib/services/preset_import.dart`
+  （`AssetLibraryImporter`：幂等跳过 → 落盘 → **一次**写库 → 失败回滚）；
+  界面只经 `assetRepoProvider`，删除改为**先删记录再删文件**。
+- `flutter analyze` → No issues found!；功能 **336/336**；压测 **24/24**；
+  `scripts/gates.sh` → **EXIT=0**；设备冒烟 **4/4**（+1 例）；设备桥接 **6/6**；
+  `flutter drive --profile`（perf_nfr_test）→ **6/6**。
+- AOT 实测：100 任务物化 **10ms / 预算 500ms**；往返基准 **1449µs**；
+  任务 500 条逐条 614ms → 批量 48ms；条件评估 50 任务逐任务 215ms → 每轮复用 3ms。
+- 证伪：三个探针分别使 1 / 4 / 2 例失败，探针 B 实测
+  `Actual: [[Instance of 'AudioAsset'], Instance of 'AudioAsset']` **具象复现半套库**。
+
+**v1.7.0-alpha.1 第十二轮（条件层每轮复用 + 设备冒烟复活）**：
 - `test/condition_env_test.dart` → **12/12 全绿**（新增，含 8 条件 × 8 环境 = 64 组穷举等价性）。
 - 修 **BUG-044（P3）**：条件评估由"逐任务读平台"改为**每轮读一次并复用**
   （`ConditionEnv` + `RoundConditionEnv`），成本与任务数解耦。
@@ -560,10 +653,14 @@ Monkey 400 零崩溃。
     → ✅ **第十二轮已闭环（BUG-044）**：拆出 `readConditionEnv()` +
     `conditionFailedIn()`，两个遍历循环各持一个 `RoundConditionEnv` 快照；
     AOT 实测 50 任务 **584ms → 17ms（34×）**，一轮固定 4 次往返。
-11. **P2（第十二轮新增）** `integration_test/` **未纳入常规门禁**（BUG-045 暴露）：
+11. ~~**P2（第十二轮新增）** `integration_test/` **未纳入常规门禁**（BUG-045 暴露）：
     默认门禁只跑 `test/`，于是设备冒烟测试红了整整一个 IA 版本无人察觉。
-    建议纳入 CI 或定期执行。解除条件：有一个带模拟器/真机的例行执行入口。
-12. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
+    建议纳入 CI 或定期执行。解除条件：有一个带模拟器/真机的例行执行入口。~~
+    → ✅ **第十三轮已闭环**：`scripts/gates.sh` 加 `WITH_DEVICE=1` 走设备全套，
+    CI 的 emulator-test job 扩为 smoke + 桥接 + assist E2E 三件套。
+12. **P2（第十四轮新增）** `rc.assets` / `rc.presets` 广播**暂无 UI 消费**
+    （与第七轮记录的"有意预留命令"配套）：启用 asset/preset 远程管理时一并接线。
+13. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
 
 ## 7. 会话操作守则（血泪教训）
 
@@ -588,7 +685,7 @@ Monkey 400 零崩溃。
   > ✅ **2026-09-19 复核结论：优先裸跑，不要加任何包装。**
   > 第九/十轮与第十二轮三次实测，bash 中该变量**未设置**，而裸跑
   > `flutter analyze` / `flutter test --exclude-tags perf` / `--tags perf` 三层
-  > **全部正常出结果**（318 / 24）。确需传递时用绝对路径
+  > **全部正常出结果**（336 / 24）。确需传递时用绝对路径
   > `/usr/bin/env "PROGRAMFILES(X86)=C:\Program Files (x86)" flutter …`。
 - **模拟器可以造出真实运行环境，不必等真机**（第九/十轮）：
   - 通话态：`adb shell am start -a android.intent.action.CALL -d tel:10086`
@@ -633,6 +730,18 @@ Monkey 400 零崩溃。
   要有 `readCount` 这样的出口，否则这个优化只能靠读代码相信，写不出回归锁。
 - **缓存 Future，不要缓存结果值**（第十二轮）：缓存结果值会让**并发在途**的取值
   各读一次（`_cached` 要到 `await` 之后才赋值）→"每轮一次"被击穿。
+- **比较两条代码路径的产物时，输入必须完全相同**（第十四轮踩坑）：
+  「`upsert` 与 `upsertMany` 行映射一致」的用例第一版用**两个不同 id** 的音源比较，
+  `id` 列必然不同 → **自造红灯**。真正的漂移锁是「**同一份输入**分别走两条路径、
+  逐列比对」；否则比的是输入差异，不是路径差异。
+- **失败路径的回归锁要锁"残留量"，并尽量让失败具象**（第十四轮）：
+  断言 `库内为空` / `已落盘文件被清理` 比断言"抛了异常"值钱得多 ——
+  探针 B 实测打印出 `Actual: [[Instance of 'AudioAsset'], [Instance of 'AudioAsset']]`，
+  直接把"半套库"这个用户可见后果**具象复现**在测试输出里。
+- **批量写入的三处收口（第十四轮清空该线索）**：BUG-035（日志 `appendMany`）→
+  BUG-042（任务 `upsertMany`）→ BUG-047（音源 `upsertMany` + 导入器回滚）。
+  排查手法：`grep` 扫「循环里 `await` 写库」+「绕过仓储层的裸 `db.*`」。
+  **第一收益永远是原子性，第二才是速度**。
 - **设备端用例必须能在"全新安装"状态跑通**（第十二轮 BUG-045）：
   `flutter test integration_test/…` 每次都会**卸载应用**，`SharedPreferences` 随之清空 ——
   依赖持久化状态（如合规承诺已确认）的用例会**必红**，且报错只显示"点了但命中不到"。
@@ -670,7 +779,7 @@ Monkey 400 零崩溃。
 | **条件层"无法判定"** | `inCall`/`onWifi` 为 `null` = **无法判定 → 按满足处理**（`unknown` ≠ `false`，BUG-041） | §4.8、docs/17 §17.4 |
 | **性能阈值分层** | 绝对验收只在 **AOT**（`perf_nfr_test.dart`）；JIT 套件按"实测基线 × 3"设数量级护栏；往返受限路径的预算**自归一化** | §7、docs/17 §18.4 |
 | **信息架构** | **5 个底部 TAB**（守护/自动化/远程/日志/设置）；子 TAB 用 `?t=` 深链；旧路径保留 redirect | docs/17 §18 |
-| **批量写入范式** | 单事务 / 单次平台往返（`appendMany` / `upsertMany`）；**第一收益是原子性** | §1.7、§1.8 |
+| **批量写入范式** | 单事务 / 单次平台往返（`appendMany` / `upsertMany`）；**第一收益是原子性**；导入类还要**幂等跳过 + 失败回滚**（清理已落盘文件） | §1.7、§1.8、§1.10 |
 
 ## 9. 交接对话（下一会话开场白，直接可用）
 
@@ -683,18 +792,22 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 §19，第十二轮）拿到「尚未闭环」清单，
-以及 docs/12 的最后一节（当前是 §21）拿真实门禁数据。
-项目当前是 v1.7.0-alpha.1：功能层 318/318、压测 24/24、analyze 零问题。
+再读 docs/17 的最后一节（当前是 §20，第十四轮）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §23）拿真实门禁数据。
+项目当前是 v1.7.0-alpha.1：功能层 336/336、压测 24/24、analyze 零问题。
 
 【第 2 步 · 选一个未完成项（按 §6 顺序）】
 §6 第 1 项（真机补测协助会话握手）是唯一 P0，但**需要真机**：
 先跑 `adb devices`，为空就跳过，不要在这上面空转。
-若无真机，按顺序取下一个**不依赖硬件**的项 —— 当前最高价值的是
-§6 第 11 项：**把 `integration_test/` 纳入常规门禁**（BUG-045 暴露的覆盖洞：
-它已经红过整整一个版本没人发现）。
-再往后可选：三向覆盖比对审计其它模块（RcCmd/RcEvt 的端点/发送/消费三向比对，
-这个方法在本项目一次定位过 5 条断链命令）；或 docs/11 路线图的下一项。
+若无真机，按顺序取下一个**不依赖硬件**的项 —— §6 第 11 项
+（`integration_test/` 纳入常规门禁）已在第十三轮闭环，
+故当前可选：**三向覆盖比对审计其它模块**（RcCmd/RcEvt 的端点/发送/消费三向比对，
+这个方法在本项目一次定位过 5 条断链命令）；把 `rc.assets`/`rc.presets` 广播接上 UI；
+或 docs/11 路线图的下一项。
+> **一条已验证高产的非硬件审计线索**：找「一次调用 = 一次平台通道往返」的批量写入路径
+> —— BUG-035（日志）→ BUG-042（任务）→ BUG-047（音源）都是这条线索挖出来的，
+> 判据是 `grep` 扫「循环里 `await` 写库」+「绕过仓储层的裸 `db.*`」。
+> 目前该线索**已清空**（剩下的 `guard_screen._persist()` 是单条写入，无半批风险）。
 
 【第 3 步 · 执行纪律（务必遵守，这些是血泪教训）】
 · 环境变量按 HANDOVER §3 的**一个代码块** export；**不要用 `env VAR=… flutter …`
@@ -702,7 +815,7 @@ Monkey 400 零崩溃。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +318 / 318
+    flutter test --exclude-tags perf         → 期望 +336 / 336
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
 · 改多行代码**只用 Edit 工具**，禁用 sed 多行替换。
   ⚠️ Edit 会偶发 `EBUSY` 并**静默不落盘**（报 success 但内容没进文件）——
@@ -724,10 +837,11 @@ Monkey 400 零崩溃。
 
 **给用户的交接会话开场（人类可读版）**：
 
-> 本轮已完成：v1.7.0-alpha.1 的条件层每轮复用（BUG-044，AOT 实测 34×）与
-> 设备冒烟测试复活（BUG-045）。门禁：analyze 干净 / 318 / 24 / AOT 6 / 冒烟 3。
-> 下一轮建议优先「把 `integration_test/` 纳入常规门禁」——它是唯一不依赖真机、
-> 且能防止"静默变红"的高价值项；真机接入后则优先补协助会话的双进程握手。
+> 本轮已完成：v1.7.0-alpha.1 的音源库导入批量写入与原子性（BUG-047，
+> 预置库 60 条由 60 次平台往返改为 1 次，失败不再留下半套库）。
+> 门禁：analyze 干净 / 336 / 24 / gates EXIT=0 / AOT 6 / 冒烟 4 / 桥接 6。
+> 下一轮建议：真机接入后优先补协助会话的双进程握手；若无真机，
+> 做三向覆盖比对审计其它模块，或把 `rc.assets`/`rc.presets` 广播接上 UI。
 
 ## 10. 代码地图（新会话快速定位）
 
@@ -746,7 +860,9 @@ Monkey 400 零崩溃。
 | 原生桥（Dart 侧） | lib/services/native_bridge.dart |
 | 权限申请 + 合规承诺门 | lib/services/permission_flow.dart |
 | 加密备份 | lib/services/export_crypto.dart |
-| 仓储（批量写：`upsertMany`/`appendMany`） | lib/data/repositories/{task,log,occurrence}_repository.dart |
+| **批量导入器（幂等/回滚/单批写库）** | lib/services/preset_import.dart（`AssetLibraryImporter`） |
+| 仓储（批量写：`upsertMany`/`appendMany`） | lib/data/repositories/{task,log,occurrence}_repository.dart（`AudioAsset`/`AssetRepository` 也在 task_repository.dart 内） |
+| 音源库界面（只经 `assetRepoProvider`） | lib/features/sounds/sound_library_screen.dart |
 
 **远程模块**
 
@@ -773,12 +889,13 @@ Monkey 400 零崩溃。
 
 | 层 | 文件 |
 |---|---|
-| 宿主机功能（`test/`，计入 318） | condition_env_test.dart、native_bridge_test.dart、db_repository_test.dart、remote_crypto_test.dart、remote_console_tab_test.dart、playback_focus_test.dart |
+| 宿主机功能（`test/`，计入 336） | condition_env_test.dart、native_bridge_test.dart、db_repository_test.dart、remote_crypto_test.dart、remote_console_tab_test.dart、playback_focus_test.dart、**asset_import_test.dart** |
 | JIT 压测护栏（`--tags perf`，24 例） | test/performance_test.dart + performance_v2_test.dart（辅助库 test/perf_bench.dart） |
 | **AOT 绝对验收**（`flutter drive --profile`，6 例） | integration_test/perf_nfr_test.dart |
-| 设备端冒烟（3 例） | integration_test/app_smoke_test.dart |
+| 设备端冒烟（4 例） | integration_test/app_smoke_test.dart |
 | 设备端桥接（6 例） | integration_test/native_bridge_test.dart |
 | 协助会话真实 broker E2E（1 例） | integration_test/assist_e2e_test.dart |
+| **统一门禁脚本** | scripts/gates.sh / gates.ps1（`WITH_DEVICE=1` / `WITH_AOT=1`） |
 
 **文档**
 

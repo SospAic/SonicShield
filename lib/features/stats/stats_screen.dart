@@ -41,9 +41,7 @@ class _StatsScreenState extends ConsumerState<StatsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: widget.embedded
-          ? null
-          : AppBar(title: const Text('统计看板')),
+      appBar: widget.embedded ? null : AppBar(title: const Text('统计看板')),
       body: FutureBuilder<StatsSnapshot>(
         future: _future,
         builder: (context, snap) {

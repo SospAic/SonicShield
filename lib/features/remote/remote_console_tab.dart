@@ -57,8 +57,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     super.initState();
     _load();
     final channel = widget.channel;
-    _evtSub = (channel?.events ?? RcEndpointService.instance.events)
-        .listen(_onEvent);
+    _evtSub =
+        (channel?.events ?? RcEndpointService.instance.events).listen(_onEvent);
     // 权限/可用性变更 → 重建，刷新按钮灰化与横幅摘要。
     // 协助会话里端点可随时放行或收回权限，若不订阅就只在收到业务回执时才
     // 重建，灰化状态会停留在旧值（BUG-030）。
@@ -146,8 +146,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         final desc = _pendingAcks.remove(payload['for'] as String?);
         if (desc != null && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content:
-                  Text('${payload['ok'] == true ? '✓' : '✗'} $desc')));
+              content: Text('${payload['ok'] == true ? '✓' : '✗'} $desc')));
         }
     }
   }
@@ -199,9 +198,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   Widget _sessionBanner() {
     final channel = widget.channel!;
     final scheme = Theme.of(context).colorScheme;
-    final perms = channel is AssistChannel
-        ? channel.client.perms
-        : AssistPerms.none;
+    final perms =
+        channel is AssistChannel ? channel.client.perms : AssistPerms.none;
     final on = <String>[];
     for (final e in AssistPerms.labels.entries) {
       if (perms.flag(e.key)) on.add(e.value);
@@ -250,8 +248,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                 // 该命令的响应是专用事件 rc.status，不是 rc.ack
                 // （BUG-038：若按默认 trackAck，_pendingAcks 里的条目永不清理）。
                 onPressed: _allowed(RcCmd.statusGet)
-                    ? () => _send(RcCmd.statusGet, {}, '状态快照',
-                        trackAck: false)
+                    ? () => _send(RcCmd.statusGet, {}, '状态快照', trackAck: false)
                     : null),
             FilledButton.tonalIcon(
                 icon: const Icon(Icons.battery_charging_full),
@@ -260,8 +257,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                 // 控制台也早就有「设备快照回执」卡片，但**没有任何入口发这条命令**
                 // → 卡片永久为空。此按钮补上入口。
                 onPressed: _allowed(RcCmd.deviceStatus)
-                    ? () => _send(RcCmd.deviceStatus, {}, '设备状态',
-                        trackAck: false)
+                    ? () =>
+                        _send(RcCmd.deviceStatus, {}, '设备状态', trackAck: false)
                     : null),
             FilledButton.tonalIcon(
                 icon: const Icon(Icons.photo_camera),
@@ -273,8 +270,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                 icon: const Icon(Icons.location_on),
                 label: const Text('定位回传'),
                 onPressed: _allowed(RcCmd.locationGet)
-                    ? () => _send(RcCmd.locationGet, {}, '定位回传',
-                        trackAck: false)
+                    ? () =>
+                        _send(RcCmd.locationGet, {}, '定位回传', trackAck: false)
                     : null),
             FilledButton.tonalIcon(
                 icon: const Icon(Icons.receipt_long),

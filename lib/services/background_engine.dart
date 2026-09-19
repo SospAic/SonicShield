@@ -687,6 +687,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   const cap = ComplianceGuardrails.maxMediaVolumePercent / 100;
   final hi = math.min(play.volumeMax, cap);
   final vol = ((play.volumeMin + hi) / 2).clamp(0.0, 1.0).toDouble();
-  final dur = (((play.durationSecMin + play.durationSecMax) / 2) * 1000).round();
+  final dur =
+      (((play.durationSecMin + play.durationSecMax) / 2) * 1000).round();
   return (vol, dur);
 }

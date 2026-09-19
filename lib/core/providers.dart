@@ -26,6 +26,13 @@ final logRepoProvider = FutureProvider<LogRepository>((ref) async {
   return LogRepository(db);
 });
 
+/// 音源仓储（音源库界面的**唯一**数据入口：列表/批量导入/删除都走它，
+/// 界面不再直接持有 `db` —— 否则批量写入与原子性无从复用）。
+final assetRepoProvider = FutureProvider<AssetRepository>((ref) async {
+  final db = await ref.watch(databaseProvider.future);
+  return AssetRepository(db);
+});
+
 /// 任务列表流（数据库层主动刷新；简单起见以 ref.invalidate 触发）。
 final taskListProvider =
     FutureProvider.autoDispose<List<TaskWithMeta>>((ref) async {

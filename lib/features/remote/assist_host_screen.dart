@@ -89,9 +89,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
                 color: live ? scheme.onErrorContainer : scheme.onSurfaceVariant,
                 fontWeight: FontWeight.w600)),
         subtitle: Text(
-          live
-              ? '控制端的每一步操作都会写入审计日志；你可随时终止。'
-              : '协助会话只能由你在本机发起，无法被远程唤醒。',
+          live ? '控制端的每一步操作都会写入审计日志；你可随时终止。' : '协助会话只能由你在本机发起，无法被远程唤醒。',
           style: TextStyle(
               color: live ? scheme.onErrorContainer : scheme.onSurfaceVariant),
         ),
@@ -106,8 +104,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('如何协助他人',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text('如何协助他人', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             const Text('1. 在本机点击「生成临时码」，屏幕会显示 9 位临时码与 8 位访问密码；\n'
                 '2. 把这两个值口述给你信任的人（对方在「远程 → 临时协助 → 接入」输入）；\n'
@@ -153,7 +150,8 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Icon(Icons.warning_amber_rounded, color: scheme.error, size: 20),
+                  Icon(Icons.warning_amber_rounded,
+                      color: scheme.error, size: 20),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -311,10 +309,9 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
         'vibrate' => const Text('震动提醒', style: TextStyle(fontSize: 12)),
         'volume' => const Text('调整媒体/闹钟音量', style: TextStyle(fontSize: 12)),
         'location' => const Text('回传本机位置（敏感）', style: TextStyle(fontSize: 12)),
-        'video' => const Text('摄像头视频通话与拍照（敏感）',
-            style: TextStyle(fontSize: 12)),
-        'script' => const Text('执行指令组、增删改任务与守卫开关',
-            style: TextStyle(fontSize: 12)),
+        'video' => const Text('摄像头视频通话与拍照（敏感）', style: TextStyle(fontSize: 12)),
+        'script' =>
+          const Text('执行指令组、增删改任务与守卫开关', style: TextStyle(fontSize: 12)),
         _ => null,
       };
 }

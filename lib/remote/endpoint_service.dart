@@ -532,8 +532,12 @@ class RcEndpointService {
   /// 数值夹紧、集合有上限）失败即回 `ok=false`，绝不落库。
   /// 成功 → 清理该任务旧 pending 计划 → 按新定义重新物化，否则新任务
   /// 永远不会到期（docs/14 §2.1）。
-  Future<void> _upsertTask(RcMessage msg, PairedEndpoint peer,
-      LogRepository logs, TaskRepository tasks, OccurrenceRepository occ) async {
+  Future<void> _upsertTask(
+      RcMessage msg,
+      PairedEndpoint peer,
+      LogRepository logs,
+      TaskRepository tasks,
+      OccurrenceRepository occ) async {
     final raw = msg.payload['task'];
     final j = raw is Map ? raw.cast<String, dynamic>() : null;
     if (j == null) {
@@ -571,8 +575,12 @@ class RcEndpointService {
   }
 
   /// 删除任务及其全部计划（含审计历史，与 UI 侧删除语义一致）。
-  Future<void> _deleteTask(RcMessage msg, PairedEndpoint peer,
-      LogRepository logs, TaskRepository tasks, OccurrenceRepository occ) async {
+  Future<void> _deleteTask(
+      RcMessage msg,
+      PairedEndpoint peer,
+      LogRepository logs,
+      TaskRepository tasks,
+      OccurrenceRepository occ) async {
     final id = msg.payload['taskId'] as String?;
     if (id == null || id.isEmpty) {
       await _ack(msg, false, data: '缺少 taskId');
@@ -586,7 +594,8 @@ class RcEndpointService {
         action: 'task.delete',
         status: existed == null ? 'skipped' : 'success',
         taskId: id,
-        message: 'by ${peer.name}${existed == null ? '' : ' · ${existed.name}'}');
+        message:
+            'by ${peer.name}${existed == null ? '' : ' · ${existed.name}'}');
     await _ack(msg, existed != null, data: existed == null ? '任务不存在' : null);
   }
 
@@ -626,8 +635,9 @@ class RcEndpointService {
 
   /// 端点音源库（供远程任务选音源）。
   Future<void> _sendAssets(RcMessage msg) async {
-    final limit = ((msg.payload['limit'] as num?)?.toInt() ?? maxRemoteAssetList)
-        .clamp(1, maxRemoteAssetList);
+    final limit =
+        ((msg.payload['limit'] as num?)?.toInt() ?? maxRemoteAssetList)
+            .clamp(1, maxRemoteAssetList);
     final assets = await AssetRepository(_db!).listAll();
     await _send(RcMessage.now(RcEvt.assets, {
       'for': msg.id,
@@ -1089,4 +1099,3 @@ class _MqttAssistTransport implements AssistTransport {
         retain: false);
   }
 }
-

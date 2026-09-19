@@ -251,8 +251,7 @@ class AssistJoinClient {
           'sessionId': _sessionId,
           'reason': 'remote',
         }));
-        _record(RcAssistCmd.close,
-            outbound: true, ok: true, detail: '本端主动挂断');
+        _record(RcAssistCmd.close, outbound: true, ok: true, detail: '本端主动挂断');
       } on Object {
         // 对端不可达不影响本地挂断
       }
@@ -308,13 +307,13 @@ class AssistJoinClient {
     _record(msg.type, outbound: true, ok: true);
     final ok = await _publish(msg);
     if (!ok) {
-      _record(msg.type,
-          outbound: true, ok: false, detail: '发送失败：通道未就绪');
+      _record(msg.type, outbound: true, ok: false, detail: '发送失败：通道未就绪');
     }
     return ok;
   }
 
-  void _record(String type, {
+  void _record(
+    String type, {
     required bool outbound,
     required bool ok,
     String detail = '',
@@ -360,9 +359,8 @@ class AssistJoinClient {
         _sessionId = msg.payload['sessionId'] as String? ?? '';
         _epName = msg.payload['epName'] as String? ?? '声盾端点';
         final exp = (msg.payload['expiresAt'] as num?)?.toInt();
-        _expiresAt = exp == null
-            ? null
-            : DateTime.fromMillisecondsSinceEpoch(exp);
+        _expiresAt =
+            exp == null ? null : DateTime.fromMillisecondsSinceEpoch(exp);
         final raw = msg.payload['perms'];
         _perms = raw is Map
             ? AssistPerms.fromJson(raw.cast<String, dynamic>())
@@ -386,8 +384,7 @@ class AssistJoinClient {
         }
       case RcAssistCmd.close:
         _record(RcAssistCmd.close, outbound: false, ok: true, detail: '端点终止会话');
-        unawaited(leave(silent: true)
-            .then((_) => _fail('端点已终止协助会话')));
+        unawaited(leave(silent: true).then((_) => _fail('端点已终止协助会话')));
       default:
         // 业务回执（rc.pong / rc.status / rc.ack / rc.device / rc.location…）
         // 与配对通道保持同一信封形状，控制台可直接复用渲染逻辑。
@@ -425,8 +422,8 @@ class AssistJoinClient {
   /// 该命令在当前会话权限下是否**预计**可执行（用于灰化按钮）。
   ///
   /// 仅是 UI 提示：真正裁决在端点侧，端点权限随时可变（[changes] 会推送）。
-  bool allows(String cmd) => _phase == AssistPhase.active &&
-      RcPermGate.allows(_perms, cmd);
+  bool allows(String cmd) =>
+      _phase == AssistPhase.active && RcPermGate.allows(_perms, cmd);
 
   bool _fail(String reason) {
     _error = reason;

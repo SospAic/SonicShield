@@ -102,8 +102,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
           path: '/remote/pair-qr', builder: (_, __) => const PairQrScreen()),
       GoRoute(
-          path: '/remote/assist',
-          builder: (_, __) => const AssistHostScreen()),
+          path: '/remote/assist', builder: (_, __) => const AssistHostScreen()),
       GoRoute(
           path: '/remote/assist/join',
           builder: (_, __) => const AssistJoinScreen()),

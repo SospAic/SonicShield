@@ -495,8 +495,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
               const SizedBox(height: 12),
               const Text('尚未配对端点设备'),
               const SizedBox(height: 8),
-              const Text('先完成配对，才能查看并操作对端任务。',
-                  style: TextStyle(fontSize: 12)),
+              const Text('先完成配对，才能查看并操作对端任务。', style: TextStyle(fontSize: 12)),
               const SizedBox(height: 16),
               FilledButton.icon(
                 icon: const Icon(Icons.qr_code_scanner),
@@ -549,9 +548,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
             .map((e) => e.toInt())
             .toList()
           ..sort();
-        final days = wd.isEmpty
-            ? '—'
-            : wd.map(_weekdayName).join('/');
+        final days = wd.isEmpty ? '—' : wd.map(_weekdayName).join('/');
         return '每周 $days ${_hhmm(m['time'])}';
       case 'randomWindow':
         return '随机窗口 ${_hhmm(m['windowStart'])}–${_hhmm(m['windowEnd'])}'
@@ -611,7 +608,8 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
     return s >= 3600 ? '${(s / 3600).toStringAsFixed(1)}h' : '${s ~/ 60}min';
   }
 
-  static String _pct(Object? v) => '${(((v as num?)?.toDouble() ?? 0) * 100).round()}%';
+  static String _pct(Object? v) =>
+      '${(((v as num?)?.toDouble() ?? 0) * 100).round()}%';
 
   static String _fmtIso(Object? iso) {
     if (iso is! String) return '';

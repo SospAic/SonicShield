@@ -77,9 +77,7 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     final engine = ref.watch(engineStateProvider);
     final guardOn = BackgroundServiceManager.instance.guardActive;
     return Scaffold(
-      appBar: widget.embedded
-          ? null
-          : AppBar(title: const Text('声音守卫')),
+      appBar: widget.embedded ? null : AppBar(title: const Text('声音守卫')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

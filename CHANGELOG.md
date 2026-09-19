@@ -327,13 +327,17 @@
   残余未覆盖维度仅「两个不同 Android 进程/机型」。
 - **对称 NAT 场景未验证**（S5 验收项）：需真实移动网络双端。
 - **真实扬声器出声未验证**：链路上已验到命令被端点接受并进入 `_dispatch`。
-- **条件评估的平台开销 ≈4ms/任务**（`isInCall` + `isOnWifi` 各约 2ms）：
+- ~~**条件评估的平台开销 ≈4ms/任务**（`isInCall` + `isOnWifi` 各约 2ms）：
   当前每轮对每个到期任务各评估一次，规模小可忽略；若单轮到期任务数上到数百，
-  应改为"每轮评估一次并复用"（同一轮内所有任务的环境条件相同）。
+  应改为"每轮评估一次并复用"（同一轮内所有任务的环境条件相同）。~~
+  → ✅ **第十二轮已闭环**（BUG-044）：`ConditionEnv` + `RoundConditionEnv`
+  一轮固定 4 次平台往返、与任务数解耦；AOT 实测 50 任务 **215ms → 3ms**。
 - **camera.snap 继续阻塞**：2026-09-18 复核 pub.dev，最新仍为 **camera 0.12.1**
   （2026-09-03），changelog 无任何 AGP9 / 内置 Kotlin 相关条目。
 - **`asset.list` / `preset.list` / `task.get` 三条命令"端点有实现、控制器不发"**：
   判定为有意保留（`task.list` 已返回完整定义；音效按钮用固定分类），未加 UI 入口。
+- **音源库的孤儿文件**：删除音源时文件已随之删除（第十四轮），但历史上遗留的
+  孤儿音频仍留在应用私有目录（不影响功能，未做迁移清理）。
 - ~~**`任务 CRUD 500 次` AOT 余量仅 1.3×**（1477–1679ms / 预算 2000ms）：
   同属"每次调用 ≈1.5ms 平台往返"结构。当前未超标，仅记录；
   若调用次数上升需同样改走 batch 路径（`TaskRepository` 暂无批量 API）。~~
@@ -434,6 +438,63 @@
 - **BUG-023：远程回执面板恒为空**。UI 读顶层字段，而业务字段在 `payload`
   之内 → 统一走 `rcPayloadOf()`。
 - 移除 `CHANGELOG.md` 中重复的 `[1.5.0]` 段落。
+
+## [1.7.2] - 2026-09-19
+
+### Added
+- **`lib/services/preset_import.dart`**（`AssetLibraryImporter`）：批量音源导入器，
+  把「幂等跳过 → 全部落盘 → **一次**写库 → 失败回滚」从界面里抽出来 ——
+  界面依赖 `FilePicker` / `rootBundle` / `path_provider` 无法在宿主机跑，
+  而"失败会不会留下半套库"恰恰是唯一值得写回归锁的性质。
+- **`AssetRepository.upsertMany`**（`batch()` 单事务 / 单次平台往返）+
+  **`AssetRepository.nameSet()`**（只取 `name` 一列，作幂等判据）+
+  **`AudioAsset.toRow()`**（`upsert` / `upsertMany` 共用同一份行映射，防漂移）。
+- **`assetRepoProvider`**：音源库界面的唯一数据入口。
+- **`test/asset_import_test.dart`（18 例）**：仓储原子性、两条写入路径行映射逐列一致、
+  单批调用出口、双回滚路径、清单↔磁盘一致性（60 条 / 12 分类 / 文件存在 / 名字唯一）。
+- `integration_test/app_smoke_test.dart` **+1 例**：音源库页面在真实运行时渲染
+  （设备端冒烟 3 → 4）。
+
+### Fixed
+- **BUG-047（P2）音源库导入逐条写入、失败留下半套库**：
+  - `_importPresets()` 循环内 `await db.insert(...)` × 60 → **60 次平台往返**，
+    且第 k 条失败时前面 k−1 条**已落库**（界面提示"导入失败"，列表里却已多出一截）；
+  - `_import()`（本地导入）同形，中途失败留下孤儿文件 + 半批记录；
+  - `_listAssets()` / 删除按钮直接操作 `db`，而 `AssetRepository` 已存在却只有
+    端点服务在用 → 表结构与行映射存在两处漂移风险；
+  - 删除音源**只删记录不删文件** → 每次"导入→删除"都攒一个孤儿音频。
+  现全部改为：单批写库（原子）、幂等（预置库按名跳过）、失败回滚
+  （库内零新增 + 清理已落盘文件）、列表返回强类型 `AudioAsset`、
+  删除**先删记录再删文件**。本地导入保持"同名可多份"的原有语义。
+
+### Verified（第十四轮实测）
+- `flutter analyze` 全零；功能 **336/336**；压测 **24/24**（分层运行）；
+  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**。
+- 设备端（emulator-5554 / Android 16）：冒烟 **4/4**、桥接 **6/6**；
+  **AOT 绝对验收 `flutter drive --profile` → 6/6、DRIVE_EXIT=0**
+  （100 任务物化 **10ms / 预算 500ms**；往返基准 1449µs）。
+- **证伪**：三个探针（改回逐条写库 / 改回逐条 saveAll / 去掉回滚）
+  分别使 1 / 4 / 2 例失败，其中探针 B 实测 `Actual: [[AudioAsset], [AudioAsset]]`
+  **具象复现"半套库"**，随后全部还原。
+- 用例总数 **342 → 360**（功能层 +18）。
+
+## [1.7.1] - 2026-09-19
+
+### Added
+- **统一门禁脚本**（scripts/gates.ps1 + gates.sh）：analyze/功能/压测三层 +
+  可选设备端（-WithDevice）+ 可选 AOT 验收（-WithAot）；失败 EXIT=1，
+  本地与 CI 同一判据。含**证伪验证**（注入必败用例 → 三层全红）。
+- CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E），
+  修复 BUG-045 暴露的"integration_test 不在门禁内"覆盖洞。
+
+### Fixed
+- **BUG-046（P3）**：对讲机"对端已播放"回执（rc.pttAck）端点已广播、
+  UI 无消费——PttTab 订阅事件流渲染，取值走 rcPayloadOf（BUG-023 同类）。
+- task_wire 两处 if 单行块（analyze info 清零）。
+
+### Verified（本轮实测）
+- analyze 全零；功能 **336/336**；压测 24/24（分层运行）。
+- 三向覆盖复扫：RcCmd 断链 0（第七轮修复保持有效）。
 
 ## [1.6.1-alpha.1] - 2026-09-16
 

@@ -89,4 +89,8 @@ jobs:
             adb shell pm grant com.sonicshield.sonic_shield android.permission.POST_NOTIFICATIONS || true
             adb shell pm grant com.sonicshield.sonic_shield android.permission.RECORD_AUDIO || true
             adb shell dumpsys deviceidle whitelist +com.sonicshield.sonic_shield
+            # BUG-045 教训：integration_test/ 必须全套纳入门禁（smoke+桥接+E2E），
+            # 只跑 smoke 会让其它设备用例静默变红一整个版本无人察觉。
             flutter test integration_test/app_smoke_test.dart
+            flutter test integration_test/native_bridge_test.dart
+            flutter test integration_test/assist_e2e_test.dart

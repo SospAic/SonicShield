@@ -44,8 +44,7 @@ class _SectionScaffoldState extends State<SectionScaffold>
   late final TabController _ctrl = TabController(
     length: widget.tabs.length,
     vsync: this,
-    initialIndex:
-        widget.initialIndex.clamp(0, widget.tabs.length - 1).toInt(),
+    initialIndex: widget.initialIndex.clamp(0, widget.tabs.length - 1).toInt(),
   );
 
   @override
@@ -68,8 +67,9 @@ class _SectionScaffoldState extends State<SectionScaffold>
             child: TabBar(
               controller: _ctrl,
               isScrollable: widget.tabs.length > 3,
-              tabAlignment:
-                  widget.tabs.length > 3 ? TabAlignment.start : TabAlignment.fill,
+              tabAlignment: widget.tabs.length > 3
+                  ? TabAlignment.start
+                  : TabAlignment.fill,
               indicatorColor: scheme.primary,
               tabs: [
                 for (final t in widget.tabs)

@@ -163,7 +163,8 @@ abstract final class RcEvt {
 
   // ---- v1.7：远程任务 CRUD 回执 ----
   static const task = 'rc.task'; // 单条任务完整定义 {for, task}
-  static const assets = 'rc.assets'; // 音源库 {for, assets:[{id,name,durationMs,tags}]}
+  static const assets =
+      'rc.assets'; // 音源库 {for, assets:[{id,name,durationMs,tags}]}
   static const presets = 'rc.presets'; // 预置分类 {for, categories:[...]}
 }
 
