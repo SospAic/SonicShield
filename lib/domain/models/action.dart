@@ -1,4 +1,5 @@
-/// 动作类型。
+import 'dart:math';
+
 enum ActionType {
   playAudio, // 播放音频（核心）
   soundscape, // 声景混音（多轨叠加，v1.3）
@@ -6,6 +7,7 @@ enum ActionType {
   notify, // 仅通知
   recordEvidence, // 录音取证（本地保存，带清晰标注）
   vibrate, // 震动
+  randomFrom, // 动作集：加权随机选一执行（v1.8）
   composite, // 组合：主动作 + 可选的「先通知」
   ;
 
@@ -17,6 +19,7 @@ enum ActionType {
         ActionType.recordEvidence => '录音取证',
         ActionType.vibrate => '震动',
         ActionType.composite => '组合动作',
+        ActionType.randomFrom => '随机指令集',
       };
 }
 
@@ -43,6 +46,7 @@ sealed class ActionConfig {
         'notify' => NotifyAction.fromJson(j),
         'record' => RecordEvidenceAction.fromJson(j),
         'vibrate' => VibrateAction.fromJson(j),
+        'randomFrom' => ActionSetAction.fromJson(j),
         'composite' => CompositeAction.fromJson(j),
         'soundscape' => SoundscapeAction.fromJson(j),
         _ => throw ArgumentError('未知动作类型: ${j['kind']}'),
@@ -257,5 +261,62 @@ class SoundscapeAction extends ActionConfig {
         'tracks': [for (final t in tracks) t.toJson()],
         'durationSec': durationSec,
         'fadeOutSec': fadeOutSec,
+      };
+}
+
+/// 动作集候选：一个候选动作 + 选中权重（v1.8）。
+class ActionSetCandidate {
+  const ActionSetCandidate({required this.weight, required this.action});
+
+  final double weight; // 选中权重（≥0；0 表示永不选中，占位用）
+  final ActionConfig action;
+
+  Map<String, dynamic> toJson() =>
+      {'weight': weight, 'action': action.toJson()};
+
+  static ActionSetCandidate fromJson(Map<String, dynamic> j) =>
+      ActionSetCandidate(
+        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
+        action:
+            ActionConfig.fromJson((j['action'] as Map).cast<String, dynamic>()),
+      );
+}
+
+/// **动作集（随机指令集，v1.8）**：触发命中后，按权重随机从候选动作中
+/// 选**一个**执行——"到点随机播放声音中的某一个 / 随机执行某一指令"。
+/// 行业对应：iOS Shortcuts 的 Choose from List + Tasker 的 Random。
+class ActionSetAction extends ActionConfig {
+  const ActionSetAction({required this.candidates})
+      : assert(candidates.length >= 2, '动作集至少需要 2 个候选才有随机意义'),
+        assert(candidates.length <= 12, '动作集最多 12 个候选');
+
+  final List<ActionSetCandidate> candidates;
+
+  /// 加权随机选中一个候选（调用方注入 [rng] 以便测试）。
+  ActionSetCandidate pick(Random rng) {
+    final total = candidates.fold<double>(0, (s, c) => s + c.weight);
+    if (total <= 0) {
+      // 全零权重：等概率兜底（配置错误时的安全行为）。
+      return candidates[Random().nextInt(candidates.length)];
+    }
+    var roll = rng.nextDouble() * total;
+    for (final c in candidates) {
+      roll -= c.weight;
+      if (roll <= 0) return c;
+    }
+    return candidates.last;
+  }
+
+  factory ActionSetAction.fromJson(Map<String, dynamic> j) => ActionSetAction(
+        candidates: [
+          for (final c in (j['candidates'] as List?) ?? [])
+            ActionSetCandidate.fromJson((c as Map).cast<String, dynamic>()),
+        ],
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'randomFrom',
+        'candidates': [for (final c in candidates) c.toJson()],
       };
 }

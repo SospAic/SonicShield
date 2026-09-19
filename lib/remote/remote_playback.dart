@@ -185,8 +185,9 @@ Future<RemotePlayOutcome> performRemotePlay(
           {bool loop})?
       play,
 }) async {
-  final volume =
-      ((payload['volume'] as num?)?.toDouble() ?? 0.9).clamp(0.0, 1.0).toDouble();
+  final volume = ((payload['volume'] as num?)?.toDouble() ?? 0.9)
+      .clamp(0.0, 1.0)
+      .toDouble();
   final durationSec = (payload['durationSec'] as num?)?.toInt() ?? 5;
   final loop = payload['loop'] as bool? ?? false;
 

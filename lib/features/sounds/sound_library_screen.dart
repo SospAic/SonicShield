@@ -109,8 +109,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
               final data = await rootBundle.load('assets/audio/${it['file']}');
               final dest = File('${docs.path}/audio_$id.wav');
               await dest.writeAsBytes(data.buffer.asUint8List(), flush: true);
-              return AssetBlob(
-                  path: dest.path, sizeBytes: data.lengthInBytes);
+              return AssetBlob(path: dest.path, sizeBytes: data.lengthInBytes);
             },
           ),
       ];

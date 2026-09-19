@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/providers.dart';
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
+import '../../remote/rc_script.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
@@ -83,12 +84,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   int _scDurationSec = 60;
   int _scFadeOutSec = 5;
 
-  // 条件层（v1.3；v1.7 新增 Wi-Fi 与通话保护）
+  // 条件层（v1.3；v1.7 新增 Wi-Fi 与通话保护；v1.8 概率门）
   bool _condCharging = false;
   int? _condMinBattery;
   int? _condWinStart;
   int? _condWinEnd;
   bool _condWifi = false;
+  int _condProbability = 100; // 概率门（100=必执行，v1.8）
+
+  // 随机指令集（v1.8）：候选动作种类 + 对应权重（平行数组）。
+  final List<RcStepKind> _setCandidates = [];
+  final List<double> _setWeights = [];
 
   /// 通话中不执行。**默认开启**（安全默认，见 TaskCondition 类文档）：
   /// 定时音频灌进通话里对双方都是干扰，且使用者无法预期。
@@ -154,6 +160,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _condWinEnd = c.windowEndMin;
         _condWifi = c.requireWifi;
         _condSkipCall = c.skipInCall;
+        _condProbability = c.probabilityPct ?? 100;
       }
       final tr = t.trigger;
       if (tr is FixedOnceTrigger) {
@@ -197,6 +204,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _scDurationSec = a.durationSec;
         _scFadeOutSec = a.fadeOutSec;
         _actionKind = ActionKindChoice.soundscape;
+      } else if (a is ActionSetAction) {
+        _setCandidates.clear();
+        _setWeights.clear();
+        for (final c in a.candidates) {
+          _setCandidates.add(_kindOfCandidate(c.action));
+          _setWeights.add(c.weight);
+        }
+        _actionKind = ActionKindChoice.randomFrom;
       } else if (a is TtsAction) {
         _ttsText = a.text;
         _actionKind = ActionKindChoice.tts;
@@ -395,6 +410,19 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         subtitle: const Text('移动网络下跳过，避免消耗流量'),
         value: _condWifi,
         onChanged: (v) => setState(() => _condWifi = v),
+      ),
+      // 概率门（v1.8）：确定性条件全部通过后再掷随机门。
+      ListTile(
+        title: Text(
+            '执行概率：${_condProbability >= 100 ? "每次都执行" : "$_condProbability%"}'),
+        subtitle: Slider(
+          value: _condProbability.toDouble(),
+          min: 5,
+          max: 100,
+          divisions: 19,
+          label: _condProbability >= 100 ? '100%（必执行）' : '$_condProbability%',
+          onChanged: (v) => setState(() => _condProbability = v.round()),
+        ),
       ),
       SwitchListTile(
         title: const Text('仅充电时执行'),
@@ -659,8 +687,123 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           const Text('组合 = 先发通知提示，再随机播放音频。'),
           ...playInputs,
         ];
+      case ActionKindChoice.randomFrom:
+        return _randomSetInputs(ctx);
     }
   }
+
+  /// 随机指令集编辑（v1.8）：候选动作列表 + 权重滑条。
+  /// 触发命中后按权重随机选一执行——"随机播放声音中的某一个 / 随机执行某一指令"。
+  List<Widget> _randomSetInputs(BuildContext ctx) {
+    const kinds = <(RcStepKind, String, IconData)>[
+      (RcStepKind.play, '播放音频', Icons.volume_up),
+      (RcStepKind.tts, '语音播报', Icons.record_voice_over),
+      (RcStepKind.notify, '通知', Icons.notifications),
+      (RcStepKind.vibrate, '震动', Icons.vibration),
+      (RcStepKind.record, '录音取证', Icons.fiber_manual_record),
+    ];
+    return [
+      const SizedBox(height: 8),
+      Text('候选动作（命中后按权重随机选一执行）', style: Theme.of(ctx).textTheme.bodySmall),
+      const SizedBox(height: 4),
+      if (_setCandidates.isEmpty)
+        const Card(
+            child: Padding(
+                padding: EdgeInsets.all(12),
+                child: Text('从下方添加至少 2 个候选动作（每个可设权重）。'))),
+      for (var i = 0; i < _setCandidates.length; i++)
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Icon(_setIcon(_setCandidates[i]),
+                        size: 18, color: Theme.of(ctx).colorScheme.primary),
+                    const SizedBox(width: 6),
+                    Text(_setLabel(_setCandidates[i]),
+                        style: const TextStyle(fontSize: 13)),
+                    const Spacer(),
+                    IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 18),
+                        onPressed: () =>
+                            setState(() => _setCandidates.removeAt(i))),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    Text('权重 ${_setWeights[i].round()}',
+                        style: const TextStyle(fontSize: 11)),
+                    Expanded(
+                      child: Slider(
+                        value: _setWeights[i],
+                        min: 0,
+                        max: 10,
+                        divisions: 10,
+                        label: _setWeights[i].round().toString(),
+                        onChanged: (v) => setState(() => _setWeights[i] = v),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      if (_setCandidates.length < 8)
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final (k, label, icon) in kinds)
+              ActionChip(
+                avatar: Icon(icon, size: 16),
+                label: Text('＋$label', style: const TextStyle(fontSize: 12)),
+                onPressed: () => setState(() {
+                  _setCandidates.add(k);
+                  _setWeights.add(3);
+                }),
+              ),
+          ],
+        ),
+      const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+            '权重 0 = 不选中。全部为 0 时按等概率兜底。执行会审计记录'
+            '"权重 → 选中"以便回溯。',
+            style: TextStyle(fontSize: 12)),
+      ),
+    ];
+  }
+
+  /// 从候选动作反推 RcStepKind（编辑回填用）。
+  RcStepKind _kindOfCandidate(ActionConfig a) => switch (a) {
+        TtsAction() => RcStepKind.tts,
+        NotifyAction() => RcStepKind.notify,
+        VibrateAction() => RcStepKind.vibrate,
+        RecordEvidenceAction() => RcStepKind.record,
+        _ => RcStepKind.play,
+      };
+
+  IconData _setIcon(RcStepKind k) => switch (k) {
+        RcStepKind.play => Icons.volume_up,
+        RcStepKind.tts => Icons.record_voice_over,
+        RcStepKind.notify => Icons.notifications,
+        RcStepKind.vibrate => Icons.vibration,
+        RcStepKind.record => Icons.fiber_manual_record,
+        RcStepKind.delay => Icons.timer,
+      };
+
+  String _setLabel(RcStepKind k) => switch (k) {
+        RcStepKind.play => '播放音频',
+        RcStepKind.tts => '语音播报',
+        RcStepKind.notify => '通知',
+        RcStepKind.vibrate => '震动',
+        RcStepKind.record => '录音取证',
+        RcStepKind.delay => '时延',
+      };
 
   String get _titleText {
     final remote = widget.remoteTarget;
@@ -753,6 +896,29 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           durationSec: _scDurationSec,
           fadeOutSec: _scFadeOutSec,
         );
+      case ActionKindChoice.randomFrom:
+        action = ActionSetAction(candidates: [
+          for (var i = 0; i < _setCandidates.length; i++)
+            ActionSetCandidate(
+              weight: _setWeights[i],
+              action: switch (_setCandidates[i]) {
+                RcStepKind.play => PlayAudioAction(
+                    volumeMin: _volMin,
+                    volumeMax: _volMax,
+                    durationSecMin: _durMin,
+                    durationSecMax: _durMax.clamp(_durMin, 120),
+                    channel:
+                        _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
+                  ),
+                RcStepKind.tts => TtsAction(text: _ttsText),
+                RcStepKind.notify =>
+                  NotifyAction(title: '声盾 · 触发', body: _nameCtrl.text),
+                RcStepKind.vibrate => const VibrateAction(),
+                RcStepKind.record => RecordEvidenceAction(seconds: _recordSec),
+                RcStepKind.delay => RecordEvidenceAction(seconds: _recordSec),
+              },
+            ),
+        ]);
       case ActionKindChoice.tts:
         action = TtsAction(text: _ttsText);
       case ActionKindChoice.record:
@@ -788,6 +954,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ActionKindChoice.record => ActionType.recordEvidence,
         ActionKindChoice.notify => ActionType.notify,
         ActionKindChoice.composite => ActionType.composite,
+        ActionKindChoice.randomFrom => ActionType.randomFrom,
       },
       action: action,
       assetIds: _editing?.assetIds ?? const [],
@@ -800,7 +967,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               _condMinBattery != null ||
               (_condWinStart != null && _condWinEnd != null) ||
               _condWifi ||
-              !_condSkipCall)
+              !_condSkipCall ||
+              _condProbability < 100)
           ? TaskCondition(
               requireCharging: _condCharging,
               minBatteryPct: _condMinBattery,
@@ -809,6 +977,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               windowEndNextDay: (_condWinEnd ?? 0) <= (_condWinStart ?? 0),
               requireWifi: _condWifi,
               skipInCall: _condSkipCall,
+              probabilityPct: _condProbability >= 100 ? null : _condProbability,
             )
           : null,
       priority: 0,
@@ -832,6 +1001,7 @@ enum ActionKindChoice {
   record,
   notify,
   composite,
+  randomFrom,
   ;
 
   String get label => switch (this) {
@@ -841,6 +1011,7 @@ enum ActionKindChoice {
         ActionKindChoice.record => '录音取证',
         ActionKindChoice.notify => '通知',
         ActionKindChoice.composite => '通知+播放',
+        ActionKindChoice.randomFrom => '随机指令集',
       };
 }
 

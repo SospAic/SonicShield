@@ -578,8 +578,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
       return const Card(
         child: Padding(
           padding: EdgeInsets.all(12),
-          child: Text('端点音源库为空（可先在端点导入音源或预置库）',
-              style: TextStyle(fontSize: 12)),
+          child: Text('端点音源库为空（可先在端点导入音源或预置库）', style: TextStyle(fontSize: 12)),
         ),
       );
     }
@@ -625,8 +624,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
       return const Card(
         child: Padding(
           padding: EdgeInsets.all(12),
-          child: Text('端点无预置音源分类（尚未导入预置库）',
-              style: TextStyle(fontSize: 12)),
+          child: Text('端点无预置音源分类（尚未导入预置库）', style: TextStyle(fontSize: 12)),
         ),
       );
     }
@@ -640,10 +638,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
             for (final c in cats)
               ActionChip(
                 label: Text(c),
-                onPressed: () => _send(
-                    RcCmd.soundPlay,
-                    {'preset': c, 'volume': 0.9, 'durationSec': 8},
-                    '播放 $c 分类'),
+                onPressed: () => _send(RcCmd.soundPlay,
+                    {'preset': c, 'volume': 0.9, 'durationSec': 8}, '播放 $c 分类'),
               ),
           ],
         ),

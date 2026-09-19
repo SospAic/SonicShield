@@ -76,6 +76,7 @@ class TaskCondition {
     this.windowEndNextDay = false,
     this.requireWifi = false,
     this.skipInCall = true,
+    this.probabilityPct,
   });
 
   final bool requireCharging; // 仅充电时执行
@@ -90,12 +91,17 @@ class TaskCondition {
   /// **通话中不执行**（v1.7，默认 true —— 安全默认，见类文档）。
   final bool skipInCall;
 
+  /// **概率门**（v1.8）：命中其余全部条件后，再按此百分比随机决定是否执行。
+  /// null / 100 = 必执行；50 = 一半概率。与其它条件正交（先确定性条件后随机门）。
+  final int? probabilityPct;
+
   bool get hasAny =>
       requireCharging ||
       minBatteryPct != null ||
       windowStartMin != null ||
       requireWifi ||
-      skipInCall;
+      skipInCall ||
+      (probabilityPct != null && probabilityPct! < 100);
 
   Map<String, dynamic> toJson() => {
         'requireCharging': requireCharging,
@@ -105,6 +111,7 @@ class TaskCondition {
         'windowEndNextDay': windowEndNextDay,
         'requireWifi': requireWifi,
         'skipInCall': skipInCall,
+        if (probabilityPct != null) 'probabilityPct': probabilityPct,
       };
 
   static TaskCondition? fromJsonOrNull(String? raw) {
@@ -199,6 +206,9 @@ class TaskCondition {
       String hm(int m) =>
           '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
       parts.add('${hm(windowStartMin!)}–${hm(windowEndMin!)}');
+    }
+    if (probabilityPct != null && probabilityPct! < 100) {
+      parts.add('概率 $probabilityPct%');
     }
     return parts.isEmpty ? '无条件' : parts.join(' · ');
   }

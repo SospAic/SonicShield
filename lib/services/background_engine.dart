@@ -144,6 +144,20 @@ Future<void> _engineBody(ServiceInstance service) async {
     return c.firstUnmetIn(env, now: DateTime.now());
   }
 
+  /// **概率门**（v1.8）：确定性条件通过后，按任务配置的百分比随机决定执行与否。
+  ///
+  /// 与条件层分离的原因：条件判定是纯函数（可测、幂等），随机门是**每次调用
+  /// 必然不同**的输入（同 [now] 不进快照的先例）。审计可回溯："概率 30% 未命中"。
+  /// 返回 null = 通过（或未配置）；返回文案 = 未命中原因（写审计）。
+  String? probabilityGateMissed(Task task, {math.Random? rng}) {
+    final c = task.condition;
+    final pct = c?.probabilityPct;
+    if (pct == null || pct >= 100) return null;
+    final roll = (rng ?? math.Random()).nextInt(100);
+    if (roll < pct) return null;
+    return '概率 $pct% 未命中（掷出 $roll）';
+  }
+
   // ==================== 依赖底座（先声明后引用） ====================
 
   Future<String?> assetPathById(String id) async {
@@ -368,6 +382,16 @@ Future<void> _engineBody(ServiceInstance service) async {
         return true;
       case final CompositeAction c:
         return runSingle(task, c.primary, volume, durationMs, source);
+      case final ActionSetAction set:
+        // 动作集（v1.8）：按权重随机选一执行，审计记录"为什么选了这个"。
+        final chosen = set.pick(math.Random());
+        await logs.append(
+            source: source,
+            action: 'randomFrom',
+            status: 'success',
+            taskId: task.id,
+            message: '权重 ${chosen.weight} → 选中 ${chosen.action.runtimeType}');
+        return runSingle(task, chosen.action, volume, durationMs, source);
     }
   }
 
@@ -497,6 +521,19 @@ Future<void> _engineBody(ServiceInstance service) async {
             taskId: task.id,
             occurrenceId: o.id,
             message: condFail);
+        continue;
+      }
+      // 概率门（v1.8）：确定性条件通过后再掷随机门。
+      final gateFail = probabilityGateMissed(task);
+      if (gateFail != null) {
+        await occs.markStatus(o.id, OccurrenceStatus.skipped);
+        await logs.append(
+            source: 'schedule',
+            action: 'probability',
+            status: 'skipped',
+            taskId: task.id,
+            occurrenceId: o.id,
+            message: gateFail);
         continue;
       }
       final ok =
