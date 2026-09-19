@@ -195,7 +195,8 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 `PttTab` 订阅 `RcEndpointService.events`，用 `rcPayloadOf(m)['ok']` 渲染
 （回执字段嵌套在 payload 内，**必须走 `rcPayloadOf`**，BUG-023 同类）。
 
-**⑤ 门禁**：analyze 全零；功能 **318/318**；压测 **24/24**；gates `EXIT=0`。
+**⑤ 门禁**：analyze 全零；功能 **336/336**（含并行会话 18 例协助测试增量落盘）；
+  压测 **24/24**；gates `EXIT=0`。
 
 ### 1.8 第十二轮（2026-09-18）：条件层**每轮复用**（BUG-044）+ 设备冒烟测试复活（BUG-045）
 
