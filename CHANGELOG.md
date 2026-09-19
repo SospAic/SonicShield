@@ -439,9 +439,24 @@
   之内 → 统一走 `rcPayloadOf()`。
 - 移除 `CHANGELOG.md` 中重复的 `[1.5.0]` 段落。
 
-## [1.7.2] - 2026-09-19
+## [1.7.1] - 2026-09-19
 
-### Added
+> 主题：**交付收口** —— 统一门禁脚本（一条命令跑完全部门禁）、三向覆盖复扫
+> （BUG-046）、音源库导入的批量写入与原子性（BUG-047）。
+
+### Added（第十三轮：统一门禁脚本）
+- **统一门禁脚本**（scripts/gates.ps1 + gates.sh）：analyze/功能/压测三层 +
+  可选设备端（-WithDevice）+ 可选 AOT 验收（-WithAot）；失败 EXIT=1，
+  本地与 CI 同一判据。含**证伪验证**（注入必败用例 → 三层全红）。
+- CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E），
+  修复 BUG-045 暴露的"integration_test 不在门禁内"覆盖洞。
+
+### Fixed（第十三轮）
+- **BUG-046（P3）**：对讲机"对端已播放"回执（rc.pttAck）端点已广播、
+  UI 无消费——PttTab 订阅事件流渲染，取值走 rcPayloadOf（BUG-023 同类）。
+- task_wire 两处 if 单行块（analyze info 清零）。
+
+### Added（第十四轮：音源库批量写入与原子性）
 - **`lib/services/preset_import.dart`**（`AssetLibraryImporter`）：批量音源导入器，
   把「幂等跳过 → 全部落盘 → **一次**写库 → 失败回滚」从界面里抽出来 ——
   界面依赖 `FilePicker` / `rootBundle` / `path_provider` 无法在宿主机跑，
@@ -455,7 +470,7 @@
 - `integration_test/app_smoke_test.dart` **+1 例**：音源库页面在真实运行时渲染
   （设备端冒烟 3 → 4）。
 
-### Fixed
+### Fixed（第十四轮）
 - **BUG-047（P2）音源库导入逐条写入、失败留下半套库**：
   - `_importPresets()` 循环内 `await db.insert(...)` × 60 → **60 次平台往返**，
     且第 k 条失败时前面 k−1 条**已落库**（界面提示"导入失败"，列表里却已多出一截）；
@@ -467,34 +482,18 @@
   （库内零新增 + 清理已落盘文件）、列表返回强类型 `AudioAsset`、
   删除**先删记录再删文件**。本地导入保持"同名可多份"的原有语义。
 
-### Verified（第十四轮实测）
+### Verified（v1.7.1 交付实测）
 - `flutter analyze` 全零；功能 **336/336**；压测 **24/24**（分层运行）；
-  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**。
+  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**（交付前复核一次）。
 - 设备端（emulator-5554 / Android 16）：冒烟 **4/4**、桥接 **6/6**；
   **AOT 绝对验收 `flutter drive --profile` → 6/6、DRIVE_EXIT=0**
   （100 任务物化 **10ms / 预算 500ms**；往返基准 1449µs）。
-- **证伪**：三个探针（改回逐条写库 / 改回逐条 saveAll / 去掉回滚）
-  分别使 1 / 4 / 2 例失败，其中探针 B 实测 `Actual: [[AudioAsset], [AudioAsset]]`
-  **具象复现"半套库"**，随后全部还原。
-- 用例总数 **342 → 360**（功能层 +18）。
-
-## [1.7.1] - 2026-09-19
-
-### Added
-- **统一门禁脚本**（scripts/gates.ps1 + gates.sh）：analyze/功能/压测三层 +
-  可选设备端（-WithDevice）+ 可选 AOT 验收（-WithAot）；失败 EXIT=1，
-  本地与 CI 同一判据。含**证伪验证**（注入必败用例 → 三层全红）。
-- CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E），
-  修复 BUG-045 暴露的"integration_test 不在门禁内"覆盖洞。
-
-### Fixed
-- **BUG-046（P3）**：对讲机"对端已播放"回执（rc.pttAck）端点已广播、
-  UI 无消费——PttTab 订阅事件流渲染，取值走 rcPayloadOf（BUG-023 同类）。
-- task_wire 两处 if 单行块（analyze info 清零）。
-
-### Verified（本轮实测）
-- analyze 全零；功能 **336/336**；压测 24/24（分层运行）。
 - 三向覆盖复扫：RcCmd 断链 0（第七轮修复保持有效）。
+- **证伪**：门禁脚本注入必败用例 → 三层 `[FAIL]` + `EXIT=1`；
+  音源库三探针（改回逐条写库 / 改回逐条 saveAll / 去掉回滚）分别使 1 / 4 / 2 例失败，
+  其中探针 B 实测 `Actual: [[AudioAsset], [AudioAsset]]` **具象复现"半套库"**，
+  随后全部还原。
+- 用例总数 **342 → 360**（功能层 +18）。
 
 ## [1.6.1-alpha.1] - 2026-09-16
 
