@@ -19,7 +19,7 @@ class AppMeta {
   /// 它长期被漏改（BUG-049：pubspec 已 1.7.1 而这里仍 1.7.0-alpha.1，
   /// 于是远程 status/device 回执上报的是**过期的版本号**）——
   /// 现已由 `test/version_consistency_test.dart` 强制三者一致。
-  static const String version = '1.7.2';
+  static const String version = '1.7.3';
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换
 }

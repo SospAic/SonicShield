@@ -1,0 +1,236 @@
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+
+/// 远程协议（`RcCmd` / `RcEvt`）的**三向覆盖机器锁**。
+///
+/// ## 为什么要有这个文件
+///
+/// BUG-037 / BUG-046 / BUG-048 是同一类缺陷的不同表现：
+/// **协议里声明了一条命令或事件，但链路的某一端是断的** ——
+/// 端点有 `case` 但控制器从不发送、控制器发了但端点没实现、
+/// 端点广播了但没有 UI 消费。每一端单看都"对"，整条链路是断的。
+///
+/// 第十三轮起用**人工**三向覆盖比对（端点处理 / 控制器发送 / UI 消费）
+/// 一次性定位过 5 条断链命令；但人工比对只能发现"当下"的洞，
+/// 新加一条命令后是否登记齐全，仍然靠人记。本文件把这张比对表
+/// **变成可断言的量**：新增 `RcCmd`/`RcEvt` 常量后如果漏接任何一端，
+/// 功能层门禁直接红。
+///
+/// ## 判据（每一向都必须成立）
+///
+/// | 维度 | 要求 |
+/// |---|---|
+/// | `RcCmd` → 端点 | `endpoint_service.dart` 有 `case RcCmd.X` |
+/// | `RcCmd` → 权限闸门 | `assist.dart` 的 `RcPermGate.requiredPerm` **显式登记** |
+/// | `RcCmd` → 发送方 | 至少一个非端点文件构造该命令 |
+/// | `RcEvt` → 发出方 | `endpoint_service.dart` 至少发一次 |
+/// | `RcEvt` → 消费方 | 至少一个非端点文件引用它 |
+/// | `RcEvt` → **App 内**消费方 | 至少一个 `lib/` 下的文件引用它 |
+///
+/// ## 为什么"权限闸门显式登记"值得单独锁
+///
+/// `requiredPerm` 的 `switch` 末尾是 `_ => denyAll` —— 这是**正确的安全默认**
+/// （新增命令忘记登记时应当失败关闭，而不是默认放行）。但它的代价是：
+/// 漏登记**不会编译报错**，只会在协助会话里表现为"命令被静默拒绝"。
+/// 这正是最需要回归锁的那类"静默降级"，所以本文件要求它必须显式列出。
+///
+/// ## 实现方式（源码契约）
+///
+/// Dart 无运行时反射，故直接解析 `lib/remote/protocol.dart` 的类体文本。
+/// 这是**权衡而非首选**：若将来协议常量改由代码生成（如 protobuf），
+/// 应改为断言生成产物而不是源码文本。
+void main() {
+  // ---------------- 源码读取 ----------------
+  final protocol = File('lib/remote/protocol.dart').readAsStringSync();
+  final endpoint = File('lib/remote/endpoint_service.dart').readAsStringSync();
+  final permGate = File('lib/remote/assist.dart').readAsStringSync();
+
+  /// 除端点 / 权限闸门 / 协议定义之外的**所有** Dart 源（含 `tool/` 桌面控制器）。
+  final others = <String, String>{};
+  for (final dir in ['lib', 'tool']) {
+    for (final f in Directory(dir).listSync(recursive: true)) {
+      if (f is! File || !f.path.endsWith('.dart')) continue;
+      final p = f.path.replaceAll(r'\', '/');
+      if (p == 'lib/remote/protocol.dart' ||
+          p == 'lib/remote/endpoint_service.dart' ||
+          p == 'lib/remote/assist.dart') {
+        continue;
+      }
+      others[p] = f.readAsStringSync();
+    }
+  }
+
+  /// 仅 `lib/`（**App 内**）的源，不含 `tool/`。
+  final inApp = <String, String>{
+    for (final e in others.entries)
+      if (e.key.startsWith('lib/')) e.key: e.value,
+  };
+
+  /// 取出 `abstract final class <name> { ... }` 的类体文本。
+  ///
+  /// 注意：这里在 `test()` 之外执行，**不能用 `expect`**（会抛
+  /// `OutsideTestException`），故用 `StateError` 表达"解析前提不成立"。
+  String classBody(String src, String name) {
+    final start = src.indexOf('abstract final class $name {');
+    if (start < 0) throw StateError('协议里找不到 $name 类');
+    final end = src.indexOf('\n}', start);
+    if (end <= start) throw StateError('$name 类体未正常闭合');
+    return src.substring(start, end);
+  }
+
+  /// 类体里的 `static const <name> =` 常量名。
+  List<String> constNames(String body) => RegExp(r'static const (\w+)\s*=')
+      .allMatches(body)
+      .map((m) => m.group(1)!)
+      .toList();
+
+  final cmds = constNames(classBody(protocol, 'RcCmd'));
+  final evts = constNames(classBody(protocol, 'RcEvt'));
+
+  /// 某个 token 在哪些文件里出现。
+  List<String> refsIn(Map<String, String> files, String token) =>
+      [for (final e in files.entries) if (e.value.contains(token)) e.key];
+
+  // ---------------- 已知缺口登记 ----------------
+  //
+  // 每条都必须写明**为什么可以暂时不接**以及**解除条件**。
+  // 缺口被修复后请从本表删除 —— 最后一个用例会检查本表是否腐烂。
+
+  /// 端点有 `case`、但全项目没有任何发送方。
+  const cmdWithoutSender = <String, String>{
+    'taskGet': '端点有实现，但无 UI 入口：`task.list` 已返回完整定义，'
+        '单条拉取属预留能力（第七轮已判定为有意保留）。'
+        '解除条件：控制台做「按 id 拉取单条任务」时一并接线。',
+  };
+
+  /// 无人发出的事件。
+  const evtWithoutEmitter = <String, String>{
+    'callMissed': '设计上由**控制器**判定"未接"（见 protocol.dart 注释），'
+        '但主叫侧尚未实现接听超时，故端点侧也无从发出 —— 见 BUG-050。',
+    'photo': '`camera.snap` 因 camera 插件无 AGP9 兼容版而按设计降级'
+        '（docs/16 §9），端点不会发出 `rc.photo`。'
+        '解除条件：camera 插件发布 AGP9 兼容版后恢复 `_snapPhoto`。',
+  };
+
+  /// 无人消费的事件。
+  const evtWithoutConsumer = <String, String>{
+    'heartbeat': '`rc.heartbeat` 的语义是"端点还活着"，而控制台的在线判定'
+        '已经由「任意同 peerId 事件都算存活」覆盖（心跳是最慢的恢复信号），'
+        '无需单独分支 —— 它只需被**发出**即可。',
+    'callMissed': '与 `evtWithoutEmitter` 同因：无人发出，自然无人消费（BUG-050）。',
+  };
+
+  /// 有消费方，但**只在 `tool/` 桌面 E2E 工具里**，App 内无消费者。
+  const evtWithoutInAppConsumer = <String, String>{
+    'scriptState': '`rc.script` 只被 `tool/rc_e2e_controller.dart`（RC-11/12）消费，'
+        'App 内控制台看不到指令组执行进度 —— 端点侧靠通知栏自证，'
+        '主叫侧无进度面板。属**已知体验缺口**，见 docs/17 本轮小节。',
+    'callState': '`rc.call` 只被 `tool/rc_e2e_controller.dart`（RC-14）消费，'
+        'App 内无通话状态镜像面板。与 BUG-050（无接听超时）同源，'
+        '一并修复时应同时接上。',
+  };
+
+  // ---------------- 用例 ----------------
+
+  test('协议常量可被解析（防空解析：锁本身必须真的在检查东西）', () {
+    expect(cmds.length, greaterThanOrEqualTo(25),
+        reason: 'RcCmd 常量数异常偏少，解析可能失效');
+    expect(evts.length, greaterThanOrEqualTo(18),
+        reason: 'RcEvt 常量数异常偏少，解析可能失效');
+    expect(cmds.toSet().length, cmds.length, reason: 'RcCmd 有重名常量');
+    expect(evts.toSet().length, evts.length, reason: 'RcEvt 有重名常量');
+  });
+
+  test('RcCmd 三向之一：每条命令端点都有 case', () {
+    final missing = [
+      for (final c in cmds)
+        if (!endpoint.contains('case RcCmd.$c')) c,
+    ];
+    expect(missing, isEmpty, reason: '这些命令端点没有处理分支：$missing');
+  });
+
+  test('RcCmd 三向之二：每条命令都在权限闸门显式登记', () {
+    final missing = [
+      for (final c in cmds)
+        if (!permGate.contains('RcCmd.$c')) c,
+    ];
+    expect(missing, isEmpty,
+        reason: '这些命令未登记进 RcPermGate.requiredPerm —— '
+            '`_ => denyAll` 会让它们在协助会话里被**静默拒绝**（不报错）：$missing');
+  });
+
+  test('RcCmd 三向之三：每条命令都有发送方', () {
+    final missing = [
+      for (final c in cmds)
+        if (refsIn(others, 'RcCmd.$c').isEmpty && !cmdWithoutSender.containsKey(c))
+          c,
+    ];
+    expect(missing, isEmpty,
+        reason: '这些命令全项目无人发送（端点能力空转）：$missing');
+  });
+
+  test('RcEvt 三向之一：每个事件端点都会发出', () {
+    final missing = [
+      for (final e in evts)
+        if (!endpoint.contains('RcEvt.$e') && !evtWithoutEmitter.containsKey(e)) e,
+    ];
+    expect(missing, isEmpty, reason: '这些事件无人发出（消费者永远等不到）：$missing');
+  });
+
+  test('RcEvt 三向之二：每个事件都有人消费', () {
+    final missing = [
+      for (final e in evts)
+        if (refsIn(others, 'RcEvt.$e').isEmpty && !evtWithoutConsumer.containsKey(e))
+          e,
+    ];
+    expect(missing, isEmpty, reason: '这些事件发出后无人消费（白耗带宽）：$missing');
+  });
+
+  test('RcEvt 三向之三：每个事件在 App 内都有消费者', () {
+    final missing = [
+      for (final e in evts)
+        if (refsIn(inApp, 'RcEvt.$e').isEmpty &&
+            !evtWithoutConsumer.containsKey(e) &&
+            !evtWithoutInAppConsumer.containsKey(e))
+          e,
+    ];
+    expect(missing, isEmpty,
+        reason: '这些事件只有桌面 E2E 工具消费，App 内看不到（用户可见缺口）：$missing');
+  });
+
+  test('缺口登记表不得腐烂：登记的名字必须仍存在于协议中', () {
+    for (final entry in [
+      ...cmdWithoutSender.keys,
+      ...evtWithoutEmitter.keys,
+      ...evtWithoutConsumer.keys,
+      ...evtWithoutInAppConsumer.keys,
+    ]) {
+      expect(cmds.contains(entry) || evts.contains(entry), isTrue,
+          reason: '缺口登记表里的 `$entry` 已不在协议中 —— '
+              '请删除该条目（协议常量被重命名或删除后，登记表会变成噪音）。');
+    }
+  });
+
+  test('缺口登记表不得冗余：缺口已被修复就必须删除条目', () {
+    final stale = <String>[];
+
+    for (final c in cmdWithoutSender.keys) {
+      if (refsIn(others, 'RcCmd.$c').isNotEmpty) stale.add('cmdWithoutSender/$c');
+    }
+    for (final e in evtWithoutEmitter.keys) {
+      if (endpoint.contains('RcEvt.$e')) stale.add('evtWithoutEmitter/$e');
+    }
+    for (final e in evtWithoutConsumer.keys) {
+      if (refsIn(others, 'RcEvt.$e').isNotEmpty) stale.add('evtWithoutConsumer/$e');
+    }
+    for (final e in evtWithoutInAppConsumer.keys) {
+      if (refsIn(inApp, 'RcEvt.$e').isNotEmpty) {
+        stale.add('evtWithoutInAppConsumer/$e');
+      }
+    }
+
+    expect(stale, isEmpty,
+        reason: '这些缺口其实已经接上了，请从登记表删除并更新 docs/17：$stale');
+  });
+}

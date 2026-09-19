@@ -1,4 +1,4 @@
-# 交接文档 HANDOVER（v1.7.2，2026-09-19）
+# 交接文档 HANDOVER（v1.7.3，2026-09-19）
 
 > **给下一个会话的第一句话**：读 §0 五分钟上手 → §1 状态快照 → §6 优先级清单，
 > 即可无缝续作，**无需向用户重复确认任何已在 §8 记录的决策**。
@@ -11,16 +11,15 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-19）**：v1.7.2，功能层 **361/361** + 压测 **24/24** 全绿，
+**当前状态（2026-09-19）**：v1.7.3，功能层 **370/370** + 压测 **24/24** 全绿，
 `flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
-**唯一的 P0 阻塞是"真机装不上"** —— 已拿到真机（arm64 / Android 16），
-但被厂商策略挡住：需在设备上开启「USB 安装」+「USB 调试（安全设置）」，
-见 §6 第 1 项与 §7。
+**真机已能装上并跑通设备冒烟（4/4，arm64 / Android 16）**，
+但**批量安装被厂商的 10 秒倒计时确认弹窗挡住** —— 见 §6 第 1 项与 §7。
 
 **一条命令跑完全部门禁**（第十三轮起，环境见 §3，**先关模拟器**）：
 
 ```bash
-bash scripts/gates.sh          # analyze + 功能 361 + 压测 24；EXIT=1 即有失败
+bash scripts/gates.sh          # analyze + 功能 370 + 压测 24；EXIT=1 即有失败
 # 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
 #   真机装不上时用 DEV=emulator-5554 显式指定；脚本默认**优先模拟器**
 # AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
@@ -48,9 +47,14 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 5. **`integration_test/` 不在默认门禁内** —— 它已经红过整整一个版本没人发现
    （BUG-045）。改完引擎/路由**主动跑一遍** §0 的两条设备命令。
 
-**下一步做什么**：§6 优先级清单第 1 项（真机补测）是唯一 P0，且**阻塞点已变更** ——
-设备侧开关一开即可跑（本轮已备好 debug APK 与配对注入法，见 §6 第 1 项）；
-若仍拿不到可装应用的真机，按 §6 顺序取下一个**不依赖硬件**的项。
+**下一步做什么**：§6 优先级清单第 1 项（真机补测）仍是唯一 P0。
+**第十六轮起情况再次变化**：真机**能装上了**（`adb install` 返回过 `Success`，
+设备冒烟 4/4 已跑通），但**每次安装都会弹一个 10 秒倒计时的厂商确认框，
+无人点击即自动拒绝**（`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`
+里的 "by user" 就是**这个超时**，不是用户点了取消）。
+`flutter test integration_test/…` 跑完会**卸载应用**，所以每跑一个设备用例都要重装一次
+→ 需要人工点一次「继续安装」。**若拿不到人工点击，就按 §6 顺序取下一个不依赖硬件的项**
+（首选：继续用覆盖锁的**缺口登记表**当待办清单，见 §6 第 14 项）。
 
 ---
 
@@ -58,10 +62,12 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 
 | 项 | 状态 |
 |---|---|
-| 版本 | **1.7.2+13**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
-| 提交链 | …→v1.6.1→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→**v1.7.2（远程音源库点选播放 + BUG-048 点名静默替换）** |
-| 测试 | **功能层 361/361 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 `integration_test/native_bridge_test.dart` **6/6 × 3 种网络状态** + 冒烟 **4/4**（设备层数字为**模拟器 x86_64**，真机 arm64 待补） |
+| 版本 | **1.7.3+14**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
+| 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→**v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）** |
+| 测试 | **功能层 370/370 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **真机冒烟 4/4（arm64 / Android 16）** / 模拟器桥接 6/6 × 3 种网络状态 |
 | analyze | **No issues found!** |
+| **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
+| **真机 arm64 设备端验收** | 🟡 **部分闭环**（第十六轮）：冒烟 **4/4** 已跑通；桥接/AOT/双端点 E2E 因**每次安装需人工点确认框**而未执行 |
 | **NFR-04 AOT 绝对验收** | ✅ **已闭环**（2026-09-18 首次取得）：100 任务物化 **15ms / 预算 500ms**（33× 余量）；1000 任务 134ms / 预算 5000ms。`flutter drive --profile` → `+5 All tests passed!`（第十二轮新增条件层复用用例后为 **+6**） |
 | **任务批量写入** | ✅ **已闭环**（第十一轮，BUG-042）：`TaskRepository.upsertMany` 单事务单往返；AOT 实测 500 条 **1797ms → 170ms（10.6×）**；任务导入已改走批量 |
 | **音源批量写入** | ✅ **已闭环**（第十四轮，BUG-047）：`AssetRepository.upsertMany` + `AssetLibraryImporter`（幂等/回滚）；预置库 60 条由 60 次往返改为 **1 次**，且失败**不再留下半套库** |
@@ -70,8 +76,8 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 | **条件层每轮复用** | ✅ **已闭环**（第十二轮，BUG-044）：一轮固定 4 次平台往返，与任务数解耦；AOT 50 任务 **584ms → 17ms（34×）** |
 | **v1.7 条件层设备端验证** | ✅ **已闭环**（第九/十轮）：`MODE_IN_CALL` 用模拟器真实通话覆盖；`wifi`/`cellular` 用模拟器虚拟 AP 覆盖；`NativeBridge` 另有 39 例宿主机契约锁 |
 | Release | ✅ app-release.apk（历史轮次）；app-profile.apk 148.0MB（AOT 验收用） |
-| 文档 | docs/00–18 + CHANGELOG + 测试报告（docs/12 含 §1–§24 全量数据）+ 续作主干 docs/17（每轮一节） |
-| **唯一 P0 阻塞** | **真机装不上**：设备已在手（`960f853`，Xiaomi `23116PN5BC` / arm64-v8a / Android 16 / SDK 36），但 `adb install` 恒报 `INSTALL_FAILED_USER_RESTRICTED`，且 `input keyevent` 缺 `INJECT_EVENTS` → 见 §6 第 1 项（含解除步骤） |
+| 文档 | docs/00–18 + CHANGELOG + 测试报告（docs/12 含 §1–§25 全量数据）+ 续作主干 docs/17（每轮一节，至 §22） |
+| **唯一 P0 阻塞** | **真机"能装一次、装不了第二次"**：设备在手（`960f853`，Xiaomi `23116PN5BC` / arm64-v8a / Android 16 / SDK 36），`adb install` 会弹厂商的 **10 秒倒计时确认框**（「继续安装」/「拒绝（10）」），无人点击即自动拒绝 → `INSTALL_FAILED_USER_RESTRICTED`。`input keyevent`/`input tap` 仍缺 `INJECT_EVENTS`，`sendevent` 的触摸节点 shell 不可写，shell 也无 `WRITE_SECURE_SETTINGS` → **无法程序化点掉它**。见 §6 第 1 项 |
 
 **产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
 核心红线：拒绝一切「未经授权控制他人设备」的实现（docs/16 §8 有完整
@@ -176,6 +182,48 @@ Xiaomi `23116PN5BC`（Redmi Note 13 Pro 5G / shennong），
 3 例失败（`Actual: '/x/newest.wav'` **具象复现**）；B `named` 忽略 `assetId` →
 6+ 例；C 控制台改发 `category` → 1 例（链路锁）；D `_playRemote` 恢复旧实现 →
 2 例（源码契约锁）；E `AppMeta.version` 改回旧值 → 1 例。探针残量 0。
+
+### 1.12 第十六轮（2026-09-19）：真机 arm64 首次跑通设备门禁 + 协议三向覆盖**机器锁**
+
+**先做 P0：再试真机。** `adb devices` 仍在 → `adb install -r -t` 这次返回 **`Success`**
+（说明「USB 安装」已开）。随即 `flutter test integration_test/app_smoke_test.dart -d 960f853`
+→ **`+4 All tests passed!`** —— **首次在真机 arm64 / Android 16 上跑通设备冒烟**。
+
+**但"能装一次、装不了第二次"**：紧接着跑桥接测试时 `INSTALL_FAILED_USER_RESTRICTED`。
+**截图抓到现行**：设备上弹出厂商的 **「USB 安装提示」** 对话框
+（「正在通过 USB 安装此应用，是否继续？」+ **[继续安装] [拒绝（10）]**）——
+**10 秒倒计时默认倒向拒绝**。所以报错里的 "by user" **就是这次超时**
+（第十五轮记录的"截图确认无弹窗"是当时**开关未开**的另一种表现，两轮现象不同、不矛盾）。
+
+**穷尽绕过路径（全部失败，逐条实测）**：
+`adb install -r -t` / `--no-streaming` / `--instant` / `push`+`pm install` /
+`pm install -i com.android.vending` / `-i com.miui.packageinstaller` /
+**会话式 `install-create`→`install-write`→`install-commit`** 全部
+`INSTALL_FAILED_USER_RESTRICTED`；`input tap`/`input keyevent` 缺 `INJECT_EVENTS`；
+`/dev/input/event7`（synaptics 触摸）是 `crw-rw---- root input` → `sendevent` 不可写
+（唯一可写的 `event2` 是振动马达）；`settings put global|secure` 缺
+`WRITE_SECURE_SETTINGS`（实测 shell 确实**不持有**该权限，与 AOSP 不同）；
+`adb root` 不可用（production build）。**结论：无法程序化点掉，需人工点一次。**
+
+**转向非硬件项：把三向覆盖比对机器化。** 第十三轮用**人工**三向比对
+（端点处理 / 控制器发送 / UI 消费）定位过 5 条断链；本轮把它变成
+`test/rc_protocol_coverage_test.dart`（**9 例**）：解析 `protocol.dart` 类体取出全部
+`RcCmd`(25) / `RcEvt`(18)，逐条断言三向齐全，并**额外锁住权限闸门登记**
+（`RcPermGate.requiredPerm` 末尾是 `_ => denyAll`，漏登记**不编译报错**、
+只在协助会话里静默拒绝 —— 正是最该上锁的静默降级）。含 2 例**防登记表腐烂**。
+
+**审计出的真实缺口（P3，已登记进缺口表并写入 CHANGELOG）**：
+- **BUG-050**：`RcEvt.callMissed` 是**死常量**（从不发出、无人消费）；
+  协议注释写明"未接由控制器判定"，但主叫侧**没有接听超时** → 被叫未开自动接通时
+  主叫**无限等待且无任何"未接"反馈**。同源的 `rc.call` 状态镜像在 **App 内也无消费者**。
+- `rc.script`（指令组状态）App 内无消费者（仅桌面 E2E 工具消费）。
+
+**门禁（实测）**：analyze 零问题；功能 **361 → 370**；压测 **24/24**；
+`bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**。用例总数 **385 → 394**。
+
+**证伪（两探针，确认"能失败"后还原）**：A 抽掉 `RcPermGate` 里 `RcCmd.assetList` 的
+登记 → **1 例**红并指名 `[assetList]`；B 临时新增无人接线的 `RcEvt.probeEvt` →
+**3 例**红并指名 `[probeEvt]`。探针残量 0。
 
 ### 1.10 第十四轮（2026-09-19）：音源库导入的**批量写入与原子性**（BUG-047）
 
@@ -594,7 +642,26 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
 杀进程 5s 自愈/真实触发执行/预置库 60 条导入试听/冷启动 1574ms/PSS 97MB/
 Monkey 400 零崩溃。
 
-**v1.7.2 第十五轮（真机接入尝试 + BUG-048 点名静默替换，最新）**：
+**v1.7.3 第十六轮（真机 arm64 首次设备端验收 + 协议三向覆盖机器锁，最新）**：
+- **真机冒烟 4/4 全绿**（`flutter test integration_test/app_smoke_test.dart -d 960f853`）
+  —— **首次在真机 arm64 / Android 16 / SDK 36 上跑通设备门禁**；此前所有设备端
+  数字均为模拟器 x86_64。覆盖：守护仪表盘渲染 / 五页导航可达 / 音源库页真实渲染
+  （BUG-047 改动的设备端验证）/ 任务定义→物化→计划可执行语义。
+- **真机批量安装仍阻塞**：厂商「USB 安装提示」弹窗 **10 秒倒计时自动拒绝**。
+  7 条安装路径 + 3 类输入注入退路（`input tap`/`sendevent`/`settings put`）
+  全部实测失败；`adb root` 不可用。**需人工点一次「继续安装」**（见 §6 第 1 项）。
+- 新增 **`test/rc_protocol_coverage_test.dart`（9 例）**：把人工三向覆盖比对
+  （端点处理 / 控制器发送 / UI 消费）变成门禁不变量；额外锁 `RcPermGate` 显式登记
+  （漏登记是**静默拒绝**，不编译报错）；含 2 例防登记表腐烂。
+- 审计出 **BUG-050（P3）**：`RcEvt.callMissed` 死常量 + 主叫无接听超时
+  → 被叫未开自动接通时主叫**无限等待且无"未接"反馈**；`rc.call` App 内也无消费者。
+- **门禁实测**：analyze 零问题；功能 **370/370**；压测 **24/24**；
+  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**。用例总数 **385 → 394**。
+- **证伪（两探针）**：A 抽掉 `RcPermGate` 中 `RcCmd.assetList` 登记 → 1 例红
+  并指名 `[assetList]`；B 新增无人接线的 `RcEvt.probeEvt` → 3 例红并指名
+  `[probeEvt]`。探针残量 0。
+
+**v1.7.2 第十五轮（真机接入尝试 + BUG-048 点名静默替换）**：
 - 真机 `960f853`（Xiaomi `23116PN5BC`，**arm64-v8a / Android 16 / SDK 36**）
   **已接入但装不上**：`adb install` 5 条路径全部 `INSTALL_FAILED_USER_RESTRICTED`；
   `input keyevent` 缺 `INJECT_EVENTS`。阻塞点=设备侧两个开关（见 §6 第 1 项）。
@@ -624,6 +691,10 @@ Monkey 400 零崩溃。
   （取值须走 `rcPayloadOf`，BUG-023 同类）。
 - 三向覆盖复扫：**RcCmd 断链 0**（第七轮修复保持有效）；`rc.assets` / `rc.presets` /
   `rc.callMissed` 与预留命令配套，有意保留。
+  ⚠️ **第十六轮修正**：`rc.callMissed` 并非"配套预留"而是**死常量**
+  （从不发出、无人消费）且对应一个**真实体验缺口**（主叫无接听超时）→ 见 **BUG-050**
+  与 §6 第 14 项。当时的判断对 `rc.assets`/`rc.presets` 成立（第十五轮已接通），
+  对 `callMissed` 不成立。
 - CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E）。
 - `flutter analyze` → No issues found!；功能 **318/318**（当时值）；压测 **24/24**。
 
@@ -724,18 +795,31 @@ Monkey 400 零崩溃。
 ## 6. 下一步优先级（按序执行）
 
 1. **P0 真机补测协助会话握手**（S3 验收的最后残余维度）。
-   **状态（第十五轮更新）：设备已到手，卡在设备侧两个开关。**
+   **状态（第十六轮更新）：真机能装上并已跑通冒烟 4/4，但"批量安装"卡在厂商确认弹窗。**
    真机 `960f853` = Xiaomi `23116PN5BC`（arm64-v8a / Android 16 / SDK 36）。
-   现状：`adb install` 恒报 `INSTALL_FAILED_USER_RESTRICTED`
-   （5 条路径全试过，含 `--no-streaming` / `pm install` / 伪造 `-i` 安装器），
-   且 `input keyevent` 报 `SecurityException: … INJECT_EVENTS`
-   （无法用 UI 自动化绕过）。
 
-   **解除条件（在真机上各操作一次）**：
-   1. 开发者选项 → **「USB 安装」** 打开（MIUI 要求登录小米账号）；
-   2. 开发者选项 → **「USB 调试（安全设置）」** 打开（允许注入输入事件）。
+   **已确认可行的**：`adb install -r -t` 有时返回 `Success`；随后
+   `flutter test integration_test/app_smoke_test.dart -d 960f853` → **+4 全绿**。
+   `run-as com.sonicshield.sonic_shield` 可用（能写 prefs）。
 
-   就绪后**本轮已备好的一切可直接复用**：
+   **仍卡住的（实测穷尽）**：每次安装会弹厂商「USB 安装提示」对话框
+   （**[继续安装] [拒绝（10）]**），**10 秒倒计时默认拒绝**，
+   报错即 `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。
+   而 `flutter test integration_test/…` **跑完会卸载应用** → 每跑一个设备用例
+   都要重装一次 → 需人工点一次。
+   已排除的绕过路径（全部实测失败）：`--no-streaming` / `--instant` /
+   `push`+`pm install` / `-i com.android.vending` / `-i com.miui.packageinstaller` /
+   会话式 `install-create`→`install-write`→`install-commit` /
+   `input tap`·`input keyevent`（缺 `INJECT_EVENTS`）/
+   `sendevent`（触摸节点 `event7` 为 `crw-rw---- root input`，shell 不可写）/
+   `settings put global|secure`（缺 `WRITE_SECURE_SETTINGS`）/ `adb root`（production build）。
+
+   **解除条件（任一即可）**：
+   - **有人在场时点一次「继续安装」**（每次安装一次）——最省事；
+   - 或真机开发者选项里把安装确认关掉（MIUI 需登录小米账号）；
+   - 或开启「USB 调试（安全设置）」后改用 `input tap` 自动点。
+
+   就绪后**备好的一切可直接复用**：
    ```bash
    # 1) 装（debug 包可 run-as，才能注入配对信息）
    adb -s 960f853 install -r -t build/app/outputs/flutter-apk/app-debug.apk
@@ -749,7 +833,7 @@ Monkey 400 零崩溃。
    注意：双方都要开启远程模块；broker 默认 `broker.emqx.io`（TCP 1883/8883
    已从该真机实测可达）。
    **另**：该真机处于**真实 5G 移动网络** → 第 5 项（对称 NAT）与
-   「真实扬声器出声」（RC-09）在开关解除后**可一并覆盖**。
+   「真实扬声器出声」（RC-09）在装得上之后**可一并覆盖**。
 2. ~~**P0 NFR-04 的 AOT 绝对验收**~~ → ✅ **第六轮已闭环**（100 任务物化 15ms /
    预算 500ms，33× 余量）。后续若改调度引擎，按 §3 命令重跑即可（单次仅 76–116s）。
 3. ~~**P1 v1.7 条件层设备端验证**~~ → ✅ **第九/十轮已闭环**：通话分支（模拟器真实通话）
@@ -790,6 +874,14 @@ Monkey 400 零崩溃。
     接线过程中发现并修 **BUG-048**（端点忽略 `assetId` 且解析失败静默回落 →
     点名被换成另一段声音却回 `ok=true`）。
 13. 持续：真机矩阵 M4（docs/09 §5 LT-01..05）。
+14. **P3（第十六轮新增）协议覆盖锁的「缺口登记表」= 一份可执行的待办清单**：
+    `test/rc_protocol_coverage_test.dart` 里登记了 5 条已知缺口
+    （`taskGet` 无发送方 / `callMissed`·`photo` 无发出方 / `heartbeat`·`callMissed`
+    无消费方 / `scriptState`·`callState` 仅桌面工具消费）。
+    **修好任一条，锁会强制你删掉登记条目**（防腐烂用例），
+    所以这张表本身就是"下一件可做的事"的队列。优先级建议：
+    **① BUG-050 接听超时 + `rc.call` 接入 App**（一次修两条缺口，且有真实用户可见收益：
+    被叫未开自动接通时主叫不再无限等待）；② `rc.script` 接进控制台做执行进度面板。
 
 ## 7. 会话操作守则（血泪教训）
 
@@ -890,11 +982,39 @@ Monkey 400 零崩溃。
   并转向合法替代，不要反复。
 - **`ping` 不通 ≠ 网络不通**（第十五轮）：真机 `ping broker.emqx.io` 100% 丢包，
   但 `toybox nc` 对 1883/8883 均成功。ICMP 常被丢，**判据要用 TCP 握手**。
-  同理 `INSTALL_FAILED_USER_RESTRICTED` 的 **"by user" 不是用户点了取消** ——
-  是厂商策略直接拒绝；截图确认屏幕上没有任何弹窗，**不要去等一个不存在的弹窗**。
+  同理 `INSTALL_FAILED_USER_RESTRICTED` 的 **"by user" 不是用户点了取消**。
+  ⚠️ **第十六轮修正**：当时推断"厂商策略直接拒绝、屏幕上没有弹窗"——
+  **这个推断只对当时的开关状态成立**。开关打开后实测会弹出
+  **「USB 安装提示」+ [继续安装] / [拒绝（10）]**，**10 秒倒计时默认拒绝**，
+  报错文案**完全相同**。所以：**看到 "by user" 不要下结论，先截图抓现行** ——
+  同一条报错文案在"开关关"与"弹窗超时"两种状态下都会出现。
 - **"有设备"不等于"能跑设备门禁"**（第十五轮）：真机可能被厂商策略禁止安装，
   此时门禁脚本"取第一台设备"会给出看不懂的红。设备选择要
   **`DEV=` 显式优先 + 优先模拟器**（`scripts/gates.sh` 的 `pick_device()`）。
+- **设备端门禁是"每跑一次装一次"**（第十六轮）：`flutter test integration_test/…`
+  **跑完会卸载应用**，而厂商安装确认框**每次安装都要点一次** →
+  没有人工在场时，**一轮只能跑一个设备用例文件**。规划真机验证时把
+  "需要几次人工点击"当作硬成本来排期（冒烟/桥接/AOT/E2E 各算一次）。
+- **`adb root` 在 MIUI production build 上会打断 adb 连接**（第十六轮）：
+  执行后设备直接从 `adb devices` 消失、系统层 USB 也查不到该设备，
+  需重新枚举（本轮之后设备一直没回来）。**别在真机上随手试 `adb root`。**
+- **人工审计必须机器化才有价值**（第十六轮）：三向覆盖比对（端点处理 /
+  控制器发送 / UI 消费）第十三轮用人工做过、也确实挖到了洞，但**人工只能发现"当下"**；
+  本轮把它写成 `test/rc_protocol_coverage_test.dart` 后，新加一条命令漏接任一端
+  都会让功能层门禁直接红。**"某张表靠人记"就是下一个 BUG-037/046/048。**
+- **安全默认也可能是静默降级**（第十六轮）：`RcPermGate.requiredPerm` 末尾的
+  `_ => denyAll` 是正确的失败关闭，代价是**漏登记不编译报错**、
+  只在协助会话里表现为"命令被静默拒绝"。**凡是"有兜底分支的 switch 表"，
+  都值得补一条"必须显式登记"的锁。**
+- **做全库引用审计时别漏目录**（第十六轮自造误判）：第一次只 grep 了
+  `lib/ test/ integration_test/`，漏掉 `tool/`，于是把 `rc.script`/`rc.call`
+  误判成"完全无人消费"，实际是"**仅桌面 E2E 工具消费**"——
+  结论从"死链路"变成"App 内缺消费者"，性质完全不同。
+  **审计覆盖面要一次写全（`lib/ tool/ test/ integration_test/`），并在结论里写明扫了哪些。**
+- **`expect` 不能在 `test()` 之外调用**（第十六轮）：在 `main()` 顶层做解析时
+  用 `expect` 会抛 `OutsideTestException`，表现为**整个文件加载失败**（`+0 -1`），
+  连用例名都看不到。解析阶段的断言用 `StateError` / `ArgumentError`，
+  把 `expect` 留给用例体。
 - **静默替换类缺陷的通用判据**（第十五轮 BUG-048）：调用方**点名**了就必须满足，
   满足不了要**失败**；只有"没点名"时才允许兜底。
   凡是 `??= 随便取一条` / `?? 默认值` 的地方都值得审一遍 ——
@@ -941,21 +1061,29 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 §21，第十五轮）拿到「尚未闭环」清单，
-以及 docs/12 的最后一节（当前是 §24）拿真实门禁数据。
-项目当前是 v1.7.2：功能层 361/361、压测 24/24、analyze 零问题。
+再读 docs/17 的最后一节（当前是 §22，第十六轮）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §25）拿真实门禁数据。
+项目当前是 v1.7.3：功能层 370/370、压测 24/24、analyze 零问题。
 
 【第 2 步 · 选一个未完成项（按 §6 顺序）】
-§6 第 1 项（真机补测协助会话握手）是唯一 P0。**第十五轮起情况变了**：
-真机已在手（`adb devices` 有 `960f853`，Xiaomi arm64 / Android 16），
-但**装不上** —— `adb install` 恒报 `INSTALL_FAILED_USER_RESTRICTED`，
-`input keyevent` 缺 `INJECT_EVENTS`。这不是代码问题，是设备侧两个开关
-（「USB 安装」+「USB 调试（安全设置）」，均需登录小米账号）。
-**先跑 `adb devices` 确认设备在不在，再试着装一次**；装得上就直接跑 §6 第 1 项
-（命令与配对注入法都已备好）；装不上就如实报告阻塞并转下一个非硬件项，
-**不要在这上面空转，也不要假报完成**。
-当前可选的非硬件项：**三向覆盖比对审计其它模块**（RcCmd/RcEvt 的端点/发送/消费
-三向比对，这个方法在本项目一次定位过 5 条断链命令）；或 docs/11 路线图的下一项。
+§6 第 1 项（真机补测协助会话握手）是唯一 P0。**第十六轮起情况又变了**：
+真机**能装上了**（`adb install` 返回过 `Success`），且**冒烟 4/4 已跑通**；
+但**每次安装都会弹一个 10 秒倒计时的厂商确认框，无人点击即自动拒绝**
+（`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` 的 "by user"
+就是这次超时）。而 `flutter test integration_test/…` 跑完会卸载应用 →
+每跑一个设备用例都要重装一次 → **需要人工点一次**。
+**先跑 `adb devices` 确认设备在不在，再试着装一次**：
+- 装得上（有人在场点了）→ 直接跑 §6 第 1 项，命令与配对注入法都已备好；
+- 装不上 → 如实报告阻塞并转下一个非硬件项，**不要在这上面空转，也不要假报完成**。
+
+当前可选的非硬件项（按建议优先级）：
+1. **§6 第 14 项：覆盖锁的「缺口登记表」**（`test/rc_protocol_coverage_test.dart`）——
+   这张表本身就是待办队列，且**修好一条会被锁强制要求删掉登记条目**。
+   首选 **BUG-050：主叫接听超时 + `rc.call` 接进 App**（一次修两条缺口，
+   且有真实用户可见收益：被叫未开自动接通时主叫不再无限等待）。
+2. docs/11 路线图的下一项。
+3. 继续审计其它模块（注意：三向覆盖已机器化，人工再扫收益下降；
+   新的高产线索是**"有兜底分支的 switch 表"**是否漏登记）。
 > **一条已验证高产的非硬件审计线索**：找「一次调用 = 一次平台通道往返」的批量写入路径
 > —— BUG-035（日志）→ BUG-042（任务）→ BUG-047（音源）都是这条线索挖出来的，
 > 判据是 `grep` 扫「循环里 `await` 写库」+「绕过仓储层的裸 `db.*`」。
@@ -967,7 +1095,7 @@ Monkey 400 零崩溃。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +361 / 361
+    flutter test --exclude-tags perf         → 期望 +370 / 370
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
 · 改多行代码**只用 Edit 工具**，禁用 sed 多行替换。
   ⚠️ Edit 会偶发 `EBUSY` 并**静默不落盘**（报 success 但内容没进文件）——
