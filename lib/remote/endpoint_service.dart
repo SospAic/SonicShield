@@ -28,6 +28,7 @@ import 'assist_host.dart';
 import 'assist_join.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
+import 'remote_playback.dart';
 import 'remote_store.dart';
 import 'script_executor.dart';
 import 'task_wire.dart';
@@ -782,27 +783,29 @@ class RcEndpointService {
     })));
   }
 
+  /// `sound.play`：解析选择器 → 播放 → 审计 → 回执。
+  ///
+  /// 决策链全部在 [performRemotePlay] 内（宿主机可断言）。此前这里直接读
+  /// `msg.payload['category']` 并把解析失败**静默回落**到"任意一条音源"，
+  /// 于是点名 `assetId` / `preset` 会被换成另一段声音而回执仍是 `ok=true`
+  /// —— 见 BUG-048。现在"点名了却找不到"会如实回 `ok=false` + 原因。
   Future<void> _playRemote(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
-    final category = msg.payload['category'] as String?;
-    final volume =
-        ((msg.payload['volume'] as num?)?.toDouble() ?? 0.9).clamp(0.0, 1.0);
-    final durationSec = (msg.payload['durationSec'] as num?)?.toInt() ?? 5;
-    final loop = msg.payload['loop'] as bool? ?? false;
-    var path = await _resolvePreset(category);
-    path ??= await _anyAssetPath();
-    var ok = false;
-    if (path != null && playHandler != null) {
-      ok = await playHandler!(path, volume, durationSec * 1000, loop: loop);
-    }
+    final r = await performRemotePlay(
+      msg.payload,
+      byId: _assetPathById,
+      byTag: (tag) => _resolvePreset(tag),
+      any: _anyAssetPath,
+      play: playHandler,
+    );
     await logs.append(
         source: 'remote',
         action: 'play',
-        status: ok ? 'success' : 'failed',
-        volume: volume,
-        durationMs: durationSec * 1000,
-        message: 'by ${peer.name}${category == null ? '' : ' · $category'}');
-    await _ack(msg, ok);
+        status: r.ok ? 'success' : 'failed',
+        volume: r.volume,
+        durationMs: r.durationMs,
+        message: 'by ${peer.name} · ${r.reason}');
+    await _ack(msg, r.ok, data: r.path == null ? r.reason : null);
   }
 
   Future<void> _runScript(
@@ -1042,6 +1045,16 @@ class RcEndpointService {
     final rows = await _db!.db
         .query('audio_assets', orderBy: 'created_at DESC', limit: 1);
     return rows.isEmpty ? null : rows.first['path'] as String;
+  }
+
+  /// 按 ID 精确取音源路径。
+  ///
+  /// BUG-048：`sound.play {assetId}` 此前**完全被忽略** ——
+  /// 协议声明支持 `assetId`，端点却只看 `category`。
+  Future<String?> _assetPathById(String id) async {
+    final rows = await _db!.db.query('audio_assets',
+        columns: ['path'], where: 'id = ?', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : rows.first['path'] as String?;
   }
 
   /// 按预置分类随机取一条（导入预置库时标签为 `预置/<分类>`）。

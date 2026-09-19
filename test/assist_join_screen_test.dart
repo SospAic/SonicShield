@@ -55,7 +55,17 @@ void main() {
   });
 
   /// 挂载页面（注入互不干扰的客户端实例）。
+  ///
+  /// 视口放大到 1200×4000：控制台是一个 `ListView`，**屏幕外的条目不会被构建**，
+  /// 而 `find.widgetWithText` 只能找到已构建的 widget。默认 800×600 下，
+  /// 断言会隐含依赖"所有按钮都在首屏内" —— 功能一多就假红
+  /// （BUG-048 给「音效播放」加了两个入口后，JW-15 的
+  /// 「停止指令组」被挤出首屏、`Found 0 widgets`）。
+  /// 放大视口让整个控制台都可被构建，断言就不再依赖位置。
   Future<void> mount(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1200, 4000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(ProviderScope(
       child: MaterialApp(home: AssistJoinScreen(client: client)),
     ));

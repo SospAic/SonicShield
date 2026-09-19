@@ -40,6 +40,17 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   List<dynamic>? _lastLogs;
   String? _photoB64;
 
+  /// 端点音源库（`asset.list` → `rc.assets`）。
+  ///
+  /// BUG-048 配套：端点早已实现 `asset.list` / `preset.list`，但控制台
+  /// **既无入口也无消费方**（HANDOVER §6.12 的 P2 项）—— 于是远程播放只能
+  /// 按固定分类"盲播"。有了列表才能点选**指定音源**（`sound.play {assetId}`）。
+  List<dynamic>? _lastAssets;
+  int _assetsTotal = 0;
+
+  /// 端点预置分类（`preset.list` → `rc.presets`）。
+  List<dynamic>? _lastPresets;
+
   /// 已知离线的对端（peerId → 显示名）。
   ///
   /// 来源：broker 代发的 **LWT 明文离线哨兵** `rc.offline`（docs/14 §4）。
@@ -142,6 +153,15 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         setState(() => _photoB64 = payload['photoB64'] as String?);
       case RcEvt.logs:
         setState(() => _lastLogs = (payload['logs'] as List?) ?? const []);
+      case RcEvt.assets:
+        setState(() {
+          _lastAssets = (payload['assets'] as List?) ?? const [];
+          _assetsTotal =
+              (payload['total'] as num?)?.toInt() ?? _lastAssets!.length;
+        });
+      case RcEvt.presets:
+        setState(
+            () => _lastPresets = (payload['categories'] as List?) ?? const []);
       case RcEvt.ack:
         final desc = _pendingAcks.remove(payload['for'] as String?);
         if (desc != null && mounted) {
@@ -290,6 +310,24 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           spacing: 8,
           runSpacing: 8,
           children: [
+            // BUG-048 配套：端点早已实现 asset.list / preset.list → rc.assets /
+            // rc.presets，但控制台既无入口也无消费方（HANDOVER §6.12 的 P2 项）。
+            // 没有列表就只能按下面那排**固定猜测**的分类盲播；有列表才能点选
+            // 指定音源（`sound.play {assetId}`）。
+            FilledButton.tonalIcon(
+                icon: const Icon(Icons.library_music_outlined),
+                label: const Text('端点音源库'),
+                // 响应是专用事件 rc.assets（不是 rc.ack）→ 不记账（同 BUG-038）。
+                onPressed: _allowed(RcCmd.assetList)
+                    ? () => _send(RcCmd.assetList, {'limit': 50}, '端点音源库',
+                        trackAck: false)
+                    : null),
+            FilledButton.tonalIcon(
+                icon: const Icon(Icons.category_outlined),
+                label: const Text('预置分类'),
+                onPressed: _allowed(RcCmd.presetList)
+                    ? () => _send(RcCmd.presetList, {}, '预置分类', trackAck: false)
+                    : null),
             for (final c in const ['knocks', 'nature', 'ambient', 'alarms'])
               OutlinedButton(
                   onPressed: _allowed(RcCmd.soundPlay)
@@ -395,6 +433,14 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         if (_lastLogs != null) ...[
           _section('端点日志回执（logs.recent）'),
           _logsCard(),
+        ],
+        if (_lastAssets != null) ...[
+          _section('端点音源库回执（asset.list）'),
+          _assetsCard(),
+        ],
+        if (_lastPresets != null) ...[
+          _section('端点预置分类回执（preset.list）'),
+          _presetsCard(),
         ],
         if (_photoB64 != null) ...[
           _section('拍照回执'),
@@ -519,6 +565,112 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         ),
       ),
     );
+  }
+
+  /// 端点音源库回执卡片（`asset.list` → `rc.assets`）。
+  ///
+  /// 每行**可点**：点一下即以 `sound.play {assetId}` 播放**那一条**。
+  /// 列表与"指定播放"必须成对出现 —— BUG-048 之前端点忽略 `assetId`，
+  /// 即使有了列表，点选也只会播库里最新的一条（点"闹钟"响起"敲击声"）。
+  Widget _assetsCard() {
+    final rows = _lastAssets ?? const [];
+    if (rows.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(12),
+          child: Text('端点音源库为空（可先在端点导入音源或预置库）',
+              style: TextStyle(fontSize: 12)),
+        ),
+      );
+    }
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+              child: Text('共 $_assetsTotal 条（点选即指定播放）',
+                  style: const TextStyle(fontSize: 12)),
+            ),
+            for (final raw in rows.take(50))
+              if (raw is Map)
+                ListTile(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  leading: const Icon(Icons.play_arrow, size: 18),
+                  title: Text(raw['name'] as String? ?? '（未命名）',
+                      style: const TextStyle(fontSize: 13)),
+                  subtitle: Text(
+                    '${_fmtDuration(raw['durationMs'])}'
+                    '${_tagSuffix(raw['tags'])}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  onTap: () => _playAsset(raw['id'] as String?),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 端点预置分类回执卡片（`preset.list` → `rc.presets`）。
+  ///
+  /// 与上面那排固定猜测的分类不同，这里是端点**真实存在**的分类，
+  /// 因此点了必然有音源（否则端点会如实回 `ok=false` 说明原因）。
+  Widget _presetsCard() {
+    final cats = (_lastPresets ?? const []).whereType<String>().toList();
+    if (cats.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(12),
+          child: Text('端点无预置音源分类（尚未导入预置库）',
+              style: TextStyle(fontSize: 12)),
+        ),
+      );
+    }
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final c in cats)
+              ActionChip(
+                label: Text(c),
+                onPressed: () => _send(
+                    RcCmd.soundPlay,
+                    {'preset': c, 'volume': 0.9, 'durationSec': 8},
+                    '播放 $c 分类'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 点选端点音源库中的一条 → **指定 assetId** 播放。
+  void _playAsset(String? id) {
+    if (id == null || id.isEmpty) return;
+    _send(RcCmd.soundPlay, {'assetId': id, 'volume': 0.9, 'durationSec': 8},
+        '播放指定音源');
+  }
+
+  /// 标签列 → ` · a/b`（空标签不产生尾巴）。
+  static String _tagSuffix(Object? tags) {
+    if (tags is! List) return '';
+    final list = tags.whereType<String>().toList();
+    return list.isEmpty ? '' : ' · ${list.join('/')}';
+  }
+
+  /// 毫秒时长 → `1:05` / `12s`。
+  static String _fmtDuration(Object? ms) {
+    if (ms is! num) return '时长未知';
+    final total = ms.toInt() ~/ 1000;
+    if (total < 60) return '${total}s';
+    return '${total ~/ 60}:${(total % 60).toString().padLeft(2, '0')}';
   }
 
   /// 毫秒时间戳 → `HH:mm:ss`（设备时钟可能缺失，缺失时显示占位符）。

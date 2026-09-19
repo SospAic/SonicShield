@@ -14,7 +14,12 @@ class AppMeta {
   static const String appPackage = 'com.sonicshield.sonic_shield';
 
   /// 与 pubspec.yaml 的 version 保持同步（远程回执上报，BUG-018）。
-  static const String version = '1.7.0-alpha.1';
+  ///
+  /// ⚠️ 这是版本号的**第四处**（pubspec / CHANGELOG / HANDOVER / 本常量）。
+  /// 它长期被漏改（BUG-049：pubspec 已 1.7.1 而这里仍 1.7.0-alpha.1，
+  /// 于是远程 status/device 回执上报的是**过期的版本号**）——
+  /// 现已由 `test/version_consistency_test.dart` 强制三者一致。
+  static const String version = '1.7.2';
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换
 }

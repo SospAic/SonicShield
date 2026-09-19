@@ -3,6 +3,124 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+## [1.7.2] - 2026-09-19
+
+> 主题：**远程音源库可点选播放** —— 修复 `sound.play` 点名被静默替换
+> （BUG-048）、接通 `rc.assets`/`rc.presets` 的 UI 消费、版本一致性上锁
+> （BUG-049）。真机接入尝试被厂商策略阻塞（详见 docs/17 §21）。
+
+### Added（第十五轮：远程音源库 + 预置分类）
+- **`lib/remote/remote_playback.dart`**：`PlaybackSelector`（解析 `sound.play`
+  payload，优先级 `assetId` > `preset` > `category`；空串/非字符串视为**未点名**）
+  + `resolvePlayback()`（纯解析，`byId`/`byTag`/`any` 由调用方注入）
+  + `performRemotePlay()`（解析 → 播放 → 汇总）。
+  **不依赖数据库与平台通道**，故整条决策链可在宿主机断言。
+- **远程控制台「端点音源库」**：发 `asset.list{limit:50}`，渲染 `rc.assets`
+  列表（名称/时长/标签）；**点某一行即以 `sound.play {assetId}` 播放那一条**。
+- **远程控制台「预置分类」**：发 `preset.list`，渲染 `rc.presets` 分类 chip，
+  点选按 `preset` 播放。两者此前是**端点已实现、控制台无入口也无消费方**的
+  预留命令（第十三/十四轮记录的 P2 项）。
+- **`test/version_consistency_test.dart`**：强制 `pubspec.yaml` / `AppMeta.version`
+  / `CHANGELOG` 顶部版本三处一致，把"发版收尾靠人肉核对"变成机器不变量。
+- `test/remote_playback_test.dart`（**17 例**）+ `test/remote_console_tab_test.dart`
+  （**+4 例**，含**链路锁**：控制台实际发出的 payload 喂给端点决策函数，
+  断言播放的就是被点选的那一条）。
+
+### Fixed（第十五轮）
+- **BUG-048（P2）`sound.play` 的点名被静默替换**：协议声明 payload 为
+  `{preset|assetId|category, …}`，但端点 `_playRemote` **只读 `category`**，
+  且解析不到时 `path ??= await _anyAssetPath()` 静默回落到"库里最新一条"。后果：
+  ①控制器点名播 A，端点播**另一段声音**而回执仍 `ok=true`；
+  ②点名分类无匹配音源时点"闹钟"响起敲击声。现改为：**点名了就必须播那一条**，
+  解析不到则 `ack(false)` + 可读原因（"无此音源：X" / "分类无音源：X"）；
+  只有**完全未点名**时才允许任意一条兜底（v1 兼容）。
+  另新增 `_assetPathById()` 按主键精确取音源，审计日志写明解析依据。
+- **BUG-049（P3）`AppMeta.version` 长期未随 pubspec 更新**：pubspec 已 1.7.1
+  而该常量仍为 `1.7.0-alpha.1`，而注释写着"与 pubspec 保持同步" ——
+  远程 `status`/`device` 回执上报的是**过期版本号**。已同步并加锁（见上）。
+- **门禁脚本设备选择加固**：`scripts/gates.sh` 新增 `pick_device()`，
+  显式 `DEV=` 优先、否则**优先模拟器**。原因：真机存在 ≠ 能跑设备门禁
+  （厂商策略可禁止 adb 安装），"取第一台设备"会给出看不懂的红。
+- **`test/assist_join_screen_test.dart` 视口脆性**：该文件用默认 800×600 视口，
+  而控制台是 `ListView`（屏幕外条目**不构建**），断言隐含依赖"所有按钮都在首屏"。
+  新增两个入口后「停止指令组」被挤出首屏 → `Found 0 widgets`。
+  修法：`mount()` 设 1200×4000 视口（与 `remote_console_tab_test.dart` 一致）。
+
+### Verified（第十五轮实测）
+- `flutter analyze` → **No issues found!**（9.4s）
+- `flutter test --exclude-tags perf` → **361/361**（336 → +25）
+- `flutter test --tags perf --concurrency=1` → **24/24**
+- `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**
+- 用例总数 **360 → 385**
+- **证伪（四探针，全部确认"能失败"后还原）**：A 点名未命中改回静默回落 →
+  3 例失败（`Actual: '/x/newest.wav'` 具象复现）；B `named` 忽略 `assetId` →
+  6+ 例失败；C 控制台改发 `category` → 1 例失败（链路锁）；
+  D `_playRemote` 恢复旧实现 → 2 例失败（源码契约锁）。探针残量 0。
+
+### Known Issues（第十五轮）
+- **真机路径仍阻塞，但阻塞点已变更**：设备侧需开启
+  「USB 安装」（需登录小米账号）+「USB 调试（安全设置）」。
+  在此之前 `adb install` 恒报 `INSTALL_FAILED_USER_RESTRICTED`，
+  且 `input keyevent` 缺 `INJECT_EVENTS`（无法用 UI 自动化绕过）。
+  就绪后可直接复用已备好的 debug APK 与 `tool/rc_e2e_controller.dart`。
+
+
+## [1.7.1] - 2026-09-19
+
+> 主题：**交付收口** —— 统一门禁脚本（一条命令跑完全部门禁）、三向覆盖复扫
+> （BUG-046）、音源库导入的批量写入与原子性（BUG-047）。
+
+### Added（第十三轮：统一门禁脚本）
+- **统一门禁脚本**（scripts/gates.ps1 + gates.sh）：analyze/功能/压测三层 +
+  可选设备端（-WithDevice）+ 可选 AOT 验收（-WithAot）；失败 EXIT=1，
+  本地与 CI 同一判据。含**证伪验证**（注入必败用例 → 三层全红）。
+- CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E），
+  修复 BUG-045 暴露的"integration_test 不在门禁内"覆盖洞。
+
+### Fixed（第十三轮）
+- **BUG-046（P3）**：对讲机"对端已播放"回执（rc.pttAck）端点已广播、
+  UI 无消费——PttTab 订阅事件流渲染，取值走 rcPayloadOf（BUG-023 同类）。
+- task_wire 两处 if 单行块（analyze info 清零）。
+
+### Added（第十四轮：音源库批量写入与原子性）
+- **`lib/services/preset_import.dart`**（`AssetLibraryImporter`）：批量音源导入器，
+  把「幂等跳过 → 全部落盘 → **一次**写库 → 失败回滚」从界面里抽出来 ——
+  界面依赖 `FilePicker` / `rootBundle` / `path_provider` 无法在宿主机跑，
+  而"失败会不会留下半套库"恰恰是唯一值得写回归锁的性质。
+- **`AssetRepository.upsertMany`**（`batch()` 单事务 / 单次平台往返）+
+  **`AssetRepository.nameSet()`**（只取 `name` 一列，作幂等判据）+
+  **`AudioAsset.toRow()`**（`upsert` / `upsertMany` 共用同一份行映射，防漂移）。
+- **`assetRepoProvider`**：音源库界面的唯一数据入口。
+- **`test/asset_import_test.dart`（18 例）**：仓储原子性、两条写入路径行映射逐列一致、
+  单批调用出口、双回滚路径、清单↔磁盘一致性（60 条 / 12 分类 / 文件存在 / 名字唯一）。
+- `integration_test/app_smoke_test.dart` **+1 例**：音源库页面在真实运行时渲染
+  （设备端冒烟 3 → 4）。
+
+### Fixed（第十四轮）
+- **BUG-047（P2）音源库导入逐条写入、失败留下半套库**：
+  - `_importPresets()` 循环内 `await db.insert(...)` × 60 → **60 次平台往返**，
+    且第 k 条失败时前面 k−1 条**已落库**（界面提示"导入失败"，列表里却已多出一截）；
+  - `_import()`（本地导入）同形，中途失败留下孤儿文件 + 半批记录；
+  - `_listAssets()` / 删除按钮直接操作 `db`，而 `AssetRepository` 已存在却只有
+    端点服务在用 → 表结构与行映射存在两处漂移风险；
+  - 删除音源**只删记录不删文件** → 每次"导入→删除"都攒一个孤儿音频。
+  现全部改为：单批写库（原子）、幂等（预置库按名跳过）、失败回滚
+  （库内零新增 + 清理已落盘文件）、列表返回强类型 `AudioAsset`、
+  删除**先删记录再删文件**。本地导入保持"同名可多份"的原有语义。
+
+### Verified（v1.7.1 交付实测）
+- `flutter analyze` 全零；功能 **336/336**；压测 **24/24**（分层运行）；
+  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**（交付前复核一次）。
+- 设备端（emulator-5554 / Android 16）：冒烟 **4/4**、桥接 **6/6**；
+  **AOT 绝对验收 `flutter drive --profile` → 6/6、DRIVE_EXIT=0**
+  （100 任务物化 **10ms / 预算 500ms**；往返基准 1449µs）。
+- 三向覆盖复扫：RcCmd 断链 0（第七轮修复保持有效）。
+- **证伪**：门禁脚本注入必败用例 → 三层 `[FAIL]` + `EXIT=1`；
+  音源库三探针（改回逐条写库 / 改回逐条 saveAll / 去掉回滚）分别使 1 / 4 / 2 例失败，
+  其中探针 B 实测 `Actual: [[AudioAsset], [AudioAsset]]` **具象复现"半套库"**，
+  随后全部还原。
+- 用例总数 **342 → 360**（功能层 +18）。
+
 ## [1.7.0-alpha.1] - 2026-09-18
 
 > 主题：**信息架构重构 + 临时协助会话（S1–S5 全链路）**。
@@ -438,63 +556,6 @@
 - **BUG-023：远程回执面板恒为空**。UI 读顶层字段，而业务字段在 `payload`
   之内 → 统一走 `rcPayloadOf()`。
 - 移除 `CHANGELOG.md` 中重复的 `[1.5.0]` 段落。
-
-## [1.7.1] - 2026-09-19
-
-> 主题：**交付收口** —— 统一门禁脚本（一条命令跑完全部门禁）、三向覆盖复扫
-> （BUG-046）、音源库导入的批量写入与原子性（BUG-047）。
-
-### Added（第十三轮：统一门禁脚本）
-- **统一门禁脚本**（scripts/gates.ps1 + gates.sh）：analyze/功能/压测三层 +
-  可选设备端（-WithDevice）+ 可选 AOT 验收（-WithAot）；失败 EXIT=1，
-  本地与 CI 同一判据。含**证伪验证**（注入必败用例 → 三层全红）。
-- CI emulator-test 扩为 integration 全套（smoke + 桥接 + assist E2E），
-  修复 BUG-045 暴露的"integration_test 不在门禁内"覆盖洞。
-
-### Fixed（第十三轮）
-- **BUG-046（P3）**：对讲机"对端已播放"回执（rc.pttAck）端点已广播、
-  UI 无消费——PttTab 订阅事件流渲染，取值走 rcPayloadOf（BUG-023 同类）。
-- task_wire 两处 if 单行块（analyze info 清零）。
-
-### Added（第十四轮：音源库批量写入与原子性）
-- **`lib/services/preset_import.dart`**（`AssetLibraryImporter`）：批量音源导入器，
-  把「幂等跳过 → 全部落盘 → **一次**写库 → 失败回滚」从界面里抽出来 ——
-  界面依赖 `FilePicker` / `rootBundle` / `path_provider` 无法在宿主机跑，
-  而"失败会不会留下半套库"恰恰是唯一值得写回归锁的性质。
-- **`AssetRepository.upsertMany`**（`batch()` 单事务 / 单次平台往返）+
-  **`AssetRepository.nameSet()`**（只取 `name` 一列，作幂等判据）+
-  **`AudioAsset.toRow()`**（`upsert` / `upsertMany` 共用同一份行映射，防漂移）。
-- **`assetRepoProvider`**：音源库界面的唯一数据入口。
-- **`test/asset_import_test.dart`（18 例）**：仓储原子性、两条写入路径行映射逐列一致、
-  单批调用出口、双回滚路径、清单↔磁盘一致性（60 条 / 12 分类 / 文件存在 / 名字唯一）。
-- `integration_test/app_smoke_test.dart` **+1 例**：音源库页面在真实运行时渲染
-  （设备端冒烟 3 → 4）。
-
-### Fixed（第十四轮）
-- **BUG-047（P2）音源库导入逐条写入、失败留下半套库**：
-  - `_importPresets()` 循环内 `await db.insert(...)` × 60 → **60 次平台往返**，
-    且第 k 条失败时前面 k−1 条**已落库**（界面提示"导入失败"，列表里却已多出一截）；
-  - `_import()`（本地导入）同形，中途失败留下孤儿文件 + 半批记录；
-  - `_listAssets()` / 删除按钮直接操作 `db`，而 `AssetRepository` 已存在却只有
-    端点服务在用 → 表结构与行映射存在两处漂移风险；
-  - 删除音源**只删记录不删文件** → 每次"导入→删除"都攒一个孤儿音频。
-  现全部改为：单批写库（原子）、幂等（预置库按名跳过）、失败回滚
-  （库内零新增 + 清理已落盘文件）、列表返回强类型 `AudioAsset`、
-  删除**先删记录再删文件**。本地导入保持"同名可多份"的原有语义。
-
-### Verified（v1.7.1 交付实测）
-- `flutter analyze` 全零；功能 **336/336**；压测 **24/24**（分层运行）；
-  `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**（交付前复核一次）。
-- 设备端（emulator-5554 / Android 16）：冒烟 **4/4**、桥接 **6/6**；
-  **AOT 绝对验收 `flutter drive --profile` → 6/6、DRIVE_EXIT=0**
-  （100 任务物化 **10ms / 预算 500ms**；往返基准 1449µs）。
-- 三向覆盖复扫：RcCmd 断链 0（第七轮修复保持有效）。
-- **证伪**：门禁脚本注入必败用例 → 三层 `[FAIL]` + `EXIT=1`；
-  音源库三探针（改回逐条写库 / 改回逐条 saveAll / 去掉回滚）分别使 1 / 4 / 2 例失败，
-  其中探针 B 实测 `Actual: [[AudioAsset], [AudioAsset]]` **具象复现"半套库"**，
-  随后全部还原。
-- 用例总数 **342 → 360**（功能层 +18）。
-
 ## [1.6.1-alpha.1] - 2026-09-16
 
 > 主题：**打通远程链路**。v1.6 的远程中心与设备控制命令此前只做到

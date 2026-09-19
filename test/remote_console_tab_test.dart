@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_console_tab.dart';
 import 'package:sonic_shield/remote/command_channel.dart';
 import 'package:sonic_shield/remote/protocol.dart';
+import 'package:sonic_shield/remote/remote_playback.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 /// 远程控制台的可测性来自 [RcCommandChannel] 抽象：注入一个假通道即可
@@ -95,6 +96,30 @@ Future<void> _tap(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+/// 假音源库（BUG-048 链路锁用）：让"控制台发出的 payload"真正走一遍端点决策。
+class _FakeLib {
+  _FakeLib({this.byId = const {}, this.anyPath});
+
+  final Map<String, String> byId;
+  final String? anyPath;
+
+  var anyQueries = 0;
+  final played = <String>[];
+
+  Future<String?> resolveId(String id) async => byId[id];
+  Future<String?> resolveTag(String tag) async => null;
+  Future<String?> resolveAny() async {
+    anyQueries++;
+    return anyPath;
+  }
+
+  Future<bool> play(String path, double volume, int durationMs,
+      {bool loop = false}) async {
+    played.add(path);
+    return true;
+  }
+}
+
 void main() {
   /// BUG-037 回归锁（2026-09-18 审计发现）：
   /// 端点早已实现 `device.status`（电量/充电/版本/待执行数），控制台也早已
@@ -171,12 +196,16 @@ void main() {
     await _tap(tester, '定位回传');
     await _tap(tester, '设备状态');
     await _tap(tester, '端点日志');
+    await _tap(tester, '端点音源库');
+    await _tap(tester, '预置分类');
 
     for (final cmd in const [
       RcCmd.statusGet,
       RcCmd.locationGet,
       RcCmd.deviceStatus,
       RcCmd.logsRecent,
+      RcCmd.assetList,
+      RcCmd.presetList,
     ]) {
       final id = ch.lastOfType(cmd).id;
       ch.emit(RcEvt.ack, {'ok': true, 'for': id});
@@ -214,5 +243,114 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('已离线'), findsNothing,
         reason: '当前选中的是 ep-1，ep-2 离线不应影响它');
+  });
+
+  // ---------------- BUG-048（2026-09-19 审计发现）----------------
+  //
+  // 端点早已实现 `asset.list` / `preset.list` → `rc.assets` / `rc.presets`，
+  // 但控制台**既无入口也无消费方**（HANDOVER §6.12 的 P2 项）：
+  // 远程播放只能按固定分类"盲播"，选不了具体音源。
+  // 更糟的是端点侧忽略 `assetId`（见 remote_playback_test.dart），
+  // 于是"点选某一条"这件事**两端各自都说得通、链路却是断的**。
+
+  testWidgets('音源库按钮发出 asset.list(limit=50) 并渲染音源列表', (tester) async {
+    final ch = await _pump(tester);
+    await _tap(tester, '端点音源库');
+    expect(ch.lastOfType(RcCmd.assetList).payload['limit'], 50);
+
+    ch.emit(RcEvt.assets, {
+      'total': 2,
+      'assets': [
+        {
+          'id': 'a-1',
+          'name': '敲门声',
+          'durationMs': 3000,
+          'tags': ['预置/knocks'],
+        },
+        {'id': 'a-2', 'name': '雨声', 'durationMs': 65000, 'tags': <String>[]},
+      ]
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('端点音源库回执（asset.list）'), findsOneWidget);
+    expect(find.textContaining('共 2 条'), findsOneWidget);
+    expect(find.text('敲门声'), findsOneWidget);
+    expect(find.text('雨声'), findsOneWidget);
+    expect(find.text('3s · 预置/knocks'), findsOneWidget);
+    expect(find.text('1:05'), findsOneWidget, reason: '65s 应显示为 1:05');
+  });
+
+  testWidgets('点选音源 → sound.play 点名该 assetId，端点按它播放那一条（链路锁）',
+      (tester) async {
+    final ch = await _pump(tester);
+    await _tap(tester, '端点音源库');
+    ch.emit(RcEvt.assets, {
+      'total': 2,
+      'assets': [
+        {'id': 'a-1', 'name': '敲门声', 'durationMs': 3000, 'tags': <String>[]},
+        {'id': 'a-2', 'name': '雨声', 'durationMs': 65000, 'tags': <String>[]},
+      ]
+    });
+    await tester.pumpAndSettle();
+
+    final row = find.text('雨声');
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+
+    final payload = ch.lastOfType(RcCmd.soundPlay).payload;
+    expect(payload['assetId'], 'a-2', reason: '必须点名用户点的那一条');
+
+    // 把控制台**实际发出**的 payload 喂给端点的决策函数。
+    // 只看两端各自都"对"，只有串起来才能发现链路是断的（本项目的老教训）。
+    final lib = _FakeLib(byId: {'a-2': '/x/rain.wav'}, anyPath: '/x/newest.wav');
+    final r = await performRemotePlay(
+      payload,
+      byId: lib.resolveId,
+      byTag: lib.resolveTag,
+      any: lib.resolveAny,
+      play: lib.play,
+    );
+
+    expect(lib.played, ['/x/rain.wav'], reason: '端点必须播放被点选的那一条');
+    expect(lib.anyQueries, 0, reason: '点名了就不该回落到"库里最新一条"');
+    expect(r.ok, isTrue);
+  });
+
+  testWidgets('预置分类按钮发出 preset.list，点分类按 preset 播放', (tester) async {
+    final ch = await _pump(tester);
+    await _tap(tester, '预置分类');
+    expect(ch.lastOfType(RcCmd.presetList).payload, isEmpty);
+
+    ch.emit(RcEvt.presets, {
+      'categories': ['ambient', 'nature']
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('端点预置分类回执（preset.list）'), findsOneWidget);
+
+    // 注意：固定分类那排按钮里也有 nature/ambient，故按 ActionChip 精确定位。
+    final chip = find.widgetWithText(ActionChip, 'nature');
+    expect(chip, findsOneWidget);
+    await tester.ensureVisible(chip);
+    await tester.tap(chip);
+    await tester.pumpAndSettle();
+
+    final payload = ch.lastOfType(RcCmd.soundPlay).payload;
+    expect(payload['preset'], 'nature');
+    expect(payload.containsKey('assetId'), isFalse,
+        reason: '按分类播放不应伪装成指定音源');
+  });
+
+  testWidgets('音源库 / 预置分类为空时给出明确提示（不显示空白卡片）', (tester) async {
+    final ch = await _pump(tester);
+    await _tap(tester, '端点音源库');
+    ch.emit(RcEvt.assets, {'total': 0, 'assets': const <Object>[]});
+    await tester.pumpAndSettle();
+    expect(find.textContaining('端点音源库为空'), findsOneWidget);
+
+    await _tap(tester, '预置分类');
+    ch.emit(RcEvt.presets, {'categories': const <Object>[]});
+    await tester.pumpAndSettle();
+    expect(find.textContaining('端点无预置音源分类'), findsOneWidget);
   });
 }

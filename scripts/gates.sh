@@ -5,6 +5,7 @@
 #   bash scripts/gates.sh                # 标准门禁：analyze + 功能 + 压测
 #   WITH_DEVICE=1 bash scripts/gates.sh  # + 设备端全套（检测到设备时）
 #   WITH_AOT=1 bash scripts/gates.sh     # + AOT 绝对验收（flutter drive --profile）
+#   DEV=emulator-5554 bash ...           # 指定设备（不指定则优先模拟器，见下方 pick_device）
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
 # 注意：flutter test 输出需 tr '\r' '\n'（compact reporter 刷行）；构建类输出要落盘。
 # =====================================================================
@@ -59,11 +60,24 @@ else
 fi
 
 # ---------- 设备端（可选）：integration_test/ 不在默认门禁内（BUG-045 洞） ----------
+# 设备选择：显式 `DEV=<serial>` 优先；否则**优先模拟器**。
+# 为什么不能只取"第一台设备"：真机可能被厂商策略禁止 adb 安装
+# （2026-09-19 实测小米 HyperOS 报 INSTALL_FAILED_USER_RESTRICTED，
+# 且 `input keyevent` 同时缺 INJECT_EVENTS → 既不能装也不能驱动 UI），
+# 此时"有设备"不等于"能跑设备门禁"，会得到一个看不懂的红。
+pick_device() {
+  if [ -n "${DEV:-}" ]; then echo "$DEV"; return; fi
+  local emu
+  emu=$(adb devices | awk '/^emulator-[0-9]+[ \t]+device$/{print $1}' | head -1)
+  if [ -n "$emu" ]; then echo "$emu"; return; fi
+  adb devices | awk '/[ \t]device$/{print $1}' | head -1
+}
+
 if [ "${WITH_DEVICE:-0}" = "1" ]; then
-  DEV=$(adb devices | grep -E "emulator-|device$" | head -1 | cut -f1)
-  if [ -n "${DEV:-}" ]; then
-    echo "=== 门禁 4/5: 设备冒烟（app_smoke_test，3 例）on $DEV ==="
-    out=$(flutter test integration_test/app_smoke_test.dart -d "$DEV" 2>&1 | tr '\r' '\n')
+  TARGET=$(pick_device)
+  if [ -n "${TARGET:-}" ]; then
+    echo "=== 门禁 4/5: 设备冒烟（app_smoke_test，4 例）on $TARGET ==="
+    out=$(flutter test integration_test/app_smoke_test.dart -d "$TARGET" 2>&1 | tr '\r' '\n')
     echo "$out" | tail -1
     if echo "$out" | grep -q "All tests passed"; then
       echo "[PASS] 设备冒烟"
@@ -71,7 +85,7 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
       echo "[FAIL] 设备冒烟"; FAIL=$((FAIL+1))
     fi
     echo "=== 门禁 5/5: 设备桥接（native_bridge_test，6 例）==="
-    out=$(flutter test integration_test/native_bridge_test.dart -d "$DEV" 2>&1 | tr '\r' '\n')
+    out=$(flutter test integration_test/native_bridge_test.dart -d "$TARGET" 2>&1 | tr '\r' '\n')
     echo "$out" | tail -1
     if echo "$out" | grep -q "All tests passed"; then
       echo "[PASS] 设备桥接"
@@ -85,9 +99,10 @@ fi
 
 # ---------- AOT 绝对验收（可选） ----------
 if [ "${WITH_AOT:-0}" = "1" ]; then
-  echo "=== 门禁: AOT 绝对验收（perf_nfr_test，flutter drive --profile）==="
+  echo "=== 门禁: AOT 绝对验收（perf_nfr_test，flutter drive --profile）on ${DEV:-emulator-5554} ==="
   out=$(flutter drive --driver=test_driver/integration_test.dart \
-    --target=integration_test/perf_nfr_test.dart --profile -d emulator-5554 2>&1 | tr '\r' '\n')
+    --target=integration_test/perf_nfr_test.dart --profile \
+    -d "${DEV:-emulator-5554}" 2>&1 | tr '\r' '\n')
   echo "$out" | tail -1
   if echo "$out" | grep -q "All tests passed"; then
     echo "[PASS] AOT 验收"
