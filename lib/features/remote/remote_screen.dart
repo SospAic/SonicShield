@@ -212,7 +212,15 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   Future<void> _pttSheet(PairedEndpoint endpoint) async {
     if (!mounted) return;
     final granted = await Permission.microphone.request().isGranted;
-    if (!granted || !mounted) return;
+    if (!granted) {
+      // ⚠️ BUG-062：此前这里**静默 return**，用户点了「对讲」毫无反应、
+      // 也不知道是麦克风权限没给 —— 与 BUG-061 同形状（失败必须让用户知道）。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('需要麦克风权限才能对讲')));
+      return;
+    }
+    if (!mounted) return;
     final controller = RcControllerService.instance;
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);

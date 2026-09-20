@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../remote/call_permission.dart';
 import '../../remote/call_service.dart';
 import '../../remote/remote_store.dart';
 
@@ -44,12 +45,29 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   }
 
   Future<void> _toggleAuto(bool v) async {
-    await [
-      Permission.camera,
-      Permission.microphone,
-    ].request();
-    await CallService.setAutoAnswer(v);
-    if (mounted) setState(() => _autoAnswer = v);
+    final scaffold = ScaffoldMessenger.of(context);
+    // 关掉开关不需要权限，直接关。
+    if (!v) {
+      await CallService.setAutoAnswer(false);
+      if (mounted) setState(() => _autoAnswer = false);
+      return;
+    }
+    // ⚠️ BUG-062：此前 `await [camera, microphone].request();` 的**结果被丢弃**，
+    // 权限被拒也照样把开关打开 —— 用户看到"已开启"，实际来电根本接不起来。
+    final status = await [Permission.camera, Permission.microphone].request();
+    final block = autoAnswerBlockFor(
+      micGranted: status[Permission.microphone]?.isGranted ?? false,
+      cameraGranted: status[Permission.camera]?.isGranted ?? false,
+    );
+    if (block != AutoAnswerBlock.none) {
+      if (mounted) {
+        scaffold.showSnackBar(SnackBar(content: Text(autoAnswerBlockText(block))));
+        setState(() => _autoAnswer = false);
+      }
+      return;
+    }
+    await CallService.setAutoAnswer(true);
+    if (mounted) setState(() => _autoAnswer = true);
   }
 
   Future<void> _call(bool video) async {

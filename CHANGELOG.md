@@ -790,6 +790,31 @@ analyze No issues；功能层 **520/520**（509 → 520）；压测 24/24；gate
 
 **未闭环**：多路实际连通性需 ≥2 台设备（当前 1 台真机 + 2 个模拟器），本轮只验证页面可达。
 
+### 第十七轮续十八（2026-09-20 末）：第 4 项开工 —— **BUG-062（权限静默失效）×2**
+
+**Fixed（BUG-062：权限申请类"不好使"的两处真因）**
+
+按 BUG-061 的同一判据（**失败必须让用户知道**）逐个审权限申请点，抓到两处静默失效：
+
+| 位置 | 原实现 | 真实后果 |
+|---|---|---|
+| `call_screen._toggleAuto` | `await [camera, microphone].request();` 结果**被丢弃**，然后无条件开启 | 权限被拒也**照样显示"已开启"**，实际来电根本接不起来 |
+| `remote_screen._pttSheet` | `if (!granted \|\| !mounted) return;` | 麦克风被拒**静默 return**，用户点了「对讲」毫无反应 |
+
+审过且良性（勿重复排查）：`pair_qr_screen:168`（扫码，已有提示）、
+`ptt_tab:71`（已有提示）、`guard_screen`（BUG-061 后统一走 `toggleGuard()`）。
+
+**修法**：新增 `lib/remote/call_permission.dart` —— `autoAnswerBlockFor()` 纯函数
++ `autoAnswerBlockText()`；`_toggleAuto` 被阻断时**不开开关**并给出原因；`_pttSheet` 补明确提示。
+
+**Tested**：新增 8 例（AAP-01..08），含两条**调用点源码锁**防"改回丢弃结果"；
+analyze No issues（14.5s）；功能层 **528/528**（520 → 528）；压测 24/24；gates → **EXIT=0**（3m04s）。
+
+⚠️ AAP-07 第一版**恒红**：判据写成"不得出现 `].request();`"，但修复后写法
+`final status = await [...].request();` 同样含它。真正的丢弃特征是
+**整条语句以 `await [` 开头**。教训（与"源码锁误伤注释"同族）：
+**锁的判据必须描述特征，不能描述字面量。**
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对
