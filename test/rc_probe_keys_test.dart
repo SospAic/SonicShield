@@ -37,8 +37,8 @@ void main() {
         selfCode: selfCode,
       );
       // 端点侧：RcCodec.deriveKey(ownCode, '$ownId|cmd')
-      final endpointKey = await RcCodec.deriveKey(
-          endpointCode, '$endpointId|cmd');
+      final endpointKey =
+          await RcCodec.deriveKey(endpointCode, '$endpointId|cmd');
       expect(keys.cmd, endpointKey);
     });
 
@@ -73,8 +73,8 @@ void main() {
         selfId: selfId,
         selfCode: selfCode,
       );
-      final endpointKey = await RcCodec.deriveKey(
-          endpointCode, '$endpointId|cmd');
+      final endpointKey =
+          await RcCodec.deriveKey(endpointCode, '$endpointId|cmd');
 
       final cmd = RcMessage.now(RcCmd.ping, const {});
       final wire = await RcCodec.encode(cmd, keys.cmd, cmdTopic);
@@ -121,10 +121,9 @@ void main() {
     test('用探针自身身份派生 cmd 密钥 → 端点解不开', () async {
       // 旧实现：deriveKey(selfCode, '$selfId|cmd')
       final wrong = await RcCodec.deriveKey(selfCode, '$selfId|cmd');
-      final endpointKey = await RcCodec.deriveKey(
-          endpointCode, '$endpointId|cmd');
-      expect(wrong, isNot(endpointKey),
-          reason: '两组身份不同就必须派生出不同密钥');
+      final endpointKey =
+          await RcCodec.deriveKey(endpointCode, '$endpointId|cmd');
+      expect(wrong, isNot(endpointKey), reason: '两组身份不同就必须派生出不同密钥');
 
       final cmd = RcMessage.now(RcCmd.ping, const {});
       final wire = await RcCodec.encode(cmd, wrong, cmdTopic);
@@ -147,13 +146,10 @@ void main() {
 
   group('探针表与判据锁（源码契约）', () {
     /// 去掉行注释后再断言 —— `contains` 对**注释掉的代码**同样为真。
-    String code(String src) => src
-        .split('\n')
-        .map((l) {
+    String code(String src) => src.split('\n').map((l) {
           final i = l.indexOf('//');
           return i < 0 ? l : l.substring(0, i);
-        })
-        .join('\n');
+        }).join('\n');
 
     late String src;
     setUpAll(() {
@@ -232,8 +228,7 @@ void main() {
     test('载荷必须能过产品自己的入站校验器（零漂移）', () {
       final wire = crudTaskWire('e2e-crud-0001');
       final task = TaskWire.fromWire(wire);
-      expect(task, isNotNull,
-          reason: '探针发的任务定义必须能被端点 TaskWire.fromWire 接受');
+      expect(task, isNotNull, reason: '探针发的任务定义必须能被端点 TaskWire.fromWire 接受');
       expect(task!.id, 'e2e-crud-0001');
       expect(task.name, isNotEmpty);
       expect(task.enabled, isTrue);

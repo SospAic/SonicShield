@@ -60,7 +60,8 @@ void main() {
     test('AS-04b 归一化结果应可通过合法性校验（真实输入路径）', () {
       final pw = RcAssist.generatePassword();
       final messy = '${pw.substring(0, 4).toLowerCase()}-${pw.substring(4)}';
-      expect(RcAssist.isValidPassword(RcAssist.normalizePassword(messy)), isTrue);
+      expect(
+          RcAssist.isValidPassword(RcAssist.normalizePassword(messy)), isTrue);
     });
 
     test('AS-04c 非法输入应被拒', () {
@@ -89,8 +90,7 @@ void main() {
     test('AS-06 同一临时码 + 不同密码 → 主题不同', () async {
       final a = await RcAssist.topicFor(code, 'ABCD2345');
       final b = await RcAssist.topicFor(code, 'WXYZ6789');
-      expect(a, isNot(b),
-          reason: '主题必须依赖密码；否则攻击者可枚举临时码订阅全部会话');
+      expect(a, isNot(b), reason: '主题必须依赖密码；否则攻击者可枚举临时码订阅全部会话');
     });
 
     test('AS-07 同一密码 + 不同临时码 → 主题不同', () async {

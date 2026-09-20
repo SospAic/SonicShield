@@ -179,10 +179,8 @@ void main() {
 
       expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 10, 30)), isNull,
           reason: '10:30 在窗口内');
-      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 9, 30)),
-          '不在时段窗口内');
-      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 12, 0)),
-          '不在时段窗口内');
+      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 9, 30)), '不在时段窗口内');
+      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 12, 0)), '不在时段窗口内');
     });
   });
 
@@ -196,8 +194,7 @@ void main() {
       );
       const env = ConditionEnv(
           batteryLevel: 10, charging: false, inCall: true, onWifi: false);
-      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 12)),
-          '通话中（不打扰通话）');
+      expect(c.firstUnmetIn(env, now: DateTime(2026, 9, 18, 12)), '通话中（不打扰通话）');
     });
   });
 }

@@ -22,13 +22,10 @@ void main() {
   final src = File('test/performance_v2_test.dart').readAsStringSync();
 
   /// 剥掉行注释 —— 源码契约锁必须防止被"注释掉的代码"骗过。
-  String code(String s) => s
-      .split('\n')
-      .map((l) {
+  String code(String s) => s.split('\n').map((l) {
         final i = l.indexOf('//');
         return i < 0 ? l : l.substring(0, i);
-      })
-      .join('\n');
+      }).join('\n');
 
   /// 取 `group('<前缀>', () { ... })` 的**组体**（大括号配对）。
   ///

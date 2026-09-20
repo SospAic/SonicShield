@@ -63,8 +63,8 @@ void main() {
         }
         scanned++;
         // 取调用点后 300 字符：足够覆盖跨行的 `orElse:`。
-        final tail = src.substring(
-            m.start, (m.start + 300).clamp(0, src.length));
+        final tail =
+            src.substring(m.start, (m.start + 300).clamp(0, src.length));
         if (tail.contains('orElse:')) continue;
         bad.add('${f.path.replaceAll(r'\', '/')}:$lineNo');
       }

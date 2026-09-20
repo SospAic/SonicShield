@@ -193,7 +193,9 @@ class CallService {
       // 到点时再复核一次：Timer 可能在 teardown 之后才被调度到，
       // 也可能期间已经接通（answered）。
       if (!timedOutMeansMissed(
-          answered: _answered, elapsedMs: sw.elapsedMilliseconds, limit: limit)) {
+          answered: _answered,
+          elapsedMs: sw.elapsedMilliseconds,
+          limit: limit)) {
         return;
       }
       unawaited(_onWaitTimeout(isCaller: isCaller));
@@ -294,8 +296,8 @@ class CallService {
   /// 现在振铃只是把状态置为 [CallPhase.ringing]，接听界面由
   /// `CallOverlayHost` 常驻监听 phase 自动弹出，用户点「接听」时走
   /// [acceptPending]。**去掉这个参数是为了让那条错误接线不再可能**。
-  Future<bool> onIncomingCall(
-      Map<String, dynamic> payload, PairedEndpoint peer, RemoteStore store) async {
+  Future<bool> onIncomingCall(Map<String, dynamic> payload, PairedEndpoint peer,
+      RemoteStore store) async {
     // 决策走纯函数（宿主机可断言）。⚠️ 它保证「开关关闭 ⇒ 绝不自动接通」。
     final action = calleeActionFor(
       autoAnswer: await autoAnswerEnabled(),
@@ -455,8 +457,7 @@ class CallService {
   /// （`busy` → '对方正在通话中'、`rejected` → '对方已拒接'，其余中性）。
   /// 未知/缺失 reason 一律中性，**不猜**（见 [endReasonFromSignal]）。
   Future<void> onRemoteEnd([Map<String, dynamic>? payload]) async {
-    await _teardown(
-        reason: endReasonFromSignal(payload?['reason'] as Object?));
+    await _teardown(reason: endReasonFromSignal(payload?['reason'] as Object?));
   }
 
   // ---------------- 挂断 ----------------
@@ -469,8 +470,7 @@ class CallService {
     }
     // 已接通后主动挂断 → '通话结束'；还没接通就取消 → '已挂断'。
     await _teardown(
-        reason:
-            wasConnected ? CallEndReason.answered : CallEndReason.hangup);
+        reason: wasConnected ? CallEndReason.answered : CallEndReason.hangup);
   }
 
   // ---------------- 内部 ----------------

@@ -19,13 +19,10 @@ import 'package:sonic_shield/remote/script_progress.dart';
 ///    （BUG-048 / BUG-056 的教训：值算得出、读得到，但没人用）。
 void main() {
   /// 剥掉行注释 —— 源码契约锁必须防止被"注释掉的代码"骗过。
-  String code(String src) => src
-      .split('\n')
-      .map((l) {
+  String code(String src) => src.split('\n').map((l) {
         final i = l.indexOf('//');
         return i < 0 ? l : l.substring(0, i);
-      })
-      .join('\n');
+      }).join('\n');
 
   /// 大括号配对抽方法体，让断言限定在**单个方法**内
   /// （文件级 `contains` 会被同文件其它方法误伤）。
@@ -91,7 +88,8 @@ void main() {
     });
 
     test('SP-03 done / stopped 都是终止态，文案不得混用', () {
-      final done = parseScriptProgress(const {'scriptId': 's', 'state': 'done'});
+      final done =
+          parseScriptProgress(const {'scriptId': 's', 'state': 'done'});
       final stopped =
           parseScriptProgress(const {'scriptId': 's', 'state': 'stopped'});
       expect(done.isTerminal, isTrue);
@@ -168,8 +166,7 @@ void main() {
       expect(src.contains('describeScriptProgress'), isTrue,
           reason: '界面没有用 describeScriptProgress 渲染进度文案 —— '
               '事件被消费了但用户看不到，等于没修');
-      expect(src.contains('_active'), isTrue,
-          reason: '缺少"正在执行的指令组"面板');
+      expect(src.contains('_active'), isTrue, reason: '缺少"正在执行的指令组"面板');
     });
 
     test('SP-11 【工具自检】methodBody 必须能跳过具名参数与 `async`', () {
@@ -183,12 +180,10 @@ void main() {
           File('lib/remote/call_lifecycle.dart').readAsStringSync();
       // 具名参数：参数表里有 `autoAnswer`，方法体里才有 `rejectBusy`
       final a = code(methodBody(lifecycle, 'CalleeAction calleeActionFor('));
-      expect(a, contains('rejectBusy'),
-          reason: 'methodBody 抽到的是具名参数列表而不是方法体');
+      expect(a, contains('rejectBusy'), reason: 'methodBody 抽到的是具名参数列表而不是方法体');
       // async 块体：方法体里才有 `ringUser` 相关判定
       final ep = File('lib/remote/endpoint_service.dart').readAsStringSync();
-      final b = code(
-          methodBody(ep, 'Future<void> _handleCallInvite('));
+      final b = code(methodBody(ep, 'Future<void> _handleCallInvite('));
       expect(b, contains('onIncomingCall'),
           reason: 'methodBody 没能跳过 `) async {` —— 抽到的不是方法体');
     });

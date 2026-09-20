@@ -38,7 +38,8 @@ void main() {
     });
 
     test('空消息兜底为运行时类型名（toString() 可能为空）', () {
-      expect(describeFailure(_EmptyMessageError()), contains('_EmptyMessageError'));
+      expect(describeFailure(_EmptyMessageError()),
+          contains('_EmptyMessageError'));
     });
 
     test('默认上限 160：不截断则原样返回', () {
@@ -72,8 +73,7 @@ void main() {
       expect(r.ok, isFalse);
       expect(r.reason, contains('occurrences 表不可用'));
       expect(r.error, isA<StateError>());
-      expect(audited, hasLength(1),
-          reason: '处理器失败必须留下审计 —— 否则故障只表现为"控制器超时"');
+      expect(audited, hasLength(1), reason: '处理器失败必须留下审计 —— 否则故障只表现为"控制器超时"');
       expect(audited.single, contains('occurrences 表不可用'));
     });
 
@@ -95,8 +95,7 @@ void main() {
       );
 
       expect(r.ok, isFalse);
-      expect(r.auditOk, isFalse,
-          reason: '"没写审计"与"审计失败"必须可区分 —— 后者是更严重的信号');
+      expect(r.auditOk, isFalse, reason: '"没写审计"与"审计失败"必须可区分 —— 后者是更严重的信号');
       expect(r.reason, contains('业务失败'));
     });
 
@@ -112,15 +111,15 @@ void main() {
         audit: (m) async => seen = m,
       );
       expect(seen, isNotNull);
-      expect(r.reason, seen,
-          reason: '审计里记的原因与控制端收到的必须是同一条 —— 否则两边对不上账');
+      expect(r.reason, seen, reason: '审计里记的原因与控制端收到的必须是同一条 —— 否则两边对不上账');
     });
   });
 
   // ---------------- 源码契约锁（接线不能被悄悄退回） ----------------
 
   group('接线锁（源码契约）', () {
-    final endpoint = File('lib/remote/endpoint_service.dart').readAsStringSync();
+    final endpoint =
+        File('lib/remote/endpoint_service.dart').readAsStringSync();
     final assistHost = File('lib/remote/assist_host.dart').readAsStringSync();
 
     /// 去掉行注释后再断言。
@@ -129,13 +128,10 @@ void main() {
     /// 用 `// await _ack(...)` 把回执注释掉，锁会**照样通过**（本轮证伪时实测到）。
     /// 那是一种自欺的锁。已知局限：字符串字面量里的 `//`（如 URL）会被误当注释，
     /// 因此本函数只用于断言"某段代码是否存在"，不用于解析语义。
-    String code(String src) => src
-        .split('\n')
-        .map((l) {
+    String code(String src) => src.split('\n').map((l) {
           final i = l.indexOf('//');
           return i < 0 ? l : l.substring(0, i);
-        })
-        .join('\n');
+        }).join('\n');
 
     test('配对遥控：_dispatch 被 guardDispatch 包住', () {
       expect(endpoint.contains('await guardDispatch('), isTrue,
@@ -143,7 +139,8 @@ void main() {
               '退回裸调用即回到"处理器异常 = 静默超时"（BUG-051）');
       expect(code(endpoint).contains('() => _dispatch(msg, peer)'), isTrue,
           reason: '_dispatch 的调用必须作为 run 回调传入，而不是裸 await');
-      expect(code(endpoint).contains('await _dispatch(msg, _peerOf(msg))'), isFalse,
+      expect(code(endpoint).contains('await _dispatch(msg, _peerOf(msg))'),
+          isFalse,
           reason: '旧的裸调用形态不应残留');
     });
 
@@ -152,13 +149,13 @@ void main() {
       final start = endpoint.indexOf('await guardDispatch(');
       expect(start, greaterThanOrEqualTo(0));
       final end = endpoint.indexOf('_broadcast(msg, peerId: msg.from', start);
-      expect(end, greaterThan(start), reason: '找不到 guardDispatch 调用点之后的 _broadcast');
+      expect(end, greaterThan(start),
+          reason: '找不到 guardDispatch 调用点之后的 _broadcast');
       final region = code(endpoint.substring(start, end));
 
       expect(region.contains("status: 'failed'"), isTrue,
           reason: '失败必须写审计（status=failed）');
-      expect(region.contains('处理器异常'), isTrue,
-          reason: '审计与回执都要带上可读原因');
+      expect(region.contains('处理器异常'), isTrue, reason: '审计与回执都要带上可读原因');
       expect(region.contains('await _ack(msg, false'), isTrue,
           reason: '失败必须显式回执 —— 只写审计的话控制器仍然只能看到超时');
     });

@@ -38,8 +38,7 @@ void main() {
   test('ASE-01 可表示的类型映射正确', () {
     expect(stepKindOfAction(const PlayAudioAction()), RcStepKind.play);
     expect(stepKindOfAction(const TtsAction(text: 'a')), RcStepKind.tts);
-    expect(
-        stepKindOfAction(const NotifyAction(title: '声盾', body: '测试')),
+    expect(stepKindOfAction(const NotifyAction(title: '声盾', body: '测试')),
         RcStepKind.notify);
     expect(stepKindOfAction(const VibrateAction()), RcStepKind.vibrate);
     expect(stepKindOfAction(const RecordEvidenceAction(seconds: 3)),

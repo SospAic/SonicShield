@@ -6,8 +6,10 @@
 /// **失败必须让用户知道，不能静默假装成功。**
 enum AutoAnswerBlock {
   none,
+
   /// 麦克风未授予：通话接起来也没有声音，等于假成功。
   micDenied,
+
   /// 相机未授予：视频来电无法出画面。
   cameraDenied,
 }

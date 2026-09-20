@@ -36,7 +36,8 @@ class _Lib {
 
   Future<bool> play(String path, double volume, int durationMs,
       {bool loop = false}) async {
-    played.add((path: path, volume: volume, durationMs: durationMs, loop: loop));
+    played
+        .add((path: path, volume: volume, durationMs: durationMs, loop: loop));
     return true;
   }
 }
@@ -224,8 +225,7 @@ void main() {
         play: lib.play,
       );
 
-      expect(lib.played, isEmpty,
-          reason: '解析失败时绝不能调用播放器 —— 这正是 BUG-048 的旧行为');
+      expect(lib.played, isEmpty, reason: '解析失败时绝不能调用播放器 —— 这正是 BUG-048 的旧行为');
       expect(r.ok, isFalse);
       expect(r.reason, contains('无此音源'));
     });

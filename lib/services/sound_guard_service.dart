@@ -63,7 +63,7 @@ class SoundGuardService {
     var lastFired = DateTime.fromMillisecondsSinceEpoch(0);
 
     _sub = stream.listen((chunk) async {
-      final db = _rmsDbfs(chunk);
+      final db = rmsDbfs(chunk);
       _levels.add(db);
       if (db >= cfg.thresholdDb) {
         peak = math.max(peak, db);
@@ -104,8 +104,8 @@ class SoundGuardService {
     _running = false;
   }
 
-  /// 计算 PCM16 小端缓冲的 RMS dBFS（满量程=0dB）。
-  double _rmsDbfs(Uint8List bytes) {
+  /// 静态公开以便宿主机单测（纯函数，无平台依赖）。
+  static double rmsDbfs(Uint8List bytes) {
     if (bytes.length < 2) return -120;
     // 每 8 字节取样一次即可（~4 sample 抽 1），进一步降 CPU。
     double sum = 0;

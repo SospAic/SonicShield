@@ -52,8 +52,8 @@ class _FakeChannel implements RcCommandChannel {
         if (peerName.isNotEmpty) 'peerName': peerName,
       });
 
-  RcMessage lastOfType(String type) =>
-      sent.lastWhere((m) => m.type == type, orElse: () => throw StateError('未发送 $type'));
+  RcMessage lastOfType(String type) => sent.lastWhere((m) => m.type == type,
+      orElse: () => throw StateError('未发送 $type'));
 }
 
 Future<_FakeChannel> _pump(WidgetTester tester) async {
@@ -169,8 +169,10 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.text('端点日志回执（logs.recent）'), findsOneWidget);
-    expect(find.textContaining('09:05:03 · schedule/play · success'), findsOneWidget);
-    expect(find.textContaining('09:06:30 · remote/guard.set · failed'), findsOneWidget);
+    expect(find.textContaining('09:05:03 · schedule/play · success'),
+        findsOneWidget);
+    expect(find.textContaining('09:06:30 · remote/guard.set · failed'),
+        findsOneWidget);
   });
 
   testWidgets('端点日志为空时给出明确提示（不显示空白卡片）', (tester) async {
@@ -189,8 +191,7 @@ void main() {
   ///
   /// 判定方式：若某命令被记账，则回灌一条 `for` 指向它的 `rc.ack` 会弹出
   /// SnackBar；修正为 `trackAck: false` 后**不应**弹出。
-  testWidgets('专用事件类命令不记账：回灌 rc.ack 不弹提示（无 pendingAcks 泄漏）',
-      (tester) async {
+  testWidgets('专用事件类命令不记账：回灌 rc.ack 不弹提示（无 pendingAcks 泄漏）', (tester) async {
     final ch = await _pump(tester);
     await _tap(tester, '状态快照');
     await _tap(tester, '定位回传');
@@ -222,8 +223,7 @@ void main() {
   /// 只能等点下命令后从"已入队"的提示里间接得知。
   testWidgets('离线哨兵：rc.offline 显示离线横幅，心跳恢复后消失', (tester) async {
     final ch = await _pumpWithPaired(tester, 'ep-1', '客厅手机');
-    expect(find.textContaining('已离线'), findsNothing,
-        reason: '初始状态不应显示离线横幅');
+    expect(find.textContaining('已离线'), findsNothing, reason: '初始状态不应显示离线横幅');
 
     ch.emit(RcEvt.offline, const {}, peerId: 'ep-1', peerName: '客厅手机');
     await tester.pumpAndSettle();
@@ -280,8 +280,7 @@ void main() {
     expect(find.text('1:05'), findsOneWidget, reason: '65s 应显示为 1:05');
   });
 
-  testWidgets('点选音源 → sound.play 点名该 assetId，端点按它播放那一条（链路锁）',
-      (tester) async {
+  testWidgets('点选音源 → sound.play 点名该 assetId，端点按它播放那一条（链路锁）', (tester) async {
     final ch = await _pump(tester);
     await _tap(tester, '端点音源库');
     ch.emit(RcEvt.assets, {
@@ -303,7 +302,8 @@ void main() {
 
     // 把控制台**实际发出**的 payload 喂给端点的决策函数。
     // 只看两端各自都"对"，只有串起来才能发现链路是断的（本项目的老教训）。
-    final lib = _FakeLib(byId: {'a-2': '/x/rain.wav'}, anyPath: '/x/newest.wav');
+    final lib =
+        _FakeLib(byId: {'a-2': '/x/rain.wav'}, anyPath: '/x/newest.wav');
     final r = await performRemotePlay(
       payload,
       byId: lib.resolveId,
@@ -337,8 +337,7 @@ void main() {
 
     final payload = ch.lastOfType(RcCmd.soundPlay).payload;
     expect(payload['preset'], 'nature');
-    expect(payload.containsKey('assetId'), isFalse,
-        reason: '按分类播放不应伪装成指定音源');
+    expect(payload.containsKey('assetId'), isFalse, reason: '按分类播放不应伪装成指定音源');
   });
 
   testWidgets('音源库 / 预置分类为空时给出明确提示（不显示空白卡片）', (tester) async {

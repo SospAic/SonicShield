@@ -114,7 +114,9 @@ void main() {
 
   /// 所有 `report('<名>', <实测>, <预算>)` 调用 → (用例名, 预算表达式)。
   final reportCalls = <String, String>{};
-  for (var i = src.indexOf('report('); i >= 0; i = src.indexOf('report(', i + 1)) {
+  for (var i = src.indexOf('report(');
+      i >= 0;
+      i = src.indexOf('report(', i + 1)) {
     final args = _topLevelArgs(_balanced(src, i + 'report'.length));
     if (args.length < 3) continue;
     final name = args[0].replaceAll("'", '').trim();
@@ -122,8 +124,8 @@ void main() {
   }
   if (reportCalls.isEmpty) throw StateError('一个 report(...) 都没解析到');
 
-  final roundTripCases =
-      reportCalls.keys.where(isRoundTripBound).toList()..sort();
+  final roundTripCases = reportCalls.keys.where(isRoundTripBound).toList()
+    ..sort();
 
   group('AOT 预算归一化（BUG-054）', () {
     test('AN-01 必须解析到往返受限用例（否则本文件全是恒真）', () {
@@ -162,10 +164,8 @@ void main() {
     });
 
     test('AN-04 基准必须来自**独立探针**，不得由被护栏的 singleMs 反推', () {
-      final defLines = src
-          .split('\n')
-          .where((l) => l.contains('perCallUs ='))
-          .toList();
+      final defLines =
+          src.split('\n').where((l) => l.contains('perCallUs =')).toList();
       expect(defLines, hasLength(1),
           reason: 'perCallUs 应当恰好定义一次，实际 ${defLines.length} 处：$defLines');
       final def = defLines.single;
@@ -210,8 +210,8 @@ void main() {
           reason: '20000ms 是按"冷启 2.475ms/次"标定的绝对护栏，'
               '实测往返可到 4839µs/次 → 余量在 2.0×↔0.83× 摆动、跨 1.0 就红。'
               '必须改用 budgetFor(5000)。');
-      expect(reportCalls['exec_logs 5000 条**逐条**写入 + recent'],
-          'budgetFor(5000)',
+      expect(
+          reportCalls['exec_logs 5000 条**逐条**写入 + recent'], 'budgetFor(5000)',
           reason: '该用例的预算必须显式绑定到 5000 次往返的自归一化预算');
     });
   });

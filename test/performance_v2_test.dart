@@ -188,7 +188,8 @@ void main() {
       });
       final actions = await logs.actionBreakdown();
       expect(actions, isNotEmpty);
-      expect(best, lessThanOrEqualTo(50), reason: 'actionBreakdown 最优 ${best}ms');
+      expect(best, lessThanOrEqualTo(50),
+          reason: 'actionBreakdown 最优 ${best}ms');
     });
   });
 
@@ -226,8 +227,7 @@ void main() {
     // 改造后实测基线：全套件负载 51ms / 单独 53ms（**min-of-5 高度可复现**，
     // 两种场景差 <4%），阈值按本套件约定取「基线 × 3」。
     // 净效果：既不再假红，又比旧阈值（400ms ≈ 基线 × 7.8）**收紧约 2.5 倍**。
-    test('GT-07 outbox 200 条 + 二次 drain 幂等 ≤ 160ms（JIT 护栏 = 基线 × 3）',
-        () async {
+    test('GT-07 outbox 200 条 + 二次 drain 幂等 ≤ 160ms（JIT 护栏 = 基线 × 3）', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
       final prefs = await SharedPreferences.getInstance();
       final store = RemoteStore(prefs);

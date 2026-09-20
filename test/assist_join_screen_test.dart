@@ -93,8 +93,7 @@ void main() {
   // ---------------- JW-0x 表单态 ----------------
 
   group('JW 接入表单', () {
-    testWidgets('JW-01 未接入时渲染表单：码/密码输入 + 接入按钮 + 安全说明',
-        (tester) async {
+    testWidgets('JW-01 未接入时渲染表单：码/密码输入 + 接入按钮 + 安全说明', (tester) async {
       await mount(tester);
 
       expect(find.text('接入协助会话'), findsOneWidget);
@@ -106,8 +105,7 @@ void main() {
       expect(find.text('设备快照与动作'), findsNothing);
     });
 
-    testWidgets('JW-02 非法凭据 → 内联错误 + 顶部提示，且不进入接入中',
-        (tester) async {
+    testWidgets('JW-02 非法凭据 → 内联错误 + 顶部提示，且不进入接入中', (tester) async {
       await mount(tester);
 
       await tester.enterText(find.byType(TextField).first, '123');
@@ -122,8 +120,7 @@ void main() {
       expect(find.text('接入协助会话'), findsOneWidget);
     });
 
-    testWidgets('JW-03 接入成功后切到控制台：标题含端点名、横幅含会话 ID 与倒计时',
-        (tester) async {
+    testWidgets('JW-03 接入成功后切到控制台：标题含端点名、横幅含会话 ID 与倒计时', (tester) async {
       final s = await host.start();
       await mount(tester);
       await handshake(tester, s);
@@ -142,8 +139,7 @@ void main() {
   // ---------------- JW-1x 控制台权限灰化 ----------------
 
   group('JW 控制台权限灰化', () {
-    testWidgets('JW-10 默认全拒：只读可点，作用于设备的按钮全部灰化',
-        (tester) async {
+    testWidgets('JW-10 默认全拒：只读可点，作用于设备的按钮全部灰化', (tester) async {
       final s = await host.start();
       await mount(tester);
       await handshake(tester, s);
@@ -156,8 +152,7 @@ void main() {
           isNotNull);
       expect(
           tester
-              .widget<FilledButton>(
-                  find.widgetWithText(FilledButton, '状态快照'))
+              .widget<FilledButton>(find.widgetWithText(FilledButton, '状态快照'))
               .onPressed,
           isNotNull);
       // 未放行：必须灰化（不能出现"可点但必被拒"的按钮）
@@ -169,20 +164,19 @@ void main() {
           isNull);
       expect(
           tester
-              .widget<FilledButton>(
-                  find.widgetWithText(FilledButton, '定位回传'))
+              .widget<FilledButton>(find.widgetWithText(FilledButton, '定位回传'))
               .onPressed,
           isNull);
       expect(
           tester
-              .widget<FilledButton>(
-                  find.widgetWithText(FilledButton, '拍照回传'))
+              .widget<FilledButton>(find.widgetWithText(FilledButton, '拍照回传'))
               .onPressed,
           isNull);
       // 音效播放同样灰化
       expect(
           tester
-              .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'knocks'))
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'knocks'))
               .onPressed,
           isNull);
       expect(find.textContaining('端点尚未放行任何能力'), findsOneWidget);
@@ -198,7 +192,8 @@ void main() {
       // 放行前：音效按钮灰
       expect(
           tester
-              .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'knocks'))
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'knocks'))
               .onPressed,
           isNull);
 
@@ -210,7 +205,8 @@ void main() {
       // 放行后：同一帧内按钮即可点，横幅摘要同步更新
       expect(
           tester
-              .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'knocks'))
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'knocks'))
               .onPressed,
           isNotNull);
       expect(find.textContaining('已放行：播放音效'), findsOneWidget);
@@ -229,7 +225,8 @@ void main() {
       await tester.pump();
       expect(
           tester
-              .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'knocks'))
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'knocks'))
               .onPressed,
           isNotNull);
 
@@ -240,7 +237,8 @@ void main() {
 
       expect(
           tester
-              .widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'knocks'))
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'knocks'))
               .onPressed,
           isNull);
       expect(find.textContaining('端点尚未放行任何能力'), findsOneWidget);
@@ -325,7 +323,8 @@ void main() {
       // 制造一条被拒绝的记录（默认全拒 → sound.play 会被拒）
       await tester.runAsync(() async {
         host.onCommand = (m) async {};
-        await client.send(RcMessage.now(RcCmd.soundPlay, {'category': 'alarms'}));
+        await client
+            .send(RcMessage.now(RcCmd.soundPlay, {'category': 'alarms'}));
         // 等拒绝回执落账
         for (var i = 0; i < 50 && !client.auditLog.any((e) => !e.ok); i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));

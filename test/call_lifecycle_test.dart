@@ -24,19 +24,19 @@ void main() {
   ///
   /// ⚠️ 直接 `contains` 会被**注释掉的代码**骗过（本项目已踩过）：
   /// 把 `callerAnswerTimeout` 写进注释也能让契约锁通过。
-  String code(String src) => src
-      .split('\n')
-      .map((l) {
+  String code(String src) => src.split('\n').map((l) {
         final i = l.indexOf('//');
         return i < 0 ? l : l.substring(0, i);
-      })
-      .join('\n');
+      }).join('\n');
 
   group('CL 超时判定（主叫接听超时 / 被叫振铃超时）', () {
     test('CL-01 到点即超时，差 1ms 不算', () {
-      expect(waitTimedOut(elapsedMs: 44999, limit: callerAnswerTimeout), isFalse);
-      expect(waitTimedOut(elapsedMs: 45000, limit: callerAnswerTimeout), isTrue);
-      expect(waitTimedOut(elapsedMs: 45001, limit: callerAnswerTimeout), isTrue);
+      expect(
+          waitTimedOut(elapsedMs: 44999, limit: callerAnswerTimeout), isFalse);
+      expect(
+          waitTimedOut(elapsedMs: 45000, limit: callerAnswerTimeout), isTrue);
+      expect(
+          waitTimedOut(elapsedMs: 45001, limit: callerAnswerTimeout), isTrue);
     });
 
     test('CL-02 已接通后超时不得判为"未接"（否则通话中会显示"对方无应答"）', () {
@@ -179,8 +179,7 @@ void main() {
         CallEndReason.declined,
       };
       for (final r in silent) {
-        expect(shouldNotifyEnd(r), isFalse,
-            reason: '$r 是本端自己刚点的动作，再弹一次就是噪音');
+        expect(shouldNotifyEnd(r), isFalse, reason: '$r 是本端自己刚点的动作，再弹一次就是噪音');
       }
       for (final r in notified) {
         expect(shouldNotifyEnd(r), isTrue,
@@ -226,8 +225,11 @@ void main() {
           seen.add(calleeActionFor(autoAnswer: auto, inCall: busy));
         }
       }
-      expect(seen, {CalleeAction.autoAccept, CalleeAction.ringUser,
-        CalleeAction.rejectBusy});
+      expect(seen, {
+        CalleeAction.autoAccept,
+        CalleeAction.ringUser,
+        CalleeAction.rejectBusy
+      });
       // 只有"显式开启"那一个组合才会自动接通。
       var autoCount = 0;
       for (final auto in [true, false]) {
@@ -242,12 +244,10 @@ void main() {
     });
 
     test('CA-05 来电文案必须带上对方名字，并区分视频/语音', () {
-      expect(incomingCallText(fromName: '妈妈的手机', video: true),
-          contains('妈妈的手机'));
-      expect(incomingCallText(fromName: '妈妈的手机', video: true),
-          contains('视频'));
-      expect(incomingCallText(fromName: '妈妈的手机', video: false),
-          contains('语音'));
+      expect(
+          incomingCallText(fromName: '妈妈的手机', video: true), contains('妈妈的手机'));
+      expect(incomingCallText(fromName: '妈妈的手机', video: true), contains('视频'));
+      expect(incomingCallText(fromName: '妈妈的手机', video: false), contains('语音'));
       expect(incomingCallText(fromName: '妈妈的手机', video: true),
           isNot(incomingCallText(fromName: '妈妈的手机', video: false)),
           reason: '视频/语音必须能区分，否则用户不知道要不要穿好衣服');
@@ -322,7 +322,8 @@ void main() {
       ];
       final f = candidates.map(File.new).where((e) => e.existsSync()).toList();
       if (f.isEmpty) {
-        throw StateError('找不到 lib/remote/call_service.dart（cwd=${Directory.current.path}）');
+        throw StateError(
+            '找不到 lib/remote/call_service.dart（cwd=${Directory.current.path}）');
       }
       callService = code(f.first.readAsStringSync());
 
@@ -418,8 +419,8 @@ void main() {
     });
 
     test('CA-08 【BUG-056 回归锁】来电处理里**不得**代为接通', () {
-      final body = methodBody(
-          endpointService, 'Future<void> _handleCallInvite(');
+      final body =
+          methodBody(endpointService, 'Future<void> _handleCallInvite(');
       expect(body, isNot(contains('acceptIncoming')),
           reason: '来电处理里出现 acceptIncoming = 又变成"收到 invite 就接通"，'
               '「自动接通」开关会再次形同虚设（BUG-056）');

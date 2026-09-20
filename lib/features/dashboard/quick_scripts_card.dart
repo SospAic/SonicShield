@@ -46,8 +46,8 @@ class QuickScriptsCardState extends ConsumerState<QuickScriptsCard> {
     if (endpoint == null) {
       // 端点在别处被解配对 / 配对表被清空 —— 明确告知，不要崩（BUG-060）。
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('端点已不存在（可能已解配对），请重新选择')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('端点已不存在（可能已解配对），请重新选择')));
       }
       return;
     }

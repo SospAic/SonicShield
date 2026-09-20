@@ -61,7 +61,8 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     );
     if (block != AutoAnswerBlock.none) {
       if (mounted) {
-        scaffold.showSnackBar(SnackBar(content: Text(autoAnswerBlockText(block))));
+        scaffold
+            .showSnackBar(SnackBar(content: Text(autoAnswerBlockText(block))));
         setState(() => _autoAnswer = false);
       }
       return;

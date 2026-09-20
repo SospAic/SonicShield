@@ -74,12 +74,9 @@ void main() {
     // ⚠️ 判据不能只看"是否出现 `].request();`" —— 赋值给变量的写法
     // 同样含有它（`final status = await [...].request();`），那样会**恒红**。
     // 真正的丢弃特征是：**整条语句以 `await [` 开头**（没有赋值目标）。
-    final reqLines = body
-        .split('\n')
-        .where((l) => l.contains('.request()'))
-        .toList();
-    expect(reqLines, isNotEmpty,
-        reason: '没找到 request 调用 —— 锁本身失效了（自检）');
+    final reqLines =
+        body.split('\n').where((l) => l.contains('.request()')).toList();
+    expect(reqLines, isNotEmpty, reason: '没找到 request 调用 —— 锁本身失效了（自检）');
     final discarded =
         reqLines.where((l) => l.trimLeft().startsWith('await [')).toList();
     expect(discarded, isEmpty,
@@ -88,7 +85,8 @@ void main() {
   });
 
   test('AAP-08 源码锁：对讲入口在权限被拒时必须给提示（不得静默 return）', () {
-    final src = File('lib/features/remote/remote_screen.dart').readAsStringSync();
+    final src =
+        File('lib/features/remote/remote_screen.dart').readAsStringSync();
     final fn = src.substring(src.indexOf('Future<void> _pttSheet'));
     final body = fn.substring(0, fn.indexOf('\n  }'));
     expect(body.contains('showSnackBar'), isTrue,

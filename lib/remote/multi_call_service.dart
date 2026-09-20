@@ -131,8 +131,7 @@ class MultiCallService {
     }
   }
 
-  Future<void> _applyAnswer(
-      MultiCallSession s, String sdp, String kind) async {
+  Future<void> _applyAnswer(MultiCallSession s, String sdp, String kind) async {
     final pc = s.pc;
     if (pc == null || sdp.isEmpty) return;
     try {
@@ -211,26 +210,34 @@ class MultiCallService {
       };
       pc.onIceCandidate = (c) {
         if (c.candidate == null) return;
-        unawaited(_send(peer, RcCmd.callCandidate, {
-          'callId': s.callId,
-          'candidate': {
-            'candidate': c.candidate,
-            'sdpMid': c.sdpMid,
-            'sdpMLineIndex': c.sdpMLineIndex,
-          },
-        }, store));
+        unawaited(_send(
+            peer,
+            RcCmd.callCandidate,
+            {
+              'callId': s.callId,
+              'candidate': {
+                'candidate': c.candidate,
+                'sdpMid': c.sdpMid,
+                'sdpMLineIndex': c.sdpMLineIndex,
+              },
+            },
+            store));
       };
 
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       final desc = await pc.getLocalDescription();
-      final sent = await _send(peer, RcCmd.callInvite, {
-        'callId': s.callId,
-        'video': video,
-        'sdp': desc?.sdp ?? '',
-        'type': desc?.type ?? 'offer',
-        'fromName': store.deviceName,
-      }, store);
+      final sent = await _send(
+          peer,
+          RcCmd.callInvite,
+          {
+            'callId': s.callId,
+            'video': video,
+            'sdp': desc?.sdp ?? '',
+            'type': desc?.type ?? 'offer',
+            'fromName': store.deviceName,
+          },
+          store);
       if (!sent) {
         // 端点离线：实时通话不能用 outbox 暂存，直接判失败。
         s.phase = MultiCallPhase.failed;

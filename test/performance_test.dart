@@ -245,7 +245,10 @@ void main() {
       final best = await benchMsAsync(() async {
         for (var i = 0; i < 5000; i++) {
           await logs.append(
-              source: 'schedule', action: 'play', status: 'success', taskId: 't');
+              source: 'schedule',
+              action: 'play',
+              status: 'success',
+              taskId: 't');
         }
         await logs.recent(limit: 100);
       }, runs: 3, warmUpRuns: 1);

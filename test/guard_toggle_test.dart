@@ -62,8 +62,8 @@ void main() {
   });
 
   test('GTO-03 下发后引擎未回投 -> engineNoResponse', () async {
-    final r = await run(
-        wanted: true, engineRunning: true, stateConfirms: false);
+    final r =
+        await run(wanted: true, engineRunning: true, stateConfirms: false);
     expect(r, GuardToggleFailure.engineNoResponse);
     // 命令确实下发过，但没生效 —— 必须报出来，不能静默。
     expect(calls.contains('setGuard:true'), isTrue);

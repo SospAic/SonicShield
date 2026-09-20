@@ -29,7 +29,8 @@ void main() {
         name: '示例任务',
         enabled: enabled,
         triggerType: triggerType,
-        trigger: trigger ?? const DailyTrigger(time: TimeSpec(hour: 8, minute: 30)),
+        trigger:
+            trigger ?? const DailyTrigger(time: TimeSpec(hour: 8, minute: 30)),
         actionType: actionType,
         action: action ?? const PlayAudioAction(),
         assetIds: assetIds,
@@ -74,8 +75,7 @@ void main() {
 
     test('TW-03 六种触发器均能往返', () {
       final cases = <TriggerType, TriggerConfig>{
-        TriggerType.fixedOnce:
-            FixedOnceTrigger(at: DateTime(2030, 1, 1, 9, 0)),
+        TriggerType.fixedOnce: FixedOnceTrigger(at: DateTime(2030, 1, 1, 9, 0)),
         TriggerType.dailyAt: const DailyTrigger(time: TimeSpec(hour: 7)),
         TriggerType.weeklyAt: const WeeklyTrigger(
             weekdays: {1, 3, 5}, time: TimeSpec(hour: 7, minute: 15)),
@@ -136,7 +136,8 @@ void main() {
     });
 
     test('TW-11 未知枚举名 → 拒绝（不得回落默认值）', () {
-      final badTrigger = TaskWire.toWire(sample())..['triggerType'] = 'evilType';
+      final badTrigger = TaskWire.toWire(sample())
+        ..['triggerType'] = 'evilType';
       expect(TaskWire.fromWire(badTrigger), isNull);
       final badAction = TaskWire.toWire(sample())..['actionType'] = 'rmRf';
       expect(TaskWire.fromWire(badAction), isNull);

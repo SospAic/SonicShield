@@ -53,15 +53,13 @@ void main() {
   group('MCS 展示文案', () {
     test('MCS-08 每个 phase 都有非空文案', () {
       for (final p in MultiCallPhase.values) {
-        expect(multiCallStatusText(p).isNotEmpty, isTrue,
-            reason: '$p 缺少状态文案');
+        expect(multiCallStatusText(p).isNotEmpty, isTrue, reason: '$p 缺少状态文案');
       }
     });
 
     test('MCS-09 failed 优先显示具体原因', () {
       expect(
-        multiCallStatusText(MultiCallPhase.failed,
-            failure: '端点离线，无法发起通话'),
+        multiCallStatusText(MultiCallPhase.failed, failure: '端点离线，无法发起通话'),
         '端点离线，无法发起通话',
       );
       // 没给原因时也要有兜底文案，而不是空白。

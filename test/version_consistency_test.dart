@@ -26,7 +26,8 @@ void main() {
 
   /// 取出 `version: 1.7.2+13` 里的 `1.7.2`（丢掉 build 号，含预发布后缀）。
   String pubspecVersion() {
-    final m = RegExp(r'^version:\s*([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.\-]+)?)',
+    final m = RegExp(
+            r'^version:\s*([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.\-]+)?)',
             multiLine: true)
         .firstMatch(pubspec);
     expect(m, isNotNull, reason: 'pubspec.yaml 里找不到 version: 行');
@@ -34,10 +35,11 @@ void main() {
   }
 
   /// CHANGELOG 里所有 `## [x.y.z]` 版本号，按出现顺序。
-  List<String> changelogVersions() => RegExp(r'^## \[([^\]]+)\]', multiLine: true)
-      .allMatches(changelog)
-      .map((m) => m.group(1)!)
-      .toList();
+  List<String> changelogVersions() =>
+      RegExp(r'^## \[([^\]]+)\]', multiLine: true)
+          .allMatches(changelog)
+          .map((m) => m.group(1)!)
+          .toList();
 
   /// `(a, b, c, isPrerelease)` —— 用于比较大小。
   (int, int, int, bool) semver(String v) {

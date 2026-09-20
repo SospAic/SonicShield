@@ -322,13 +322,13 @@ class SavedScript {
 extension RemoteStoreScripts on RemoteStore {
   List<SavedScript> savedScripts() {
     final raw = _prefs.getString(RemoteStore._kScripts);
-    if (raw == null || raw.isEmpty) return const [];
+    if (raw == null || raw.isEmpty) return [];
     try {
       return ((jsonDecode(raw) as List).cast<Map<String, dynamic>>())
           .map(SavedScript.fromJson)
           .toList();
     } on Object {
-      return const [];
+      return [];
     }
   }
 

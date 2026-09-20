@@ -89,8 +89,10 @@ void main() {
   final evts = constNames(classBody(protocol, 'RcEvt'));
 
   /// 某个 token 在哪些文件里出现。
-  List<String> refsIn(Map<String, String> files, String token) =>
-      [for (final e in files.entries) if (e.value.contains(token)) e.key];
+  List<String> refsIn(Map<String, String> files, String token) => [
+        for (final e in files.entries)
+          if (e.value.contains(token)) e.key
+      ];
 
   // ---------------- 已知缺口登记 ----------------
   //
@@ -168,17 +170,18 @@ void main() {
   test('RcCmd 三向之三：每条命令都有发送方', () {
     final missing = [
       for (final c in cmds)
-        if (refsIn(others, 'RcCmd.$c').isEmpty && !cmdWithoutSender.containsKey(c))
+        if (refsIn(others, 'RcCmd.$c').isEmpty &&
+            !cmdWithoutSender.containsKey(c))
           c,
     ];
-    expect(missing, isEmpty,
-        reason: '这些命令全项目无人发送（端点能力空转）：$missing');
+    expect(missing, isEmpty, reason: '这些命令全项目无人发送（端点能力空转）：$missing');
   });
 
   test('RcEvt 三向之一：每个事件端点都会发出', () {
     final missing = [
       for (final e in evts)
-        if (!endpoint.contains('RcEvt.$e') && !evtWithoutEmitter.containsKey(e)) e,
+        if (!endpoint.contains('RcEvt.$e') && !evtWithoutEmitter.containsKey(e))
+          e,
     ];
     expect(missing, isEmpty, reason: '这些事件无人发出（消费者永远等不到）：$missing');
   });
@@ -186,7 +189,8 @@ void main() {
   test('RcEvt 三向之二：每个事件都有人消费', () {
     final missing = [
       for (final e in evts)
-        if (refsIn(others, 'RcEvt.$e').isEmpty && !evtWithoutConsumer.containsKey(e))
+        if (refsIn(others, 'RcEvt.$e').isEmpty &&
+            !evtWithoutConsumer.containsKey(e))
           e,
     ];
     expect(missing, isEmpty, reason: '这些事件发出后无人消费（白耗带宽）：$missing');
@@ -221,13 +225,17 @@ void main() {
     final stale = <String>[];
 
     for (final c in cmdWithoutSender.keys) {
-      if (refsIn(others, 'RcCmd.$c').isNotEmpty) stale.add('cmdWithoutSender/$c');
+      if (refsIn(others, 'RcCmd.$c').isNotEmpty) {
+        stale.add('cmdWithoutSender/$c');
+      }
     }
     for (final e in evtWithoutEmitter.keys) {
       if (endpoint.contains('RcEvt.$e')) stale.add('evtWithoutEmitter/$e');
     }
     for (final e in evtWithoutConsumer.keys) {
-      if (refsIn(others, 'RcEvt.$e').isNotEmpty) stale.add('evtWithoutConsumer/$e');
+      if (refsIn(others, 'RcEvt.$e').isNotEmpty) {
+        stale.add('evtWithoutConsumer/$e');
+      }
     }
     for (final e in evtWithoutInAppConsumer.keys) {
       if (refsIn(inApp, 'RcEvt.$e').isNotEmpty) {
@@ -235,7 +243,6 @@ void main() {
       }
     }
 
-    expect(stale, isEmpty,
-        reason: '这些缺口其实已经接上了，请从登记表删除并更新 docs/17：$stale');
+    expect(stale, isEmpty, reason: '这些缺口其实已经接上了，请从登记表删除并更新 docs/17：$stale');
   });
 }

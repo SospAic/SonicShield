@@ -378,8 +378,7 @@ void main() {
       expect(fk.first.values.first, 1);
     });
 
-    test('journal_mode 可读且非空（内存库回落为 memory，文件库应为 wal）',
-        () async {
+    test('journal_mode 可读且非空（内存库回落为 memory，文件库应为 wal）', () async {
       final jm = await appDb.db.rawQuery('PRAGMA journal_mode');
       final mode = '${jm.first.values.first}'.toLowerCase();
       expect(mode, isNotEmpty);

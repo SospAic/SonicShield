@@ -62,8 +62,7 @@ void main() {
       await store.selectEndpoint('a');
       expect(store.selectedEndpointId, 'a');
       await store.removePaired('a');
-      expect(store.selectedEndpointId, '',
-          reason: '否则列表里会出现"选中了一个已被删除的端点"');
+      expect(store.selectedEndpointId, '', reason: '否则列表里会出现"选中了一个已被删除的端点"');
     });
   });
 
@@ -117,8 +116,7 @@ void main() {
     test('DLS-13 各档位相对时间', () {
       expect(formatLastConnected(now.subtract(const Duration(seconds: 5)), now),
           '刚刚');
-      expect(
-          formatLastConnected(now.subtract(const Duration(minutes: 5)), now),
+      expect(formatLastConnected(now.subtract(const Duration(minutes: 5)), now),
           '5 分钟前');
       expect(formatLastConnected(now.subtract(const Duration(hours: 3)), now),
           '3 小时前');
@@ -130,8 +128,7 @@ void main() {
     });
 
     test('DLS-14 时钟回拨不显示负时间', () {
-      expect(formatLastConnected(now.add(const Duration(hours: 1)), now),
-          '刚刚');
+      expect(formatLastConnected(now.add(const Duration(hours: 1)), now), '刚刚');
     });
   });
 }

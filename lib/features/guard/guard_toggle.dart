@@ -11,10 +11,13 @@ import 'dart:async';
 /// 却都表现为"开关弹回"，用户无从判断该去开引擎还是去开权限。
 enum GuardToggleFailure {
   none,
+
   /// 后台引擎未运行 —— `setGuard()` 会发向不存在的服务，是彻底的 no-op。
   engineNotRunning,
+
   /// 麦克风权限未授予（`record` 插件 `hasPermission()` 会返回 false）。
   micDenied,
+
   /// 已下发但引擎未在超时内回投期望状态（引擎卡住 / 被杀 / 权限被系统拦截）。
   engineNoResponse,
 }
@@ -27,11 +30,9 @@ enum GuardToggleFailure {
 /// 用户看到一句说不清的话 —— 这正是 BUG-058 教训的同一形状）。
 String guardFailureText(GuardToggleFailure f) => switch (f) {
       GuardToggleFailure.none => '',
-      GuardToggleFailure.engineNotRunning =>
-        '守卫需要后台引擎：请先在「守护」页开启守护，再来打开守卫',
+      GuardToggleFailure.engineNotRunning => '守卫需要后台引擎：请先在「守护」页开启守护，再来打开守卫',
       GuardToggleFailure.micDenied => '需要麦克风权限：请在系统设置中允许后重试',
-      GuardToggleFailure.engineNoResponse =>
-        '引擎无响应：请确认后台引擎正在运行（若刚开启请稍候几秒）',
+      GuardToggleFailure.engineNoResponse => '引擎无响应：请确认后台引擎正在运行（若刚开启请稍候几秒）',
     };
 
 /// 守卫开关的完整流程（**可注入依赖**，便于回归锁真实证伪）。

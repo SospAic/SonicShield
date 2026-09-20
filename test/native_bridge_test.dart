@@ -54,7 +54,8 @@ void main() {
   void installNotImplemented() {
     _messenger.setMockMethodCallHandler(channel, (call) async {
       log.add(call);
-      throw MissingPluginException('No implementation found for ${call.method}');
+      throw MissingPluginException(
+          'No implementation found for ${call.method}');
     });
   }
 

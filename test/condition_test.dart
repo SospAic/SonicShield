@@ -44,8 +44,10 @@ void main() {
     test('CC-02 通话中 → 阻止执行，且原因可读', () {
       const c = TaskCondition();
       expect(unmet(c, inCall: true), contains('通话中'));
-      expect(c.evaluate(
-          charging: false, batteryLevel: 100, now: now, inCall: true), isFalse);
+      expect(
+          c.evaluate(
+              charging: false, batteryLevel: 100, now: now, inCall: true),
+          isFalse);
     });
 
     test('CC-03 未通话 → 放行', () {

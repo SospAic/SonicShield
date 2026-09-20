@@ -217,7 +217,8 @@ Future<void> _engineBody(ServiceInstance service) async {
         unresolved++;
         continue;
       }
-      tracks.add(SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
+      tracks.add(
+          SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
     }
     if (tracks.isEmpty) {
       await logs.append(

@@ -28,7 +28,8 @@ void main() {
     audits = [];
     host.bind(bus);
     host.endpointName = '端点-测试机';
-    host.audit = (a, s, m) async => audits.add((action: a, status: s, message: m));
+    host.audit =
+        (a, s, m) async => audits.add((action: a, status: s, message: m));
   });
 
   tearDown(() async {
@@ -44,8 +45,7 @@ void main() {
     String? passwordOverride,
     String? idOverride,
   }) async {
-    final key =
-        await RcAssist.ctlKey(s.code, passwordOverride ?? s.password);
+    final key = await RcAssist.ctlKey(s.code, passwordOverride ?? s.password);
     final msg = RcMessage.now(RcAssistCmd.hello, {'ctrlName': ctrlName});
     return RcCodec.encode(msg, key, s.topic);
   }
@@ -104,8 +104,10 @@ void main() {
       // 主题里不得出现临时码明文（否则窃听者可直接订阅）。
       expect(a.contains(code), isFalse);
       expect(a.substring(RcAssist.topicPrefix.length).length, 16);
-      expect(RegExp(r'^[0-9a-f]{16}$')
-          .hasMatch(a.substring(RcAssist.topicPrefix.length)), isTrue);
+      expect(
+          RegExp(r'^[0-9a-f]{16}$')
+              .hasMatch(a.substring(RcAssist.topicPrefix.length)),
+          isTrue);
     });
 
     test('AH-03 hello 握手成功 → 回 accept、会话激活、密钥就绪', () async {
@@ -119,8 +121,7 @@ void main() {
       expect(host.keys!.sessionId, s.sessionId);
       expect(s.sessionId, isNotEmpty);
 
-      final accept =
-          await openLast(await RcAssist.epKey(s.code, s.password));
+      final accept = await openLast(await RcAssist.epKey(s.code, s.password));
       expect(accept, isNotNull);
       expect(accept!.type, RcAssistCmd.accept);
       expect(accept.payload['epName'], '端点-测试机');
@@ -132,8 +133,7 @@ void main() {
       final s = await host.start();
       await host.onWire(await helloWire(s));
 
-      final accept =
-          await openLast(await RcAssist.epKey(s.code, s.password));
+      final accept = await openLast(await RcAssist.epKey(s.code, s.password));
       final perms =
           AssistPerms.fromJson((accept!.payload['perms'] as Map).cast());
       expect(perms.toJson().values.every((v) => v == false), isTrue,
@@ -242,8 +242,7 @@ void main() {
       await untilExpired(s);
       await host.onWire(await helloWire(s));
 
-      final reject =
-          await openLast(await RcAssist.epKey(s.code, s.password));
+      final reject = await openLast(await RcAssist.epKey(s.code, s.password));
       expect(reject, isNotNull);
       expect(reject!.type, RcAssistCmd.reject);
       expect(reject.payload['reason'], 'ttl_expired');
@@ -294,8 +293,8 @@ void main() {
       final s = await host.start();
       final ctlKey = await RcAssist.ctlKey(s.code, s.password);
 
-      await host.onWire(await RcCodec.encode(
-          RcMessage.now('assist.未来扩展'), ctlKey, s.topic));
+      await host.onWire(
+          await RcCodec.encode(RcMessage.now('assist.未来扩展'), ctlKey, s.topic));
 
       expect(s.phase, AssistPhase.waiting, reason: '未知类型不应改变会话状态');
       expect(bus.published, isEmpty);
@@ -475,8 +474,8 @@ void main() {
     Future<void> business(AssistSession s, String type,
         {Map<String, dynamic> payload = const {}}) async {
       final ctlKey = await RcAssist.ctlKey(s.code, s.password);
-      await host.onWire(await RcCodec.encode(
-          RcMessage.now(type, payload), ctlKey, s.topic));
+      await host.onWire(
+          await RcCodec.encode(RcMessage.now(type, payload), ctlKey, s.topic));
     }
 
     test('AH-40 会话未激活时业务命令不执行、不回调执行层', () async {
@@ -545,7 +544,8 @@ void main() {
       await host.onWire(await helloWire(s));
       await host.grant(const AssistPerms(media: true));
       host.onCommand = (m) async {
-        await host.sendReply(RcMessage.now(RcEvt.ack, {'ok': true, 'for': m.id}));
+        await host
+            .sendReply(RcMessage.now(RcEvt.ack, {'ok': true, 'for': m.id}));
       };
 
       await business(s, RcCmd.soundPlay);
@@ -557,10 +557,8 @@ void main() {
       expect(bus.published.last.topic, s.topic, reason: '回执必须发在会合主题上');
 
       // 控制端用 ctlKey 无法解开 epKey 加密的回执（方向密钥隔离）。
-      final wrong = await RcCodec.decode(
-          bus.published.last.wire,
-          await RcAssist.ctlKey(s.code, s.password),
-          s.topic);
+      final wrong = await RcCodec.decode(bus.published.last.wire,
+          await RcAssist.ctlKey(s.code, s.password), s.topic);
       expect(wrong, isNull);
     });
 

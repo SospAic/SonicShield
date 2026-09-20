@@ -64,8 +64,7 @@ void main() {
     expect(find.byType(SwitchListTile), findsNothing);
   });
 
-  testWidgets('AHW-02 等待接入：显示临时码/密码/倒计时，且仍无权限开关',
-      (tester) async {
+  testWidgets('AHW-02 等待接入：显示临时码/密码/倒计时，且仍无权限开关', (tester) async {
     final s = await host.start();
     await pump(tester);
 
@@ -74,8 +73,10 @@ void main() {
     expect(find.text('临时码'), findsOneWidget);
     expect(find.text('访问密码'), findsOneWidget);
     // 临时码按 3 位一组显示，降低口述误读率。
-    expect(find.text('${s.code.substring(0, 3)} '
-        '${s.code.substring(3, 6)} ${s.code.substring(6)}'), findsOneWidget);
+    expect(
+        find.text('${s.code.substring(0, 3)} '
+            '${s.code.substring(3, 6)} ${s.code.substring(6)}'),
+        findsOneWidget);
     expect(find.textContaining('后自动失效'), findsOneWidget);
     expect(find.text('终止会话'), findsOneWidget);
     expect(find.byType(SwitchListTile), findsNothing,
@@ -84,8 +85,7 @@ void main() {
     await finish(tester);
   });
 
-  testWidgets('AHW-03 已接入：显示控制端名 + 7 个权限开关且默认全关',
-      (tester) async {
+  testWidgets('AHW-03 已接入：显示控制端名 + 7 个权限开关且默认全关', (tester) async {
     await activate();
     await pump(tester);
 

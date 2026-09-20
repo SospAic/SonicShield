@@ -41,8 +41,9 @@ void main() {
 
       final servers = await CallService.iceServers();
 
-      final stunCount =
-          servers.where((s) => (s['urls'] as String).startsWith('stun:')).length;
+      final stunCount = servers
+          .where((s) => (s['urls'] as String).startsWith('stun:'))
+          .length;
       expect(stunCount, greaterThan(0), reason: 'STUN 不应被 TURN 顶掉');
       final turn = servers.last;
       expect(turn['urls'], 'turn:relay.example.com:3478');
@@ -52,7 +53,8 @@ void main() {
 
     test('CS-03 TURN 无账号密码时不塞空字段（部分服务器不接受空凭据）', () async {
       final store = RemoteStore(await SharedPreferences.getInstance());
-      await store.setTurn(url: 'turn:relay.example.com:3478', user: '', cred: '');
+      await store.setTurn(
+          url: 'turn:relay.example.com:3478', user: '', cred: '');
 
       final turn = (await CallService.iceServers()).last;
 
@@ -67,8 +69,9 @@ void main() {
 
       await store.setTurn(url: '', user: '', cred: '');
 
-      expect((await CallService.iceServers()).every(
-              (s) => (s['urls'] as String).startsWith('stun:')),
+      expect(
+          (await CallService.iceServers())
+              .every((s) => (s['urls'] as String).startsWith('stun:')),
           isTrue);
     });
   });

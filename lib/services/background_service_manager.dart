@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_background_service/flutter_background_service.dart';
 
 import '../core/constants.dart';
@@ -80,7 +81,21 @@ class BackgroundServiceManager {
   }
 
   Future<void> stop() async => _svc.invoke('stop');
-  Future<void> replan() async => _svc.invoke('replan');
+
+  /// 测试缝（v1.8）：widget 测试中后台服务未初始化，`invoke('replan')`
+  /// 会返回**永不完成**的 Future（已实测挂死测试）。测试注入本钩子短路。
+  /// 生产代码不设置此值，走真实服务调用。
+  @visibleForTesting
+  static Future<void> Function()? replanHook;
+
+  Future<void> replan() async {
+    final hook = replanHook;
+    if (hook != null) {
+      await hook();
+      return;
+    }
+    _svc.invoke('replan'); // 返回 void（fire-and-forget）
+  }
 
   Future<void> setGuard(bool enabled) async =>
       _svc.invoke('guard', {'enabled': enabled});

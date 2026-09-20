@@ -207,8 +207,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text('当前',
-                    style:
-                        TextStyle(fontSize: 11, color: scheme.onPrimary)),
+                    style: TextStyle(fontSize: 11, color: scheme.onPrimary)),
               ),
           ],
         ),

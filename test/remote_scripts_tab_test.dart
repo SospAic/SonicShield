@@ -167,12 +167,10 @@ void main() {
     await frames(tester);
 
     expect(find.textContaining('已完成'), findsWidgets);
-    expect(find.textContaining('执行中'), findsNothing,
-        reason: '终止态之后不得残留"执行中"');
+    expect(find.textContaining('执行中'), findsNothing, reason: '终止态之后不得残留"执行中"');
   });
 
-  testWidgets('RS-03 未知 state → 界面**什么都不做**（不谎报完成 / 不永远转圈）',
-      (tester) async {
+  testWidgets('RS-03 未知 state → 界面**什么都不做**（不谎报完成 / 不永远转圈）', (tester) async {
     await pump(tester);
     emit(RcEvt.scriptState,
         {'scriptId': scriptId, 'state': 'running', 'stepIndex': 0});
@@ -201,15 +199,13 @@ void main() {
 
   // ---------------- 协助会话：指令组改走 RcCommandChannel（第十七轮续八） ----------------
 
-  testWidgets('RS-05 协助会话通道下点「执行」→ 命令从**通道**发出（此前跑不了）',
-      (tester) async {
+  testWidgets('RS-05 协助会话通道下点「执行」→ 命令从**通道**发出（此前跑不了）', (tester) async {
     final ch = await pumpCh(tester);
 
     // 协助会话的目标由会话本身决定 → 不该再让使用者"选配对端点"。
     expect(find.text('发送目标端点'), findsNothing,
         reason: '协助会话里没有已配对端点可选，下拉若还在就是漏改');
-    expect(find.text('假端点（协助）'), findsOneWidget,
-        reason: '应显示通道标签，让使用者知道命令发给谁');
+    expect(find.text('假端点（协助）'), findsOneWidget, reason: '应显示通道标签，让使用者知道命令发给谁');
 
     await tester.tap(find.widgetWithText(FilledButton, '执行').first);
     await frames(tester, 6);
@@ -230,8 +226,7 @@ void main() {
         reason: '静默拦截会让使用者以为"功能坏了"（BUG-029 的同类问题）');
   });
 
-  testWidgets('RS-07 协助会话下不给「新建指令组」入口（组装器需已配对端点）',
-      (tester) async {
+  testWidgets('RS-07 协助会话下不给「新建指令组」入口（组装器需已配对端点）', (tester) async {
     await pumpCh(tester);
 
     expect(find.text('新建指令组'), findsNothing,

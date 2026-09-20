@@ -16,8 +16,7 @@ const _src = 'lib/services/background_engine.dart';
 
 void main() {
   test('SCT-01 点名具体音源优先（assetId > presetCategory）', () {
-    expect(
-        soundscapeTrackPath(byId: '/a.mp3', byCategory: '/b.mp3'), '/a.mp3');
+    expect(soundscapeTrackPath(byId: '/a.mp3', byCategory: '/b.mp3'), '/a.mp3');
   });
 
   test('SCT-02 没点名音源时按分类取', () {
@@ -66,8 +65,7 @@ void main() {
         .allMatches(sig)
         .map((m) => m.group(1)!)
         .toSet();
-    expect(params.isNotEmpty, isTrue,
-        reason: '没解析出任何入参 —— 正则失效了（恒红的锁比没锁更坏）');
+    expect(params.isNotEmpty, isTrue, reason: '没解析出任何入参 —— 正则失效了（恒红的锁比没锁更坏）');
     expect(params, {'byId', 'byCategory'},
         reason: '`soundscapeTrackPath` 的入参必须**恰好**是 byId / byCategory —— '
             '多一个（哪怕叫别的名字）就是重新开了兜底通道。'

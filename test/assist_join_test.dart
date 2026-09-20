@@ -50,8 +50,8 @@ void main() {
     host
       ..bind(hostBus)
       ..endpointName = '端点-测试机'
-      ..audit = (a, s, m) async =>
-          hostAudits.add((action: a, status: s, message: m));
+      ..audit =
+          (a, s, m) async => hostAudits.add((action: a, status: s, message: m));
     client
       ..bind(joinBus)
       ..ctrlName = '控制端A'
@@ -112,8 +112,8 @@ void main() {
   Future<String> rejectWire(AssistSession s, String reason) =>
       epWire(s, RcAssistCmd.reject, {'reason': reason});
 
-  Future<String> permWire(AssistSession s, AssistPerms perms) =>
-      epWire(s, RcAssistCmd.perm, {'sessionId': s.sessionId, 'perms': perms.toJson()});
+  Future<String> permWire(AssistSession s, AssistPerms perms) => epWire(
+      s, RcAssistCmd.perm, {'sessionId': s.sessionId, 'perms': perms.toJson()});
 
   /// 静音总线（hello 石沉大海）后开始接入，并等到握手循环真正跑起来。
   ///
@@ -256,8 +256,7 @@ void main() {
 
       expect(await client.join(s.code, s.password), isTrue);
       expect(client.sessionId, first, reason: '端点对重复 hello 幂等，不新建会话');
-      expect(joinBus.unsubscribed, contains(s.topic),
-          reason: '重复接入前应先退订旧主题');
+      expect(joinBus.unsubscribed, contains(s.topic), reason: '重复接入前应先退订旧主题');
       expect(joinBus.subscribed.where((t) => t == s.topic).length, 2);
     });
 
@@ -345,7 +344,8 @@ void main() {
     test('AJ-32 权限可被端点收回（只减不增）', () async {
       final s = await host.start();
       final fut = await joinMuted(s);
-      await client.onWire(await acceptWire(s, perms: const AssistPerms(media: true)));
+      await client
+          .onWire(await acceptWire(s, perms: const AssistPerms(media: true)));
       expect(await fut, isTrue);
       expect(client.allows(RcCmd.soundPlay), isTrue);
 
@@ -408,8 +408,8 @@ void main() {
       expect(await client.join(s.code, s.password), isTrue);
 
       host.onCommand = (m) async {
-        await host.sendReply(
-            RcMessage.now(RcEvt.ack, {'ok': true, 'for': m.id, 'data': 'pong'}));
+        await host.sendReply(RcMessage.now(
+            RcEvt.ack, {'ok': true, 'for': m.id, 'data': 'pong'}));
       };
       final events = <Map<String, dynamic>>[];
       final sub = client.events.listen(events.add);
@@ -437,8 +437,11 @@ void main() {
       final sub = client.events.listen(events.add);
 
       // 默认全拒 → sound.play 未放行
-      expect(await client.send(RcMessage.now(RcCmd.soundPlay, {'category': 'alarms'})),
-          isTrue, reason: '命令会发出（裁决在端点侧），但不会被执行');
+      expect(
+          await client
+              .send(RcMessage.now(RcCmd.soundPlay, {'category': 'alarms'})),
+          isTrue,
+          reason: '命令会发出（裁决在端点侧），但不会被执行');
       await pumpUntil(() => events.isNotEmpty);
 
       expect(executed, isEmpty, reason: '未授权命令绝不能被端点执行');
@@ -455,11 +458,14 @@ void main() {
       final executed = <String>[];
       host.onCommand = (m) async {
         executed.add(m.type);
-        await host.sendReply(RcMessage.now(RcEvt.ack, {'ok': true, 'for': m.id}));
+        await host
+            .sendReply(RcMessage.now(RcEvt.ack, {'ok': true, 'for': m.id}));
       };
       await host.grant(const AssistPerms(media: true));
 
-      expect(await client.send(RcMessage.now(RcCmd.soundPlay, {'category': 'nature'})),
+      expect(
+          await client
+              .send(RcMessage.now(RcCmd.soundPlay, {'category': 'nature'})),
           isTrue);
       await pumpUntil(() => executed.isNotEmpty);
       expect(executed, [RcCmd.soundPlay]);
@@ -615,7 +621,8 @@ void main() {
       final log = client.auditLog;
       expect(log.any((e) => e.outbound && e.type == RcAssistCmd.hello), isTrue,
           reason: '握手过程应留痕');
-      expect(log.any((e) => !e.outbound && e.type == RcAssistCmd.accept), isTrue,
+      expect(
+          log.any((e) => !e.outbound && e.type == RcAssistCmd.accept), isTrue,
           reason: '端点接受应留痕');
       expect(log.last.detail, contains(client.sessionId));
 
@@ -668,7 +675,9 @@ void main() {
 
       expect(
           client.auditLog.any((e) =>
-              e.outbound && e.type == RcAssistCmd.close && e.detail.contains('挂断')),
+              e.outbound &&
+              e.type == RcAssistCmd.close &&
+              e.detail.contains('挂断')),
           isTrue);
 
       // 端点侧会话已结束，重新发起一次会话验证轨迹被清空。
@@ -724,7 +733,8 @@ void main() {
       final before = joinBus.published.length;
 
       // 若在此静默拦截，使用者会以为"功能坏了"，看不到端点的拒绝原因。
-      expect(await ch.send(RcMessage.now(RcCmd.guardSet, {'enabled': true})), isTrue);
+      expect(await ch.send(RcMessage.now(RcCmd.guardSet, {'enabled': true})),
+          isTrue);
       expect(joinBus.published.length, before + 1);
     });
 
@@ -757,7 +767,10 @@ void main() {
       await AssistChannel(client).dispose();
       await PairedChannel(
               PairedEndpoint(
-                  deviceId: 'd', name: 'n', secret: 's', pairedAt: DateTime.now()),
+                  deviceId: 'd',
+                  name: 'n',
+                  secret: 's',
+                  pairedAt: DateTime.now()),
               RemoteStore(await SharedPreferences.getInstance()))
           .dispose();
 
@@ -774,7 +787,10 @@ void main() {
       final store = RemoteStore(await SharedPreferences.getInstance());
       final paired = PairedChannel(
           PairedEndpoint(
-              deviceId: 'd2', name: 'n2', secret: 's2', pairedAt: DateTime.now()),
+              deviceId: 'd2',
+              name: 'n2',
+              secret: 's2',
+              pairedAt: DateTime.now()),
           store);
       var pairedPings = 0;
       final p = paired.updates.listen((_) => pairedPings++);

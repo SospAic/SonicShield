@@ -163,8 +163,8 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
       if (ep == null) {
         // 端点在别处被解配对 —— 明确告知，不要崩（BUG-060）。
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('端点已不存在（可能已解配对），请重新选择')));
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('端点已不存在（可能已解配对），请重新选择')));
         }
         return;
       }
@@ -174,9 +174,7 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(ok
               ? '「${s.name}」已发送，进度见下方（端点通知栏可终止）'
-              : (ch != null
-                  ? '协助会话未激活：未发送'
-                  : '端点离线：已入队，上线后自动补发'))));
+              : (ch != null ? '协助会话未激活：未发送' : '端点离线：已入队，上线后自动补发'))));
     }
   }
 

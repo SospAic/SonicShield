@@ -113,7 +113,8 @@ void main() {
 
   group('AssetLibraryImporter', () {
     /// 每条落盘一个假路径 `/tmp/<id>.wav`，并记录调用轨迹。
-    AssetImportEntry entry(String name, {List<Object>? log}) => AssetImportEntry(
+    AssetImportEntry entry(String name, {List<Object>? log}) =>
+        AssetImportEntry(
           name: name,
           tags: const ['预置'],
           durationMs: 100,
@@ -131,7 +132,8 @@ void main() {
         removeFile: (_) async {},
         newId: () => 'id${++n}',
       );
-      final out = await importer.importAll([entry('a'), entry('b'), entry('c')]);
+      final out =
+          await importer.importAll([entry('a'), entry('b'), entry('c')]);
       expect(saves, hasLength(1), reason: '逐条 upsert 会调用 3 次 —— 3 次平台往返');
       expect(saves.single, hasLength(3));
       expect(out.added, 3);
@@ -150,8 +152,7 @@ void main() {
         entry('[预置]已存在', log: log),
         entry('[预置]新的', log: log),
       ]);
-      expect(log, ['materialize:[预置]新的'],
-          reason: '已存在的条目不该白读一次 asset bundle');
+      expect(log, ['materialize:[预置]新的'], reason: '已存在的条目不该白读一次 asset bundle');
       expect(out.added, 1);
       expect(out.skipped, 1);
       expect(saves.single, hasLength(1));
@@ -230,8 +231,7 @@ void main() {
       );
       await expectLater(
         importer.importAll([entry('a')]),
-        throwsA(isA<StateError>()
-            .having((e) => e.message, 'message', '原始错误')),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', '原始错误')),
       );
     });
 
@@ -261,8 +261,7 @@ void main() {
       );
       final first = await importer.importAll([entry('[预置]a'), entry('[预置]b')]);
       expect(first.added, 2);
-      final second =
-          await importer.importAll([entry('[预置]a'), entry('[预置]b')]);
+      final second = await importer.importAll([entry('[预置]a'), entry('[预置]b')]);
       expect(second.added, 0);
       expect(second.skipped, 2);
       expect(await repo.listAll(), hasLength(2));

@@ -34,8 +34,8 @@ void main() {
 
   test('LBL-01 `_kindToType` 必须覆盖全部动作 kind', () {
     // 权威集合 = ActionConfig.fromJson 认识的 kind（新增动作类型必改这里）。
-    final fromJson = _bodyOf(
-        action, "static ActionConfig fromJson(Map<String, dynamic> j) => switch (j['kind']) {");
+    final fromJson = _bodyOf(action,
+        "static ActionConfig fromJson(Map<String, dynamic> j) => switch (j['kind']) {");
     final kinds = RegExp(r"'(\w+)' => ")
         .allMatches(fromJson)
         .map((m) => m.group(1)!)
@@ -43,7 +43,8 @@ void main() {
     expect(kinds.length, greaterThanOrEqualTo(8),
         reason: 'ActionConfig 的 kind 集合变了，本锁要跟着看');
 
-    final kindToType = _bodyOf(tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
+    final kindToType = _bodyOf(
+        tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
     for (final k in kinds) {
       expect(kindToType.contains("'$k' =>"), isTrue,
           reason: '`_kindToType` 没登记 kind `$k` —— 漏登记的后果是任务摘要'
@@ -52,18 +53,21 @@ void main() {
   });
 
   test('LBL-02 组合/随机指令集必须有名字（本轮实测缺陷）', () {
-    final kindToType = _bodyOf(tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
+    final kindToType = _bodyOf(
+        tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
     expect(kindToType.contains("'composite' =>"), isTrue);
     expect(kindToType.contains("'randomFrom' =>"), isTrue);
   });
 
   test('LBL-03 `_actionLabel` 必须覆盖 `_kindToType` 的全部产出', () {
-    final kindToType = _bodyOf(tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
+    final kindToType = _bodyOf(
+        tasks, 'static String _kindToType(Object? kind) => switch (kind) {');
     final outs = RegExp(r"=> '(\w+)'")
         .allMatches(kindToType)
         .map((m) => m.group(1)!)
         .toSet();
-    final label = _bodyOf(tasks, 'static String _actionLabel(Object? raw) => switch (raw) {');
+    final label = _bodyOf(
+        tasks, 'static String _actionLabel(Object? raw) => switch (raw) {');
     for (final o in outs) {
       expect(label.contains("'$o' =>"), isTrue,
           reason: '`_kindToType` 会产出 `$o`，`_actionLabel` 却没有对应文案');
@@ -76,7 +80,8 @@ void main() {
       ('_actionLabel', '未知动作'),
       ('_triggerLabel', '未知触发'),
     ]) {
-      final b = _bodyOf(tasks, 'static String $fn(Object? raw) => switch (raw) {');
+      final b =
+          _bodyOf(tasks, 'static String $fn(Object? raw) => switch (raw) {');
       expect(b.contains('raw == null'), isTrue,
           reason: '`$fn` 的兜底必须显式判空串 —— 只判 `raw ?? …` 会让空串渲染成空白');
       expect(b.contains(fallback), isTrue);
@@ -85,15 +90,16 @@ void main() {
 
   test('LBL-05 每个权限键都必须有 UI 说明文案', () {
     // 权威集合 = AssistPerms.withFlag 能设置的权限位。
-    final withFlag =
-        _bodyOf(assist, 'AssistPerms withFlag(String key, bool value) => switch (key) {');
+    final withFlag = _bodyOf(assist,
+        'AssistPerms withFlag(String key, bool value) => switch (key) {');
     final keys = RegExp(r"'(\w+)' => copyWith")
         .allMatches(withFlag)
         .map((m) => m.group(1)!)
         .toSet();
     expect(keys.isNotEmpty, isTrue);
 
-    final hint = _bodyOf(hintSrc, 'static Widget? _permHint(String key) => switch (key) {');
+    final hint = _bodyOf(
+        hintSrc, 'static Widget? _permHint(String key) => switch (key) {');
     for (final k in keys) {
       expect(hint.contains("'$k' =>"), isTrue,
           reason: '权限 `$k` 没有说明文案 —— 用户会在**完全不知道要授权什么**'

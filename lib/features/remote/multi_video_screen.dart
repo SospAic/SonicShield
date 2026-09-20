@@ -46,9 +46,8 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
   Future<void> _addDevice() async {
     final store = _store;
     if (store == null) return;
-    final candidates = _endpoints
-        .where((e) => _svc.sessionOf(e.deviceId) == null)
-        .toList();
+    final candidates =
+        _endpoints.where((e) => _svc.sessionOf(e.deviceId) == null).toList();
     if (candidates.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -74,7 +73,8 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
     if (!mounted) return;
     if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('「${picked.displayName}」连接失败（端点离线或无法获取麦克风/摄像头）')),
+        SnackBar(
+            content: Text('「${picked.displayName}」连接失败（端点离线或无法获取麦克风/摄像头）')),
       );
     }
   }
@@ -90,8 +90,9 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ok ? '已向「${s.peer.displayName}」发送 $cmd'
-          : '发送失败（端点离线，已暂存待发）')),
+      SnackBar(
+          content: Text(
+              ok ? '已向「${s.peer.displayName}」发送 $cmd' : '发送失败（端点离线，已暂存待发）')),
     );
   }
 
@@ -125,8 +126,7 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.grid_view,
-                        size: 56, color: scheme.outline),
+                    Icon(Icons.grid_view, size: 56, color: scheme.outline),
                     const SizedBox(height: 12),
                     const Text('还没有视频连接'),
                     const SizedBox(height: 6),
@@ -285,7 +285,6 @@ class _VideoTileState extends State<_VideoTile> {
       ),
     );
   }
-
 }
 
 /// 底部指令条：对**当前窗口**那台设备发指令（视频保持连接）。

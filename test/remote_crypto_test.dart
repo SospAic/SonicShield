@@ -38,8 +38,8 @@ void main() {
 
     test('cmd：旧实现（遍历对端密钥）必须解密失败', () async {
       final txKey = await RcCodec.deriveKey(bCode, '$bId|cmd');
-      final wire = await RcCodec.encode(
-          RcMessage.now(RcCmd.ping), txKey, cmdTopic);
+      final wire =
+          await RcCodec.encode(RcMessage.now(RcCmd.ping), txKey, cmdTopic);
 
       // B 侧曾用「对端 A 的配对码 + A 的 deviceId」尝试解密 → 永不匹配。
       final staleKey = await RcCodec.deriveKey(aCode, '$aId|cmd');
@@ -76,16 +76,16 @@ void main() {
 
     test('方向隔离：cmd 密钥无法解 evt 密文（密钥方向独立）', () async {
       final evtKey = await RcCodec.deriveKey(aCode, '$aId|evt');
-      final wire = await RcCodec.encode(
-          RcMessage.now(RcEvt.status), evtKey, evtTopic);
+      final wire =
+          await RcCodec.encode(RcMessage.now(RcEvt.status), evtKey, evtTopic);
       final cmdKey = await RcCodec.deriveKey(aCode, '$aId|cmd');
       expect(await RcCodec.decode(wire, cmdKey, evtTopic), isNull);
     });
 
     test('配对码不符 → 解密失败（未配对设备无法注入命令）', () async {
       final txKey = await RcCodec.deriveKey(bCode, '$bId|cmd');
-      final wire = await RcCodec.encode(
-          RcMessage.now(RcCmd.scriptRun), txKey, cmdTopic);
+      final wire =
+          await RcCodec.encode(RcMessage.now(RcCmd.scriptRun), txKey, cmdTopic);
       final attacker = await RcCodec.deriveKey('HACKER22', '$bId|cmd');
       expect(await RcCodec.decode(wire, attacker, cmdTopic), isNull);
     });
@@ -111,8 +111,8 @@ void main() {
 
     test('重复消息 ID → 第二次被去重丢弃', () async {
       final key = await RcCodec.deriveKey(bCode, '$bId|cmd');
-      final wire = await RcCodec.encode(
-          RcMessage.now(RcCmd.ping), key, cmdTopic);
+      final wire =
+          await RcCodec.encode(RcMessage.now(RcCmd.ping), key, cmdTopic);
       final seen = <String, int>{};
       final first = await RcCodec.decode(wire, key, cmdTopic, seenIds: seen);
       expect(first, isNotNull);
@@ -123,8 +123,8 @@ void main() {
 
     test('AAD 绑定主题：换主题解密失败', () async {
       final key = await RcCodec.deriveKey(bCode, '$bId|cmd');
-      final wire = await RcCodec.encode(
-          RcMessage.now(RcCmd.ping), key, cmdTopic);
+      final wire =
+          await RcCodec.encode(RcMessage.now(RcCmd.ping), key, cmdTopic);
       expect(
           await RcCodec.decode(wire, key, 'sonicshield/v1/$bId/evt'), isNull);
     });

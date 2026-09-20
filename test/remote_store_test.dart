@@ -119,9 +119,7 @@ void main() {
 
   test('RS-11 TURN 配置可保存与读取，且去除首尾空白', () async {
     await store.setTurn(
-        url: '  turn:relay.example.com:3478  ',
-        user: ' sonic ',
-        cred: 'p@ss');
+        url: '  turn:relay.example.com:3478  ', user: ' sonic ', cred: 'p@ss');
 
     expect(store.turnUrl, 'turn:relay.example.com:3478');
     expect(store.turnUser, 'sonic');
