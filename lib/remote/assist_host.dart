@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'assist.dart';
+import 'guarded_dispatch.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 
@@ -325,7 +326,28 @@ class RcAssistHost {
 
     final handler = onCommand;
     if (handler == null) return; // 端点未接入执行层（不应发生）
-    await runZoned(() => handler(msg), zoneValues: {assistReplyZone: true});
+    // 与配对遥控同源（BUG-051）：处理器抛异常必须**留下审计 + 显式回执拒绝**，
+    // 否则控制端只会看到"点了没反应"，与"权限未放行"无法区分。
+    final outcome = await guardDispatch(
+      () => runZoned(() => handler(msg), zoneValues: {assistReplyZone: true}),
+      audit: (reason) async {
+        await audit?.call(msg.type, 'failed', '处理器异常：$reason');
+      },
+    );
+    if (!outcome.ok) {
+      try {
+        await _publish(
+            k.epKey,
+            RcMessage.now(RcEvt.ack, {
+              'ok': false,
+              'for': msg.id,
+              'forType': msg.type,
+              'data': '处理器异常：${outcome.reason}',
+            }));
+      } on Object {
+        // 信道不可用 —— 审计已落盘，不再挣扎。
+      }
+    }
   }
 
   /// 业务回执：走会合主题、epKey 加密（由端点服务的 `_send` 在

@@ -199,20 +199,35 @@ void main() {
       expect(sw.elapsedMilliseconds, lessThanOrEqualTo(200));
     });
 
-    test('GT-07 outbox 200 条 + 二次 drain 幂等 ≤ 400ms', () async {
+    // 第十七轮修复（BUG-053）：原实现用**裸 Stopwatch 单次采样**，而本文件
+    // 头部明确要求"统一用 benchMs/benchMsAsync（预热 + 取最小值）"。
+    // 后果：同一份代码在全套件负载下测到 455ms（红）、单独跑 6/6 绿且 <1s ——
+    // 单次采样测的是 JIT 编译 + GC + 调度噪声，不是该路径的成本。
+    // 改造后实测基线：全套件负载 51ms / 单独 53ms（**min-of-5 高度可复现**，
+    // 两种场景差 <4%），阈值按本套件约定取「基线 × 3」。
+    // 净效果：既不再假红，又比旧阈值（400ms ≈ 基线 × 7.8）**收紧约 2.5 倍**。
+    test('GT-07 outbox 200 条 + 二次 drain 幂等 ≤ 160ms（JIT 护栏 = 基线 × 3）',
+        () async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
       final prefs = await SharedPreferences.getInstance();
       final store = RemoteStore(prefs);
-      final sw = Stopwatch()..start();
-      for (var i = 0; i < 200; i++) {
-        await store.enqueue('w$i', 'dev');
-      }
-      final d1 = store.drainOutbox('dev');
-      final d2 = store.drainOutbox('dev');
-      sw.stop();
-      expect(d1.length, 200);
-      expect(d2, isEmpty); // 幂等：冲刷后不再重复
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(400));
+      var d1Len = 0;
+      var d2Len = -1;
+      // 这条路径是**往返受限**的：200 次 `enqueue` = 200 次
+      // `prefs.setString` 平台往返（外加对递增列表的整体 jsonEncode）。
+      final best = await benchMsAsync(() async {
+        for (var i = 0; i < 200; i++) {
+          await store.enqueue('w$i', 'dev');
+        }
+        final d1 = store.drainOutbox('dev');
+        final d2 = store.drainOutbox('dev');
+        d1Len = d1.length;
+        d2Len = d2.length;
+      });
+      expect(d1Len, 200);
+      expect(d2Len, 0); // 幂等：冲刷后不再重复
+      expect(best, lessThanOrEqualTo(160),
+          reason: 'outbox 200 条 + 二次 drain 最优 ${best}ms（基线 51ms × 3）');
     });
   });
 

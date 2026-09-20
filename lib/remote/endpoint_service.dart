@@ -26,6 +26,7 @@ import 'call_service.dart';
 import 'assist.dart';
 import 'assist_host.dart';
 import 'assist_join.dart';
+import 'guarded_dispatch.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 import 'remote_playback.dart';
@@ -166,7 +167,16 @@ class RcEndpointService {
         final topic = m.topic;
         final payload = m.payload as MqttPublishMessage;
         final text = utf8.decode(payload.payload.message, allowMalformed: true);
-        await _handleRaw(topic, text);
+        // **绝不能把异常漏出这个回调**：漏出去只会变成一条无人看见的异步错误，
+        // 而监听循环会继续 —— 表现为"端点还活着，但对某些命令永远没反应"
+        // （BUG-051 的温床）。命令级兜底在 _handleRaw 内（那里能拿到 msg.id，
+        // 才好回执），这里只是最后一道防线。
+        try {
+          await _handleRaw(topic, text);
+        } on Object catch (e) {
+          // ignore: avoid_print
+          print('[sonic_shield][remote] inbound dropped: $e');
+        }
       }
     });
     client.subscribe('sonicshield/v1/$deviceId/cmd', MqttQos.atLeastOnce);
@@ -263,7 +273,33 @@ class RcEndpointService {
     final msg = await RcCodec.decode(wire, key, topic, seenIds: _seen);
     if (msg == null) return;
     _rememberSeen(msg.id);
-    await _dispatch(msg, _peerOf(msg));
+    final peer = _peerOf(msg);
+    // 命令处理失败必须**留下痕迹**（BUG-051）：此前处理器抛异常会直接逃逸，
+    // 后果是"不回执 + 不写审计"，控制器只看到超时、真实原因被完全隐藏
+    // （实测形状：ping 通、status.get 超时）。
+    final outcome = await guardDispatch(
+      () => _dispatch(msg, peer),
+      audit: (reason) => LogRepository(_db!).append(
+        source: 'remote',
+        action: msg.type,
+        status: 'failed',
+        message: 'by ${peer.name} · 处理器异常：$reason',
+      ),
+    );
+    if (!outcome.ok) {
+      if (!outcome.auditOk) {
+        // 连审计都失败（通常是数据库本身不可用）—— 必须被看见。
+        // ignore: avoid_print
+        print('[sonic_shield][remote] audit failed for '
+            '${msg.type}: ${outcome.reason}');
+      }
+      // 回执失败同样不能外泄，否则又退回静默。
+      try {
+        await _ack(msg, false, data: '处理器异常：${outcome.reason}');
+      } on Object {
+        // 信道本身不可用 —— 审计已落盘，不再挣扎。
+      }
+    }
     _broadcast(msg, peerId: msg.from, peerName: _peerName(msg.from));
   }
 

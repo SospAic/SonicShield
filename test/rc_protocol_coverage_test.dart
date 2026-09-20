@@ -115,14 +115,18 @@ void main() {
 
   /// 无人消费的事件。
   const evtWithoutConsumer = <String, String>{
-    'heartbeat': '`rc.heartbeat` 的语义是"端点还活着"，而控制台的在线判定'
-        '已经由「任意同 peerId 事件都算存活」覆盖（心跳是最慢的恢复信号），'
-        '无需单独分支 —— 它只需被**发出**即可。',
     'callMissed': '与 `evtWithoutEmitter` 同因：无人发出，自然无人消费（BUG-050）。',
   };
 
   /// 有消费方，但**只在 `tool/` 桌面 E2E 工具里**，App 内无消费者。
   const evtWithoutInAppConsumer = <String, String>{
+    'heartbeat': '`rc.heartbeat` 的语义是"端点还活着"。控制台的在线判定已经由'
+        '「任意同 peerId 事件都算存活」覆盖（心跳是最慢的恢复信号），'
+        '**App 内无需单独分支**。'
+        '第十七轮起 `tool/rc_probe.dart` 会消费它 —— 用来把心跳从"真回执"里'
+        '剔除，并统计心跳条数以区分「端点离线」与「密钥不匹配」'
+        '（BUG-052 的教训：心跳曾让"密文到达即通过"的判据恒真）。'
+        '因此它已**有人消费**，只是 App 内没有。',
     'scriptState': '`rc.script` 只被 `tool/rc_e2e_controller.dart`（RC-11/12）消费，'
         'App 内控制台看不到指令组执行进度 —— 端点侧靠通知栏自证，'
         '主叫侧无进度面板。属**已知体验缺口**，见 docs/17 本轮小节。',

@@ -1,4 +1,4 @@
-# 交接文档 HANDOVER（v1.7.3，2026-09-19）
+# 交接文档 HANDOVER（v1.8.0-alpha，2026-09-20）
 
 > **给下一个会话的第一句话**：读 §0 五分钟上手 → §1 状态快照 → §6 优先级清单，
 > 即可无缝续作，**无需向用户重复确认任何已在 §8 记录的决策**。
@@ -11,19 +11,26 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-19）**：v1.7.3，功能层 **370/370** + 压测 **24/24** 全绿，
+**当前状态（2026-09-20）**：v1.8.0-alpha，功能层 **407/407** + 压测 **24/24** 全绿，
 `flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
+**仿真多机连通已真正打通**（模拟器端点 ↔ 宿主控制器，走**真实公网 broker**，
+`tool/rc_probe.dart` **9/9**，含远程任务 CRUD 8 步）—— 见 §1.14。
 **真机已能装上并跑通设备冒烟（4/4，arm64 / Android 16）**，
 但**批量安装被厂商的 10 秒倒计时确认弹窗挡住** —— 见 §6 第 1 项与 §7。
 
 **一条命令跑完全部门禁**（第十三轮起，环境见 §3，**先关模拟器**）：
 
 ```bash
-bash scripts/gates.sh          # analyze + 功能 370 + 压测 24；EXIT=1 即有失败
+bash scripts/gates.sh          # analyze + 功能 407 + 压测 24；EXIT=1 即有失败
 # 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
 #   真机装不上时用 DEV=emulator-5554 显式指定；脚本默认**优先模拟器**
 # AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
 ```
+
+> ⚠️ **`WITH_DEVICE=1` 会把模拟器一起带进功能/压测层** → 压测层被 CPU 争用污染
+> （第十七轮实测：`GT-03` 1754ms > 1500ms 假红，**关掉模拟器后 +24 全绿**）。
+> **正确姿势**：① 关模拟器跑 `bash scripts/gates.sh` 取干净的 analyze/功能/压测；
+> ② 再开模拟器**单独**跑设备三条（见下方两条命令）。
 
 **需要设备的两条**（先 `emulator -avd sonic_test -no-snapshot-save` 并等
 `sys.boot_completed=1`）：
@@ -62,9 +69,9 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 
 | 项 | 状态 |
 |---|---|
-| 版本 | **1.7.3+14**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
-| 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→**v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）** |
-| 测试 | **功能层 370/370 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **真机冒烟 4/4（arm64 / Android 16）** / 模拟器桥接 6/6 × 3 种网络状态 |
+| 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
+| 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
+| 测试 | **功能层 407/407 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟡 **部分闭环**（第十六轮）：冒烟 **4/4** 已跑通；桥接/AOT/双端点 E2E 因**每次安装需人工点确认框**而未执行 |
@@ -76,8 +83,9 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 | **条件层每轮复用** | ✅ **已闭环**（第十二轮，BUG-044）：一轮固定 4 次平台往返，与任务数解耦；AOT 50 任务 **584ms → 17ms（34×）** |
 | **v1.7 条件层设备端验证** | ✅ **已闭环**（第九/十轮）：`MODE_IN_CALL` 用模拟器真实通话覆盖；`wifi`/`cellular` 用模拟器虚拟 AP 覆盖；`NativeBridge` 另有 39 例宿主机契约锁 |
 | Release | ✅ app-release.apk（历史轮次）；app-profile.apk 148.0MB（AOT 验收用） |
-| 文档 | docs/00–18 + CHANGELOG + 测试报告（docs/12 含 §1–§25 全量数据）+ 续作主干 docs/17（每轮一节，至 §22） |
-| **唯一 P0 阻塞** | **真机"能装一次、装不了第二次"**：设备在手（`960f853`，Xiaomi `23116PN5BC` / arm64-v8a / Android 16 / SDK 36），`adb install` 会弹厂商的 **10 秒倒计时确认框**（「继续安装」/「拒绝（10）」），无人点击即自动拒绝 → `INSTALL_FAILED_USER_RESTRICTED`。`input keyevent`/`input tap` 仍缺 `INJECT_EVENTS`，`sendevent` 的触摸节点 shell 不可写，shell 也无 `WRITE_SECURE_SETTINGS` → **无法程序化点掉它**。见 §6 第 1 项 |
+| 文档 | docs/00–19 + CHANGELOG + 测试报告（docs/12 含 §1–§27 全量数据）+ 续作主干 docs/17（每轮一节，至 §24） |
+| **唯一 P0 阻塞** | **真机当前不在线 + 厂商确认弹窗**。①**设备不在线**：`960f853` 在第十五轮执行 `adb root` 后从 `adb devices` 消失，第十六/十七轮**均未回来**（`adb devices -l` 只剩 `emulator-5554`）→ 需人工重新插拔 USB / 在设备上重新授权调试。②**装得上但需人工点击**：`adb install` 会弹厂商 **10 秒倒计时确认框**（「继续安装」/「拒绝（10）」），无人点击即自动拒绝 → `INSTALL_FAILED_USER_RESTRICTED`（文案里的 "by user" **是超时，不是用户点了取消**）。`input keyevent`/`input tap` 缺 `INJECT_EVENTS`，`sendevent` 触摸节点 shell 不可写，shell 无 `WRITE_SECURE_SETTINGS` → **无法程序化点掉**。⚠️ 不要在真机上试 `adb root`（MIUI production build 上执行后设备会从 adb 消失）。见 §6 第 1 项 |
+| **仿真多机连通** | ✅ **已闭环**（第十七轮）：**双机远程链路不再需要真机验证** —— 模拟器端点 ↔ 宿主控制器，走真实公网 `broker.emqx.io`，**9/9**（8 条单命令 + 远程任务 CRUD 8 步），单程 ≈630ms、解密失败 0。真机剩下的增量只有 ①厂商安装策略 ②真实无线环境（对称 NAT / 真实扬声器出声） |
 
 **产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
 核心红线：拒绝一切「未经授权控制他人设备」的实现（docs/16 §8 有完整
@@ -130,6 +138,111 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 
 **测试门禁已变**（上一会话记录的 93 已过期）：非性能 **318** + 性能 **24** = **342**
 （截至第十四轮已增至非性能 **336** + 性能 **24** = **360**，见 §1.10）。
+
+### 1.14 第十七轮（2026-09-20）：仿真多机连通 **9/9** + 探针密钥身份错配（BUG-052）
+
+**主题：把"互通验证"从假绿改成真绿。**
+
+**BUG-052（P2，验证工具级）** —— `tool/rc_probe.dart` 用 `(selfCode, '{selfId}|cmd')`
+派生**命令**密钥，而协议规定按**接收方身份**派生（端点侧是
+`(ownCode, '{ownId}|cmd')`），两者**永不相等** → 端点解密失败后静默 return
+→ **命令从未被处理**。而通过判据是"`evt` 上出现任意密文"，
+端点每 **60s** 的心跳恰好能满足它 → **假的"全链路闭环"**。
+
+修复：命令密钥改用**端点**身份；判据改为**解密成功 + 类型对 + `for` 与命令 id 一致**；
+心跳显式剔除；失败时打印"密文/心跳/解密失败"计数以区分**离线**与**密钥不匹配**。
+
+**仿真多机连通实测（本轮主要交付）**：宿主控制器（纯 Dart VM）
+→ **真实公网 broker `broker.emqx.io`** → 模拟器端点（`sonic_test` x86_64）：
+
+```
+✓ ping / status.get / task.list / asset.list / preset.list /
+  device.status / logs.recent / sound.play        = 8/8
+✓ crud（远程任务增/查/计划物化/改/删/清理，8 步）  = 8/8
+探针结果: 9/9 通过 · 单程往返 ≈ 630ms · 解密失败 0
+```
+
+**本项目第一次真正闭环的跨机验证。** 端点侧准备脚本见 §1.14 对应的
+docs/12 §27.2（`-no-window` 无头启动 + `run-as` 注入配对 prefs + `monkey` 拉起）。
+
+**顺带纠正两条上一轮的结论**：
+
+1. **BUG-051 定级下调** —— 上一轮推断"`status.get` 超时 = 处理器抛异常"。
+   本轮实测：跑在**不含该修复的旧 APK** 上的 `status.get` **正常应答（641ms）**
+   → 该因果**已证伪**；真实原因是 BUG-052。`guardDispatch` 保留为**防御性加固**，
+   但**不得再作为"超时"的解释引用**。
+2. **`planned=0` 不是缺陷** —— 免打扰默认 **22:00–07:00**，
+   `quietPolicy=skip` 按设计丢弃 03:30 的时刻。改成正午 12:30 → `planned=2`。
+   **已把 03:30 保留为负向对照**，让免打扰语义也进入验证范围。
+
+**测量坑（本轮两次假红，都靠"先怀疑测量"化解）**：
+`WITH_DEVICE=1` 整跑时模拟器与 `flutter_tester` 争 CPU →
+压测 `GT-03` 1754ms > 1500ms 假红（**关掉模拟器后 +24 全绿**）；
+设备冒烟首跑 FAIL，单独重跑 4/4 全绿。**取数姿势见 §0 的告示块。**
+
+**新增锁**：`test/rc_probe_keys_test.dart`（16 例）把"探针发的命令端点能解"
+变成**宿主机可断言**的量（不需要 broker、不需要设备），含 2 例
+"**旧写法必须失败**"防止该组锁恒真。
+
+**追加闭环：BUG-053 —— 把"压测层假红"改成稳定绿。**
+
+文档同步完成后跑完整门禁，**as-found 是 `EXIT=1`**：功能层 `+407` 全绿，
+但压测 `GT-07` 红（`455ms > 400ms`）。排查发现**同一份代码红绿翻转**
+（单独跑 6/6 绿且 <1s）→ 测量问题，不是代码回归：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 测量方式 | 裸 `Stopwatch` **单次采样**（违反本文件头"统一用 `benchMsAsync`"的约定） | `benchMsAsync`（预热 3 + **min-of-5**） |
+| 阈值 | 400ms（≈ 基线 × 7.8，却仍假红） | **160ms（= 基线 51ms × 3）** |
+| 稳定性 | 全套件下约 **50% 假红** | 51/53ms（负载/单独差 <4%），**不再翻转** |
+
+**关键认识**：旧阈值"松"并不等于"不假红" —— **噪声放大倍数（9×）比余量（7.8×）还大**。
+**余量必须与噪声幅度比，而不是与基线比。**
+证伪：注入"按已有条数重复写盘"→ `Actual: <4595>` 红；还原后 `PROBE-` 残量 0。
+
+**真机测试本轮未执行**：`adb devices -l` / `adb reconnect offline` /
+`adb kill-server` 三次尝试均无法恢复真机 `960f853`（自第十五轮 `adb root` 后消失）
+→ 阻塞点已从「厂商弹窗需人工点」**前移到**「设备根本不在 adb 列表里」。
+真机唯一增量只剩 ①厂商安装策略 ②真实无线环境；**双机远程链路已由模拟器闭环覆盖**。
+
+**设备层全部重跑**（模拟器 `sonic_test` x86_64）：
+冒烟 **4/4（23s）**、桥接 **6/6（8s）**、**仿真多机连通复验 9/9**、AOT **6/6**。
+连通复验证据：`evt 密文 24（心跳 1、解密失败 0）`、明文哨兵 0、
+端点自报 `version=1.8.0-alpha`、`/proc/net/tcp` 见 `ESTABLISHED → broker.emqx.io:1883`。
+
+**⚠️ 新增环境陷阱（本轮最有价值的发现之一，务必先看）**：
+`build/app/outputs/flutter-apk/app-debug.apk` 在跑过
+`flutter test integration_test/…` / `flutter drive` 之后，
+**会被替换成 integration_test 的"测试入口包"**（Dart 入口是测试文件而非 `lib/main.dart`）。
+用它 + `monkey` 拉起 → **永久停在 Flutter 闪屏**：不建 DB、不连 broker、**无任何报错**。
+**判据：真包 ~245MB / 测试包 ~144MB**；恢复用 `flutter build apk --debug`。
+本轮为此先后误判到 `main.dart` 的 await 链、sqflite、prefs 注入三处，
+**真因在构建产物层**。§6 的配方已加入体积校验。
+
+**AOT 又一次假红（BUG-054，P3）**：第一次 `flutter drive --profile` → `+5 -1`，
+唯一失败是那条**故意不归一化**的基准护栏（`exec_logs 5000 条逐条 20000ms = 4ms/次 × 5000`），
+而该轮**基准本身自报 4839µs/次 > 4ms/次**；**全部自归一化预算都通过**。
+重启模拟器复跑 → 基准 **2046µs/次（快 2.4×）**、**+6 全绿**。
+→ 判定为**模拟器性能状态**，非代码回归；**本轮不擅自放宽验收阈值**，
+BUG-054 登记为待办（建议放宽到「最差实测 × 2」或改为与独立原语对比的相对护栏）。
+
+### 1.13 第十六轮补记（2026-09-20）：多条件×随机编排（docs/19）+ 互通探针 —— 以及一次**假的绿**
+
+上一轮交接称"全量 **401/401** 全绿 + 文档已全部同步"。开工前实测**推翻**：
+
+| 交接叙述 | 仓库实况 |
+|---|---|
+| "全量 401/401 全绿" | 功能层 **FAIL**（391 例中 1 例红：`[1.8.0-alpha]` 的 CHANGELOG 章节被插在 `[1.7.2]`/`[1.7.1]` 之间，违反版本锁） |
+| "HANDOVER + CHANGELOG + docs/19 + docs/17 已全部同步" | `docs/17` 停在 §22、`docs/12` 停在 §25；HANDOVER 无 docs/19 / rc_probe / 1.8.0 字样 |
+| "`status.get` 超时 = BUG-047（Battery 挂起）" | ① `BUG-047` 编号已被占用；② `status.get` 处理器**根本不碰 Battery** |
+| "`ping` ✓ 全链路闭环" | 复跑 **0/3**（根因 = §1.14 的 BUG-052） |
+
+**真实交付成立的部分**：`docs/19`（概率门 + 动作集加权随机）+ 7 例 TDD、
+`tool/rc_probe.dart` 工具本体。
+
+> **教训**：交接宣称 **401** 例、实测 **391** 例 —— **数字对不上就是脱节的第一个信号**。
+> ⚠️ 另注意 `flutter test` 失败时打印的 `+330 -1` 是**失败那一刻的全局进度**，
+> **不是总数**；总数只看收尾的 `+NNN: All tests passed!`。
 
 ### 1.11 第十五轮（2026-09-19）：真机接入尝试（被厂商策略阻塞）+ `sound.play` 点名被静默替换（BUG-048）
 
@@ -571,8 +684,10 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
 > （实测 2475µs vs 1565µs），会让绝对值型断言误红（BUG-043）。
 
 **关键命令**：
-- 测试分层：`flutter test --exclude-tags perf`（功能 **336** 例）/
+- 测试分层：`flutter test --exclude-tags perf`（功能 **407** 例）/
   `flutter test --tags perf --concurrency=1`（压测 **24** 例；混跑会因 CPU 争用假红——这是特性不是 bug）
+  > ⚠️ 失败输出里的 `+330 -1` **是"失败那一刻的进度"，不是总数** ——
+  > 真实总数只看结尾的 `+NNN: All tests passed!`（第十七轮踩过：一度把 331 当总数，实为 391）。
 - 构建：`flutter build apk --release` / `flutter build apk --profile`
   （**输出必须重定向到文件**，见 §7）
 - **AOT 性能验收（绝对验收，可常态化跑；`flutter drive` 会自行重建 APK）**：
@@ -586,15 +701,22 @@ until [ "$(adb -s emulator-5554 shell getprop sys.boot_completed | tr -d '\r')" 
   ```
 - 模拟器装测：`scripts/emulator_test.ps1`
 
-> **真机（第十五轮实测）**：设备可能**存在但不可用** ——
-> Xiaomi/Redmi（HyperOS）默认拒绝 adb 安装：
-> `adb install` → `INSTALL_FAILED_USER_RESTRICTED`（注意 **"by user" 不是**
-> 用户在弹窗上点了取消，是厂商策略直接拒绝，**不要去屏幕上找不存在的弹窗**），
-> 且 `input keyevent` 报 `SecurityException: … INJECT_EVENTS`
-> （连 UI 自动化都不行）。需在设备上开「USB 安装」+「USB 调试（安全设置）」。
-> 因此 `scripts/gates.sh` 的设备选择是 **`DEV=` 显式优先 → 否则优先模拟器**，
+> **真机（第十五/十六/十七轮实测，结论已被推翻过一次，务必看全）**：
+> ① 设备可能**存在但不在线**：`960f853` 在第十五轮执行 `adb root` 后从
+> `adb devices` 消失，此后**未回来**。**不要在真机上试 `adb root`**。
+> ② Xiaomi/Redmi（HyperOS/MIUI）默认拦截 adb 安装：
+> `adb install` → `INSTALL_FAILED_USER_RESTRICTED`，且 `input keyevent` 报
+> `SecurityException: … INJECT_EVENTS`（连 UI 自动化都不行）。
+> ③ ⚠️ **同一条报错文案 `Install canceled by user` 对应两种完全不同的状态**：
+> **开关关掉（直接拒绝）** 与 **厂商「USB 安装提示」弹窗 10 秒倒计时超时** ——
+> 第十六轮实测确认：`adb install` **返回过 `Success`**，冒烟 **4/4 全绿**，
+> 而每次安装**确实会弹**一个「[继续安装] [拒绝（10）]」框，无人点击即默认拒绝。
+> 所以 **"by user" 里的 user 就是这次超时**。
+> **第十五轮曾据此断言"弹窗不存在、不要去屏幕上找" —— 那是错的。**
+> **判据：看到 "by user" 必须先 `adb shell screencap` 抓现行截图，再下结论。**
+> ④ `scripts/gates.sh` 的设备选择是 **`DEV=` 显式优先 → 否则优先模拟器**，
 > 不要写"取第一台设备"。
-> 另：判断真机能否连上 broker **不要用 `ping`**（ICMP 常被丢，会误判），
+> ⑤ 判断真机能否连上 broker **不要用 `ping`**（ICMP 常被丢，会误判），
 > 用 TCP：`adb shell "toybox nc -w 5 broker.emqx.io 1883 < /dev/null; echo RC=$?"`。
 
 ## 4. 关键架构速记
@@ -794,8 +916,52 @@ Monkey 400 零崩溃。
 
 ## 6. 下一步优先级（按序执行）
 
+> **第十七轮更新（重要）**：**"仿真多机连通"已打通** —— 模拟器端点 ↔ 宿主控制器，
+> 走**真实公网 broker**，`tool/rc_probe.dart` **9/9**（8 条单命令 + 远程任务 CRUD 8 步）。
+> 因此**"双机远程链路"不再需要真机来验证**；真机剩下的增量只有
+> ①**厂商安装策略** ②**真实无线环境**（对称 NAT / 真实扬声器出声）。
+>
+> 模拟器侧一键复现（详见 docs/12 §27.2 / §28.11 / docs/19 §8）：
+> ```bash
+> emulator.exe -avd sonic_test -no-snapshot-save -no-audio -no-boot-anim \
+>              -no-window -gpu swiftshader_indirect
+> # ⚠️⚠️ 装之前**必须**先确认这是"真应用包"（第十七轮踩坑，docs/12 §28.11）：
+> #   跑过 flutter test integration_test/… / flutter drive 之后，
+> #   这个路径会变成 **integration_test 的"测试入口包"**（入口是测试文件，
+> #   不是 lib/main.dart）→ monkey 拉起后**永久停在 Flutter 闪屏**，
+> #   不建 DB、不连 broker、无任何报错，极易误判成"应用启动 hang"。
+> #   判据：真包 ~245MB / 测试包 ~144MB。测试包用下面这条重新产出真包：
+> ls -l build/app/outputs/flutter-apk/app-debug.apk   # 144MB 就停下！
+> flutter build apk --debug                           # 输出必须重定向到文件
+> adb -s emulator-5554 install -r -t build/app/outputs/flutter-apk/app-debug.apk
+> adb -s emulator-5554 push build/rc_prefs.xml /data/local/tmp/
+> adb -s emulator-5554 shell "run-as com.sonicshield.sonic_shield \
+>   mkdir -p shared_prefs && run-as com.sonicshield.sonic_shield \
+>   cp /data/local/tmp/rc_prefs.xml shared_prefs/FlutterSharedPreferences.xml"
+> adb -s emulator-5554 shell monkey -p com.sonicshield.sonic_shield \
+>   -c android.intent.category.LAUNCHER 1
+> # 验证端点真的连上了（没有这一步，探针失败时无法区分"离线"与"密钥不匹配"）：
+> adb -s emulator-5554 shell "cat /proc/net/tcp" | grep -i 075B   # 期望 state=01
+> # 宿主侧（注意：命令密钥用**端点**配对码，回执用**探针自己**的配对码）
+> dart run tool/rc_probe.dart endpoint=e2e-endpoint-001 endpointcode=12345678 \
+>   selfid=e2e-probe-000001 selfcode=87654321 \
+>   probe=ping,status,tasks,assets,presets,device,logs,sound,crud
+> ```
+> ⚠️ 参数用 `key=value`（无 `--` 前缀）：`dart run` 会吞掉连字符开头的参数。
+> ⚠️ `run-as` 需要 `shared_prefs/` 已存在；首次安装时该目录还不存在 →
+> **先 `mkdir -p shared_prefs`**（否则 `cp` 报 `No such file or directory`）。
+
 1. **P0 真机补测协助会话握手**（S3 验收的最后残余维度）。
-   **状态（第十六轮更新）：真机能装上并已跑通冒烟 4/4，但"批量安装"卡在厂商确认弹窗。**
+   **状态（第十七轮更新）：设备当前不在线，先解决"看得见设备"再谈安装。**
+   `adb devices -l` 只剩 `emulator-5554`；真机 `960f853` 自第十五轮 `adb root`
+   后从 adb 列表消失，第十六/十七轮均未回来。
+   **第一步（人工，1 分钟）**：重新插拔 USB 线 / 换一根**数据线**（非充电线）/
+   在设备上重新允许 USB 调试；`adb reconnect offline` 已试过无效。
+   **⚠️ 不要再试 `adb root`** —— MIUI production build 上执行后设备会直接
+   从 `adb devices` 消失、系统层 USB 也查不到（第十五轮实测）。
+
+   **设备回来后**（第十六轮已取得的结论）：真机能装上并已跑通冒烟 4/4，
+   但"批量安装"卡在厂商确认弹窗。
    真机 `960f853` = Xiaomi `23116PN5BC`（arm64-v8a / Android 16 / SDK 36）。
 
    **已确认可行的**：`adb install -r -t` 有时返回 `Success`；随后
@@ -1061,20 +1227,42 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 §22，第十六轮）拿到「尚未闭环」清单，
-以及 docs/12 的最后一节（当前是 §25）拿真实门禁数据。
-项目当前是 v1.7.3：功能层 370/370、压测 24/24、analyze 零问题。
+再读 docs/17 的最后一节（当前是 §24，第十七轮，含 ⑨⑩⑪ 追加闭环）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §28）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 407/407、压测 24/24、analyze 零问题，
+`bash scripts/gates.sh` → EXIT=0。
+**仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
+`tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
+⚠️ 第十七轮推翻/纠正了四条旧叙述，**读 §1.13 / §1.14 再动手，别沿用旧叙述**：
+① BUG-051 的"处理器异常致超时"因果（已证伪）；② `planned=0` 是缺陷（其实是
+免打扰语义，正确行为）；③ 探针"ping ✓ 全链路闭环"（其实是 BUG-052 的假绿）；
+④ HANDOVER §3 曾写"`by user` 不是弹窗超时、不要去屏幕上找弹窗"（**已被实测推翻**，
+弹窗确实存在，10 秒倒计时默认拒绝）。
+⚠️ **压测层刚修过一条抖动用例**（BUG-053）：`GT-07` 曾用裸 `Stopwatch` 单次采样，
+导致同一份代码时红时绿。**若你看到压测红，先看该用例是否用了 `benchMs*`**。
 
 【第 2 步 · 选一个未完成项（按 §6 顺序）】
-§6 第 1 项（真机补测协助会话握手）是唯一 P0。**第十六轮起情况又变了**：
-真机**能装上了**（`adb install` 返回过 `Success`），且**冒烟 4/4 已跑通**；
+§6 第 1 项（真机补测协助会话握手）是唯一 P0，但**第十七轮起阻塞点前移了一层**：
+
+**第 0 步（新的第一步）：先确认设备在不在。**
+第十七轮实测 `adb devices -l` 只剩 `emulator-5554` —— 真机 `960f853` 自第十五轮
+`adb root` 后消失，`adb reconnect offline` 与 `adb kill-server && adb start-server`
+**都无法恢复**。**这是物理层/授权层问题，adb 命令治不了**，需要人工
+重新插拔 USB（换一根**数据线**）/ 在设备上重新允许 USB 调试。
+⚠️ **不要再试 `adb root`**（MIUI production build 上执行后设备会从 adb 消失）。
+
+**设备回来之后**，情况是（第十六轮结论）：真机**能装上了**
+（`adb install` 返回过 `Success`），且**冒烟 4/4 已跑通**；
 但**每次安装都会弹一个 10 秒倒计时的厂商确认框，无人点击即自动拒绝**
 （`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` 的 "by user"
-就是这次超时）。而 `flutter test integration_test/…` 跑完会卸载应用 →
+**就是这次超时** —— 第十六轮实测确认弹窗**确实存在**，别信 §3 旧注里
+"不要去找弹窗"的说法）。而 `flutter test integration_test/…` 跑完会卸载应用 →
 每跑一个设备用例都要重装一次 → **需要人工点一次**。
-**先跑 `adb devices` 确认设备在不在，再试着装一次**：
 - 装得上（有人在场点了）→ 直接跑 §6 第 1 项，命令与配对注入法都已备好；
 - 装不上 → 如实报告阻塞并转下一个非硬件项，**不要在这上面空转，也不要假报完成**。
+  **注意（第十七轮起）**："双机远程链路"这个维度**已经不需要真机了** ——
+  模拟器端点 ↔ 宿主控制器已跑通 9/9（§6 顶部有可粘贴的复现命令）。
+  真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
 1. **§6 第 14 项：覆盖锁的「缺口登记表」**（`test/rc_protocol_coverage_test.dart`）——
@@ -1095,8 +1283,16 @@ Monkey 400 零崩溃。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +370 / 370
+    flutter test --exclude-tags perf         → 期望 +407 / 407
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
+  ⚠️ `WITH_DEVICE=1` 会把**开着的模拟器**带进功能/压测层 → 压测必然被 CPU 争用
+  污染（第十七轮实测 `GT-03` 1754ms > 1500ms 假红，关掉模拟器后 +24 全绿）。
+  ⚠️ **压测红还有第二个来源：用例没用 `benchMs*`**（BUG-053）。第十七轮
+  `GT-07` 就是裸 `Stopwatch` 单次采样 → 同一份代码在全套件下 455ms 红、
+  单独跑 <1s 绿。**看到"同一份代码时红时绿"，先看测量方式，别改代码。**
+  本套件约定：`test/performance_v2_test.dart` 里的用例一律用
+  `benchMs`/`benchMsAsync`（预热 + 取最小值），阈值取「实测基线 × 3」。
+  **正确姿势**：① 关模拟器跑 `bash scripts/gates.sh`；② 再开模拟器单独跑设备三条。
 · 改多行代码**只用 Edit 工具**，禁用 sed 多行替换。
   ⚠️ Edit 会偶发 `EBUSY` 并**静默不落盘**（报 success 但内容没进文件）——
   **改完关键文件必须 grep 复核**。
