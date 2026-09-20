@@ -193,21 +193,60 @@ void main() {
       // ── 基准：平台通道往返成本（必须最先测）────────────────────────
       //
       // 设备上**每次 sqflite 调用 = 一次 Dart→平台通道→原生 SQLite 往返**。
-      // 这条基准是**纯往返受限**的（5000 次 append = 5000 次往返），
-      // 因此它就是"本次运行里每次往返多少钱"的实测值。
+      // 单次往返成本**随机器状态浮动** —— 同一台机器、同一份 APK，
+      // 冷启 2475µs/次、热机 1565µs/次（1.6×，BUG-043）；后续实测更宽：
+      // **1963µs ↔ 4839µs（2.5×）**。任何"绝对 ms"预算都会因此红绿翻转：
+      // `任务 CRUD 500 次` 冷启 3340ms 撞 2000ms 预算、热机 1764ms 通过。
+      // 所以往返受限路径的预算一律**归一化**为「本次往返成本 × 调用次数 × 3」。
       //
-      // 为什么要先测：单次往返成本**随机器状态浮动** —— 同一台机器、同一份
-      // APK，冷启模拟器实测 2475µs/次，热机 1565µs/次（**1.6×**，BUG-043）。
-      // 任何"绝对 ms"预算都会因此红绿翻转：本轮实测 `任务 CRUD 500 次`
-      // 冷启 3340ms 撞 2000ms 预算、热机 1764ms 通过。
-      // 所以逐条路径的预算一律**归一化**为「本次往返成本 × 调用次数 × 3」，
-      // 与机器冷暖解耦，同时仍能抓住结构性回归（每次调用多一次往返 =
-      // 工作量翻倍 → 超 3× 余量）。
+      // ⚠️ **BUG-054（第十七轮续三修正）**：这条基准原先**自己给自己当基准** ——
+      // `perCallUs = singleMs / 5000`，而 `singleMs` 正是下面那条 5000 次 append
+      // 的测量值。于是被它归一化的用例自洽了，它**自己**却只能用一条硬编码的
+      // 绝对护栏（20000ms = 4ms/次，按"冷启 2.475ms/次"标定）。
+      // 实测该标定不成立：往返成本可到 4839µs/次 → 该护栏余量在
+      // **2.0× ↔ 0.83×** 之间摆动，**跨过 1.0 就红** —— 它成了本文件
+      // **唯一一条会随机器状态假红**的用例。
       //
-      // 这条基准自身**不**用归一化预算（否则等于 3× 自己、恒真）：
-      // 它保留 4ms/次 的绝对护栏（冷启实测 2.475ms/次，仍留 1.6× 余量）。
+      // 修法：**基准改用一个独立的、小规模的同类探针来测** —— 同样是
+      // `logs.append`（= 一次平台往返 + 一次 INSERT），但只跑 200 次。
+      // 与那条 5000 次的用例**解耦**，所以 `budgetFor(5000)` 不再是
+      // `3 × singleMs` 那种恒真断言，也不再依赖任何绝对 ms。
+      //
+      // ⚠️ **为什么探针必须与被护栏的用例"同类"**（第一次改错的教训）：
+      // 曾改用 `tasks.get(<缺失 id>)`（= 纯 1 次 SELECT）做探针，结果
+      // 写入路径的每次调用要 2~3 次往返 → 探针**低估**了单位成本 →
+      // `任务 500 条逐条写入` 实测 3534ms / 预算 3728ms，**只剩 1.05× 余量**
+      // —— 等于把 BUG-054 搬到另一条用例上。**归一化的单位必须与被护栏的
+      // 工作量同量级**，否则 3× 安全系数会被结构差异吃掉。
+      //
+      // 本护栏的语义（写清楚，免得被当成"绝对性能验收"）：
+      // 它断言的是**规模不变性** —— 5000 次调用的每次成本不得超过
+      // 200 次调用的每次成本的 3×。**均匀变慢抓不住**（两边一起变），
+      // 但**超线性退化**（例如丢了索引导致 append 变 O(n)）会被抓住。
+      const kProbeCalls = 200;
+      for (var i = 0; i < 20; i++) {
+        await logs.append(
+            source: 'probe', action: 'warmup', status: 'success'); // 预热
+      }
+      var probeMs = 1 << 62;
+      for (var r = 0; r < 3; r++) {
+        final sw = Stopwatch()..start();
+        for (var i = 0; i < kProbeCalls; i++) {
+          await logs.append(
+              source: 'probe', action: 'play', status: 'success');
+        }
+        sw.stop();
+        if (sw.elapsedMilliseconds < probeMs) probeMs = sw.elapsedMilliseconds;
+      }
+      final perCallUs = probeMs * 1000 / kProbeCalls;
+      int budgetFor(int calls) => (perCallUs * calls / 1000 * 3).round();
+      debugPrint('[NFR-AOT] 基准：每次日志写入 ${perCallUs.round()}µs'
+          '（探针 = $kProbeCalls 次 append；'
+          '逐条路径预算 = 本次单次写入成本 × 调用次数 × 3）');
+
+      // ── 被护栏的用例：5000 次 append = 5000 次往返（**不再自带基准**）──
       var singleMs = 1 << 62;
-      for (var r = 0; r < 2; r++) {
+      for (var r = 0; r < 3; r++) {
         final sw = Stopwatch()..start();
         for (var i = 0; i < 5000; i++) {
           await logs.append(
@@ -220,11 +259,7 @@ void main() {
         sw.stop();
         if (sw.elapsedMilliseconds < singleMs) singleMs = sw.elapsedMilliseconds;
       }
-      final perCallUs = singleMs * 1000 / 5000;
-      int budgetFor(int calls) => (perCallUs * calls / 1000 * 3).round();
-      debugPrint('[NFR-AOT] 基准：每次平台往返 ${perCallUs.round()}µs'
-          '（逐条路径预算 = 本次往返成本 × 调用次数 × 3）');
-      report('exec_logs 5000 条**逐条**写入 + recent', singleMs, 20000);
+      report('exec_logs 5000 条**逐条**写入 + recent', singleMs, budgetFor(5000));
 
       // 任务 CRUD 500 次 = **1000 次往返**（500 upsert + 500 get）
       var crudMs = 1 << 62;
@@ -315,8 +350,9 @@ void main() {
       expect(writeBatchMs, lessThanOrEqualTo(500),
           reason: '任务批量写入实测 ${writeBatchMs}ms（批量 = 单次往返，'
               '应与往返次数解耦）');
-      expect(singleMs, lessThanOrEqualTo(20000),
-          reason: '逐条日志写入实测 ${singleMs}ms（护栏 4ms/条）');
+      expect(singleMs, lessThanOrEqualTo(budgetFor(5000)),
+          reason: '逐条日志写入实测 ${singleMs}ms（本次每次往返 '
+              '${perCallUs.round()}µs → 5000 次预算 ${budgetFor(5000)}ms，3× 余量）');
       expect(batchMs, lessThanOrEqualTo(3000),
           reason: '批量日志写入实测 ${batchMs}ms');
       expect(aggMs, lessThanOrEqualTo(50), reason: '聚合实测 ${aggMs}ms');
