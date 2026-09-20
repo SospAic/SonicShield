@@ -622,6 +622,12 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   static String _weekdayName(int d) =>
       const ['一', '二', '三', '四', '五', '六', '日'][(d - 1).clamp(0, 6)];
 
+  /// 动作 kind → 展示用的 type 名。
+  ///
+  /// ⚠️ 必须覆盖 [ActionConfig.fromJson] 认识的**全部** kind（由
+  /// `test/remote_label_perm_coverage_test.dart` LBL-01 强制）。
+  /// 漏一个的后果（本轮实测）：组合动作的主动作是"随机指令集/嵌套组合"时，
+  /// 摘要显示成「通知 + 」（**空标签**），用户看不出这任务到底要干什么。
   static String _kindToType(Object? kind) => switch (kind) {
         'play' => 'playAudio',
         'soundscape' => 'soundscape',
@@ -629,6 +635,8 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         'notify' => 'notify',
         'record' => 'recordEvidence',
         'vibrate' => 'vibrate',
+        'composite' => 'composite',
+        'randomFrom' => 'randomFrom',
         _ => '',
       };
 
@@ -639,7 +647,8 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         'randomWindow' => '随机窗口',
         'randomInterval' => '随机间隔',
         'soundTriggered' => '声音触发',
-        _ => '${raw ?? '未知触发'}',
+        // ⚠️ 空串也要给得出名字：`''` 不是 null，`'${raw ?? …}'` 会渲染成空白。
+        _ => (raw == null || '$raw'.isEmpty) ? '未知触发' : '$raw',
       };
 
   static String _actionLabel(Object? raw) => switch (raw) {
@@ -650,6 +659,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         'recordEvidence' => '录音取证',
         'vibrate' => '震动',
         'composite' => '组合动作',
-        _ => '${raw ?? '未知动作'}',
+        'randomFrom' => '随机指令集',
+        _ => (raw == null || '$raw'.isEmpty) ? '未知动作' : '$raw',
       };
 }
