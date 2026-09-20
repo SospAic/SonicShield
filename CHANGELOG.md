@@ -425,6 +425,53 @@
 - **真机设备桥接（`native_bridge_test`，6 例）本轮未取得数据**（被同一弹窗拦住）。
 - 缺口登记表剩 3 条（`taskGet` / `photo` / `heartbeat`），**均有正当理由、非缺陷**。
 
+### 第十七轮补记（八）（2026-09-20）：真机门禁**前置步骤落地**（预装 + `--no-uninstall`）+ 首次**真机桥接数据** + 「链路掉了 ≠ 代码回归」
+
+> 主题：把"**人工点一次**「继续安装」"从**口头约定**变成**门禁脚本里的一个分支**，
+> 并实测确认 `--no-uninstall` 真的保留了应用。
+
+#### Added（新增）
+- `scripts/gates.sh` 设备层重做：
+  - **`ensure_device_app()`**：跑设备用例前先确保设备上**已有应用**；没有就先 `adb install`
+    （`PREINSTALL_TRIES` 次重试，引导人工点一次厂商确认框）。依据：厂商弹窗的触发条件是
+    "设备上有没有这个应用"，与传输方式无关（见补记（七））。
+  - **设备用例一律加 `--no-uninstall`**：跑完**保留应用** → 下次走**覆盖安装**（无弹窗）。
+    （`flutter test` 默认 `--uninstall`，跑完卸载 → 下次又退回"全新安装"。）
+  - **`device_alive()` / `is_transport_failure()` / `run_device_test()`**：把
+    「传输链路掉了」从「用例失败」里分出来 → 归 **`BLOCKED`**，不污染代码红灯。
+  - **`BLOCKED` 计数器 + 退出码 `3`**：`0`=全绿；`1`=门禁失败（代码回归）；
+    **`3`=代码全绿但有环境阻塞（未执行 ≠ 失败）**。
+  - `ONLY_DEVICE=1`（只跑设备层）、`SKIP_PREINSTALL=1`、`APP_ID=`（可覆盖，用于**证伪 BLOCKED 分支**）、
+    `PREINSTALL_TRIES=N`。
+
+#### Fixed（缺陷修复）
+- **脚本自身**：字符串里的**反引号被当命令替换执行**（`` echo "…`input tap`…" `` 真的执行了
+  `input tap` → `line 139: input: command not found`）。
+- **脚本自身**：`adb install … | tail -1` **把失败原因吞成空行**（预装 3 次尝试输出全是空行）。
+  → 改为捕获完整输出、无输出时显式打印 `[no output] RC=…`。**这是本项目已总结过的
+  `tail -1` 教训在新代码里的复发**，修完立刻可见 `adb.exe: device '…' not found`。
+
+#### Tested（真实执行数据）
+- **真机设备桥接 `native_bridge_test` 首次取得数据：6/6 全绿**（此前两轮均为"未取得数据"）。
+- **真机设备冒烟 `app_smoke_test`：4/4 全绿**（`--no-uninstall`）。
+- **`--no-uninstall` 效果实测确认**：跑完 `pm list packages | grep sonic`
+  → `package:com.sonicshield.sonic_shield` **仍在**。
+- **设备层三分支全部实测**：已装→**EXIT=0**；未装+预装成功（模拟器）→**EXIT=0**；
+  设备不可连→**BLOCKED / EXIT=3**。
+- 宿主三层：analyze **No issues found**（12.7s）；功能层 **465/465**（00:22）；
+  压测层 **24/24**（01:07）；`bash scripts/gates.sh` → **EXIT=0**。
+
+#### Known Issues
+- ⚠️ **真机无线调试链路不持久**：第二次复跑时桥接红，根因不是用例而是
+  **设备侧无线调试已关闭/设备离开网络** → `adb devices` 与 `adb mdns services` 皆空、
+  `192.168.2.11:{39715,38659,5555}` 三个端口全 **refused(10061)**、**adb server 亦已死掉**。
+  **再次使用需设备侧重新开启无线调试**（脚本无法代劳）。
+  该判据已固化为 `is_transport_failure()` → `BLOCKED`。
+- **首次预装仍需人工点一次**「继续安装」（设备缺 `INJECT_EVENTS`，`input tap` 不可用）。
+  ⚠️ **"引导文案 → 人工点击 → 成功"的完整时序未取到**（点击发生时正在跑门禁）。
+- **BUG-022**、`ethernet`/`vpn`、`camera.snap`（等 AGP9）、YAMNet（模型源不可达）。
+- 缺口登记表剩 3 条（`taskGet` / `photo` / `heartbeat`），**非缺陷**。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对
