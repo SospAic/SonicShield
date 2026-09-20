@@ -53,6 +53,29 @@ class EngineState {
       };
 }
 
+/// 一条声景轨道要播哪条音源（**纯决策，便于断言**）。
+///
+/// 顺序：`assetId`（点名具体音源）→ `presetCategory`（点名分类，分类内随机）
+/// → **就此为止，不再兜底**。
+///
+/// ⚠️ **BUG-059**：修之前这里还有第三级 `pickAnyAssetPath()`（"库里任意一条"）。
+/// 但 [SoundscapeTrack] 断言 `assetId` / `presetCategory` **必居其一**，
+/// 所以那一级**只可能在"点名了却没找到"时触发** —— 效果是：
+/// 用户挑的某条音源被删了，任务却**静默改播一条完全不相干的声音**。
+/// 这正是 BUG-048 判据「**点名了就必须满足，满足不了要失败，绝不 `??=`**」的形状。
+///
+/// 为什么不保留兜底：声景的每一轨都是用户**显式挑的**，缺一轨的正确后果是
+/// "这轨不响 + 审计留痕"，而不是"拿别的声音凑数"（用户听不出来，也没法发现配置坏了）。
+///
+/// 抽成纯函数而不是留在调用处：`lib/services/background_engine.dart` 依赖真实
+/// DB / 播放器 / 日志，宿主机上实例化不了；**签名里根本没有"任意一条"这个入参**
+/// → 想退回兜底就必须先改签名，"不兜底"因此是**结构性**的，比源码锁更强。
+String? soundscapeTrackPath({
+  required String? byId,
+  required String? byCategory,
+}) =>
+    byId ?? byCategory;
+
 /// 后台调度引擎：运行于 flutter_background_service 的前台服务隔离。
 ///
 /// 双通道触发（详见 docs/05）：
@@ -176,27 +199,25 @@ Future<void> _engineBody(ServiceInstance service) async {
     return rows.isEmpty ? null : rows.first['path'] as String;
   }
 
-  /// 任意一条音源路径（按最近导入优先）。
-  Future<String?> pickAnyAssetPath() async {
-    final rows =
-        await db.db.query('audio_assets', orderBy: 'created_at DESC', limit: 1);
-    return rows.isEmpty ? null : rows.first['path'] as String;
-  }
-
   /// 声景混音：逐轨解析路径（assetId 优先，其次预置分类随机），多轨叠加。
+  ///
+  /// ⚠️ 解析不到的轨道**直接跳过**，绝不拿别的音源顶上（见 [soundscapeTrackPath]）。
   Future<void> soundscapeAndLog(
       Task task, SoundscapeAction sc, String source) async {
     final tracks = <SoundscapeTrackInput>[];
+    var unresolved = 0;
     for (final t in sc.tracks) {
-      var path = t.assetId != null ? await assetPathById(t.assetId!) : null;
-      path ??= t.presetCategory != null
-          ? await presetPathByCategory(t.presetCategory!)
-          : null;
-      path ??= await pickAnyAssetPath();
-      if (path != null) {
-        tracks.add(
-            SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
+      final path = soundscapeTrackPath(
+        byId: t.assetId != null ? await assetPathById(t.assetId!) : null,
+        byCategory: t.presetCategory != null
+            ? await presetPathByCategory(t.presetCategory!)
+            : null,
+      );
+      if (path == null) {
+        unresolved++;
+        continue;
       }
+      tracks.add(SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
     }
     if (tracks.isEmpty) {
       await logs.append(
@@ -204,8 +225,21 @@ Future<void> _engineBody(ServiceInstance service) async {
           action: 'soundscape',
           status: 'failed',
           taskId: task.id,
-          message: '无可解析的音轨');
+          message: sc.tracks.isEmpty
+              ? '无可解析的音轨'
+              : '${sc.tracks.length} 轨全部无法解析'
+                  '（点名的音源已不存在），已跳过而非改播其它音源');
       return;
+    }
+    // 部分轨解析不到也要留痕：否则用户听的是"少了轨的声景"却以为配置没生效。
+    if (unresolved > 0) {
+      await logs.append(
+          source: source,
+          action: 'soundscape',
+          status: 'failed',
+          taskId: task.id,
+          message: '$unresolved/${sc.tracks.length} 轨无法解析（点名的音源已不存在）'
+              '，已跳过这些轨');
     }
     final r = await playback.playSoundscape(
       tracks: tracks,
