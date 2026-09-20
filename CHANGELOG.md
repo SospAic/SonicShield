@@ -472,6 +472,59 @@
 - **BUG-022**、`ethernet`/`vpn`、`camera.snap`（等 AGP9）、YAMNet（模型源不可达）。
 - 缺口登记表剩 3 条（`taskGet` / `photo` / `heartbeat`），**非缺陷**。
 
+### 第十七轮补记（九）（2026-09-20）：「手机上打开黑屏」根因 + `scripts/install_app.sh` + `RemoteScriptsTab` 改走 `RcCommandChannel`（P3）
+
+> 主题：用户报告"手机上打开这个软件初始黑屏" —— **不是应用缺陷**，
+> 而是设备层门禁留下的**测试入口包**。本轮把根因、判据与修复做成可复用工具，
+> 并顺带完成 P3 项（协助会话里跑不了指令组）。
+
+#### Fixed（缺陷修复）
+- **「打开黑屏 / 永久停在闪屏」根因定位**：`flutter test integration_test/…` 会把
+  `build/app/outputs/flutter-apk/app-debug.apk` **覆盖成"测试入口包"**
+  （Dart 入口 = `integration_test/xxx_test.dart`，在等 driver 连接）→
+  从桌面启动永久黑屏、**无报错**（不建 DB、不连 broker）。
+  硬证据：解 `assets/flutter_assets/kernel_blob.bin` →
+  测试包含 `integration_test/` **22 处**、`lib/main.dart` **0 处**；
+  真包（`flutter build apk --debug`，245,669,568 B）反之（0 处 / 4 处）。
+  修复：装真包 245,669,568 B → `Success`（36s，同签名覆盖无弹窗）→
+  `mCurrentFocus = …/MainActivity` → 抓屏确认首页正常。
+- **`RemoteScriptsTab` 改走 `RcCommandChannel`（P3）**：本页原直接
+  `sendTo(ep, …)`，只能驱动**已配对端点** → 协助会话目标跑不了指令组。
+  改为面向通道（事件来源 `注入 > 通道 > 端点服务`；订阅 `channel.updates`），
+  协助会话页加**控制台 / 指令组**两个 Tab（共用同一条命令路径，无第二套面板）；
+  会话未激活 → **不发且说明原因**（不静默）；协助会话下不提供「新建指令组」入口
+  （组装器路由需已配对端点 id），改为说明卡写明边界。
+
+#### Added（新增）
+- **`scripts/install_app.sh`**：把**可启动的真包**装到设备上。
+  流程 = 构建 → **校验产物身份** → 覆盖安装 → 启动验证；退出码 `0`/`1`/`3`。
+  支持 `--check-only`、`APK=<path>`、`DEV=<serial>`。
+  身份判据：**`integration_test/` 命中 > 0 → test**；否则 `lib/main.dart` 命中 > 0 → real。
+  ⚠️ 判据第一版用宽泛的 `main\.dart` → 真包与测试包因框架样板串
+  （`file:///path/to/main.dart`、`http://localhost:8080/main.dart`）**双双命中**、恒为
+  `unknown`；**靠证伪才发现**，改成语义判据后两个方向都验证成立。
+- `scripts/gates.sh` 设备段开跑时新增提醒：设备用例会把 `app-debug.apk` 覆盖成
+  测试入口包 → 手机上那个应用会黑屏，恢复用 `bash scripts/install_app.sh`。
+
+#### Tested（真实执行数据）
+- 新增 **4 例**回归锁（`test/remote_scripts_tab_test.dart` 4 → **8**）：
+  RS-05 命令从通道发出 / RS-06 未激活不发且说明原因 / RS-07 不给组装入口 /
+  RS-08 进度从通道回灌也要显示。
+  **变异证伪**：`ch` 置空 + `_events` 忽略通道 → **RS-05 / RS-06 / RS-08 精确打红**；还原后 8/8 绿。
+- 身份判据证伪：真包 → `real`(EXIT=0)；构造的测试入口包 → **`test`(EXIT=1)** ✅。
+- `flutter analyze` **No issues found**（21.1s）；功能层 **469/469**（01:03，465→469）；
+  压测层 **24/24**（01:17）；`bash scripts/gates.sh` → **EXIT=0**。
+- 设备层（真机）：**BLOCKED / EXIT=3** —— 链路中途又掉（`adb devices` 与 mDNS 皆空）；
+  脚本正确判为**环境阻塞**，未误报成"用例失败"。
+
+#### Known Issues
+- **真机无线调试链路不持久（第二次复现）**：19:26 装好并验证可用 → 19:47 再跑已空；
+  连接端口每次都变（39715 → 45871 → ？）。**需设备侧重新开启无线调试**。
+- ⚠️ **跑完设备门禁后手机上应用会变不可启动** → 收尾须 `bash scripts/install_app.sh`。
+  当前已备好可启动真包（245,670,373 B，身份 `real`，含本轮 P3 改动），待设备在线即可装。
+- 协助会话下只能执行**已收藏**的指令组模板，不能就地组装新的。
+- **BUG-022**、`ethernet`/`vpn`、`camera.snap`（等 AGP9）、YAMNet（模型源不可达）。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

@@ -5,12 +5,15 @@ import '../../remote/assist.dart';
 import '../../remote/assist_join.dart';
 import '../../remote/command_channel.dart';
 import 'remote_console_tab.dart';
+import 'remote_scripts_tab.dart';
 
 /// 控制端「接入协助会话」页（docs/18 S3）。
 ///
 /// 流程：输入**临时码 + 访问密码**（由端点使用者口述）→ 握手 → 进入控制台。
 /// 控制台**复用** [RemoteConsoleTab]（传入 [AssistChannel]），因此协助会话
 /// 与已配对端点拥有完全相同的命令面板，不会出现两套会漂移的实现。
+/// 指令组同样复用 [RemoteScriptsTab]（第十七轮续八接入通道）——
+/// 此前协助会话里跑不了指令组，因为该页直接依赖"已配对端点"。
 ///
 /// ## 合规与安全提示（页面上常驻）
 /// - 临时码必须由**端点使用者主动告知**（等价于物理在场授权）；
@@ -185,48 +188,64 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
 
   Widget _console(AssistJoinInfo info) {
     final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('协助会话 · ${info.epName}'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: '会话审计',
-            onPressed: () => _showAudit(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.link_off),
-            tooltip: '挂断',
-            onPressed: () => _client.leave(),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            color: scheme.primaryContainer,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            child: Row(
-              children: [
-                Icon(Icons.verified_user,
-                    size: 18, color: scheme.onPrimaryContainer),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '临时协助会话进行中 · 剩余 ${_mmss(info.remaining)}'
-                    '${info.sessionId.isEmpty ? '' : ' · ${info.sessionId}'}',
-                    style: TextStyle(
-                        fontSize: 12, color: scheme.onPrimaryContainer),
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('协助会话 · ${info.epName}'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.history),
+              tooltip: '会话审计',
+              onPressed: () => _showAudit(),
+            ),
+            IconButton(
+              icon: const Icon(Icons.link_off),
+              tooltip: '挂断',
+              onPressed: () => _client.leave(),
+            ),
+          ],
+        ),
+        body: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              color: scheme.primaryContainer,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(Icons.verified_user,
+                      size: 18, color: scheme.onPrimaryContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '临时协助会话进行中 · 剩余 ${_mmss(info.remaining)}'
+                      '${info.sessionId.isEmpty ? '' : ' · ${info.sessionId}'}',
+                      style: TextStyle(
+                          fontSize: 12, color: scheme.onPrimaryContainer),
+                    ),
                   ),
-                ),
+                ],
+              ),
+            ),
+            // 指令组也要能在协助会话里跑（第十七轮续八）：两个 Tab 都只面对
+            // [RcCommandChannel]，因此**没有第二套命令面板**。
+            const TabBar(
+              tabs: [
+                Tab(text: '控制台', icon: Icon(Icons.terminal, size: 18)),
+                Tab(text: '指令组', icon: Icon(Icons.bolt, size: 18)),
               ],
             ),
-          ),
-          Expanded(
-            child: RemoteConsoleTab(channel: AssistChannel(_client)),
-          ),
-        ],
+            Expanded(
+              child: TabBarView(
+                children: [
+                  RemoteConsoleTab(channel: AssistChannel(_client)),
+                  RemoteScriptsTab(channel: AssistChannel(_client)),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -210,6 +210,10 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
     TARGET=$(pick_device)
   fi
   if [ -n "${TARGET:-}" ]; then
+    echo "  ⚠️ 提醒：设备用例会把 build/app/outputs/flutter-apk/app-debug.apk 覆盖成"
+    echo "     **测试入口包**（Dart 入口 = integration_test/xxx_test.dart）。跑完之后"
+    echo "     手机上那个应用从桌面启动会**一直黑屏**（不建 DB、不连 broker、无报错）。"
+    echo "     要恢复可启动的应用：bash scripts/install_app.sh"
     DEVICE_OK=1
     if [ "${SKIP_PREINSTALL:-0}" = "1" ]; then
       echo "  [SKIP] 跳过预装检查（SKIP_PREINSTALL=1）"
