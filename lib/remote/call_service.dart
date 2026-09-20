@@ -79,6 +79,12 @@ class CallService {
   String? get callId => _callId;
   bool get inCall => _phase != CallPhase.idle && _phase != CallPhase.ended;
 
+  /// 本次通话是否为本机发起。
+  ///
+  /// UI 用它区分「来电」与「去电」—— 振铃阶段只有**被叫**才该出现
+  /// 「接听」按钮；主叫在振铃阶段要做的是继续等（或挂断）。
+  bool get isCaller => _isCaller;
+
   /// 远端媒体流（UI 渲染用）。
   MediaStream? get remoteStream => _remoteStream;
   MediaStream? _remoteStream;
@@ -95,6 +101,18 @@ class CallService {
   // 这里只负责把它接到 Timer / 信令 / UI 上。
 
   Timer? _waitTimer;
+
+  /// 手动振铃期间暂存的 invite（SDP 在里面），供用户稍后点「接听」时使用。
+  ///
+  /// ⚠️ 为什么必须存：手动模式下"接听"是**用户稍后**在界面上点的，
+  /// 那一刻拿不到原始 invite。不存的话，UI 就只能回头去调那个
+  /// "收到 invite 就立刻接通"的老回调 —— 而那正是 BUG-056
+  /// （「自动接通」开关关掉也照样接通）。
+  Map<String, dynamic>? _pendingInvite;
+
+  /// 是否正处于"振铃、等用户接/拒"的状态。
+  bool get awaitingAnswer =>
+      _phase == CallPhase.ringing && _pendingInvite != null;
 
   /// 是否已收到应答（SDP answer 或 `rc.call state=connected`）。
   /// 超时判定要用它来区分"没人接"与"已接通但计时器残留"。
@@ -268,13 +286,22 @@ class CallService {
 
   // ---------------- 被叫（含自动接通） ----------------
 
-  /// 收到 invite：自动接通开启则直接 answer，否则交由 UI 手动接听。
-  /// 返回 true 表示已开始接通流程。
+  /// 收到 invite：按 [calleeActionFor] 决定自动接通 / 振铃等用户 / 回占线。
+  /// 返回 true 表示已开始接通流程或已进入振铃等待。
+  ///
+  /// ⚠️ **没有 `onManualRing` 回调了**（BUG-056）。原先它存在的唯一用途是让
+  /// 调用方"代为接通"—— 于是「自动接通」开关关掉也照样接通。
+  /// 现在振铃只是把状态置为 [CallPhase.ringing]，接听界面由
+  /// `CallOverlayHost` 常驻监听 phase 自动弹出，用户点「接听」时走
+  /// [acceptPending]。**去掉这个参数是为了让那条错误接线不再可能**。
   Future<bool> onIncomingCall(
-      Map<String, dynamic> payload, PairedEndpoint peer, RemoteStore store,
-      {void Function(String callId, String fromName, bool video)?
-          onManualRing}) async {
-    if (inCall) {
+      Map<String, dynamic> payload, PairedEndpoint peer, RemoteStore store) async {
+    // 决策走纯函数（宿主机可断言）。⚠️ 它保证「开关关闭 ⇒ 绝不自动接通」。
+    final action = calleeActionFor(
+      autoAnswer: await autoAnswerEnabled(),
+      inCall: inCall,
+    );
+    if (action == CalleeAction.rejectBusy) {
       // 占线：直接回 end，主叫立刻得到反馈。
       await _sendCallMsg(RcCmd.callEnd,
           {'callId': payload['callId'], 'reason': 'busy'}, peer, store);
@@ -286,16 +313,27 @@ class CallService {
     _video = payload['video'] as bool? ?? true;
     _setPhase(CallPhase.ringing);
 
-    final auto = await autoAnswerEnabled();
-    if (!auto) {
-      // 振铃超时：到点由**端点侧**发出 `RcEvt.callMissed`，主叫据此结束等待 ——
-      // "没人接"这件事不该由主叫单方面猜（BUG-050）。
-      _startWaitTimer(isCaller: false);
-      onManualRing?.call(
-          _callId!, payload['fromName'] as String? ?? peer.name, _video);
-      return true; // UI 弹来电界面，等待用户操作
-    }
-    return await acceptIncoming(payload, peer, store);
+    // ⚠️ 用**穷尽 switch 表达式**：将来给 [CalleeAction] 加一个值会**编译报错**，
+    // 强迫作者显式决定它走哪条路。若写成 `if (autoAccept) {...} else {振铃}`，
+    // 新值会**静默落进振铃分支** —— 那正是本项目反复出现的"静默降级"。
+    return switch (action) {
+      CalleeAction.autoAccept => await acceptIncoming(payload, peer, store),
+      CalleeAction.ringUser => _ringUser(payload),
+      // 上面已提前 return；保留此臂只为让 switch **穷尽**。
+      CalleeAction.rejectBusy => false,
+    };
+  }
+
+  /// 进入"振铃、等用户接/拒"状态。返回 true 表示已受理这通来电。
+  bool _ringUser(Map<String, dynamic> payload) {
+    // 手动路径：**只振铃，绝不自动接通**（BUG-056）。
+    // 把 invite 存下来 —— 用户是**稍后**才点「接听」的，那一刻拿不到 SDP；
+    // 不存就只能退回"收到 invite 就立刻接通"的老路，而那正是本 BUG。
+    _pendingInvite = Map<String, dynamic>.from(payload);
+    // 振铃超时：到点由**端点侧**发出 `RcEvt.callMissed`，主叫据此结束等待 ——
+    // "没人接"这件事不该由主叫单方面猜（BUG-050）。
+    _startWaitTimer(isCaller: false);
+    return true;
   }
 
   /// 接通来电（自动或手动）。
@@ -304,6 +342,8 @@ class CallService {
       {bool video = true}) async {
     if (_phase != CallPhase.ringing) return false;
     _setPhase(CallPhase.connecting);
+    // invite 已被消费 —— 之后再点「接听」应当无效（phase 守卫也拦一道）。
+    _pendingInvite = null;
     // 用户（或自动接通策略）已经接下这通电话 → 振铃等待到此结束。
     _answered = true;
     _cancelWaitTimer();
@@ -349,6 +389,27 @@ class CallService {
     // ⚠️ 不能复用 `rejected`：那个文案是给**被拒的一方**看的（'对方已拒接'），
     // 拒接的人自己看到"对方已拒接"会以为被拒的是自己。
     await _teardown(reason: CallEndReason.declined);
+  }
+
+  /// 接听当前振铃中的来电（UI「接听」按钮调用）。
+  ///
+  /// 没有待接 invite、或已经不在振铃状态时返回 `false`（**不抛异常**）——
+  /// 按钮可能被连点，也可能在超时收尾之后才被点到。
+  Future<bool> acceptPending() async {
+    final invite = _pendingInvite;
+    final peer = _peer;
+    if (invite == null || peer == null) return false;
+    if (_phase != CallPhase.ringing) return false;
+    final store = await _storeRef?.call();
+    if (store == null) return false;
+    return acceptIncoming(invite, peer, store);
+  }
+
+  /// 拒接当前振铃中的来电（UI「拒接」按钮调用）。
+  Future<void> declinePending() async {
+    final store = await _storeRef?.call();
+    if (store == null) return;
+    await rejectCall(store);
   }
 
   // ---------------- 信令处理（由 endpoint_service 分派调用） ----------------
@@ -534,6 +595,9 @@ class CallService {
     _setPhase(CallPhase.ended);
     _callId = null;
     _peer = null;
+    // 待接 invite 必须一起清掉：否则下一通来电的「接听」按钮
+    // 可能拿到**上一通**的 SDP（连错人）。
+    _pendingInvite = null;
     if (reason != null) {
       _endReason = reason;
       if (!_endedCtrl.isClosed) _endedCtrl.add(reason);

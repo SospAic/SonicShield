@@ -189,6 +189,66 @@
   策略**决定，**换传输不必然消除它 —— 必须实测，不得推断**。
 - BUG-055 残余：`runs: 3` 能挡"单个采样点被抢占"，但**并发跑性能层**仍可能同时被打中。
 
+### 第十七轮补记（四）（2026-09-20）：被叫手动接听闭环 + 「自动接通」开关失效（BUG-056，隐私相关）
+
+#### Fixed（BUG-056：隐私开关静默失效）
+- **「自动接通」开关关掉也照样接通。** 修前 `endpoint_service._handleCallInvite`
+  把 `onManualRing` 实现成**立刻 `acceptIncoming`**（注释写着"v1.4 简化"）。
+  那个开关是使用者**唯一**能表达"别自动接我的电话"的地方（设置页文案：
+  仅限已配对设备呼入时自动接通，用于家人守护）。**开关失灵 = 来电被静默接通、
+  摄像头/麦克风被打开，而使用者以为自己已经关掉了。**
+  这不只是"功能没做完"，是**隐私问题**。
+- 修后：被叫按 `calleeActionFor(autoAnswer, inCall)` 决定
+  **`autoAccept` / `ringUser` / `rejectBusy`**（占线优先于开关）。
+  `_handleCallInvite` **只负责发通知**，接/拒由用户在界面上点。
+- **默认分支必须是 `ringUser`**：把"读不到开关"或"将来新增分支"的兜底做成
+  `autoAccept`，就等于把"隐私开关默认关闭"做反了。
+- 判定用**穷尽 switch 表达式**（无 `default`）→ 将来新增 `CalleeAction` 值会
+  **编译报错**，而不是静默落进"振铃"。
+
+#### Fixed（被叫此前根本没有来电界面 —— 让上面那条修复真正生效的前提）
+- 来电 UI 原先挂在**通话页**（`OverlayEntry` 需要已挂载的页面 context）→
+  **只有用户已经站在通话页上才可能接到来电**。被叫在别的页面时，
+  "振铃等用户"实际等于"永远接不到"。
+- 改为 `CallOverlayHost` 挂在 `MaterialApp.builder` 上
+  （用 `Stack` 保住 `child`；不能直接 return 通话视图，否则 Navigator 会被卸载），
+  **与当前路由无关**。
+- `alignment: Alignment.topLeft`（**非方向性**）：`builder` 在应用根部，
+  不保证有 `Directionality`。
+- `scaffoldMessengerKey` 抽到 `lib/core/app_keys.dart`：断开
+  `app.dart ↔ call_incoming_overlay.dart` 的 import 环。
+
+#### Changed
+- `CallService.onIncomingCall` **移除 `onManualRing` 参数**；
+  新增 `acceptPending()` / `declinePending()` 作为界面入口。
+- `call_screen.dart` 不再自行 `attach` 来电浮层。
+
+#### Added
+- `test/call_lifecycle_test.dart` **+11 例**（CA-01…CA-11，共 **31 例**）：
+  四个开关组合全覆盖、默认值必须是 `ringUser`、来电文案、只有振铃才能接听；
+  外加**接线锁**：`calleeActionFor` 必须真的被 `CallService` 用上、
+  **来电处理里不得出现 `acceptIncoming`**、`onManualRing` 必须彻底消失、
+  接听界面必须挂在 `builder` 上、界面「接听」必须走 `acceptPending`。
+- 锁文件新增 `methodBody(src, signature)`（**大括号配对**抽方法体）：
+  文件级 `isNot(contains('acceptIncoming'))` 会被同文件其它方法误伤。
+
+#### Tested（实测）
+- `flutter analyze` → **No issues found**（17.0s）。
+- 功能层 **438/438**（`--exclude-tags perf`；原 427，**+11** = CA 组）。
+- 压测层 **24/24**（`--tags perf --concurrency=1`）。合计 **462**。
+- `bash scripts/gates.sh` → **EXIT=0，全部门禁通过**。
+- **证伪**（各自只打红预期用例）：
+  MUTANT-3（把 `acceptIncoming` 塞回 `_handleCallInvite`）→ **CA-08 红**；
+  MUTANT-4（`calleeActionFor` 恒返回 `autoAccept`）→ **CA-01 + CA-04 红**。
+- ⚠️ **CA-07 初稿就是红的**：`CalleeAction.ringUser` 在 `call_service.dart` 里
+  根本不出现（手动路径当时是个隐式 `else`）。**这条锁抓住的是一个真实弱点** ——
+  将来新增 `CalleeAction` 值会静默落进"振铃"。改为穷尽 switch + 抽 `_ringUser()`
+  之后才绿。
+
+#### Known Issues
+- 真机仍阻塞（`adb devices` 为空）。本轮**未取得任何新的真机数据**，
+  **不声称任何真机结论**。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

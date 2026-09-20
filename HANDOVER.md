@@ -11,7 +11,7 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-20）**：v1.8.0-alpha，功能层 **407/407** + 压测 **24/24** 全绿，
+**当前状态（2026-09-20）**：v1.8.0-alpha，功能层 **438/438** + 压测 **24/24** 全绿，
 `flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
 **仿真多机连通已真正打通**（模拟器端点 ↔ 宿主控制器，走**真实公网 broker**，
 `tool/rc_probe.dart` **9/9**，含远程任务 CRUD 8 步）—— 见 §1.14。
@@ -21,7 +21,7 @@
 **一条命令跑完全部门禁**（第十三轮起，环境见 §3，**先关模拟器**）：
 
 ```bash
-bash scripts/gates.sh          # analyze + 功能 427 + 压测 24；EXIT=1 即有失败
+bash scripts/gates.sh          # analyze + 功能 438 + 压测 24；EXIT=1 即有失败
 # 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
 #   真机装不上时用 DEV=emulator-5554 显式指定；脚本默认**优先模拟器**
 # AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
@@ -71,7 +71,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 427/427 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 438/438 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟡 **部分闭环**（第十六轮）：冒烟 **4/4** 已跑通；桥接/AOT/双端点 E2E 因**每次安装需人工点确认框**而未执行 |
@@ -272,6 +272,60 @@ MUTANT-2（删掉 `_startWaitTimer(isCaller: true)`）→ **CL-12 红**；
 必须实测、不得推断。另注意本机有 **Mihomo TUN 适配器（198.18.0.1）**，
 常见后果是劫持局域网路由导致 `adb connect` 超时。
 
+### 1.16 第十七轮续三（2026-09-20）：被叫手动接听闭环 + 「自动接通」开关失效（BUG-056，**隐私相关**）
+
+> 本轮做的是 §1.15 结尾列的第 1 条（"被叫手动接听闭环"）。
+> 开工时以为这是"代码已就绪、只差接线"的一条 —— 结果它下面压着一个**隐私级缺陷**。
+
+**BUG-056（P2，隐私相关）：设置页的「自动接通」开关，关掉也照样自动接通。**
+
+| 半边 | 修前 | 修后 |
+|---|---|---|
+| 开关**没人用** | `endpoint_service._handleCallInvite` 把 `onManualRing` 实现成**立刻 `acceptIncoming`**（注释写着"v1.4 简化"） | 被叫按 `calleeActionFor(autoAnswer, inCall)` 决定 **`autoAccept` / `ringUser` / `rejectBusy`**；`_handleCallInvite` **只发通知** |
+| 被叫**根本没有来电界面** | 来电 UI 挂在**通话页**（`OverlayEntry` 需要已挂载的页面 context）→ **只有已经站在通话页上才可能接到来电** | `CallOverlayHost` 挂在 `MaterialApp.builder` 上（`Stack` 保 `child`），**与当前路由无关** |
+
+**为什么定级为隐私问题**：该开关是使用者**唯一**能表达"别自动接我的电话"的地方
+（设置页文案：*仅限已配对设备呼入时自动接通，用于家人守护*）。开关失灵意味着
+**来电被静默接通、摄像头/麦克风被打开**，而使用者以为自己已经关掉了。
+> **缺陷族**：与 BUG-048（`sound.play` 点名被静默替换）同族 ——
+> **开关存在、有 UI、能保存、读得到值，但值没人用。** 都属"静默降级"。
+
+**两条设计约束**：
+① **默认分支必须是 `ringUser`** —— 把兜底做成 `autoAccept` 等于把
+"隐私开关默认关闭"**做反**；
+② 调用点用**穷尽 switch 表达式（无 `default`）** → 将来新增 `CalleeAction` 值会
+**编译报错**，而不是静默落进"振铃"。
+
+**两个易踩的实现细节**：`alignment` 必须用 `Alignment.topLeft`（**非方向性**，
+因为 `builder` 在应用根部、**不保证有 `Directionality`**）；
+`scaffoldMessengerKey` 抽到 `lib/core/app_keys.dart`（否则
+`app.dart ↔ call_incoming_overlay.dart` **import 成环**）。
+
+**新增回归锁 `test/call_lifecycle_test.dart` +11 例（CA-01…CA-11，共 31 例）**：
+四个开关组合全覆盖 + **接线锁**（`calleeActionFor` 必须真的被 `CallService` 用上、
+**来电处理里不得出现 `acceptIncoming`**、`onManualRing` 必须彻底消失、
+接听界面必须挂在 `builder` 上、界面「接听」必须走 `acceptPending`）。
+配套新增测试工具 `methodBody(src, signature)`（**大括号配对**抽方法体）——
+文件级 `isNot(contains('acceptIncoming'))` 会被同文件其它方法误伤。
+
+**证伪**：MUTANT-3（把 `acceptIncoming` 塞回 `_handleCallInvite`）→ **CA-08 红**；
+MUTANT-4（`calleeActionFor` 恒返回 `autoAccept`）→ **CA-01 + CA-04 红**；
+其余 27 条保持绿 → 锁是**载重的**。
+
+> ⚠️ **CA-07 初稿就是红的 —— 而它抓的是一个真实弱点。**
+> 初稿首跑报 `does not contain CalleeAction.ringUser`；排查发现
+> `call_service.dart` 里**根本没有这个字面量**：当时"手动振铃"是**隐式 `else`**
+> （`if (rejectBusy) …; if (autoAccept) …; _ringUser(...); // 剩下的都算振铃`）。
+> 将来新增 `CalleeAction` 值会**静默落进"振铃"**，没有任何报错。
+> 改成穷尽 switch + 抽 `_ringUser(...)` 之后才绿。
+> **教训：初稿红灯先怀疑代码，别急着改断言。**
+
+**门禁（实测）**：analyze **No issues found**（17.0s）；功能 **427 → 438**；
+压测 **24/24**；合计 **451 → 462**；`bash scripts/gates.sh` → **EXIT=0，全部门禁通过**。
+
+**真机仍阻塞**：`adb devices` **为空**。本轮**未取得任何新的真机数据**，
+**不声称任何真机结论**。候选路径与注意事项同 §1.15 末尾。
+
 ### 1.13 第十六轮补记（2026-09-20）：多条件×随机编排（docs/19）+ 互通探针 —— 以及一次**假的绿**
 
 上一轮交接称"全量 **401/401** 全绿 + 文档已全部同步"。开工前实测**推翻**：
@@ -375,7 +429,8 @@ Xiaomi `23116PN5BC`（Redmi Note 13 Pro 5G / shennong），
 - **BUG-050**：`RcEvt.callMissed` 是**死常量**（从不发出、无人消费）；
   协议注释写明"未接由控制器判定"，但主叫侧**没有接听超时** → 被叫未开自动接通时
   主叫**无限等待且无任何"未接"反馈**。同源的 `rc.call` 状态镜像在 **App 内也无消费者**。
-- `rc.script`（指令组状态）App 内无消费者（仅桌面 E2E 工具消费）。
+  → ✅ **已在第十七轮续（§1.15）闭环**（两个半边一起修）。
+- `rc.script`（指令组状态）App 内无消费者（仅桌面 E2E 工具消费）—— **仍未闭环**。
 
 **门禁（实测）**：analyze 零问题；功能 **361 → 370**；压测 **24/24**；
 `bash scripts/gates.sh` → **PASS/PASS/PASS、EXIT=0**。用例总数 **385 → 394**。
@@ -1273,9 +1328,9 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 §24，第十七轮，含 ⑨⑩⑪ 追加闭环）拿到「尚未闭环」清单，
-以及 docs/12 的最后一节（当前是 §28）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 407/407、压测 24/24、analyze 零问题，
+再读 docs/17 的最后一节（当前是 §26，第十七轮续三，含 ⑧⑨ 未闭环与建议）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §30）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 438/438、压测 24/24、analyze 零问题，
 `bash scripts/gates.sh` → EXIT=0。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
@@ -1311,12 +1366,13 @@ Monkey 400 零崩溃。
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
-1. **§6 第 14 项：覆盖锁的「缺口登记表」**（`test/rc_protocol_coverage_test.dart`）——
-   这张表本身就是待办队列，且**修好一条会被锁强制要求删掉登记条目**。
-   首选 **BUG-050：主叫接听超时 + `rc.call` 接进 App**（一次修两条缺口，
-   且有真实用户可见收益：被叫未开自动接通时主叫不再无限等待）。
-2. docs/11 路线图的下一项。
-3. 继续审计其它模块（注意：三向覆盖已机器化，人工再扫收益下降；
+1. **BUG-054（P3）：AOT 基准护栏余量为零** —— `integration_test/perf_nfr_test.dart` 里
+   `exec_logs 5000 条逐条` 的 20000ms 护栏按"冷启 2.475ms/次"标定，实测可到
+   4839µs/次 → **已知会假红**。判据：**只有那条不归一化的基准红、自归一化的全过**
+   → 机器状态，非代码。候选方案见 docs/17 §24 ⑬。**不要擅自放宽验收阈值。**
+2. **`rc.script` 接进 App**（P3）—— 缺口登记表里**最后一条**。
+3. docs/11 路线图的下一项。
+4. 继续审计其它模块（注意：三向覆盖已机器化，人工再扫收益下降；
    新的高产线索是**"有兜底分支的 switch 表"**是否漏登记）。
 > **一条已验证高产的非硬件审计线索**：找「一次调用 = 一次平台通道往返」的批量写入路径
 > —— BUG-035（日志）→ BUG-042（任务）→ BUG-047（音源）都是这条线索挖出来的，
@@ -1329,7 +1385,7 @@ Monkey 400 零崩溃。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +427 / 427
+    flutter test --exclude-tags perf         → 期望 +438 / 438
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
   ⚠️ `WITH_DEVICE=1` 会把**开着的模拟器**带进功能/压测层 → 压测必然被 CPU 争用
   污染（第十七轮实测 `GT-03` 1754ms > 1500ms 假红，关掉模拟器后 +24 全绿）。

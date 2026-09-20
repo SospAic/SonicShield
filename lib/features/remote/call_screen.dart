@@ -5,7 +5,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../remote/call_service.dart';
 import '../../remote/remote_store.dart';
-import 'call_incoming_overlay.dart';
 
 /// 视频通话页：选择配对端点发起呼叫（视频/语音）+ 自动接通开关。
 class CallScreen extends ConsumerStatefulWidget {
@@ -26,8 +25,8 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   void initState() {
     super.initState();
     _load();
-    // 来电覆盖层监听（手动接听场景）。
-    CallIncomingOverlay.attach(context);
+    // 来电界面不再从这里挂载 —— 它由 `CallOverlayHost`（挂在 `MaterialApp.builder`）
+    // 常驻监听 `CallService.phase` 自动弹出，与当前在哪个路由无关（BUG-056）。
   }
 
   Future<void> _load() async {

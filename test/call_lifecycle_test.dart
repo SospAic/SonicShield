@@ -3,17 +3,21 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/remote/call_lifecycle.dart';
 
-/// BUG-050 的宿主机回归锁。
+/// 通话生命周期的宿主机回归锁。
 ///
 /// ## 为什么要有这个文件
 ///
-/// BUG-050：主叫侧没有接听超时 → 被叫未开自动接通时**主叫无限等待且无"未接"反馈**。
-/// 这条逻辑原先埋在 `CallService` 里（依赖 flutter_webrtc + 真实信令），
+/// **BUG-050**：主叫侧没有接听超时 → 被叫未开自动接通时**主叫无限等待且无"未接"反馈**。
+/// **BUG-056**：「自动接通」开关**关掉也照样接通**（来电处理里 `onManualRing`
+/// 会立刻代为接通）→ 使用者的隐私开关形同虚设。
+///
+/// 这两段逻辑原先都埋在 `CallService` 里（依赖 flutter_webrtc + 真实信令），
 /// **宿主机无法实例化 → 整整一个版本没被测过**。
 ///
 /// 本文件锁两层：
 /// 1. **判定逻辑本身**（`call_lifecycle.dart` 的纯函数）；
-/// 2. **接线**（`CallService` 真的用了它、`endpoint_service` 真的会发 `callMissed`）
+/// 2. **接线**（`CallService` 真的用了它、`endpoint_service` 真的会发 `callMissed`、
+///    来电处理**不得**代为接通、接听界面真的常驻）
 ///    —— 否则纯逻辑可以"全绿但没人调用"，那是本项目最熟悉的那类假绿。
 void main() {
   /// 剥掉行注释后再断言。
@@ -190,10 +194,99 @@ void main() {
     });
   });
 
+  group('CA 被叫接听动作（BUG-056）', () {
+    test('CA-01 开关关闭 ⇒ 必须振铃等用户，**绝不自动接通**', () {
+      // 这是 BUG-056 的核心断言。
+      // 修之前 `_handleCallInvite` 的 onManualRing 会**立刻 acceptIncoming**，
+      // 于是"关掉自动接通"这个动作对行为**没有任何影响**。
+      expect(
+        calleeActionFor(autoAnswer: false, inCall: false),
+        CalleeAction.ringUser,
+        reason: '开关关闭时自动接通 = 使用者的隐私开关形同虚设',
+      );
+    });
+
+    test('CA-02 开关开启 ⇒ 自动接通', () {
+      expect(calleeActionFor(autoAnswer: true, inCall: false),
+          CalleeAction.autoAccept);
+    });
+
+    test('CA-03 占线优先于开关（两种开关状态都必须回 busy）', () {
+      for (final auto in [true, false]) {
+        expect(calleeActionFor(autoAnswer: auto, inCall: true),
+            CalleeAction.rejectBusy,
+            reason: 'autoAnswer=$auto 时占线仍须回 busy，否则主叫要等到超时');
+      }
+    });
+
+    test('CA-04 四个组合全覆盖，且默认值是 ringUser（不是 autoAccept）', () {
+      final seen = <CalleeAction>{};
+      for (final auto in [true, false]) {
+        for (final busy in [true, false]) {
+          seen.add(calleeActionFor(autoAnswer: auto, inCall: busy));
+        }
+      }
+      expect(seen, {CalleeAction.autoAccept, CalleeAction.ringUser,
+        CalleeAction.rejectBusy});
+      // 只有"显式开启"那一个组合才会自动接通。
+      var autoCount = 0;
+      for (final auto in [true, false]) {
+        for (final busy in [true, false]) {
+          if (calleeActionFor(autoAnswer: auto, inCall: busy) ==
+              CalleeAction.autoAccept) {
+            autoCount++;
+          }
+        }
+      }
+      expect(autoCount, 1, reason: '自动接通只能由"开关开启且不在通话中"这一个组合触发');
+    });
+
+    test('CA-05 来电文案必须带上对方名字，并区分视频/语音', () {
+      expect(incomingCallText(fromName: '妈妈的手机', video: true),
+          contains('妈妈的手机'));
+      expect(incomingCallText(fromName: '妈妈的手机', video: true),
+          contains('视频'));
+      expect(incomingCallText(fromName: '妈妈的手机', video: false),
+          contains('语音'));
+      expect(incomingCallText(fromName: '妈妈的手机', video: true),
+          isNot(incomingCallText(fromName: '妈妈的手机', video: false)),
+          reason: '视频/语音必须能区分，否则用户不知道要不要穿好衣服');
+    });
+
+    test('CA-06 只有振铃状态才能接听', () {
+      expect(canAcceptNow(true), isTrue);
+      expect(canAcceptNow(false), isFalse);
+    });
+  });
+
   group('CL 接线锁（纯逻辑必须真的被用上，否则本文件全是恒真）', () {
     late String callService;
     late String endpointService;
     late String overlay;
+    late String appDart;
+
+    /// 取出某个方法的**函数体**（从签名后第一个 `{` 到配对的 `}`）。
+    ///
+    /// 为什么要精确到方法体：`isNot(contains('acceptIncoming'))` 放在整个文件上
+    /// 会误伤 —— 文件里**别处本来就应该有** `acceptIncoming`（那是对的）。
+    /// 要锁的是"**来电处理里不得代为接通**"这一件具体的事，所以必须缩小范围。
+    String methodBody(String src, String signature) {
+      final i = src.indexOf(signature);
+      if (i < 0) throw StateError('找不到 `$signature`');
+      final open = src.indexOf('{', i + signature.length);
+      if (open < 0) throw StateError('`$signature` 没有函数体');
+      var depth = 0;
+      for (var j = open; j < src.length; j++) {
+        final c = src[j];
+        if (c == '{') {
+          depth++;
+        } else if (c == '}') {
+          depth--;
+          if (depth == 0) return src.substring(open, j + 1);
+        }
+      }
+      throw StateError('`$signature` 的花括号不配对');
+    }
 
     setUpAll(() {
       final candidates = [
@@ -223,6 +316,13 @@ void main() {
         throw StateError('找不到 lib/features/remote/call_incoming_overlay.dart');
       }
       overlay = code(o.first.readAsStringSync());
+
+      final a = [
+        'lib/app.dart',
+        '../lib/app.dart',
+      ].map(File.new).where((e) => e.existsSync()).toList();
+      if (a.isEmpty) throw StateError('找不到 lib/app.dart');
+      appDart = code(a.first.readAsStringSync());
     });
 
     test('CL-12 CallService 必须真的启动等待计时（主叫 + 被叫两条路径）', () {
@@ -281,6 +381,50 @@ void main() {
           reason: '`attach` 定义了却没人调用 = `rc.call` 仍然无人消费（恒真的接线锁）');
       expect(mainSrc, contains('RcEndpointService.instance.events'),
           reason: '必须接的是端点**已解密**的事件流');
+    });
+
+    test('CA-07 CallService 的被叫分支必须走 calleeActionFor（不得另写一套判断）', () {
+      expect(callService, contains('calleeActionFor'),
+          reason: '不接纯逻辑 → "开关关闭也要振铃"这条规则就没有任何锁');
+      expect(callService, contains('CalleeAction.ringUser'),
+          reason: '必须显式处理 ringUser 分支，否则手动路径等于没实现');
+    });
+
+    test('CA-08 【BUG-056 回归锁】来电处理里**不得**代为接通', () {
+      final body = methodBody(
+          endpointService, 'Future<void> _handleCallInvite(');
+      expect(body, isNot(contains('acceptIncoming')),
+          reason: '来电处理里出现 acceptIncoming = 又变成"收到 invite 就接通"，'
+              '「自动接通」开关会再次形同虚设（BUG-056）');
+      expect(body, contains('onIncomingCall'),
+          reason: '来电处理必须把决策交给 CallService');
+    });
+
+    test('CA-09 `onManualRing` 这个回调必须彻底消失（让错误接线不可能复活）', () {
+      // 该参数存在的**唯一**用途就是让调用方代为接通 —— 去掉它，
+      // BUG-056 的那种写法就无从写起（而不是只靠注释提醒）。
+      expect(callService, isNot(contains('onManualRing')),
+          reason: '`onManualRing` 回来了 → 又会有人往里面塞 acceptIncoming');
+      expect(endpointService, isNot(contains('onManualRing')),
+          reason: '同上：调用方不得再有"代为接通"的入口');
+    });
+
+    test('CA-10 【BUG-056】接听界面必须挂在 builder 上（否则被叫接不到电话）', () {
+      expect(appDart, contains('CallOverlayHost'),
+          reason: '来电界面若不常驻，被叫不在通话页时就没有接听入口 —— '
+              '关掉自动接通后，来电会全部变成"无人接听"');
+      expect(appDart, contains('builder:'),
+          reason: '必须挂在 MaterialApp.builder 上才在所有路由之上');
+    });
+
+    test('CA-11 【BUG-056】界面「接听」必须走 acceptPending，不得自己拼 invite', () {
+      expect(overlay, contains('acceptPending'),
+          reason: '接听必须用服务层暂存的 invite，否则界面拿不到 SDP');
+      expect(overlay, contains('declinePending'),
+          reason: '拒接同理，且要走"本端拒接"的语义（declined）');
+      expect(overlay, isNot(contains('acceptIncoming')),
+          reason: '界面不应直接调 acceptIncoming（它需要 invite/peer/store 三件套，'
+              '界面不该持有这些）');
     });
   });
 }

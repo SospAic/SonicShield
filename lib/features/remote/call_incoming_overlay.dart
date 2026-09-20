@@ -5,45 +5,64 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../app.dart';
+import '../../core/app_keys.dart';
 import '../../remote/call_lifecycle.dart';
 import '../../remote/call_service.dart';
 import '../../remote/remote_store.dart';
 
-/// 来电/通话中全屏覆盖层：监听 CallService.phase 自动显示。
-/// 手动模式下来电展示「接听/拒接」；通话中展示远端画面占位与挂断。
-class CallIncomingOverlay {
-  CallIncomingOverlay._();
+/// 通话 UI 宿主：挂在 `MaterialApp.builder` 上，**始终位于所有路由之上**。
+///
+/// ## 为什么不再用 `OverlayEntry`（v1.4 的做法）
+///
+/// `OverlayEntry` 需要先拿到 `Overlay`，而唯一能拿到它的地方是
+/// "某个**已挂载页面**的 context"。原来的实现挂在通话页的 `initState`，
+/// 于是 —— **没进过通话页就永远收不到来电界面**。
+///
+/// 被叫侧尤其致命：**人不在那个页面上，这通电话就接不了**
+/// （只能看着它响到超时）。而这恰好和 BUG-056 纠缠在一起：
+/// 之前"看起来能用"只是因为 `onManualRing` 会**立刻代为接通**，
+/// 把"没有接听界面"这件事盖住了。一旦把自动接通关掉（BUG-056 的修复），
+/// 缺失的接听界面就立刻暴露成"来电全部无人接听"。
+///
+/// 挂在 `builder` 上之后，来电界面与"当前在哪个路由"完全无关。
+class CallOverlayHost extends ConsumerStatefulWidget {
+  const CallOverlayHost({super.key, required this.child});
 
-  static OverlayEntry? _entry;
-  static StreamSubscription<CallPhase>? _phaseSub;
-  static StreamSubscription<CallEndReason>? _endSub;
+  final Widget? child;
 
-  /// 挂载监听（call_screen initState 调用）。
-  static void attach(BuildContext context) {
-    final overlay = Overlay.maybeOf(context, rootOverlay: true);
-    if (overlay == null) return;
-    // ⚠️ 每次进通话页都会调一次 `attach`，不取消旧订阅会**累积监听**
-    // → 同一通未接电话弹出 N 条提示（进过 N 次通话页就弹 N 次）。
-    _phaseSub?.cancel();
+  @override
+  ConsumerState<CallOverlayHost> createState() => _CallOverlayHostState();
+}
+
+class _CallOverlayHostState extends ConsumerState<CallOverlayHost> {
+  StreamSubscription<CallPhase>? _phaseSub;
+  StreamSubscription<CallEndReason>? _endSub;
+  CallPhase _phase = CallService.instance.currentPhase;
+
+  @override
+  void initState() {
+    super.initState();
     _phaseSub = CallService.instance.phase.listen((p) {
-      if ((p == CallPhase.ringing || p == CallPhase.connected) &&
-          _entry == null) {
-        _entry = OverlayEntry(builder: (_) => const _OverlayView());
-        overlay.insert(_entry!);
-      } else if (p == CallPhase.idle || p == CallPhase.ended) {
-        _remove();
-      }
+      if (mounted) setState(() => _phase = p);
     });
-    _endSub?.cancel();
+    // 通话结束/未接时把原因说出来。宿主**常驻**，所以主叫就算中途
+    // 退到别的页面也收得到"对方无应答"（BUG-050 的用户可见收益）。
     _endSub = CallService.instance.callEnded.listen(showEndNotice);
+  }
+
+  @override
+  void dispose() {
+    _phaseSub?.cancel();
+    _endSub?.cancel();
+    super.dispose();
   }
 
   /// 通话结束时把原因说出来（BUG-050）。
   ///
-  /// 修之前：主叫等满自己的超时也**没有任何反馈**，界面直接退回上一页 ——
-  /// 用户分不清"对方没接"和"应用卡死了"。判断该不该弹的规则在
-  /// [shouldNotifyEnd]（纯函数、宿主机可断言）。
+  /// 判断该不该弹的规则在 [shouldNotifyEnd]（纯函数、宿主机可断言）：
+  /// 本端自己刚点的"挂断/拒接"不再弹（噪音），
+  /// 未接/被拒/占线/对方挂断/失败**必须**弹 ——
+  /// 否则又回到"无声无息退回上一页"。
   static void showEndNotice(CallEndReason r) {
     if (!shouldNotifyEnd(r)) return;
     scaffoldMessengerKey.currentState?.showSnackBar(
@@ -54,34 +73,55 @@ class CallIncomingOverlay {
     );
   }
 
-  static void _remove() {
-    _entry?.remove();
-    _entry = null;
+  @override
+  Widget build(BuildContext context) {
+    final showCall =
+        _phase == CallPhase.ringing || _phase == CallPhase.connected;
+    // ⚠️ 必须用 `Stack` 把 `child` **留在树里**，不能直接 return 通话界面 ——
+    // 后者会把 Navigator 整个卸载掉，通话结束后导航栈被重置回初始路由。
+    //
+    // `alignment` 显式用非方向性的 `Alignment.topLeft`：默认的
+    // `AlignmentDirectional` 需要 `Directionality`，而 `builder` 处在
+    // 应用根部、不保证有这个祖先。
+    return Stack(
+      alignment: Alignment.topLeft,
+      fit: StackFit.expand,
+      children: [
+        widget.child ?? const SizedBox.shrink(),
+        if (showCall) const _CallView(),
+      ],
+    );
   }
 }
 
-class _OverlayView extends ConsumerStatefulWidget {
-  const _OverlayView();
+/// 来电/通话中的全屏界面。
+///
+/// 手动模式下来电展示「接听/拒接」；通话中展示远端画面占位与挂断。
+/// 只在通话期间构建 —— 两个 `RTCVideoRenderer` 的开销不落在应用启动路径上。
+class _CallView extends ConsumerStatefulWidget {
+  const _CallView();
 
   @override
-  ConsumerState<_OverlayView> createState() => _OverlayViewState();
+  ConsumerState<_CallView> createState() => _CallViewState();
 }
 
-class _OverlayViewState extends ConsumerState<_OverlayView> {
+class _CallViewState extends ConsumerState<_CallView> {
   final _remoteView = RTCVideoRenderer();
   final _localView = RTCVideoRenderer();
   bool _renderersReady = false;
+  StreamSubscription<MediaStream?>? _streamSub;
+  StreamSubscription<RemoteCallState>? _remoteStateSub;
 
   @override
   void initState() {
     super.initState();
     _initRenderers();
     // 远端流到达时刷新渲染。
-    CallService.instance.remoteStreamChanges.listen((_) {
+    _streamSub = CallService.instance.remoteStreamChanges.listen((_) {
       if (mounted) setState(() => _attachStreams());
     });
     // 对端 `rc.call` 状态变化（"对方振铃中…"）——BUG-050 前无人消费。
-    CallService.instance.remoteStateChanges.listen((_) {
+    _remoteStateSub = CallService.instance.remoteStateChanges.listen((_) {
       if (mounted) setState(() {});
     });
   }
@@ -102,6 +142,8 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
 
   @override
   void dispose() {
+    _streamSub?.cancel();
+    _remoteStateSub?.cancel();
     try {
       _remoteView.dispose();
       _localView.dispose();
@@ -109,6 +151,20 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
       // ignore
     }
     super.dispose();
+  }
+
+  /// 挂断 / 拒接。
+  ///
+  /// 振铃中点"拒绝"走 [CallService.declinePending]（拒接，对端显示"对方已拒接"）；
+  /// 已接通走 [CallService.hangUp]（挂断）。
+  Future<void> _endCall() async {
+    final svc = CallService.instance;
+    if (svc.currentPhase == CallPhase.ringing) {
+      await svc.declinePending();
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await svc.hangUp(RemoteStore(prefs));
   }
 
   @override
@@ -177,28 +233,23 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      if (phase == CallPhase.ringing)
+                      // 「接听」只在真正振铃时出现，且**只对来电方**有意义。
+                      // 主叫侧振铃阶段没有"接听"这个动作。
+                      if (phase == CallPhase.ringing && !svc.isCaller)
                         FloatingActionButton.large(
                           heroTag: 'accept',
                           backgroundColor: Colors.green,
                           child: const Icon(Icons.call, color: Colors.white),
-                          onPressed: () {
-                            // 自动/手动统一路径下 ringing 极短暂；此处保留
-                            // 手动语义入口（被叫 acceptIncoming 由服务层触发）。
-                          },
+                          // ⚠️ 这里**必须**走 acceptPending()（用暂存的 invite），
+                          // 不能退回"收到 invite 就代为接通"的老回调 ——
+                          // 那正是 BUG-056（开关关掉也照样接通）。
+                          onPressed: () => CallService.instance.acceptPending(),
                         ),
                       FloatingActionButton.large(
                         heroTag: 'decline',
                         backgroundColor: Colors.red,
+                        onPressed: _endCall,
                         child: const Icon(Icons.call_end, color: Colors.white),
-                        onPressed: () async {
-                          final prefs = await SharedPreferences.getInstance();
-                          if (svc.currentPhase == CallPhase.ringing) {
-                            await svc.rejectCall(RemoteStore(prefs));
-                          } else {
-                            await svc.hangUp(RemoteStore(prefs));
-                          }
-                        },
                       ),
                     ],
                   ),

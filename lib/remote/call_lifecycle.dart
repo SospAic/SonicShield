@@ -91,6 +91,53 @@ bool remoteStateEndsCall(RemoteCallState s) => s == RemoteCallState.ended;
 String connectingText(RemoteCallState remote) =>
     remote == RemoteCallState.ringing ? '对方振铃中…' : '连接中…';
 
+// ---------------- 被叫收到 invite 后该做什么 ----------------
+
+/// 被叫侧收到 `rc.call.invite` 后的动作。
+enum CalleeAction {
+  /// 直接接通（用户**显式**开启了「自动接通」）。
+  autoAccept,
+
+  /// 振铃，等用户在界面上接听或拒接（**默认路径**）。
+  ringUser,
+
+  /// 本机正在通话中 → 回 `busy`，让主叫立刻得到反馈。
+  rejectBusy,
+}
+
+/// 决定被叫的动作。
+///
+/// ## 为什么要有这个纯函数（BUG-056）
+///
+/// 修之前：`endpoint_service._handleCallInvite` 的 `onManualRing` 回调
+/// **立刻调 `acceptIncoming`**（注释写着"v1.4 简化"）—— 于是
+/// **「自动接通」开关关掉也照样自动接通**，那个开关等于不存在。
+///
+/// 这不只是"功能没做"，而是**隐私问题**：该开关是使用者唯一能表达
+/// "别自动接我的电话"的地方（设置页文案：仅限已配对设备呼入时自动接通，
+/// 用于家人守护）。开关失灵意味着**来电会被静默接通、摄像头/麦克风被打开**，
+/// 而使用者以为自己已经关掉了。
+///
+/// 抽成纯函数的收益：这条判断（以及"默认必须是 `ringUser`"）可以在宿主机断言，
+/// 不需要 WebRTC、不需要真机 —— 而它原先埋在一个**没人能实例化**的类里。
+///
+/// ⚠️ 默认分支必须是 [CalleeAction.ringUser]：把"读不到开关"或"将来新增分支"
+/// 的兜底做成 `autoAccept`，就等于把"隐私开关默认关闭"这件事做反了。
+CalleeAction calleeActionFor({
+  required bool autoAnswer,
+  required bool inCall,
+}) {
+  if (inCall) return CalleeAction.rejectBusy;
+  return autoAnswer ? CalleeAction.autoAccept : CalleeAction.ringUser;
+}
+
+/// 振铃界面上「接听」按钮是否可用（只在真正振铃时可用）。
+bool canAcceptNow(bool ringing) => ringing;
+
+/// 来电提示文案（通知与界面共用，避免两处文案漂移）。
+String incomingCallText({required String fromName, required bool video}) =>
+    '来自 $fromName（${video ? '视频' : '语音'}）';
+
 // ---------------- 结束原因（用户可见文案的唯一来源） ----------------
 
 /// 通话结束原因。

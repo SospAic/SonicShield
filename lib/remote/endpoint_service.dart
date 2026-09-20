@@ -22,6 +22,7 @@ import '../domain/scheduling/schedule_engine.dart';
 import '../services/background_service_manager.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
+import 'call_lifecycle.dart';
 import 'call_service.dart';
 import 'assist.dart';
 import 'assist_host.dart';
@@ -818,17 +819,27 @@ class RcEndpointService {
     await _ack(msg, ok);
   }
 
-  /// 被叫：收到 invite → 自动接通（设置开启）或弹来电界面（fullScreenIntent）。
+  /// 被叫：收到 invite → 按 `calleeActionFor` 决定自动接通 / 振铃等用户 / 回占线。
+  ///
+  /// ⚠️ **BUG-056**：这里原先把 `onManualRing` 实现成**立刻 `acceptIncoming`**
+  /// （注释写着"v1.4 简化"）—— 于是「自动接通」开关**关掉也照样接通**，
+  /// 那个开关等于不存在。它不只是"功能没做完"，而是**隐私问题**：
+  /// 该开关是使用者唯一能表达"别自动接我的电话"的地方（设置页文案：
+  /// 仅限已配对设备呼入时自动接通，用于家人守护）。开关失灵意味着
+  /// **来电被静默接通、摄像头/麦克风被打开**，而使用者以为自己已经关掉了。
+  ///
+  /// 现在这里只负责"通知有人打来"。接/拒由用户在界面上点击完成
+  /// （`CallService.acceptPending` / `declinePending`），界面由
+  /// `CallOverlayHost` 常驻监听 `CallService.phase` 弹出 —— **与当前在哪个路由无关**。
   Future<void> _handleCallInvite(RcMessage msg, PairedEndpoint peer) async {
     final video = msg.payload['video'] as bool? ?? true;
+    final fromName = msg.payload['fromName'] as String? ?? peer.name;
     await NotificationService.instance.showEvent(
-        title: '声盾 · 来电', body: '来自 ${peer.name}（${video ? '视频' : '语音'}）');
-    await CallService.instance.onIncomingCall(msg.payload, peer, _store!,
-        onManualRing: (callId, fromName, vid) {
-      // 手动接听模式：亮屏来电页（v1.4 简化：也走自动接通页，UI 内可拒接）。
-      unawaited(CallService.instance
-          .acceptIncoming(msg.payload, peer, _store!, video: vid));
-    });
+        title: '声盾 · 来电',
+        body: incomingCallText(fromName: fromName, video: video));
+    final ringing =
+        await CallService.instance.onIncomingCall(msg.payload, peer, _store!);
+    if (!ringing) return; // 占线已回 busy，不必再报 ringing
     unawaited(_send(RcMessage.now(RcEvt.callState, {
       'callId': msg.payload['callId'],
       'state': 'ringing',
