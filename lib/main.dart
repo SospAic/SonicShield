@@ -31,6 +31,12 @@ Future<void> main() async {
     final prefs = await SharedPreferences.getInstance();
     return RemoteStore(prefs);
   });
+  // 通话状态镜像：把端点的**已解密事件流**接给通话服务（BUG-050）。
+  //
+  // 修之前：`rc.call` / `rc.call.missed` 在 App 内**无人消费**
+  // （只有 `tool/` 的桌面 E2E 工具看得到）→ 主叫看不到"对方振铃中"，
+  // 也收不到被叫判定的"未接"。
+  CallService.instance.attach(RcEndpointService.instance.events);
   // 远程端点：注入执行能力 + 按启用状态自恢复（见下方说明）。
   //
   // 韧性（BUG-026 教训）：这里是 `runApp` **之前**的 await 链，任何一处

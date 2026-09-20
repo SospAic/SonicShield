@@ -128,6 +128,67 @@
   极易误判为"应用启动 hang"。判据：**真包 245MB / 测试包 144MB**；
   恢复用 `flutter build apk --debug`。
 
+### 第十七轮补记（三）（2026-09-20）：主叫接听超时 + `rc.call` 接进 App（BUG-050）+ 压测层第二条假红（BUG-055）
+
+#### Fixed（BUG-050：主叫无接听超时 + `rc.call` App 内无消费者）
+- **主叫不再无限等待**：`startCall` 发出 `rc.call.invite` 后启动 **45s 等待应答计时**；
+  到点未接通 → 结束通话并给出 **"对方无应答"**。
+  修前：被叫未开自动接通、或 invite 被静默丢弃时，主叫**永远停在"连接中…"**，
+  且**没有任何"未接"反馈**。
+- **`rc.call` / `rc.call.missed` 在 App 内接通消费者**：`CallService.attach(events)`
+  接端点的**已解密事件流**（`main.dart` 装配）。
+  控制台/通话页现在显示 **"对方振铃中…"**，并在通话结束时弹出原因。
+- **`RcEvt.callMissed` 从"死常量"变成真事件**：被叫振铃超时后由**端点**发出
+  （`endpoint_service._wireCall()`），主叫据此立刻结束等待。
+- **三条"不许猜"规则**：`rc.call` 未知 `state` → `unknown` 且**什么都不做**
+  （否则协议加一个 state 就会挂断所有在途通话）；`call.end` 未知 `reason` → 中性；
+  本端拒接用新值 `CallEndReason.declined`（'已拒接'），**不复用** `rejected`
+  （'对方已拒接' —— 那句是给被拒的一方看的）。
+- **已接通后绝不报"未接"**：`timedOutMeansMissed` 带 `!answered` 守卫。
+- **收尾副作用不得覆盖真正的原因**：`_pc.close()` 触发的二次 `_teardown()`
+  传 `reason: null`（否则"对方无应答"会被冲成空白）。
+
+#### Added
+- `lib/remote/call_lifecycle.dart` —— 通话生命周期的**纯逻辑**
+  （超时上限/判定、`rc.call` 状态解析、结束原因→用户文案、是否该弹提示）。
+  沿用 `remote_playback.dart` 范式：原先埋在依赖 `flutter_webrtc` 的 `CallService` 里，
+  **宿主机无法实例化 → 整整一个版本没被任何用例覆盖过**。
+- `test/call_lifecycle_test.dart` —— **20 例**（CL-01…CL-20）：
+  判定逻辑 + **接线锁**（真的启动两个角色的计时、真的消费两个事件、
+  `_teardown` 真的取消 Timer、UI 真的消费 `callEnded`、`main.dart` 真的调了 `attach`）。
+- `app.dart` 增加全局 `scaffoldMessengerKey`：通话结束提示可能在**任意页面之上**弹出。
+
+#### Changed
+- 三向覆盖锁的缺口登记表**清空 3 条**（`evtWithoutEmitter/callMissed`、
+  `evtWithoutConsumer/callMissed`、`evtWithoutInAppConsumer/callState`）。
+
+#### Fixed（BUG-055：压测层 `runs: 1` 造成的假红）
+- `exec_logs 5000 条写入` 是两套性能文件里**唯一的 `runs: 1`**（min-of-1 =
+  一个采样点被抢占就必红）。实测**单独跑 837–1010ms / 全层跑 4654ms（5.2× 放大）**，
+  3000ms 阈值看似有 3.3× 余量，实际落在噪声带里。→ `runs: 3`，**阈值不动**。
+- `任务 CRUD 500 次` 同源（`runs: 2`，稳态 457–809ms，负载下测到 2360ms）→ `runs: 3`。
+- **新硬规矩**（写入 `performance_test.dart` 头注释）：
+  ① 任何用例都不得用 `runs: 1`；② **余量要和「噪声幅度」比，不是和「基线」比**；
+  ③ **不要并发跑性能层**（两个 `--tags perf` 同时跑 = 自己制造 5× 噪声）。
+
+#### Tested（实测）
+- `flutter analyze` → **No issues found**。
+- 功能层 **427/427**（`--exclude-tags perf`；原 407，**+20** = `call_lifecycle_test.dart`）。
+- 压测层 **24/24**（`--tags perf --concurrency=1`）。合计 **451**。
+- **证伪**：MUTANT-1（去掉 `!answered` 守卫）→ CL-02 红；
+  MUTANT-2（删掉 `_startWaitTimer(isCaller: true)`）→ CL-12 红；
+  其余 18 条保持绿 → 锁是**载重的**。
+
+#### Known Issues
+- **`rc.call` 的"被叫手动接听"路径仍是半成品**：`_handleCallInvite` 的
+  `onManualRing` 回调**立刻**调 `acceptIncoming`（v1.4 简化），
+  故 `calleeRingTimeout` 在当前 UI 下几乎不会触发。计时器与 `callMissed`
+  发出路径已接好（有锁），但"真的弹来电界面让用户接/拒"未接线 → 下一轮候选。
+- **真机测试仍阻塞**：`adb devices -l` 为**空**。候选路径 Android 11+「无线调试」
+  （`adb pair`/`adb connect`）可绕开 USB 链路；⚠️ 但厂商确认框由**设备上的安装器
+  策略**决定，**换传输不必然消除它 —— 必须实测，不得推断**。
+- BUG-055 残余：`runs: 3` 能挡"单个采样点被抢占"，但**并发跑性能层**仍可能同时被打中。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

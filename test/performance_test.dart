@@ -41,6 +41,16 @@ import 'perf_bench.dart';
 ///
 /// 另一条环境约束：本机即使在空闲状态，CPU 也被 WSL2（vmmemWSL 常驻约 12GB）
 /// 与 IDE 占用 38–71%。**护栏阈值以"数量级"为粒度，不要为几成的波动调阈值。**
+///
+/// **第十七轮补充（BUG-055）**：本机噪声幅度可达基线的 **5×** —— 同一份代码
+/// 实测 `exec_logs 5000`：单独跑 837–1010ms、全层跑 1117ms/**4654ms**。
+/// 由此得三条硬规矩：
+/// 1. **任何用例都不得用 `runs: 1`**：min-of-1 等于没有抗噪，
+///    一个采样点被 GC/抢占打中就必红（该用例原本正是全套件唯一的 `runs: 1`）。
+/// 2. **余量要和「噪声幅度」比，不是和「基线」比**：3000ms 阈值对 900ms 基线
+///    看着有 3.3× 余量，5× 的噪声照样打得穿（BUG-054 的 AOT 基线护栏同病）。
+/// 3. **不要并发跑性能层**：两个 `flutter test --tags perf` 同时跑 =
+///    自己制造 5× 噪声，然后去改阈值 —— 那是把测量问题当代码问题修。
 void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
@@ -208,25 +218,37 @@ void main() {
 
     test('任务 CRUD 500 次 ≤ 2s', () async {
       final repo = TaskRepository(db);
+      // 第十七轮（BUG-055 同源）：原为 `runs: 2`（min-of-2）。
+      // 实测同一份代码：稳态 457–809ms，但在**连续压性能层**的负载下测到
+      // **2360ms**（5.1× 放大）→ 2000ms 阈值只剩 2.5× 余量，落在噪声带里。
+      // 取 3 次最小值：多花约 1.6s，换掉"两个采样点同时被抢占就必红"的脆弱性。
       final best = await benchMsAsync(() async {
         for (var i = 0; i < 500; i++) {
           final t = genTask(i);
           await repo.upsert(t);
           await repo.get(t.id);
         }
-      }, runs: 2, warmUpRuns: 1);
+      }, runs: 3, warmUpRuns: 1);
       expect(best, lessThanOrEqualTo(2000), reason: 'CRUD 最优耗时 ${best}ms');
     });
 
     test('exec_logs 5000 条写入 + recent ≤ 3s', () async {
       final logs = LogRepository(db);
+      // 第十七轮修复（BUG-055）：这里原本是全套件**唯一的 `runs: 1`** ——
+      // 也就是 min-of-1，一个采样点被噪声打中就必红，而本用例恰好是全套件
+      // 最容易被噪声打中的一个：5000 次 `await insert` = 5000 个可被抢占的
+      // 让步点（其余用例是"一口气跑完"的紧循环）。
+      // 实测同一份代码：**单独跑 837–1010ms，全层跑 1117ms / 4654ms**
+      // （5.2× 放大）→ 3000ms 阈值看似有 3.3× 余量，实际落在噪声带里。
+      // 教训与 BUG-053 同源：**余量要和「噪声幅度」比，不是和「基线」比**；
+      // 修法是回到本文件自己的约定（预热 + 取 N 次最小值），而不是放宽阈值。
       final best = await benchMsAsync(() async {
         for (var i = 0; i < 5000; i++) {
           await logs.append(
               source: 'schedule', action: 'play', status: 'success', taskId: 't');
         }
         await logs.recent(limit: 100);
-      }, runs: 1, warmUpRuns: 1);
+      }, runs: 3, warmUpRuns: 1);
       expect(best, lessThanOrEqualTo(3000), reason: '最优耗时 ${best}ms');
     });
 

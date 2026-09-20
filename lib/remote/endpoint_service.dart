@@ -78,7 +78,23 @@ class RcEndpointService {
     // 接收侧密钥依赖本机配对码（发送方用它加密），必须在连接前就绪。
     _ownCode = await store.ensurePairingCode();
     _wireAssist(store, db);
+    _wireCall();
     await _connect();
+  }
+
+  /// 通话信令接线（BUG-050）。
+  ///
+  /// 被叫振铃超时后，由**端点**发出 `RcEvt.callMissed` —— 主叫据此立刻结束
+  /// 等待，不必自己单方面等满 45s。"没人接"因此变成一条**明确的信令**，
+  /// 而不是靠主叫猜（修 BUG-050 前 `RcEvt.callMissed` 是个**死常量**：
+  /// 从不发出、无人消费）。
+  ///
+  /// 用回调注入而不是让 [CallService] 直接发：发送通道（[_send] + MQTT 客户端）
+  /// 在端点手上，反向依赖会把通话模块与网络模块绑死。
+  void _wireCall() {
+    CallService.instance.onRingTimeout = (callId) async {
+      await _send(RcMessage.now(RcEvt.callMissed, {'callId': callId}));
+    };
   }
 
   /// 协助会话接线（docs/18 S2）：注入传输、审计、显示名与执行层入口。
@@ -494,7 +510,7 @@ class RcEndpointService {
       case RcCmd.callCandidate:
         await CallService.instance.onCandidate(msg.payload);
       case RcCmd.callEnd:
-        await CallService.instance.onRemoteEnd();
+        await CallService.instance.onRemoteEnd(msg.payload);
       case RcCmd.deviceStatus:
         await _sendDeviceStatus(msg, peer);
       case RcCmd.cameraSnap:

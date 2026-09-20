@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../app.dart';
+import '../../remote/call_lifecycle.dart';
 import '../../remote/call_service.dart';
 import '../../remote/remote_store.dart';
 
@@ -12,12 +16,17 @@ class CallIncomingOverlay {
   CallIncomingOverlay._();
 
   static OverlayEntry? _entry;
+  static StreamSubscription<CallPhase>? _phaseSub;
+  static StreamSubscription<CallEndReason>? _endSub;
 
   /// 挂载监听（call_screen initState 调用）。
   static void attach(BuildContext context) {
     final overlay = Overlay.maybeOf(context, rootOverlay: true);
     if (overlay == null) return;
-    CallService.instance.phase.listen((p) {
+    // ⚠️ 每次进通话页都会调一次 `attach`，不取消旧订阅会**累积监听**
+    // → 同一通未接电话弹出 N 条提示（进过 N 次通话页就弹 N 次）。
+    _phaseSub?.cancel();
+    _phaseSub = CallService.instance.phase.listen((p) {
       if ((p == CallPhase.ringing || p == CallPhase.connected) &&
           _entry == null) {
         _entry = OverlayEntry(builder: (_) => const _OverlayView());
@@ -26,6 +35,23 @@ class CallIncomingOverlay {
         _remove();
       }
     });
+    _endSub?.cancel();
+    _endSub = CallService.instance.callEnded.listen(showEndNotice);
+  }
+
+  /// 通话结束时把原因说出来（BUG-050）。
+  ///
+  /// 修之前：主叫等满自己的超时也**没有任何反馈**，界面直接退回上一页 ——
+  /// 用户分不清"对方没接"和"应用卡死了"。判断该不该弹的规则在
+  /// [shouldNotifyEnd]（纯函数、宿主机可断言）。
+  static void showEndNotice(CallEndReason r) {
+    if (!shouldNotifyEnd(r)) return;
+    scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        content: Text(callEndText(r)),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   static void _remove() {
@@ -53,6 +79,10 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
     // 远端流到达时刷新渲染。
     CallService.instance.remoteStreamChanges.listen((_) {
       if (mounted) setState(() => _attachStreams());
+    });
+    // 对端 `rc.call` 状态变化（"对方振铃中…"）——BUG-050 前无人消费。
+    CallService.instance.remoteStateChanges.listen((_) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -132,7 +162,9 @@ class _OverlayViewState extends ConsumerState<_OverlayView> {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                phase == CallPhase.ringing ? '来电…' : '连接中…',
+                                phase == CallPhase.ringing
+                                    ? '来电…'
+                                    : connectingText(svc.remoteState),
                                 style: const TextStyle(
                                     color: Colors.white, fontSize: 18),
                               ),

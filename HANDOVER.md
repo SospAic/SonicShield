@@ -21,7 +21,7 @@
 **一条命令跑完全部门禁**（第十三轮起，环境见 §3，**先关模拟器**）：
 
 ```bash
-bash scripts/gates.sh          # analyze + 功能 407 + 压测 24；EXIT=1 即有失败
+bash scripts/gates.sh          # analyze + 功能 427 + 压测 24；EXIT=1 即有失败
 # 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
 #   真机装不上时用 DEV=emulator-5554 显式指定；脚本默认**优先模拟器**
 # AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
@@ -71,7 +71,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 407/407 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 427/427 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟡 **部分闭环**（第十六轮）：冒烟 **4/4** 已跑通；桥接/AOT/双端点 E2E 因**每次安装需人工点确认框**而未执行 |
@@ -84,7 +84,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 | **v1.7 条件层设备端验证** | ✅ **已闭环**（第九/十轮）：`MODE_IN_CALL` 用模拟器真实通话覆盖；`wifi`/`cellular` 用模拟器虚拟 AP 覆盖；`NativeBridge` 另有 39 例宿主机契约锁 |
 | Release | ✅ app-release.apk（历史轮次）；app-profile.apk 148.0MB（AOT 验收用） |
 | 文档 | docs/00–19 + CHANGELOG + 测试报告（docs/12 含 §1–§27 全量数据）+ 续作主干 docs/17（每轮一节，至 §24） |
-| **唯一 P0 阻塞** | **真机当前不在线 + 厂商确认弹窗**。①**设备不在线**：`960f853` 在第十五轮执行 `adb root` 后从 `adb devices` 消失，第十六/十七轮**均未回来**（`adb devices -l` 只剩 `emulator-5554`）→ 需人工重新插拔 USB / 在设备上重新授权调试。②**装得上但需人工点击**：`adb install` 会弹厂商 **10 秒倒计时确认框**（「继续安装」/「拒绝（10）」），无人点击即自动拒绝 → `INSTALL_FAILED_USER_RESTRICTED`（文案里的 "by user" **是超时，不是用户点了取消**）。`input keyevent`/`input tap` 缺 `INJECT_EVENTS`，`sendevent` 触摸节点 shell 不可写，shell 无 `WRITE_SECURE_SETTINGS` → **无法程序化点掉**。⚠️ 不要在真机上试 `adb root`（MIUI production build 上执行后设备会从 adb 消失）。见 §6 第 1 项 |
+| **唯一 P0 阻塞** | **真机当前不在线 + 厂商确认弹窗**。①**设备不在线**：`960f853` 在第十五轮执行 `adb root` 后从 `adb devices` 消失，第十六/十七轮**均未回来**（第十七轮续复测 `adb devices -l` 仍为**空**）→ 需人工重新插拔 USB / 在设备上重新授权调试。**候选解除路径：Android 11+「无线调试」**（`adb pair <ip>:<port>` + `adb connect`）可**完全绕开 USB 链路**；⚠️ 但厂商确认框由**设备上的安装器策略**决定，**换传输不必然消除它 —— 必须实测，不得推断**；⚠️ 本机有 **Mihomo TUN（198.18.0.1）**，需把 `192.168.2.0/24` 加入直连绕过，否则 `adb connect` 会超时。②**装得上但需人工点击**：`adb install` 会弹厂商 **10 秒倒计时确认框**（「继续安装」/「拒绝（10）」），无人点击即自动拒绝 → `INSTALL_FAILED_USER_RESTRICTED`（文案里的 "by user" **是超时，不是用户点了取消**）。`input keyevent`/`input tap` 缺 `INJECT_EVENTS`，`sendevent` 触摸节点 shell 不可写，shell 无 `WRITE_SECURE_SETTINGS` → **无法程序化点掉**。⚠️ 不要在真机上试 `adb root`（MIUI production build 上执行后设备会从 adb 消失）。见 §6 第 1 项 |
 | **仿真多机连通** | ✅ **已闭环**（第十七轮）：**双机远程链路不再需要真机验证** —— 模拟器端点 ↔ 宿主控制器，走真实公网 `broker.emqx.io`，**9/9**（8 条单命令 + 远程任务 CRUD 8 步），单程 ≈630ms、解密失败 0。真机剩下的增量只有 ①厂商安装策略 ②真实无线环境（对称 NAT / 真实扬声器出声） |
 
 **产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
@@ -225,6 +225,52 @@ docs/12 §27.2（`-no-window` 无头启动 + `run-as` 注入配对 prefs + `monk
 重启模拟器复跑 → 基准 **2046µs/次（快 2.4×）**、**+6 全绿**。
 → 判定为**模拟器性能状态**，非代码回归；**本轮不擅自放宽验收阈值**，
 BUG-054 登记为待办（建议放宽到「最差实测 × 2」或改为与独立原语对比的相对护栏）。
+
+### 1.15 第十七轮续（2026-09-20）：主叫接听超时 + `rc.call` 接进 App（BUG-050 闭环）+ 压测层第二条假红（BUG-055）
+
+**BUG-050 闭环（两个半边一起修）**：
+
+| 半边 | 修前 | 修后 |
+|---|---|---|
+| 主叫**无限等待** | 发出 `rc.call.invite` 后**无任何超时** → 被叫未开自动接通时**永远停在"连接中…"**，且无"未接"反馈 | **45s 未应答 → "对方无应答"** |
+| `rc.call` / `rc.call.missed` App 内**无人消费** | 只有 `tool/` 桌面 E2E 工具看得到 | `CallService.attach(events)` 消费；UI 显示 **"对方振铃中…"** 并弹出结束原因 |
+| `RcEvt.callMissed` 是**死常量** | 从不发出、无人消费 | 被叫振铃超时后由**端点**发出（`_wireCall()`） |
+
+**手法**：判定链抽成纯函数 `lib/remote/call_lifecycle.dart`
+（沿用 `remote_playback.dart` 范式）—— 原先埋在依赖 `flutter_webrtc` 的
+`CallService` 里，**宿主机无法实例化 → 整整一个版本没被任何用例覆盖过**。
+
+**新增回归锁 `test/call_lifecycle_test.dart`（20 例，CL-01…CL-20）**：
+判定逻辑 + **接线锁**（真的启动了两个角色的计时、真的消费两个事件、
+`_teardown` 真的取消 Timer、UI 真的消费 `callEnded`、`main.dart` 真的调了 `attach`）。
+> ⚠️ CL-12 初稿断言 `contains('callerAnswerTimeout')` —— 但 `_startWaitTimer`
+> 内部走 `waitLimitMs(isCaller: isCaller)`，**该字面量在服务里根本不出现**
+> → 那是一条**恒真的锁**。改成断言两个**调用点**。
+
+**证伪**：MUTANT-1（去掉 `!answered` 守卫）→ **CL-02 红**；
+MUTANT-2（删掉 `_startWaitTimer(isCaller: true)`）→ **CL-12 红**；
+其余 18 条保持绿 → 锁是**载重的**。
+
+**三向覆盖缺口登记表清空 3 条**：`evtWithoutEmitter/callMissed`、
+`evtWithoutConsumer/callMissed`、`evtWithoutInAppConsumer/callState`。
+
+**BUG-055（P2）：压测层第二条假红 —— `runs: 1`（min-of-1）**。
+`exec_logs 5000 条写入` 是两套性能文件里**唯一的 `runs: 1`**，
+实测**单独跑 837–1010ms / 全层跑 4654ms（5.2× 放大）**，
+3000ms 阈值看着有 3.3× 余量却被噪声打穿。
+取证手法：**把阈值临时置 0**，逼它把实测值打进失败信息。
+修法：`runs: 1 → 3`，**阈值不动**；`任务 CRUD 500 次` 同源（`runs: 2 → 3`）。
+> **判据：余量要和「噪声幅度」比，不是和「基线」比。**
+> 这是"红灯先怀疑测量与阈值"**第四次**直接救场（BUG-043 → 053 → 054 → 055）。
+
+**门禁（实测）**：analyze 零问题；功能 **407 → 427**；压测 **24/24**；
+合计 **431 → 451**。
+
+**真机仍阻塞**：`adb devices -l` → **空**（设备不在列表里）。
+候选路径：Android 11+ **无线调试**（`adb pair` + `adb connect`）可绕开 USB 链路；
+⚠️ 但厂商「USB 安装提示」框由**设备上的安装器策略**决定，**换传输不必然消除它**，
+必须实测、不得推断。另注意本机有 **Mihomo TUN 适配器（198.18.0.1）**，
+常见后果是劫持局域网路由导致 `adb connect` 超时。
 
 ### 1.13 第十六轮补记（2026-09-20）：多条件×随机编排（docs/19）+ 互通探针 —— 以及一次**假的绿**
 
@@ -1283,7 +1329,7 @@ Monkey 400 零崩溃。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +407 / 407
+    flutter test --exclude-tags perf         → 期望 +427 / 427
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
   ⚠️ `WITH_DEVICE=1` 会把**开着的模拟器**带进功能/压测层 → 压测必然被 CPU 争用
   污染（第十七轮实测 `GT-03` 1754ms > 1500ms 假红，关掉模拟器后 +24 全绿）。
@@ -1292,6 +1338,15 @@ Monkey 400 零崩溃。
   单独跑 <1s 绿。**看到"同一份代码时红时绿"，先看测量方式，别改代码。**
   本套件约定：`test/performance_v2_test.dart` 里的用例一律用
   `benchMs`/`benchMsAsync`（预热 + 取最小值），阈值取「实测基线 × 3」。
+  ⚠️ **第三个来源：`runs: 1`（min-of-1 = 没有抗噪）**（BUG-055）。第十七轮续
+  `exec_logs 5000 条写入` 是两套性能文件里**唯一的 `runs: 1`**，
+  实测**单独跑 837–1010ms / 全层跑 4654ms（5.2×）**，3000ms 阈值被噪声打穿。
+  已改 `runs: 3`（`任务 CRUD 500 次` 同源，`runs: 2`→`runs: 3`）。
+  **取证手法**：把阈值**临时置 0**，逼它把实测值打进失败信息 ——
+  比反复猜"是不是机器慢"快得多（用完必须改回）。
+  **判据**：余量要和**噪声幅度**比，不是和**基线**比。
+  ⚠️ **不要并发跑性能层**（两个 `--tags perf` 同时跑 = 自己制造 5× 噪声，
+  然后去改阈值）。
   **正确姿势**：① 关模拟器跑 `bash scripts/gates.sh`；② 再开模拟器单独跑设备三条。
 · 改多行代码**只用 Edit 工具**，禁用 sed 多行替换。
   ⚠️ Edit 会偶发 `EBUSY` 并**静默不落盘**（报 success 但内容没进文件）——

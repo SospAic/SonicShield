@@ -105,18 +105,20 @@ void main() {
   };
 
   /// 无人发出的事件。
+  ///
+  /// ⚠️ `callMissed` 已于第十七轮**闭环**（BUG-050）：端点侧 `_wireCall()` 会在
+  /// 被叫振铃超时后发出它。按本表的规矩，修好就要删条目（见下方"不得冗余"用例）。
   const evtWithoutEmitter = <String, String>{
-    'callMissed': '设计上由**控制器**判定"未接"（见 protocol.dart 注释），'
-        '但主叫侧尚未实现接听超时，故端点侧也无从发出 —— 见 BUG-050。',
     'photo': '`camera.snap` 因 camera 插件无 AGP9 兼容版而按设计降级'
         '（docs/16 §9），端点不会发出 `rc.photo`。'
         '解除条件：camera 插件发布 AGP9 兼容版后恢复 `_snapPhoto`。',
   };
 
   /// 无人消费的事件。
-  const evtWithoutConsumer = <String, String>{
-    'callMissed': '与 `evtWithoutEmitter` 同因：无人发出，自然无人消费（BUG-050）。',
-  };
+  ///
+  /// 第十七轮已**清空**：`callMissed` 现在由 `CallService._onRemoteEvent`
+  /// 与通话 UI 消费（BUG-050）。
+  const evtWithoutConsumer = <String, String>{};
 
   /// 有消费方，但**只在 `tool/` 桌面 E2E 工具里**，App 内无消费者。
   const evtWithoutInAppConsumer = <String, String>{
@@ -130,9 +132,6 @@ void main() {
     'scriptState': '`rc.script` 只被 `tool/rc_e2e_controller.dart`（RC-11/12）消费，'
         'App 内控制台看不到指令组执行进度 —— 端点侧靠通知栏自证，'
         '主叫侧无进度面板。属**已知体验缺口**，见 docs/17 本轮小节。',
-    'callState': '`rc.call` 只被 `tool/rc_e2e_controller.dart`（RC-14）消费，'
-        'App 内无通话状态镜像面板。与 BUG-050（无接听超时）同源，'
-        '一并修复时应同时接上。',
   };
 
   // ---------------- 用例 ----------------

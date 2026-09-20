@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'endpoint_service.dart';
+import 'call_lifecycle.dart';
 import 'protocol.dart';
 import 'remote_store.dart';
 
@@ -86,6 +87,125 @@ class CallService {
 
   MediaStream? get localStream => _localStream;
 
+  // ---------------- 接听超时与通话状态镜像（BUG-050） ----------------
+  //
+  // 修 BUG-050 之前：主叫发出 invite 后**没有超时** —— 被叫未开自动接通、
+  // 或压根没收到 invite 时，主叫会**无限停在"连接中…"**，且没有任何
+  // "未接"反馈。判定逻辑全部抽到 `call_lifecycle.dart`（纯函数、宿主机可断言），
+  // 这里只负责把它接到 Timer / 信令 / UI 上。
+
+  Timer? _waitTimer;
+
+  /// 是否已收到应答（SDP answer 或 `rc.call state=connected`）。
+  /// 超时判定要用它来区分"没人接"与"已接通但计时器残留"。
+  bool _answered = false;
+
+  /// 最近一次通话的结束原因（UI 直接取用；无通话时为 null）。
+  CallEndReason? get lastEndReason => _endReason;
+  CallEndReason? _endReason;
+
+  final _endedCtrl = StreamController<CallEndReason>.broadcast();
+
+  /// 通话结束（含"未接"）时广播原因 —— 让 UI 能把结果说出来，
+  /// 而不是无声无息地退回上一页。
+  Stream<CallEndReason> get callEnded => _endedCtrl.stream;
+
+  /// 对端 `rc.call` 的状态镜像（ringing / connected / ended）。
+  /// 主叫据此显示"对方振铃中…"，不必等媒体真正建立。
+  RemoteCallState get remoteState => _remoteState;
+  RemoteCallState _remoteState = RemoteCallState.unknown;
+  final _remoteStateCtrl = StreamController<RemoteCallState>.broadcast();
+  Stream<RemoteCallState> get remoteStateChanges => _remoteStateCtrl.stream;
+
+  /// 被叫振铃超时时的上报钩子（由端点侧装配，负责发出 `RcEvt.callMissed`）。
+  ///
+  /// 为什么用回调而不是在这里直接发：`rc.call.missed` 是**端点（被叫）**发出的
+  /// 事件，发送通道（`_send` / MQTT 客户端）在 `endpoint_service` 手上；
+  /// 由它装配既省掉一条反向依赖，也让"端点确实会发这个事件"变成可断言的接线
+  /// （见 `call_lifecycle_test.dart` CL-14）。
+  ///
+  /// 只传 `callId`：对端与 store 端点自己知道，不必来回倒手。
+  Future<void> Function(String callId)? onRingTimeout;
+
+  /// 接上控制器的入站事件流，消费通话相关事件。
+  ///
+  /// 修 BUG-050 前：`rc.call` 与 `rc.call.missed` **在 App 内无人消费**
+  /// （只有 `tool/` 的桌面 E2E 工具看得到）→ 用户在控制台既看不到
+  /// "对方振铃中"，也收不到"未接"。
+  void attach(Stream<Map<String, dynamic>> events) {
+    _evtSub?.cancel();
+    _evtSub = events.listen(_onRemoteEvent);
+  }
+
+  StreamSubscription<Map<String, dynamic>>? _evtSub;
+
+  void _onRemoteEvent(Map<String, dynamic> m) {
+    final type = m['type'] as String? ?? '';
+    if (type == RcEvt.callState) {
+      final payload = rcPayloadOf(m);
+      final s = parseRemoteCallState(payload['state']);
+      if (s == RemoteCallState.unknown) return; // 未知状态：什么都不做
+      if (payload['callId'] != null && payload['callId'] != _callId) {
+        return; // 不是本次通话的状态
+      }
+      _remoteState = s;
+      if (!_remoteStateCtrl.isClosed) _remoteStateCtrl.add(s);
+      if (remoteStateStopsWaiting(s)) _cancelWaitTimer();
+      if (remoteStateEndsCall(s)) {
+        unawaited(_teardown(reason: CallEndReason.remoteEnded));
+      }
+      return;
+    }
+    if (type == RcEvt.callMissed) {
+      // 对端（被叫）判定本次未接 —— 主叫立刻结束等待并给出原因。
+      if (!inCall) return;
+      final payload = rcPayloadOf(m);
+      if (payload['callId'] != null && payload['callId'] != _callId) return;
+      unawaited(_teardown(reason: CallEndReason.missed));
+    }
+  }
+
+  /// 启动"等待应答"计时（主叫等 answer / 被叫等用户接听）。
+  void _startWaitTimer({required bool isCaller}) {
+    _cancelWaitTimer();
+    _answered = false;
+    final limit = Duration(milliseconds: waitLimitMs(isCaller: isCaller));
+    final sw = Stopwatch()..start();
+    _waitTimer = Timer(limit, () {
+      // 到点时再复核一次：Timer 可能在 teardown 之后才被调度到，
+      // 也可能期间已经接通（answered）。
+      if (!timedOutMeansMissed(
+          answered: _answered, elapsedMs: sw.elapsedMilliseconds, limit: limit)) {
+        return;
+      }
+      unawaited(_onWaitTimeout(isCaller: isCaller));
+    });
+  }
+
+  void _cancelWaitTimer() {
+    _waitTimer?.cancel();
+    _waitTimer = null;
+  }
+
+  Future<void> _onWaitTimeout({required bool isCaller}) async {
+    if (isCaller) {
+      // 主叫侧判定：被叫没应答（可能没上线、也可能被叫侧静默丢弃）。
+      await _teardown(reason: CallEndReason.missed);
+      return;
+    }
+    // 被叫侧判定：振铃期间无人接听 → **由端点发出 rc.call.missed**，
+    // 让主叫不必单方面等到自己的超时。
+    final callId = _callId;
+    if (callId != null) {
+      try {
+        await onRingTimeout?.call(callId);
+      } on Object {
+        // 上报失败不影响本地收尾（主叫仍有自己的超时兜底）。
+      }
+    }
+    await _teardown(reason: CallEndReason.missed);
+  }
+
   // ---------------- 自动接通配置（合规：家人守护定位，见 docs/16 §6） ----------------
 
   static const _kAutoAnswer = 'rc_call_auto_answer';
@@ -139,6 +259,10 @@ class CallService {
       await _teardown();
       return null; // 端点离线（outbox 不适用于实时通话）
     }
+    // invite 已发出 → 开始"等待应答"计时。
+    // 修 BUG-050 前这里什么都没有：被叫未开自动接通、或 invite 被静默丢弃时，
+    // 主叫会**无限停在"连接中…"**且没有任何"未接"反馈。
+    _startWaitTimer(isCaller: true);
     return _callId;
   }
 
@@ -164,6 +288,9 @@ class CallService {
 
     final auto = await autoAnswerEnabled();
     if (!auto) {
+      // 振铃超时：到点由**端点侧**发出 `RcEvt.callMissed`，主叫据此结束等待 ——
+      // "没人接"这件事不该由主叫单方面猜（BUG-050）。
+      _startWaitTimer(isCaller: false);
       onManualRing?.call(
           _callId!, payload['fromName'] as String? ?? peer.name, _video);
       return true; // UI 弹来电界面，等待用户操作
@@ -177,12 +304,15 @@ class CallService {
       {bool video = true}) async {
     if (_phase != CallPhase.ringing) return false;
     _setPhase(CallPhase.connecting);
+    // 用户（或自动接通策略）已经接下这通电话 → 振铃等待到此结束。
+    _answered = true;
+    _cancelWaitTimer();
 
     final ok = await _ensureMedia(video: _video);
     if (!ok) {
       await _sendCallMsg(
           RcCmd.callEnd, {'callId': _callId, 'reason': 'media'}, peer, store);
-      await _teardown();
+      await _teardown(reason: CallEndReason.failed);
       return false;
     }
     await _createPc();
@@ -205,7 +335,7 @@ class CallService {
           store);
       return true;
     } on Object {
-      await _teardown();
+      await _teardown(reason: CallEndReason.failed);
       return false;
     }
   }
@@ -215,7 +345,10 @@ class CallService {
     if (_phase != CallPhase.ringing || _peer == null) return;
     await _sendCallMsg(RcCmd.callEnd, {'callId': _callId, 'reason': 'rejected'},
         _peer!, store);
-    await _teardown();
+    // 本端拒接 → `declined`（'已拒接'）。
+    // ⚠️ 不能复用 `rejected`：那个文案是给**被拒的一方**看的（'对方已拒接'），
+    // 拒接的人自己看到"对方已拒接"会以为被拒的是自己。
+    await _teardown(reason: CallEndReason.declined);
   }
 
   // ---------------- 信令处理（由 endpoint_service 分派调用） ----------------
@@ -227,13 +360,16 @@ class CallService {
         payload['callId'] != _callId) {
       return;
     }
+    // 应答到达 → 等待结束（否则 45s 后会把一通已接通的电话报成"未接"）。
+    _answered = true;
+    _cancelWaitTimer();
     try {
       await _pc?.setRemoteDescription(RTCSessionDescription(
         payload['sdp'] as String,
         payload['type'] as String? ?? 'answer',
       ));
     } on Object {
-      await _teardown();
+      await _teardown(reason: CallEndReason.failed);
     }
   }
 
@@ -253,18 +389,27 @@ class CallService {
   }
 
   /// 对端挂断/占线/拒接。
-  Future<void> onRemoteEnd() async {
-    await _teardown();
+  ///
+  /// [payload] 是 `call.end` 的业务字段；`reason` 决定给用户看哪句话
+  /// （`busy` → '对方正在通话中'、`rejected` → '对方已拒接'，其余中性）。
+  /// 未知/缺失 reason 一律中性，**不猜**（见 [endReasonFromSignal]）。
+  Future<void> onRemoteEnd([Map<String, dynamic>? payload]) async {
+    await _teardown(
+        reason: endReasonFromSignal(payload?['reason'] as Object?));
   }
 
   // ---------------- 挂断 ----------------
 
   Future<void> hangUp(RemoteStore store) async {
+    final wasConnected = _phase == CallPhase.connected;
     if (_peer != null && _phase != CallPhase.idle) {
       await _sendCallMsg(RcCmd.callEnd, {'callId': _callId, 'reason': 'hangup'},
           _peer!, store);
     }
-    await _teardown();
+    // 已接通后主动挂断 → '通话结束'；还没接通就取消 → '已挂断'。
+    await _teardown(
+        reason:
+            wasConnected ? CallEndReason.answered : CallEndReason.hangup);
   }
 
   // ---------------- 内部 ----------------
@@ -297,12 +442,18 @@ class CallService {
     pc.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _failureReason = null;
+        // 媒体已连通 ⇒ 必然已应答。这里再确认一次，防止"answer 信令丢了
+        // 但媒体通了"的极端情形下 45s 后把通话报成"未接"。
+        _answered = true;
+        _cancelWaitTimer();
         _setPhase(CallPhase.connected);
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         // 无 TURN 降级：把"失败"变成"可诊断的失败"（S5）。
         unawaited(_reportIceFailure());
         unawaited(_teardown());
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        // ⚠️ 不传 reason：这里是 `_pc.close()` 的**副作用**，
+        // 传了会把真正的原因（未接/拒接）覆盖掉（BUG-050）。
         unawaited(_teardown());
       }
     };
@@ -352,7 +503,16 @@ class CallService {
     if (!_phaseCtrl.isClosed) _phaseCtrl.add(p);
   }
 
-  Future<void> _teardown() async {
+  /// 收尾。
+  ///
+  /// ⚠️ [reason] 只在**本次结束真的有一个原因**的那一次传入。
+  /// 由收尾**副作用**触发的二次调用（典型：`_pc.close()` 会让
+  /// `onConnectionState` 变成 `closed`，那里再调一次 `_teardown()`）
+  /// 必须传 `null`，否则会用"没有语义的结束"覆盖掉真正的原因 ——
+  /// 用户会看到"对方无应答"被冲成空白（BUG-050）。
+  Future<void> _teardown({CallEndReason? reason}) async {
+    _cancelWaitTimer();
+    _answered = false;
     try {
       await _pc?.close();
       await _pc?.dispose();
@@ -368,9 +528,16 @@ class CallService {
     _localStream = null;
     _remoteStream = null;
     _remoteCtrl.add(null);
+    // 镜像归位：**不广播**（"通话已结束"由 callEnded / phase 负责），
+    // 否则 UI 会先收到 ended 再收到 unknown，白闪一下。
+    _remoteState = RemoteCallState.unknown;
     _setPhase(CallPhase.ended);
     _callId = null;
     _peer = null;
+    if (reason != null) {
+      _endReason = reason;
+      if (!_endedCtrl.isClosed) _endedCtrl.add(reason);
+    }
     // 归位（下一次呼叫从 idle 开始）。
     scheduleMicrotask(() {
       if (_phase == CallPhase.ended) _setPhase(CallPhase.idle);
