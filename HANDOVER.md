@@ -23,7 +23,9 @@
 ```bash
 bash scripts/gates.sh          # analyze + 功能 465 + 压测 24；EXIT=1 即有失败
 # 设备接入后（跑 integration 全套）：WITH_DEVICE=1 bash scripts/gates.sh
-#   真机装不上时用 DEV=emulator-5554 显式指定；脚本默认**优先模拟器**
+#   DEV=<serial> 显式指定设备；脚本默认**优先模拟器**。
+#   真机走「无线调试」时 id 形如 adb-<serial>._adb-tls-connect._tcp（见 §1.19）；
+#   真机安装需人工点一次厂商弹窗，设备测试才走得通。
 # AOT 绝对验收：WITH_AOT=1 bash scripts/gates.sh（或单独 flutter drive --profile，见 §3）
 ```
 
@@ -71,7 +73,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 465/465 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64；真机 arm64 冒烟曾 4/4）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 465/465 全绿**（`--exclude-tags perf`）+ 压测层 **24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4**（走无线调试，见 §1.19）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟡 **部分闭环**（第十六轮）：冒烟 **4/4** 已跑通；桥接/AOT/双端点 E2E 因**每次安装需人工点确认框**而未执行 |
@@ -456,6 +458,56 @@ AOT **6/6**。
 → **协助会话目标目前跑不了指令组**。属体验缺口，非缺陷，已登记为下一步第 1 项。
 
 **真机仍阻塞**：`adb devices` 里只有 `emulator-5554`。本轮**未取得任何真机数据**。
+
+### 1.19 第十七轮续六（2026-09-20）：真机**无线调试接入** + 厂商安装弹窗的**真实边界**
+
+> 本轮做的是 §1.18 结尾列的第 2 条（真机）—— 并且**推翻了 §1.18 里自己写的一条结论**。
+
+**① 真机接进来了（走无线调试，不是 USB）**：
+
+```bash
+adb pair 192.168.2.11:38659 878590   # → Successfully paired ... [guid=adb-960f853-Kmi5Mk]
+adb mdns services                    # → adb-960f853-Kmi5Mk _adb-tls-connect._tcp 192.168.2.11:39715
+flutter devices                      # → 23116PN5BC (wireless) • android-arm64 • Android 16 (API 36)
+```
+
+- **配对端口 ≠ 连接端口**；配对成功后 **mDNS 会自动连上，不要手动 `adb connect`**。
+- **真机 arm64 设备冒烟 4/4 全绿**（`app_smoke_test.dart`，实测 **6 次**）。
+
+**② ⚠️ 撤回上一轮的结论**：§1.18 写「无线调试绕过了厂商 USB 安装弹窗」—— **这是错的**。
+抓屏铁证：走无线调试时 MIUI **照旧弹窗**，且**标题仍是「USB 安装提示」**：
+
+```
+USB 安装提示
+正在通过 USB 安装此应用，是否继续？
+○ 拒绝后下次安装不再提示
+[继续安装]   [拒绝（10）]      ← 10 秒倒计时，默认高亮「拒绝」
+```
+
+**真实边界（实测）**：
+
+| 设备上是否已有该应用 | 语义 | 结果 |
+|---|---|---|
+| **无** | 全新安装 | ❌ 弹窗 → 超时 → `INSTALL_FAILED_USER_RESTRICTED`（实测 **3 次**） |
+| **有** | 覆盖安装 | ✅ `Success` 且**无弹窗**（实测 **1 次**，无人干预） |
+
+上一轮那次"成功且无弹窗"，真因是**使用者当场点了「继续安装」**
+（抓屏显示弹窗 6 秒内消失，而倒计时是 10 秒）。**单次采样不足以证明"没有弹窗"。**
+
+**③ 门禁工具改进**：`scripts/gates.sh` 新增 `fail_dump()` —— 各层失败时把**完整输出**
+落盘到 `${GATE_LOG_DIR:-/tmp}/gates_<标签>.log` 并回显尾部 15 行。
+（第一次真机门禁只 `tail -1`，把 `No tests were found.` 之外的一切都丢了，**已无法回溯**。）
+
+**④ 修掉功能层一条时间敏感假红**：`AHW-05`/`AHW-06` 断言具体秒数（`'04:5'`/`'00:4'`），
+窗口只有 5 秒，而 `_mmss(s.remaining)` 读**真实墙钟** → 慢机器/并发下必假红。
+改为**格式断言 + 宽窗口数值断言**（该文件修后 **7/7**）。
+
+**门禁（实测）**：analyze **No issues**；功能层 **465/465**（第二次出现 AHW-06 假红，**已修**）；
+压测层 **24/24**；`bash scripts/gates.sh` → **EXIT=1**（**失败项全部在真机安装，非代码**）。
+
+**真机剩余阻塞**：设备测试需要**人工点一次**「继续安装」建立初始应用；
+`flutter test --[no-]uninstall` 参数存在（`--no-uninstall` = 跑完保留应用）但**本轮未实测其效果**。
+真机设备桥接（`native_bridge_test`，6 例）**本轮未取得数据**。
 
 ### 1.13 第十六轮补记（2026-09-20）：多条件×随机编排（docs/19）+ 互通探针 —— 以及一次**假的绿**
 
@@ -1187,28 +1239,30 @@ Monkey 400 零崩溃。
 > **先 `mkdir -p shared_prefs`**（否则 `cp` 报 `No such file or directory`）。
 
 1. **P0 真机补测协助会话握手**（S3 验收的最后残余维度）。
-   **状态（第十七轮更新）：设备当前不在线，先解决"看得见设备"再谈安装。**
-   `adb devices -l` 只剩 `emulator-5554`；真机 `960f853` 自第十五轮 `adb root`
-   后从 adb 列表消失，第十六/十七轮均未回来。
-   **第一步（人工，1 分钟）**：重新插拔 USB 线 / 换一根**数据线**（非充电线）/
-   在设备上重新允许 USB 调试；`adb reconnect offline` 已试过无效。
+   **状态（第十七轮续六更新）：真机已接入** —— 走 **Android 11+「无线调试」**（不是 USB）：
+   `adb pair <ip>:<pairPort> <6位码>` → 配对成功后 **mDNS 自动连上**
+   （**配对端口 ≠ 连接端口**，实测 38659 / 39715），
+   flutter 侧 id = `adb-960f853-Kmi5Mk._adb-tls-connect._tcp`。
+   真机 `960f853` = Xiaomi `23116PN5BC`（arm64-v8a / Android 16 / SDK 36）。
+   **真机 arm64 冒烟 4/4 已跑通**（实测 6 次）。
    **⚠️ 不要再试 `adb root`** —— MIUI production build 上执行后设备会直接
    从 `adb devices` 消失、系统层 USB 也查不到（第十五轮实测）。
 
-   **设备回来后**（第十六轮已取得的结论）：真机能装上并已跑通冒烟 4/4，
-   但"批量安装"卡在厂商确认弹窗。
-   真机 `960f853` = Xiaomi `23116PN5BC`（arm64-v8a / Android 16 / SDK 36）。
+   **安装弹窗的真实边界（本轮实测，见 §1.19）**：
+   - 设备上**无**应用 → **全新安装** → 弹「USB 安装提示」`[继续安装] [拒绝（10）]`
+     → 10s 倒计时默认拒绝 → `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`
+     （实测 **3 次**）；
+   - 设备上**有**应用 → **覆盖安装** → `Success` 且**无弹窗**（实测 **1 次**，无人干预）；
+   - `flutter test integration_test/…` **跑完会卸载** → 下一次又退回"全新安装"；
+   - ⚠️ **无线调试并不改变这条策略**（上一轮"绕过了"的结论**已撤回**，抓屏铁证见 §1.19）。
 
-   **已确认可行的**：`adb install -r -t` 有时返回 `Success`；随后
-   `flutter test integration_test/app_smoke_test.dart -d 960f853` → **+4 全绿**。
+   **可用的工作流**：**人工点一次「继续安装」** → 此后设备上有应用时，
+   设备测试即走覆盖安装（可自动）。
+   `flutter test --[no-]uninstall`（`--no-uninstall` = 跑完**保留应用**）**参数存在**，
+   但**本轮未实测其保留效果** —— 它是把"一次人工"摊薄成"一次就够"的关键拼图。
    `run-as com.sonicshield.sonic_shield` 可用（能写 prefs）。
 
-   **仍卡住的（实测穷尽）**：每次安装会弹厂商「USB 安装提示」对话框
-   （**[继续安装] [拒绝（10）]**），**10 秒倒计时默认拒绝**，
-   报错即 `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。
-   而 `flutter test integration_test/…` **跑完会卸载应用** → 每跑一个设备用例
-   都要重装一次 → 需人工点一次。
-   已排除的绕过路径（全部实测失败）：`--no-streaming` / `--instant` /
+   **已被实测穷尽排除的绕过路径**（第十五/十六轮）：`--no-streaming` / `--instant` /
    `push`+`pm install` / `-i com.android.vending` / `-i com.miui.packageinstaller` /
    会话式 `install-create`→`install-write`→`install-commit` /
    `input tap`·`input keyevent`（缺 `INJECT_EVENTS`）/
@@ -1223,13 +1277,14 @@ Monkey 400 零崩溃。
    就绪后**备好的一切可直接复用**：
    ```bash
    # 1) 装（debug 包可 run-as，才能注入配对信息）
-   adb -s 960f853 install -r -t build/app/outputs/flutter-apk/app-debug.apk
+   adb -s adb-960f853-Kmi5Mk._adb-tls-connect._tcp install -r -t build/app/outputs/flutter-apk/app-debug.apk
    # 2) 注入配对（复刻 docs/12 §10.5 的方法；真机不能 adb root，故用 run-as）
    #    run-as com.sonicshield.sonic_shield 写
    #    shared_prefs/FlutterSharedPreferences.xml，键为 flutter.rc_*
    #    （rc_enabled / rc_device_id / rc_device_name / rc_pair_code / rc_broker / rc_paired）
    # 3) 跑真实 broker 端到端（桌面控制器，RC-01..14）
-   dart run tool/rc_e2e_controller.dart --eid … --ecode … --cid … --ccode …
+   dart run tool/rc_e2e_controller.dart eid=… ecode=… cid=… ccode=…
+   # ⚠️ 参数一律 key=value（无 `--` 前缀）：`dart run` 会吞掉连字符开头的参数。
    ```
    注意：双方都要开启远程模块；broker 默认 `broker.emqx.io`（TCP 1883/8883
    已从该真机实测可达）。
@@ -1464,40 +1519,45 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 §28，第十七轮续五，含 ⑧⑨ 未闭环与建议）拿到「尚未闭环」清单，
-以及 docs/12 的最后一节（当前是 §32）拿真实门禁数据。
+再读 docs/17 的最后一节（当前是 §29，第十七轮续六，含 ⑧⑨ 未闭环与建议）拿到「尚未闭环」清单，
+以及 docs/12 的最后一节（当前是 §33）拿真实门禁数据。
 项目当前是 v1.8.0-alpha：功能层 465/465、压测 24/24、analyze 零问题，
 `bash scripts/gates.sh` → EXIT=0。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
-⚠️ 第十七轮推翻/纠正了四条旧叙述，**读 §1.13 / §1.14 再动手，别沿用旧叙述**：
+⚠️ 第十七轮推翻/纠正了**五条**旧叙述，**读 §1.13 / §1.14 / §1.19 再动手，别沿用旧叙述**：
 ① BUG-051 的"处理器异常致超时"因果（已证伪）；② `planned=0` 是缺陷（其实是
 免打扰语义，正确行为）；③ 探针"ping ✓ 全链路闭环"（其实是 BUG-052 的假绿）；
 ④ HANDOVER §3 曾写"`by user` 不是弹窗超时、不要去屏幕上找弹窗"（**已被实测推翻**，
-弹窗确实存在，10 秒倒计时默认拒绝）。
+弹窗确实存在，10 秒倒计时默认拒绝）；
+⑤ **§1.18 曾写"无线调试绕过了厂商 USB 安装弹窗"—— 本轮续六已撤回**：
+抓屏铁证显示无线调试下弹窗照旧，**标题仍叫「USB 安装提示」**。
+真实边界是 **全新安装弹窗 / 覆盖安装免弹窗**（见 §1.19）。
 ⚠️ **压测层刚修过一条抖动用例**（BUG-053）：`GT-07` 曾用裸 `Stopwatch` 单次采样，
 导致同一份代码时红时绿。**若你看到压测红，先看该用例是否用了 `benchMs*`**。
 
 【第 2 步 · 选一个未完成项（按 §6 顺序）】
 §6 第 1 项（真机补测协助会话握手）是唯一 P0，但**第十七轮起阻塞点前移了一层**：
 
-**第 0 步（新的第一步）：先确认设备在不在。**
-第十七轮实测 `adb devices -l` 只剩 `emulator-5554` —— 真机 `960f853` 自第十五轮
-`adb root` 后消失，`adb reconnect offline` 与 `adb kill-server && adb start-server`
-**都无法恢复**。**这是物理层/授权层问题，adb 命令治不了**，需要人工
-重新插拔 USB（换一根**数据线**）/ 在设备上重新允许 USB 调试。
+**第 0 步：真机现在可以接进来了（走无线调试）。**
+第十七轮续六实测：**Android 11+「无线调试」可用** ——
+`adb pair <ip>:<pairPort> <6位码>`（端口与配对码都在设备屏的配对弹窗上）→
+配对成功后 **mDNS 会自动连上连接端口**（**配对端口 ≠ 连接端口**，实测 38659 / 39715），
+`flutter devices` 就能看到它。本轮真机 id = `adb-960f853-Kmi5Mk._adb-tls-connect._tcp`。
 ⚠️ **不要再试 `adb root`**（MIUI production build 上执行后设备会从 adb 消失）。
 
-**设备回来之后**，情况是（第十六轮结论）：真机**能装上了**
-（`adb install` 返回过 `Success`），且**冒烟 4/4 已跑通**；
-但**每次安装都会弹一个 10 秒倒计时的厂商确认框，无人点击即自动拒绝**
-（`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` 的 "by user"
-**就是这次超时** —— 第十六轮实测确认弹窗**确实存在**，别信 §3 旧注里
-"不要去找弹窗"的说法）。而 `flutter test integration_test/…` 跑完会卸载应用 →
-每跑一个设备用例都要重装一次 → **需要人工点一次**。
-- 装得上（有人在场点了）→ 直接跑 §6 第 1 项，命令与配对注入法都已备好；
-- 装不上 → 如实报告阻塞并转下一个非硬件项，**不要在这上面空转，也不要假报完成**。
-  **注意（第十七轮起）**："双机远程链路"这个维度**已经不需要真机了** ——
+**但安装弹窗的边界已实测清楚（见 §1.19）**：
+- 设备上**无**应用 → **全新安装** → 弹「USB 安装提示」`[继续安装] [拒绝（10）]`
+  → 10 秒倒计时默认拒绝 → `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`（实测 3 次）；
+- 设备上**有**应用 → **覆盖安装** → `Success` 且**无弹窗**（实测 1 次、无人干预）；
+- `flutter test integration_test/…` **跑完会卸载应用** → 下一次又退回"全新安装"；
+- ⚠️ **无线调试并不改变这条策略** —— 上一轮"无线调试绕过了弹窗"的结论**已撤回**
+  （抓屏铁证：弹窗标题仍叫「USB 安装提示」，10 秒倒计时默认「拒绝」）。
+- **可用工作流**：**人工点一次「继续安装」** → 此后设备上有应用时，设备测试即可自动跑。
+  `flutter test --no-uninstall`（跑完保留应用）**参数存在但本轮未实测其效果**。
+- 真机设备桥接（`native_bridge_test`，6 例）**本轮未取得数据**。
+- 如实报告阻塞，**不要在这上面空转，也不要假报完成**。
+  **注意**："双机远程链路"这个维度**已经不需要真机了** ——
   模拟器端点 ↔ 宿主控制器已跑通 9/9（§6 顶部有可粘贴的复现命令）。
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 

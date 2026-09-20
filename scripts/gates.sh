@@ -28,6 +28,17 @@ gate() {
   fi
 }
 
+# 失败时把**完整输出**落盘并回显尾部。
+# 为什么必须这么做：2026-09-20 真机设备层报「No tests were found.」，
+# 而脚本只 `tail -1` → 只剩一行，既看不到 Gradle/安装阶段，也无法判断
+# 是"没构建"还是"构建了但设备上没跑起测试"。**证据必须在失败时留下。**
+fail_dump() {  # $1=标签  $2=完整输出
+  local f="${GATE_LOG_DIR:-/tmp}/gates_$1.log"
+  printf '%s\n' "$2" > "$f"
+  echo "  ── 完整输出已存: $f ──"
+  printf '%s\n' "$2" | tail -15
+}
+
 echo "=== 门禁 1/3: flutter analyze ==="
 out=$(flutter analyze 2>&1 | tr '\r' '\n')
 echo "$out" | tail -1
@@ -45,6 +56,7 @@ if echo "$out" | grep -q "All tests passed"; then
 else
   echo "[FAIL] 功能层"
   echo "$out" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
+  fail_dump 功能层 "$out"
   FAIL=$((FAIL+1))
 fi
 
@@ -56,6 +68,7 @@ if echo "$out" | grep -q "All tests passed"; then
 else
   echo "[FAIL] 压测层"
   echo "$out" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
+  fail_dump 压测层 "$out"
   FAIL=$((FAIL+1))
 fi
 
@@ -82,7 +95,9 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
     if echo "$out" | grep -q "All tests passed"; then
       echo "[PASS] 设备冒烟"
     else
-      echo "[FAIL] 设备冒烟"; FAIL=$((FAIL+1))
+      echo "[FAIL] 设备冒烟"
+      fail_dump device_smoke "$out"
+      FAIL=$((FAIL+1))
     fi
     echo "=== 门禁 5/5: 设备桥接（native_bridge_test，6 例）==="
     out=$(flutter test integration_test/native_bridge_test.dart -d "$TARGET" 2>&1 | tr '\r' '\n')
@@ -90,7 +105,9 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
     if echo "$out" | grep -q "All tests passed"; then
       echo "[PASS] 设备桥接"
     else
-      echo "[FAIL] 设备桥接"; FAIL=$((FAIL+1))
+      echo "[FAIL] 设备桥接"
+      fail_dump device_bridge "$out"
+      FAIL=$((FAIL+1))
     fi
   else
     echo "[SKIP] 设备端门禁：adb devices 为空"

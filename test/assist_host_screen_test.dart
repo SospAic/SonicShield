@@ -116,23 +116,32 @@ void main() {
   });
 
   testWidgets('AHW-05 倒计时按 TTL 渲染为 mm:ss', (tester) async {
-    await host.start(ttl: const Duration(minutes: 5));
+    final s = await host.start(ttl: const Duration(minutes: 5));
     await pump(tester);
 
     // 注：**不能**用 tester.pump(Duration) 推进倒计时 —— FakeAsync 只虚拟化
     // Timer，`DateTime.now()` 仍是真实墙钟，elapse 会瞬间返回、剩余时间几乎不变。
     // TTL 的真实推进由 assist_host_test.dart 的 AH-14/AH-15 用真实延时覆盖；
     // 这里只锁定"渲染格式 + 绑定的是会话真实剩余时间"。
-    expect(find.textContaining('04:5'), findsOneWidget);
+    // ⚠️ **不要断言具体的十位秒数**（原为 `'04:5'`）：`remaining` 来自真实墙钟，
+    // 慢机器（或与其它用例并发）上 pumpWidget 一旦耗时 >5s 就会跨到 `04:4x`
+    // → `Found 0 widgets` 假红（2026-09-20 门禁实测）。
+    expect(find.textContaining(RegExp(r'剩余 \d\d:[0-5]\d')), findsOneWidget);
+    // 用**宽窗口**的数值断言补回"绑定的确实是会话真实剩余时间"这一意图。
+    expect(s.remaining.inSeconds, greaterThan(240));
+    expect(s.remaining.inSeconds, lessThanOrEqualTo(300));
 
     await finish(tester);
   });
 
   testWidgets('AHW-06 短 TTL 渲染为 00:ss（不出现负数/越界）', (tester) async {
-    await host.start(ttl: const Duration(seconds: 45));
+    final s = await host.start(ttl: const Duration(seconds: 45));
     await pump(tester);
 
-    expect(find.textContaining('00:4'), findsOneWidget);
+    // 短 TTL 必须渲染成 00:ss —— 两位秒、不越界、不出现负号。
+    // ⚠️ 同样不要断言 `'00:4'` 这种具体秒数（只有 5 秒窗口 → 慢机器假红）。
+    expect(find.textContaining(RegExp(r'剩余 00:[0-5]\d')), findsOneWidget);
+    expect(s.remaining.inSeconds, inInclusiveRange(0, 45));
 
     await finish(tester);
   });
