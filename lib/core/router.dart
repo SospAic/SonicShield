@@ -8,6 +8,7 @@ import '../features/logs/logs_section.dart';
 import '../features/remote/assist_host_screen.dart';
 import '../features/remote/assist_join_screen.dart';
 import '../features/remote/call_screen.dart';
+import '../features/remote/multi_video_screen.dart';
 import '../features/remote/pair_qr_screen.dart';
 import '../features/remote/ptt_screen.dart';
 import '../features/remote/remote_section.dart';
@@ -98,6 +99,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
           path: '/remote/settings', builder: (_, __) => const RemoteScreen()),
       GoRoute(path: '/remote/call', builder: (_, __) => const CallScreen()),
+      GoRoute(
+          path: '/remote/multi-video',
+          builder: (_, __) => const MultiVideoScreen()),
       GoRoute(path: '/remote/ptt', builder: (_, __) => const PttScreen()),
       GoRoute(
           path: '/remote/pair-qr', builder: (_, __) => const PairQrScreen()),

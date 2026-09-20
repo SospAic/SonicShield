@@ -765,6 +765,31 @@ analyze No issues；功能层 **509/509**（488 → 509）；压测 24/24；gate
 这次不删注释，而是给锁加"跳过整行注释" + `scanned > 0` 反向自检，
 并用注入变异验证加固后仍抓得到真违规。
 
+### 第十七轮续十六（2026-09-20）：多设备视频同连（用户第 3 项）
+
+**Added：多设备视频同连 —— 同时保持多路视频，点窗口切换目标，切换不断开**
+
+`CallService`（630 行）是**单会话**设计（单 `_pc`/`_callId`/`_phase`/`_peer`），
+重做成多会话会牵动来电/振铃/自动接通（BUG-050/056 那套），风险高。
+改为**新增 `MultiCallService`（只管本机发起的多路）+ callId 归属隔离**：
+- `Map<deviceId, MultiCallSession>`，一路一条 `RTCPeerConnection`
+- **复用同一条本地 MediaStream**（为 N 路各开一次摄像头既耗资源，也会在部分机型失败）
+- `setActive()` **只改焦点、不挂断任何一路** —— 这是"保持视频链接的情况下发送远程指令"的关键
+- 隔离边界 `ownedCallIdOf()`：只处理自己的 callId，来电仍归 `CallService`，两者不抢信令
+
+新页 `multi_video_screen.dart`（窗口网格 + 底部指令条对当前窗口发 ping / device.status），
+入口：远程 → 通话 → **多设备视频同连**。
+
+**⭐ 锁抓到了新代码自身的缺陷**：`ownedCallIdOf` 原本写 `m['callId'] as String?`，
+远端报文字段类型不可信，收到数字会**抛异常**（整条事件流崩溃）—— **MCS-04 当场抓到**，
+改为 `raw is! String` 判定。
+
+**Tested**：新增 11 例（MCS-01..11）；变异（去掉 callId 归属检查）→ **MCS-02 红**；
+analyze No issues；功能层 **520/520**（509 → 520）；压测 24/24；gates → **EXIT=0**（2m25s）；
+真机验证页面可达 + 空态（`PROBE multi-video page OK`，+1 passed）。
+
+**未闭环**：多路实际连通性需 ≥2 台设备（当前 1 台真机 + 2 个模拟器），本轮只验证页面可达。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

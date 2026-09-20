@@ -104,6 +104,19 @@ class RemoteCallEntry extends StatelessWidget {
         Card(
           child: ListTile(
             leading: CircleAvatar(
+              backgroundColor: scheme.tertiaryContainer,
+              child: Icon(Icons.grid_view, color: scheme.onTertiaryContainer),
+            ),
+            title: const Text('多设备视频同连'),
+            subtitle: const Text('同时保持多路视频 · 点窗口切换目标 · 切换时不断开'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/remote/multi-video'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: ListTile(
+            leading: CircleAvatar(
               backgroundColor: scheme.secondaryContainer,
               child: Icon(Icons.mic, color: scheme.onSecondaryContainer),
             ),
