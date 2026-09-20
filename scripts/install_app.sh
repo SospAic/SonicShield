@@ -24,6 +24,7 @@
 # 【用法】
 #   bash scripts/install_app.sh              # 构建真包 + 覆盖安装 + 启动验证
 #   bash scripts/install_app.sh --check-only # 只检查现有 APK 身份（不构建不安装）
+#   bash scripts/install_app.sh --no-build   # 跳过构建，直接装现有 APK（省 ~50s）
 #   DEV=<serial> bash scripts/install_app.sh # 指定设备
 #   APK=<path> bash scripts/install_app.sh --check-only   # 检查任意 APK（可覆盖）
 #
@@ -34,7 +35,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="${APK:-$ROOT/build/app/outputs/flutter-apk/app-debug.apk}"
 APP_ID="${APP_ID:-com.sonicshield.sonic_shield}"
 LOG="${GATE_LOG_DIR:-/tmp}/build_real_apk.log"
-MODE="${1:-}"
+MODE=""
+DO_BUILD=1
+for a in "$@"; do
+  case "$a" in
+    --check-only) MODE=check ;;
+    --no-build)   DO_BUILD=0 ;;
+  esac
+done
 
 # APK 身份判定：解 kernel_blob.bin 看 Dart 入口是不是**测试**。
 #
@@ -89,7 +97,7 @@ pick_device() {
 }
 
 # ---------- --check-only：只判定现有产物 ----------
-if [ "$MODE" = "--check-only" ]; then
+if [ "$MODE" = "check" ]; then
   id=$(apk_identity "$APK")
   echo "APK   : $APK"
   ls -l "$APK" 2>/dev/null || echo "  （不存在）"
@@ -103,13 +111,17 @@ if [ "$MODE" = "--check-only" ]; then
 fi
 
 echo "=== 1/3 构建真包（Dart 入口 = lib/main.dart）==="
-echo "  ⚠️ 构建输出重定向到文件：`flutter build apk` 经管道会被 SIGTERM。"
-if ! flutter build apk --debug > "$LOG" 2>&1; then
-  echo "[FAIL] 构建失败 —— 完整日志: $LOG"
-  tail -15 "$LOG"
-  exit 1
+if [ "$DO_BUILD" = "0" ]; then
+  echo "  [skip] --no-build：直接装现有 $APK（省一次 ~50s 的 Gradle）"
+else
+  echo "  ⚠️ 构建输出重定向到文件：flutter build apk 经管道会被 SIGTERM。"
+  if ! flutter build apk --debug > "$LOG" 2>&1; then
+    echo "[FAIL] 构建失败 —— 完整日志: $LOG"
+    tail -15 "$LOG"
+    exit 1
+  fi
+  tail -2 "$LOG"
 fi
-tail -2 "$LOG"
 
 echo "=== 2/3 校验产物身份（拒绝把测试入口包装给用户）==="
 id=$(apk_identity "$APK")

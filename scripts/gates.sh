@@ -8,6 +8,7 @@
 #   DEV=emulator-5554 bash ...           # 指定设备（不指定则优先模拟器，见下方 pick_device）
 #   SKIP_PREINSTALL=1 bash ...           # 跳过真机预装检查（默认不跳，见 ensure_device_app）
 #   PREINSTALL_TRIES=3 bash ...          # 真机预装的重试次数（默认 3）
+#   RESTORE_APP=0 bash ...               # 跳过"跑完设备层自动装回可启动真包"（默认做）
 #   ONLY_DEVICE=1 bash ...               # 只跑设备层（迭代设备用例时不必重跑 465 例宿主测试）
 #   APP_ID=... bash ...                  # 覆盖包名（默认 com.sonicshield.sonic_shield）
 # 退出码：0=全绿；1=有门禁失败（代码回归）；3=代码全绿但有**环境阻塞**（未执行，非失败）。
@@ -202,6 +203,38 @@ ensure_device_app() {  # $1=serial → 0=可以跑设备测试
   return 1
 }
 
+# ---- 收尾：把**可启动的真包**装回去（否则手机上应用会永久黑屏）--------------
+# 为什么必须做：设备用例会把 app-debug.apk 覆盖成"测试入口包" ——
+#   从桌面启动**永久停在闪屏/黑屏、且无任何报错**（2026-09-20 用户真实提问）。
+# 做法：设备用例开跑**之前**先缓存一份真包副本（若当时正好是真包），
+#   跑完之后用 `--no-build` 装回去 → **省一次 ~50s 的 Gradle 构建**。
+# 默认开启（`RESTORE_APP=0` 可关）—— 目标是"**门禁跑完，手机一定可用**"。
+REAL_APK_CACHE="$ROOT/build/app/outputs/flutter-apk/app-debug-real.apk"
+
+cache_real_apk() {
+  local src="$ROOT/build/app/outputs/flutter-apk/app-debug.apk"
+  [ -f "$src" ] || { echo "  [缓存] 尚无 app-debug.apk，跳过"; return 1; }
+  # 复用 install_app.sh 的判据，**不在两个脚本里各写一份**（会漂移）。
+  if APK="$src" bash "$ROOT/scripts/install_app.sh" --check-only >/dev/null 2>&1; then
+    cp -f "$src" "$REAL_APK_CACHE" &&
+      echo "  [缓存] 真包副本 → $(basename "$REAL_APK_CACHE")"
+    return 0
+  fi
+  echo "  [缓存] 当前 app-debug.apk 不是真包（多半是测试入口包），不缓存"
+  return 1
+}
+
+restore_real_apk() {  # $1=serial → 0=已恢复
+  local d="$1"
+  if [ -f "$REAL_APK_CACHE" ]; then
+    echo "  装回缓存的真包副本（--no-build，不重跑 Gradle）…"
+    APK="$REAL_APK_CACHE" DEV="$d" bash "$ROOT/scripts/install_app.sh" --no-build
+    return $?
+  fi
+  echo "  没有缓存副本 → 走完整构建（较慢：Gradle ~50s + 安装）…"
+  DEV="$d" bash "$ROOT/scripts/install_app.sh"
+}
+
 if [ "${WITH_DEVICE:-0}" = "1" ]; then
   TARGET=""
   if ! command -v adb >/dev/null 2>&1; then
@@ -210,10 +243,9 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
     TARGET=$(pick_device)
   fi
   if [ -n "${TARGET:-}" ]; then
-    echo "  ⚠️ 提醒：设备用例会把 build/app/outputs/flutter-apk/app-debug.apk 覆盖成"
-    echo "     **测试入口包**（Dart 入口 = integration_test/xxx_test.dart）。跑完之后"
-    echo "     手机上那个应用从桌面启动会**一直黑屏**（不建 DB、不连 broker、无报错）。"
-    echo "     要恢复可启动的应用：bash scripts/install_app.sh"
+    echo "  ⚠️ 提醒：设备用例会把 app-debug.apk 覆盖成**测试入口包**，从桌面启动会"
+    echo "     永久黑屏 —— 本脚本跑完会**自动装回可启动的真包**"
+    echo "     （RESTORE_APP=0 可关；手工恢复：bash scripts/install_app.sh）"
     DEVICE_OK=1
     if [ "${SKIP_PREINSTALL:-0}" = "1" ]; then
       echo "  [SKIP] 跳过预装检查（SKIP_PREINSTALL=1）"
@@ -228,8 +260,20 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
       echo "            MSYS_NO_PATHCONV=1 adb -s $TARGET install -r -t \"$(apk_path)\""
       BLOCKED=$((BLOCKED+1))
     else
+      cache_real_apk || true
       run_device_test "设备冒烟（app_smoke_test，4 例）" integration_test/app_smoke_test.dart device_smoke
       run_device_test "设备桥接（native_bridge_test，6 例）" integration_test/native_bridge_test.dart device_bridge
+      # ---- 收尾：把可启动的真包装回去 ----
+      if [ "${RESTORE_APP:-1}" = "1" ]; then
+        echo "=== 收尾: 恢复可启动的真包（不恢复的话手机上打开会永久黑屏）==="
+        if ! restore_real_apk "$TARGET"; then
+          echo "  [BLOCKED] 恢复真包失败 —— 设备上现在是不可启动的测试入口包"
+          echo "            **这不是代码回归**；手工补救：bash scripts/install_app.sh"
+          BLOCKED=$((BLOCKED+1))
+        fi
+      else
+        echo "  [skip] RESTORE_APP=0 —— 设备上现在是不可启动的测试入口包"
+      fi
     fi
   else
     echo "[SKIP] 设备端门禁：没有可用设备（adb devices 为空）"
