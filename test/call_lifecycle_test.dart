@@ -265,27 +265,54 @@ void main() {
     late String overlay;
     late String appDart;
 
-    /// 取出某个方法的**函数体**（从签名后第一个 `{` 到配对的 `}`）。
+    /// 取出某个方法的**函数体**（配对 `{}`）。
     ///
     /// 为什么要精确到方法体：`isNot(contains('acceptIncoming'))` 放在整个文件上
     /// 会误伤 —— 文件里**别处本来就应该有** `acceptIncoming`（那是对的）。
     /// 要锁的是"**来电处理里不得代为接通**"这一件具体的事，所以必须缩小范围。
+    ///
+    /// ⚠️ 两个坑都真实踩过，且都会让断言**静默失效**（看起来还在测，其实没测）：
+    /// 1. 不能取"签名后的第一个 `{`" —— Dart 的**具名参数**也用大括号
+    ///    （`String f(int a, {int? b}) { ... }`），会抽到参数列表；
+    /// 2. 不能取"后一个前面是 `)` 的 `{`" —— `) async {` 的 `{` 前面是 `async`。
+    ///
+    /// 正确做法：先按括号配对**跳过整个参数表**，再取其后第一个 `{`。
+    /// 本工具的自检在 `test/script_progress_test.dart` 的 SP-11。
     String methodBody(String src, String signature) {
       final i = src.indexOf(signature);
       if (i < 0) throw StateError('找不到 `$signature`');
-      final open = src.indexOf('{', i + signature.length);
-      if (open < 0) throw StateError('`$signature` 没有函数体');
+      // 1) 跳过参数表（具名参数的 `{}` 也一并配对掉）
       var depth = 0;
+      var k = src.indexOf('(', i + signature.length - 1);
+      if (k < 0) throw StateError('`$signature` 后面找不到 `(`');
+      for (; k < src.length; k++) {
+        final c = src[k];
+        if (c == '(' || c == '[' || c == '{') {
+          depth++;
+        } else if (c == ')' || c == ']' || c == '}') {
+          depth--;
+          if (depth == 0) break;
+        }
+      }
+      if (depth != 0) throw StateError('`$signature` 的参数表未闭合');
+      // 2) 参数表之后的第一个 `{` 即方法体
+      final open = src.indexOf('{', k);
+      if (open < 0) throw StateError('`$signature` 没有函数体');
+      if (src.substring(k, open).contains('=>')) {
+        throw StateError('`$signature` 是表达式体（`=>`），本工具只支持块体');
+      }
+      // 3) 大括号配对
+      var d = 0;
       for (var j = open; j < src.length; j++) {
         final c = src[j];
         if (c == '{') {
-          depth++;
+          d++;
         } else if (c == '}') {
-          depth--;
-          if (depth == 0) return src.substring(open, j + 1);
+          d--;
+          if (d == 0) return src.substring(open, j + 1);
         }
       }
-      throw StateError('`$signature` 的花括号不配对');
+      throw StateError('`$signature` 的函数体未闭合');
     }
 
     setUpAll(() {

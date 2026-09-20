@@ -82,6 +82,21 @@ void main() {
   });
 
   group('GT-灰盒 · 加密备份（PBKDF2 120k + AES-GCM）', () {
+    /// 本组三条用例的**工作量完全相同**：120k 次 PBKDF2 派生 + 一次 50KB 的
+    /// AES-256-GCM 运算（错密码只是最后 GCM 校验失败，KDF 一次都不会少跑）。
+    /// 因此它们**必须共用同一个预算**。
+    ///
+    /// ⚠️ 这正是一条缺陷（BUG-057）的成因：GT-03 曾单独写 `1500`，
+    /// 而实测三条都在 1.05–1.13s —— 于是 GT-03 只剩 **1.33×** 余量，
+    /// 兄弟用例却有 3.5×+。机器一有 CPU 争用就先红（实测被一次残留进程
+    /// 拖到 3229ms），表现为"同一份代码时红时绿"。
+    ///
+    /// 取值依据：干净机器实测 ≈1.05–1.13s（JIT），取 ~3.5× 余量。
+    /// ⚠️ 这是 **JIT 护栏**，不是绝对性能验收 —— 绝对验收在 AOT 层
+    /// （`integration_test/perf_nfr_test.dart` 的 NFR-04）。
+    /// 一致性由 `test/perf_budget_consistency_test.dart` 上锁。
+    const kdfBudgetMs = 4000;
+
     // ~50KB 任务备份（100 任务全字段）。
     final bigPayload = const JsonEncoder().convert({
       'app': 'sonic_shield',
@@ -104,8 +119,9 @@ void main() {
       final enc = await ExportCrypto.encrypt(bigPayload, 'stress-pass');
       sw.stop();
       expect(enc.length, greaterThan(40000));
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(4000),
-          reason: '加密耗时 ${sw.elapsedMilliseconds}ms');
+      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
+          reason: 'GT-01 加密实测 ${sw.elapsedMilliseconds}ms'
+              '（预算 ${kdfBudgetMs}ms = 实测 ≈1.1s × ~3.5）');
     });
 
     test('GT-02 解密 50KB 备份（含 KDF 12 万次，纯 Dart 实现）≤ 4s', () async {
@@ -114,8 +130,9 @@ void main() {
       final back = await ExportCrypto.decrypt(enc, 'stress-pass');
       sw.stop();
       expect(back, bigPayload);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(4000),
-          reason: '解密耗时 ${sw.elapsedMilliseconds}ms');
+      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
+          reason: 'GT-02 解密实测 ${sw.elapsedMilliseconds}ms'
+              '（预算 ${kdfBudgetMs}ms = 实测 ≈1.05s × ~3.8）');
     });
 
     test('GT-03 错误密码解密（含 KDF+失败）≤ 4s', () async {
@@ -124,7 +141,10 @@ void main() {
       final back = await ExportCrypto.decrypt(enc, 'wrong');
       sw.stop();
       expect(back, isNull);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(1500));
+      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
+          reason: 'GT-03 错密码解密实测 ${sw.elapsedMilliseconds}ms'
+              '（预算 ${kdfBudgetMs}ms —— 与 GT-01/02 **同一份工作量**，'
+              '故必须同一预算；曾单独写 1500ms，只剩 1.33× 余量）');
     });
   });
 

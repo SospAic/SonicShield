@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,11 +8,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../remote/script_progress.dart';
 
 /// 指令组 Tab（v1.6）：收藏模板列表（一键发往选中端点/编辑/删除）
 /// + 新建组装器入口。数据来自 RemoteStore.savedScripts。
+///
+/// v1.8（第十七轮续五）：**消费 `RcEvt.scriptState`** —— 端点每进入一个步骤都会
+/// 广播 `rc.script`，本页据此显示执行进度。此前该事件只有桌面 E2E 工具消费，
+/// 主叫侧发完就只能去端点看通知栏（协议三向覆盖里的最后一个 App 内缺口）。
 class RemoteScriptsTab extends ConsumerStatefulWidget {
-  const RemoteScriptsTab({super.key});
+  const RemoteScriptsTab({super.key, this.events});
+
+  /// 端点事件流；默认取 `RcEndpointService.instance.events`。
+  ///
+  /// 留出注入点是为了让部件测试能直接回灌 `rc.script` ——
+  /// 否则"用户真的能在界面上看到进度"这件事只能靠读代码来断言。
+  final Stream<Map<String, dynamic>>? events;
 
   @override
   ConsumerState<RemoteScriptsTab> createState() => _RemoteScriptsTabState();
@@ -21,10 +34,68 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
   String _selectedId = '';
   List<SavedScript> _saved = const [];
 
+  /// scriptId → 最新进度（消费 `RcEvt.scriptState`）。
+  final _progress = <String, ScriptProgress>{};
+
+  StreamSubscription<Map<String, dynamic>>? _evtSub;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _evtSub =
+        (widget.events ?? RcEndpointService.instance.events).listen(_onEvent);
+  }
+
+  @override
+  void dispose() {
+    unawaited(_evtSub?.cancel());
+    super.dispose();
+  }
+
+  /// 端点侧指令组进度（`rc.script`）。
+  ///
+  /// 未知状态一律不猜：`shouldApplyProgress` 为假时**什么都不做**，
+  /// 进度保持上一次的已知状态（BUG-050 判据）。
+  void _onEvent(Map<String, dynamic> m) {
+    if (!mounted) return;
+    if ((m['type'] as String?) != RcEvt.scriptState) return;
+    final p = parseScriptProgress(rcPayloadOf(m));
+    if (!shouldApplyProgress(p)) return;
+    setState(() => _progress[p.scriptId] = p);
+  }
+
+  /// 仍在执行的指令组 —— 进度卡只在"有在跑"时出现。
+  ScriptProgress? get _active {
+    for (final p in _progress.values) {
+      if (!p.isTerminal) return p;
+    }
+    return null;
+  }
+
+  /// 与当前进度对应的收藏模板（用于取名字与总步数）。
+  SavedScript? get _activeScript {
+    final a = _active;
+    if (a == null) return null;
+    for (final s in _saved) {
+      if (s.payload['scriptId'] == a.scriptId) return s;
+    }
+    return null;
+  }
+
+  /// 某条收藏模板的进度文案；从未跑过则返回 null。
+  String? _progressText(SavedScript s) {
+    final p = _progress[s.payload['scriptId']];
+    if (p == null) return null;
+    return describeScriptProgress(p,
+        totalSteps: (s.payload['steps'] as List?)?.length);
+  }
+
+  /// 列表项的副标题：基础信息 + （若有）执行进度。
+  String _subtitleFor(SavedScript s) {
+    final base = '已收藏 · ${s.payload['fromName'] ?? ''}';
+    final p = _progressText(s);
+    return p == null ? base : '$base · $p';
   }
 
   Future<void> _load() async {
@@ -53,13 +124,16 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
         .sendTo(ep, RcMessage.now(RcCmd.scriptRun, s.payload), store);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content:
-              Text(ok ? '「${s.name}」已发送，端点立即执行（通知栏可终止）' : '端点离线：已入队，上线后自动补发')));
+          content: Text(ok
+              ? '「${s.name}」已发送，进度见下方（端点通知栏可终止）'
+              : '端点离线：已入队，上线后自动补发')));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final active = _active;
+    final activeScript = _activeScript;
     return Scaffold(
       floatingActionButton: FloatingActionButton.extended(
         icon: const Icon(Icons.add),
@@ -95,6 +169,22 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
               ),
             ),
           const SizedBox(height: 8),
+          if (active != null) ...[
+            Card(
+              child: ListTile(
+                leading: const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                title: Text(activeScript?.name ?? '远程指令组'),
+                subtitle: Text(describeScriptProgress(active,
+                    totalSteps:
+                        (activeScript?.payload['steps'] as List?)?.length)),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           if (_saved.isEmpty)
             const Card(
                 child: Padding(
@@ -106,7 +196,7 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
               child: ListTile(
                 leading: const Icon(Icons.bolt),
                 title: Text(s.name),
-                subtitle: Text('已收藏 · ${s.payload['fromName'] ?? ''}'),
+                subtitle: Text(_subtitleFor(s)),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -129,7 +219,8 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
               padding: EdgeInsets.all(12),
               child: Text(
                 '指令组 = 动作 + 时延的有序序列（最多 50 步）。端点收到后立即执行，'
-                '通知栏全程显示发送方与进度，可随时终止；全程审计留痕。',
+                '执行进度会实时回传本页（端点每进入一步广播一次），'
+                '端点通知栏全程显示发送方与进度，可随时终止；全程审计留痕。',
                 style: TextStyle(fontSize: 12),
               ),
             ),

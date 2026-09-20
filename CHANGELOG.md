@@ -321,6 +321,64 @@
   （Dart VM 栈帧刷屏），关掉后同一条命令 No issues found。
 - 真机仍阻塞（`adb devices` 里没有真机）。本轮**未取得任何真机数据**。
 
+### 第十七轮补记（六）（2026-09-20）：`rc.script` 接进 App（协议缺口可闭环项清零）+ BUG-057
+
+#### Added（新增）
+- **`lib/remote/script_progress.dart`**（纯逻辑）：指令组执行进度的解析与文案。
+  `ScriptState { running, done, stopped, unknown }` + `parseScriptProgress` +
+  `shouldApplyProgress` + `describeScriptProgress`（**穷尽 switch、无 `default:`**）。
+- `RemoteScriptsTab` 现在**消费 `RcEvt.scriptState`**：顶部出现执行中进度卡，
+  每条收藏模板的副标题也带自己的进度（此前发完只弹一句"已发送"，看不到执行到第几步）。
+- `RemoteScriptsTab({this.events})` 注入点：让部件测试能直接回灌事件。
+
+#### Fixed（BUG-057：压测层「同一份工作量、两个预算」）
+- **现象**：标准门禁压测层红 —— `GT-01 加密 50KB 备份 ≤ 4s`（实测 6213ms）与
+  `GT-03 错误密码解密 ≤ 1500ms`（实测 3737ms）。
+- **先怀疑测量，果然有一半是测量问题**：`TaskStop` 报"已终止"的端口扫描后台任务
+  **并没有真的死**，`/usr/bin/xargs` 仍在持续 fork 子进程（`ps` 见 24 个残留）。
+  杀掉后 GT-01 恢复，**但 GT-03 依然红**（3229ms）→ 是两个独立问题。
+- **预算形状的证据链**：`encrypt`/`decrypt` 都走 `Pbkdf2(iterations: 120000)`，
+  错密码只是最后 GCM 校验失败、**KDF 一次都不会少跑** → 三条用例工作量完全相同。
+  用"把阈值临时置 0"逼出干净机器实测：GT-01 **1128ms**、GT-02 **1049ms**、GT-03 **1127ms**。
+  于是 GT-03 的 1500ms 只剩 **1.33×** 余量（兄弟用例 3.5×+），
+  且三条用例**标题都写「≤ 4s」**、只有 GT-03 的断言写 1500 —— 断言与自己的标题矛盾。
+  CPU 争用把耗时抬到 2.9× → 余量低于噪声幅度，GT-03 必然最先红。
+- **修法**：抽 `const kdfBudgetMs = 4000` 三条共用（依据写进注释）。
+  ⚠️ **不是放宽阈值**：需求（4 秒）没变，改的是**形状** ——
+  把"拍脑袋的 1.33×"对齐到"与兄弟用例一致的 3.5×"。绝对验收仍在 AOT 层（NFR-04）。
+- **顺带修掉两个会让锁静默失效的工具缺陷**：
+  ① `methodBody()` 取"签名后第一个 `{`" → Dart **具名参数也用大括号** → 抽到参数列表
+  （`isNot(contains(...))` 恒真、`contains(...)` 恒假）；中间试过的"前面是 `)` 的 `{`"
+  同样错（`) async {` 的 `{` 前面是 `async`）。最终**先按括号配对跳过整个参数表**，
+  并给工具本身加自检；`test/call_lifecycle_test.dart` 的同名函数同步修正。
+  ② `'ScriptState.$v'` 会插值成 `ScriptState.ScriptState.running`（恒假断言）→ 必须用 `v.name`。
+
+#### Tested
+- 新增回归锁 **19 例**：
+  - `test/script_progress_test.dart`（11）：纯逻辑 SP-01…SP-06 + 源码契约 SP-07…SP-10 +
+    **工具自检 SP-11**；
+  - `test/remote_scripts_tab_test.dart`（4）：**用户看得见**的后果（进度卡与副标题、
+    终止态不残留、未知状态不乱动、其他事件不误判）；
+  - `test/perf_budget_consistency_test.dart`（4）：同工作量必须同预算（PB-01…PB-04）。
+- **证伪 5 组变异，全部精确打红**：过滤字面量代替 `RcEvt.scriptState` → SP-08；
+  绕过 `shouldApplyProgress` → SP-09；去掉 `stopped` + 加 `default:` → SP-03 + SP-07；
+  GT-03 预算改回 1500 → PB-01 + PB-02；进度写进错 key → RS-02。
+  > **"变异只打红一半"是本次最有价值的发现**：它暴露 RS-01/RS-03 当时只被顶部横幅满足、
+  > 没覆盖"每条模板自己的副标题"。据此**补强 RS-01**，重跑 → 打红到位。
+- 门禁：analyze **No issues found**；功能层 **465/465**；压测层 **24/24**；总 **489**；
+  `bash scripts/gates.sh` → **EXIT=0**。
+
+#### Known Issues
+- 缺口登记表剩 3 条（`taskGet` / `photo` / `heartbeat`），**均有正当理由、非缺陷**。
+  > ⚠️ 上一轮交接写「`scriptState` 是缺口登记表里**最后一条**，修好即可清空整张表」——
+  > 实测本表共 4 条，`scriptState` 是**最后一条可闭环的**。**叙述修正**。
+- **无线调试的端口扫描这条路已否决**：即使扫到端口，`adb pair` 仍**必须**用设备屏上的
+  6 位配对码 —— 扫描无法替代向使用者索取信息；且那次扫描的残留进程正是 BUG-057 的污染源。
+- **新观察项**：`RemoteScriptsTab` 发命令走 `RcEndpointService.sendTo`（未过
+  `RcCommandChannel`）→ 协助会话目标目前跑不了指令组。属体验缺口，非缺陷。
+- 真机仍阻塞（`adb devices` 里只有 `emulator-5554`）。本轮**未取得任何真机数据**，
+  **不声称任何真机结论**。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

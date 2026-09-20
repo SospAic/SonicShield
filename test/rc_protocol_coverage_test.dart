@@ -121,6 +121,11 @@ void main() {
   const evtWithoutConsumer = <String, String>{};
 
   /// 有消费方，但**只在 `tool/` 桌面 E2E 工具里**，App 内无消费者。
+  ///
+  /// ⚠️ `scriptState` 已于第十七轮**续五**闭环：`RemoteScriptsTab` 现在消费
+  /// `RcEvt.scriptState` 显示执行进度（纯逻辑在 `lib/remote/script_progress.dart`，
+  /// 回归锁在 `test/script_progress_test.dart`）。按本表规矩，修好就删条目 ——
+  /// 下面的"不得冗余"用例会强制这一点。
   const evtWithoutInAppConsumer = <String, String>{
     'heartbeat': '`rc.heartbeat` 的语义是"端点还活着"。控制台的在线判定已经由'
         '「任意同 peerId 事件都算存活」覆盖（心跳是最慢的恢复信号），'
@@ -129,9 +134,6 @@ void main() {
         '剔除，并统计心跳条数以区分「端点离线」与「密钥不匹配」'
         '（BUG-052 的教训：心跳曾让"密文到达即通过"的判据恒真）。'
         '因此它已**有人消费**，只是 App 内没有。',
-    'scriptState': '`rc.script` 只被 `tool/rc_e2e_controller.dart`（RC-11/12）消费，'
-        'App 内控制台看不到指令组执行进度 —— 端点侧靠通知栏自证，'
-        '主叫侧无进度面板。属**已知体验缺口**，见 docs/17 本轮小节。',
   };
 
   // ---------------- 用例 ----------------
