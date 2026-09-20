@@ -10,6 +10,28 @@ import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
 
+/// 「随机指令集」子动作 → [RcStepKind] 的回填映射；**不可表示的类型返回 null**。
+///
+/// ⚠️ 故意**不写 `_ =>` 兜底**（BUG-058）：[ActionConfig] 是 **sealed**，
+/// 一旦写 `_` 就**关掉了编译器的穷尽性检查** —— 以后新增动作类型会静默掉进兜底。
+/// 修之前这里正是 `_ => RcStepKind.play`：复合 / 声景 / 嵌套动作组都会被当成
+/// "播放音频"回填，用户**打开编辑器再保存**（哪怕什么都没改）就把原配置悄悄改掉了。
+///
+/// 现在改成**显式穷尽 + null**：新增 [ActionConfig] 子类时这里**编译报错**，
+/// 逼人显式登记，而不是悄悄当 play 处理。返回 null 的子动作由编辑器
+/// [TaskEditorScreen] **原样保留**（`_setPreserved`），保存时不丢。
+RcStepKind? stepKindOfAction(ActionConfig a) => switch (a) {
+      PlayAudioAction() => RcStepKind.play,
+      TtsAction() => RcStepKind.tts,
+      NotifyAction() => RcStepKind.notify,
+      VibrateAction() => RcStepKind.vibrate,
+      RecordEvidenceAction() => RcStepKind.record,
+      // 这三种在"随机指令集"编辑器里没有对应控件 → 不可表示，交回原配置保留。
+      CompositeAction() => null,
+      SoundscapeAction() => null,
+      ActionSetAction() => null,
+    };
+
 /// 任务编辑器：触发方式 -> 时间参数 -> 动作 -> 音源 -> 保存。
 /// 编辑器刻意保持“单页分组 + 底部保存”，降低复杂度。
 ///
@@ -95,6 +117,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   // 随机指令集（v1.8）：候选动作种类 + 对应权重（平行数组）。
   final List<RcStepKind> _setCandidates = [];
   final List<double> _setWeights = [];
+
+  /// 不可在编辑器中表示、需**原样保留**的子动作（复合 / 声景 / 嵌套动作组）。
+  ///
+  /// 见 [stepKindOfAction]：这些类型返回 null，若不保留，用户打开编辑器
+  /// 再保存就会**静默丢掉**它们（BUG-058）。
+  final List<ActionSetCandidate> _setPreserved = [];
 
   /// 通话中不执行。**默认开启**（安全默认，见 TaskCondition 类文档）：
   /// 定时音频灌进通话里对双方都是干扰，且使用者无法预期。
@@ -207,9 +235,15 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       } else if (a is ActionSetAction) {
         _setCandidates.clear();
         _setWeights.clear();
+        _setPreserved.clear();
         for (final c in a.candidates) {
-          _setCandidates.add(_kindOfCandidate(c.action));
-          _setWeights.add(c.weight);
+          final k = _kindOfCandidate(c.action);
+          if (k == null) {
+            _setPreserved.add(c); // 不可编辑：原样保留，保存时不丢
+          } else {
+            _setCandidates.add(k);
+            _setWeights.add(c.weight);
+          }
         }
         _actionKind = ActionKindChoice.randomFrom;
       } else if (a is TtsAction) {
@@ -752,6 +786,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             ),
           ),
         ),
+      if (_setPreserved.isNotEmpty)
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Text(
+              '另有 ${_setPreserved.length} 个子动作（复合 / 声景 / 嵌套动作组）'
+              '在此编辑器中没有对应控件，已按原配置保留，保存时不会丢失。',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ),
       if (_setCandidates.length < 8)
         Wrap(
           spacing: 6,
@@ -778,14 +823,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     ];
   }
 
-  /// 从候选动作反推 RcStepKind（编辑回填用）。
-  RcStepKind _kindOfCandidate(ActionConfig a) => switch (a) {
-        TtsAction() => RcStepKind.tts,
-        NotifyAction() => RcStepKind.notify,
-        VibrateAction() => RcStepKind.vibrate,
-        RecordEvidenceAction() => RcStepKind.record,
-        _ => RcStepKind.play,
-      };
+  /// 从候选动作反推 RcStepKind（编辑回填用）—— 见顶层 [stepKindOfAction]。
+  RcStepKind? _kindOfCandidate(ActionConfig a) => stepKindOfAction(a);
 
   IconData _setIcon(RcStepKind k) => switch (k) {
         RcStepKind.play => Icons.volume_up,
@@ -918,6 +957,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                 RcStepKind.delay => RecordEvidenceAction(seconds: _recordSec),
               },
             ),
+          // 不可编辑的子动作原样带回来 —— 打开编辑器再保存也不丢配置。
+          ..._setPreserved,
         ]);
       case ActionKindChoice.tts:
         action = TtsAction(text: _ttsText);
