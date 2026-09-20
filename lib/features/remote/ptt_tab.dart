@@ -97,7 +97,12 @@ class _PttTabState extends State<PttTab> {
     setState(() => _recording = false);
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
-    final ep = _endpoints.firstWhere((e) => e.deviceId == _selectedId);
+    final ep = endpointById(_endpoints, _selectedId);
+    if (ep == null) {
+      // 端点在别处被解配对 —— 明确告知，不要崩（BUG-060）。
+      if (mounted) setState(() => _lastResult = '端点已不存在（可能已解配对）');
+      return;
+    }
     final r = await RcControllerService.instance.pttStopAndSend(ep, store);
     if (mounted) setState(() => _lastResult = r.message);
   }

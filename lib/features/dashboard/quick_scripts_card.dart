@@ -42,7 +42,15 @@ class QuickScriptsCardState extends ConsumerState<QuickScriptsCard> {
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
     final paired = store.paired();
-    final endpoint = paired.firstWhere((p) => p.deviceId == _firstEndpoint);
+    final endpoint = endpointById(paired, _firstEndpoint);
+    if (endpoint == null) {
+      // 端点在别处被解配对 / 配对表被清空 —— 明确告知，不要崩（BUG-060）。
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('端点已不存在（可能已解配对），请重新选择')));
+      }
+      return;
+    }
     final script = RcScript.fromJson(s.payload);
     final ok = await RcEndpointService.instance.sendTo(
         endpoint, RcMessage.now(RcCmd.scriptRun, script.toJson()), store);

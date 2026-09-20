@@ -35,6 +35,25 @@ class PairedEndpoint {
       );
 }
 
+/// 按 `deviceId` 找**已选中的端点**；找不到返回 **null**（不抛）。
+///
+/// ⚠️ 为什么不用 `firstWhere` 一行写完（BUG-060）：`firstWhere` 不带 `orElse`
+/// 时找不到会抛 `Bad state: No element`。而"选中端点"是**跨页面共享的旧状态** ——
+/// 用户在别处解配对、或配对表被清了，本页 `_selectedId` 仍是旧值，
+/// 此时一点「发送 / 松开对讲 / 快捷指令」就**直接崩溃**，而且**没有任何提示**
+/// （用户看到的是界面无响应或闪退，完全不知道是配对没了）。
+///
+/// 返回 null 让调用方有机会**明确告知**（"端点已不存在，可能已解配对"）——
+/// 这既符合「点名了就必须满足，满足不了要失败」，也符合「失败必须留痕且让用户知道」：
+/// **要失败，但不要崩。**
+PairedEndpoint? endpointById(List<PairedEndpoint> endpoints, String deviceId) {
+  if (deviceId.isEmpty) return null;
+  for (final e in endpoints) {
+    if (e.deviceId == deviceId) return e;
+  }
+  return null;
+}
+
 /// 远程遥控持久化状态（SharedPreferences，KV 简单可靠）。
 class RemoteStore {
   RemoteStore(this._prefs);

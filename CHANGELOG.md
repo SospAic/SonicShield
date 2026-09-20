@@ -670,6 +670,41 @@
 #### Known Issues
 - 真机本轮全程离线，设备层与"自动收尾恢复真包"的端到端成功仍未取到。
 
+### 第十七轮补记（十四）（2026-09-20）：`firstWhere` 审计 → **BUG-060**（"选中端点"是旧状态，找不到就崩）
+
+> 主题：`lib/` 里 `firstWhere` 只有 4 处，1 处良性（带 `orElse: throw`），
+> **3 处无 `orElse` = BUG-060**。
+
+#### Fixed（缺陷修复）
+- **BUG-060**：`dashboard/quick_scripts_card`、`features/remote/ptt_tab`、
+  `features/remote/remote_scripts_tab` 三处都写成
+  `endpoints.firstWhere((e) => e.deviceId == _selectedId)`（**无 `orElse`**），
+  找不到会抛 `Bad state: No element`。
+  而 `_selectedId` 是**跨页面共享的旧状态** —— 用户在别处解配对、或配对表被清，
+  本页状态不刷新 → 一点「发送 / 松开对讲 / 快捷指令」就**崩溃且无任何提示**。
+  > 判据（与 BUG-058/059 同一条纪律）：**要失败，但不要崩** ——
+  > 崩溃既不留痕（无审计），用户也无从知道原因。
+- 修法：新增纯函数 `endpointById(List<PairedEndpoint>, String) → PairedEndpoint?`
+  （找不到返回 **null**，不抛）；三处调用点改为**明确告知"端点已不存在（可能已解配对）"**。
+- `rc_script.dart:25` 那处判定**良性**：带 `orElse: () => throw ArgumentError(...)`，
+  是**显式失败**（与 `action.dart` / `trigger.dart` 一致）。
+
+#### Added（新增）
+- `test/endpoint_by_id_test.dart`（**4 例**，EBI-01..04）：找得到 / **找不到 → null 不抛** /
+  空 id·空表不抛 / **全局锁**：`lib/` 每处 `firstWhere`/`lastWhere`/`singleWhere`
+  **必须带 `orElse:`**，失败时**报具体行号**。
+
+#### Tested（真实执行数据）
+- 变异证伪**两个方向**：`endpointById` 内部退回 `firstWhere` → **EBI-02 红**；
+  `ptt_tab` 调用点改回 `firstWhere` → **EBI-04 红**，定位 `ptt_tab.dart:100`；还原后 4/4 绿。
+- analyze No issues（10.4s）；功能层 **488/488**（484 → 488）；压测 **24/24**；
+  `bash scripts/gates.sh` → **EXIT=0**（3m23s）。
+
+#### Known Issues
+- 真机本轮全程离线（第七次），设备层与"自动收尾恢复真包"的端到端成功仍未取到。
+- 已全量审完的面：switch 兜底 **21/21**、`??=` **5/5**、`firstWhere` **4/4**；
+  剩下唯一规模大的可审计面是 **`??` 兜底 262 处**。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对
