@@ -57,9 +57,8 @@ class _PttTabState extends State<PttTab> {
     if (!mounted) return;
     setState(() {
       _endpoints = store.paired();
-      _selectedId = _endpoints.isEmpty
-          ? ''
-          : (_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId);
+      // 与「我的设备」共享同一份选择（快速连接的落点）。
+      _selectedId = initialSelectedId(_endpoints, store.selectedEndpointId);
     });
   }
 
@@ -140,7 +139,11 @@ class _PttTabState extends State<PttTab> {
                   for (final e in _endpoints)
                     DropdownMenuItem(value: e.deviceId, child: Text(e.name)),
                 ],
-                onChanged: (v) => setState(() => _selectedId = v ?? ''),
+                onChanged: (v) async {
+                  setState(() => _selectedId = v ?? '');
+                  final prefs = await SharedPreferences.getInstance();
+                  await RemoteStore(prefs).setSelectedEndpoint(v ?? '');
+                },
               ),
             ),
           ),

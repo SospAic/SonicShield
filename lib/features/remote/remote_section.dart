@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/widgets/section_scaffold.dart';
+import 'device_list_screen.dart';
 import 'remote_console_tab.dart';
 import 'remote_scripts_tab.dart';
 import 'remote_tasks_tab.dart';
@@ -48,7 +49,12 @@ class RemoteSection extends StatelessWidget {
       ],
       tabs: [
         SectionTabSpec(
-          label: '设备',
+          label: '我的设备',
+          icon: Icons.devices,
+          builder: (_) => const DeviceListScreen(embedded: true),
+        ),
+        SectionTabSpec(
+          label: '控制台',
           icon: Icons.gamepad_outlined,
           builder: (_) => const RemoteConsoleTab(),
         ),

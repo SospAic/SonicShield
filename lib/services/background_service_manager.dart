@@ -111,6 +111,33 @@ class BackgroundServiceManager {
 
   bool get isRunning => _last?.running ?? false;
   bool get guardActive => _last?.guardActive ?? false;
+
+  /// 等待引擎回投状态，直到 `guardActive == expected` 或超时。
+  ///
+  /// 存在意义（BUG-061）：`setGuard()` 是 **fire-and-forget** 的 `invoke`，
+  /// 调用返回**不代表生效**。引擎没跑时它发向不存在的服务、完全没反应，
+  /// UI 若只看"调用完成"就会显示错误的成功。
+  /// 有了这个等待，UI 才能区分"生效了"与"引擎无响应"。
+  ///
+  /// 返回 true = 观察到期望状态；false = 超时。
+  ///
+  /// ⚠️ 刻意**不用** `state.firstWhere(...)`：`firstWhere` 不带 `orElse`
+  /// 会在流关闭时抛 `Bad state: No element`（全局锁 EBI-04 禁止该形态）。
+  /// 这里用 Completer + `timeout(onTimeout:)`，超时是**返回值**而非异常。
+  Future<bool> waitForGuardActive(bool expected,
+      {Duration timeout = const Duration(seconds: 3)}) async {
+    if (guardActive == expected) return true;
+    final c = Completer<bool>();
+    StreamSubscription<EngineState>? sub;
+    sub = state.listen((s) {
+      if (s.guardActive == expected && !c.isCompleted) c.complete(true);
+    });
+    try {
+      return await c.future.timeout(timeout, onTimeout: () => false);
+    } finally {
+      await sub.cancel();
+    }
+  }
 }
 
 /// 远程「立即执行」结果。

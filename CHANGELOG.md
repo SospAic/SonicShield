@@ -733,6 +733,38 @@
 **非硬件阻塞全部清空。** 下一个新增的可审计面要等代码变化后再扫，
 新代码动手前**先跑一遍这 4 个全局锁**确认没破：EBI-04 / ASE-03 / SCT-05 / LBL-01。
 
+### 第十七轮续十五（2026-09-20）
+
+**Fixed（BUG-061：守卫开关失败时完全静默）**
+
+真机复现：点守卫开关后 `value` 保持 false、`mgr.last == null`，页面文案**零解释**。
+根因：`setGuard()` 是 fire-and-forget 的 `invoke`，引擎没跑时发向不存在的服务、
+彻底 no-op，而 UI 只看"调用完成"就 `setState` —— 开关弹回且不说原因。
+
+三条失败路径（引擎未运行 / 麦克风被拒 / 引擎无响应）此前表现完全相同。
+修法：抽 `guard_toggle.dart`（依赖全注入）+ `waitForGuardActive()` 让"下发"与
+"生效"可区分，逐条给出可操作提示。
+真机修复验证：300ms 内出现「守卫需要后台引擎：请先在「守护」页开启守护」。
+
+**Fixed：电池白名单框每次都弹** —— `requestAllPermissions()` 无条件请求，
+改为先 `isIgnoringBatteryOptimizations()` 判定。
+
+**Added：「我的设备」列表（向日葵式：保存连接 + 快速连接）**
+
+此前 `_selectedId` 是每个 TAB 各自的局部 State，列表页选好的端点切到控制台就丢了。
+- `RemoteStore`：`selectedEndpointId` 持久化 + `selectEndpoint` / `setSelectedEndpoint`
+  / `renamePaired` / `touchPaired`；删掉当前目标时清空选择
+- `PairedEndpoint`：新增 `alias`（备注名）+ `lastConnectedAt`，`displayName` 备注优先
+- 共享纯函数 `initialSelectedId()`：优先已选（且仍在配对表里），三页统一调用
+- 新页 `device_list_screen.dart`，「远程」分组新增子 TAB「我的设备」
+
+**Tested**：新增 21 例（GTO-01..07 / DLS-01..14），四个方向变异证伪全红；
+analyze No issues；功能层 **509/509**（488 → 509）；压测 24/24；gates → **EXIT=0**。
+
+**⚠️ 源码锁误伤注释（第三次同类）**：新注释里的 `firstWhere` 字面量让 EBI-04 恒红。
+这次不删注释，而是给锁加"跳过整行注释" + `scanned > 0` 反向自检，
+并用注入变异验证加固后仍抓得到真违规。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

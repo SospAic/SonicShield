@@ -72,8 +72,13 @@ Future<void> requestAllPermissions(WidgetRef ref) async {
   if (exact) {
     // 原生层已检查；未授权时跳转系统设置由引导页完成。
   }
-  // 电池优化白名单（可跳过，引导页处理）
-  await NativeBridge.requestIgnoreBatteryOptimizations();
+  // 电池优化白名单（可跳过，引导页处理）。
+  //
+  // ⚠️ 只在**尚未加白**时才弹系统框：无条件弹会让「每次开引擎 / 开守卫」
+  // 都弹出一次系统对话框，用户只能反复点掉；已加白的情况等于白弹一次。
+  if (!await NativeBridge.isIgnoringBatteryOptimizations()) {
+    await NativeBridge.requestIgnoreBatteryOptimizations();
+  }
 }
 
 /// 厂商保活引导：识别品牌并给出操作指引 + 深链跳转。

@@ -7,6 +7,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../../core/providers.dart';
 import '../../services/background_service_manager.dart';
+import 'guard_toggle.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
 
@@ -72,6 +73,37 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     }
   }
 
+  /// 守卫开关。
+  ///
+  /// ⚠️ BUG-061：此前三条失败路径（引擎没跑 / 麦克风权限被拒 / 引擎无响应）
+  /// **全都静默表现为"开关弹回"**，用户既不知道失败也不知道该做什么。
+  /// 现在统一经 `toggleGuard()` 归类，并把原因**明确告知**。
+  Future<void> _onToggleGuard(bool v) async {
+    final scaffold = ScaffoldMessenger.of(context);
+    final mgr = BackgroundServiceManager.instance;
+    final failure = await toggleGuard(
+      wanted: v,
+      engineRunning: mgr.isRunning,
+      requestMic: () async => Permission.microphone.request().isGranted,
+      persist: _persist,
+      startMicService: () async {
+        // 前台启动麦克风类型 FGS（Android 11+ while-in-use 通行证，
+        // 使守卫在后台合法使用麦克风；docs/05 §1.4）。
+        await NativeBridge.startMicService();
+        await requestAllPermissions(ref);
+      },
+      stopMicService: NativeBridge.stopMicService,
+      setGuard: mgr.setGuard,
+      waitForGuardActive: mgr.waitForGuardActive,
+    );
+    if (!mounted) return;
+    ref.invalidate(engineStateProvider);
+    setState(() {});
+    if (failure != GuardToggleFailure.none) {
+      scaffold.showSnackBar(SnackBar(content: Text(guardFailureText(failure))));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final engine = ref.watch(engineStateProvider);
@@ -87,29 +119,7 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
               title: Text(guardOn ? '守卫运行中' : '守卫已停止'),
               subtitle: const Text('检测到超过阈值的声音事件后自动执行声音触发类任务'),
               value: guardOn,
-              onChanged: (v) async {
-                final scaffold = ScaffoldMessenger.of(context);
-                if (v) {
-                  final granted =
-                      await Permission.microphone.request().isGranted;
-                  if (!granted) {
-                    scaffold
-                        .showSnackBar(const SnackBar(content: Text('需要麦克风权限')));
-                    return;
-                  }
-                  await _persist();
-                  if (!mounted) return;
-                  await requestAllPermissions(ref);
-                  // 前台启动麦克风类型 FGS（Android 11+ while-in-use 通行证，
-                  // 使守卫在后台合法使用麦克风；docs/05 §1.4）。
-                  await NativeBridge.startMicService();
-                } else {
-                  await NativeBridge.stopMicService();
-                }
-                await BackgroundServiceManager.instance.setGuard(v);
-                ref.invalidate(engineStateProvider);
-                if (mounted) setState(() {});
-              },
+              onChanged: _onToggleGuard,
             ),
           ),
           const SizedBox(height: 16),

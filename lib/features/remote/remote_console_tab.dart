@@ -92,9 +92,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     setState(() {
       _endpoints = store.paired();
       _enabled = store.enabled;
-      _selectedId = _endpoints.isEmpty
-          ? ''
-          : (_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId);
+      // 与「我的设备」共享同一份选择：在那里点过"连接"，这里就应是同一台。
+      _selectedId = initialSelectedId(_endpoints, store.selectedEndpointId);
     });
   }
 
@@ -490,7 +489,12 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
             for (final e in _endpoints)
               DropdownMenuItem(value: e.deviceId, child: Text(e.name)),
           ],
-          onChanged: (v) => setState(() => _selectedId = v ?? ''),
+          onChanged: (v) async {
+            setState(() => _selectedId = v ?? '');
+            // 持久化到全局选择：换页/重启后仍是这台（"快速连接"的另一端）。
+            final prefs = await SharedPreferences.getInstance();
+            await RemoteStore(prefs).setSelectedEndpoint(v ?? '');
+          },
         ),
       ),
     );
