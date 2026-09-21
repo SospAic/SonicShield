@@ -1827,11 +1827,11 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 **§41，第十七轮续十八 = 第十九轮交接**）拿到「尚未闭环」清单与开场提示词，
-以及 docs/12 的最后一节（当前是 §44）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 528/528、压测 24/24、analyze 零问题，
+再读 docs/17 的最后一节（当前是 **§45，第二十轮开场 = 第四次交接**）拿到「尚未闭环」清单与开场提示词，
+以及 docs/12 的最后一节（当前是 §45）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 578/578、压测 24/24、analyze 零问题，
 **可审计面已全量审完（4 个面：switch 兜底 21、`??=` 5、`firstWhere` 4、`??` 262）**。
-`bash scripts/gates.sh` → EXIT=0。
+`bash scripts/gates.sh` → EXIT=0（2026-09-21 实测 8m54s）。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
 ⚠️ 第十七轮推翻/纠正了**七条**旧叙述，**读 §1.13 / §1.14 / §1.19 / §1.20 / §1.21 再动手，别沿用旧叙述**：
@@ -1886,6 +1886,21 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
+0. ★ **覆盖率冲刺（用户第 4 项明确要求 99%+，当前最高优先级）**
+   全局 **57.5% → 约 58.5%+**（edge_coverage + prob_gate 后未重测）。
+   口径：**设备层豁免 ≈ 1419 行**（endpoint 576 / engine 316 / call 231 /
+   multi_call 124 / playback 85 / bg_mgr 55 / notification 32，不可宿主测）；
+   **可测面剩余 ≈ 640 行**，按文件从大到小补：
+   task_editor 215、device_list 105、remote_console 86、providers 35、
+   script_executor 20、remote_scripts_tab 31、assist_host_screen 19、occurrence 18、
+   protocol 16、native_bridge 14、action 13、remote_store 12、assist_join_screen 11、
+   app_db 10、assist_host 10、schedule_engine 9、assist 7、random 6、
+   command_channel 6、assist_join 5、rc_script 4、condition/guarded/task_wire 3。
+   device_list 与 remote_console 用现成 channel 抽象注入 fake。
+   ⚠️ 新用例若出现"DBG 打印与断言自相矛盾"，**先迁到独立文件再排查**
+   （dart 宿主缓存互扰，见 docs/17 §44③）。
+0b. **权限"已授予"主路径真机跑通**（需 `pm grant` 预授权）；
+   多设备视频**多路实际连通性**（需 ≥2 台设备）。
 1. ~~**`RemoteScriptsTab` 改走 `RcCommandChannel`**（P3）~~ ✅ **第十七轮续八已闭环**
    （协助会话目标现在能执行已收藏的指令组；协助页加了「指令组」Tab；
    新增 RS-05…RS-08 四例锁并经变异证伪）。剩余边界：协助会话下**只能执行已收藏**的模板，
@@ -1911,9 +1926,21 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 · 环境变量按 HANDOVER §3 的**一个代码块** export；**不要用 `env VAR=… flutter …`
   包装命令**（裸跑即可，实测三层门禁都正常）。
 · 跑门禁前**先关模拟器**（qemu 占内存会导致 analyze/test 被 SIGTERM）。
+· ★ **2026-09-21 新增（第二十轮血泪）：先确认"整机空不空"，不只是"关模拟器"。**
+  `ps | grep 'dart|flutter'` 干净 **≠** 机器空闲。实测：另一个项目
+  （`sports-intelligence-os`）的 **17 个 Docker 容器**跑在 WSL2 里，
+  `vmmemWSL` 独占 **8.2 / 16 核**，整机 `LoadPercentage=100` →
+  功能层从 `00:38` 变 `07:33`（**12–18×**）、压测层 `01:07`→`13:30`，
+  失败**全是 `TimeoutException after 0:00:30`**（钟表敏感，不是回归）。
+  开工前必做（**这一步能省下 40 分钟白跑**）：
+    `Get-CimInstance Win32_Processor | Select-Object -ExpandProperty LoadPercentage`（期望 << 100）
+    `docker ps --format "{{.Names}}\t{{.Status}}"`（看有没有别的项目在跑）
+  判定链：单跑绿 + 全套件红 + 超出幅度彼此不成比例 ⇒ **环境假红**，
+  **别改代码、别放宽阈值**。停别人的容器前**先问使用者**。
+  完整记录见 docs/12 §45、docs/17 §45；技能 `flutter-flaky-gate-triage` 已同步加固。
 · 门禁必须**分层跑**，混跑会因 CPU 争用假红：
     flutter analyze                          → 期望 No issues found
-    flutter test --exclude-tags perf         → 期望 +465 / 465
+    flutter test --exclude-tags perf         → 期望 +578 / 578
     flutter test --tags perf --concurrency=1 → 期望 +24 / 24
   ⚠️ `WITH_DEVICE=1` 会把**开着的模拟器**带进功能/压测层 → 压测必然被 CPU 争用
   污染（第十七轮实测 `GT-03` 1754ms > 1500ms 假红，关掉模拟器后 +24 全绿）。
@@ -1955,11 +1982,33 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 **给用户的交接会话开场（人类可读版）**：
 
-> 本轮已完成：v1.7.1 的音源库导入批量写入与原子性（BUG-047，
-> 预置库 60 条由 60 次平台往返改为 1 次，失败不再留下半套库）。
-> 门禁：analyze 干净 / 336 / 24 / gates EXIT=0 / AOT 6 / 冒烟 4 / 桥接 6。
-> 下一轮建议：真机接入后优先补协助会话的双进程握手；若无真机，
-> 做三向覆盖比对审计其它模块，或把 `rc.assets`/`rc.presets` 广播接上 UI。
+> 本轮（第二十轮 / 第四次交接）**没有新功能**，只做一件事：
+> **把"门禁到底可不可信"查清楚，并交付一个可复现的绿色基线。**
+>
+> 起因：第一次全量门禁**红了**，但 `git status` 全程干净、没动过相关代码。
+> 查证结果 —— **不是回归，是跨项目 CPU 争用**：另一个项目
+> （`sports-intelligence-os`）的 **17 个 Docker 容器**跑在 WSL2 里，
+> `vmmemWSL` 独占 **8.2 / 16 核**、整机 CPU 100%，把门禁整体拖慢 **12–18×**
+> （功能层 `00:38` → `07:33`，压测层 `01:07` → `13:30`）。
+> 两处"红"全是 `TimeoutException after 0:00:30`（钟表敏感用例），
+> 隔离复跑 `52/52 All tests passed!` ⇒ 实锤环境假红。
+> **未改一行业务代码、未放宽任何阈值。**
+>
+> 干净门禁基线（Docker 栈退出后重跑，`/tmp/gates_r20.log`）：
+> `analyze No issues`（19.3s）/ **功能层 578/578**（2m14s）/
+> **压测层 24/24**（2m57s）/ `bash scripts/gates.sh` → **RC=0**，总 8m54s。
+>
+> 用户点名的收尾项已对账：`prob_gate_test.dart` 最后一条失败断言已按
+> **实现的实际契约**锁定（`toJson` 对 `probabilityPct` **非 null 即写，含 100**），
+> 复核 `prob_gate + edge_coverage` → **14/14 绿**（提交 `c27d1df`）。
+>
+> 教训已沉淀进技能 `flutter-flaky-gate-triage`：新增
+> **"更隐蔽的一类：别的项目在吃 CPU（Docker / WSL2 / 模拟器）"**。
+> **开工前先看整机空不空** —— 这一步能省下 40 分钟白跑。
+>
+> 下一轮建议：**优先推进覆盖率冲刺**（用户第 4 项要求 99%+；
+> 当前全局 57.5%+，设备层豁免 ≈1419 行，可测面剩余 ≈640 行，清单见 docs/17 §45⑦）。
+> 其余：权限"已授予"主路径真机跑通、多设备视频多路实际连通性（需 ≥2 台设备）。
 
 ## 10. 代码地图（新会话快速定位）
 
