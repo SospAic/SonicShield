@@ -80,10 +80,32 @@ class BackgroundServiceManager {
     return ok;
   }
 
-  Future<void> stop() async => _svc.invoke('stop');
+  Future<void> stop() => _invoke('stop');
+
+  /// 测试缝（v1.8）：widget 测试中后台服务未初始化，`invoke(...)` 会**抛**。
+  ///
+  /// 具体机制：`FlutterBackgroundService.invoke` → `FlutterBackgroundService
+  /// Platform.instance`，而该 getter 内部判平台，**非 Android/iOS 直接抛**
+  /// `UnsupportedError('FlutterBackgroundService is currently supported for
+  /// Android and iOS Platform only.')`（实测：宿主 widget 测试里点一下
+  /// 「电源策略」就炸，且异常发生在 `setState` 之前 → 界面停在旧值）。
+  ///
+  /// 测试注入本钩子短路。生产代码不设置此值，走真实服务调用。
+  @visibleForTesting
+  static Future<void> Function(String method, Map<String, Object?>? args)?
+      invokeHook;
+
+  Future<void> _invoke(String method, [Map<String, Object?>? args]) async {
+    final hook = invokeHook;
+    if (hook != null) {
+      await hook(method, args);
+      return;
+    }
+    _svc.invoke(method, args); // 返回 void（fire-and-forget）
+  }
 
   /// 测试缝（v1.8）：widget 测试中后台服务未初始化，`invoke('replan')`
-  /// 会返回**永不完成**的 Future（已实测挂死测试）。测试注入本钩子短路。
+  /// 会抛（见 `invokeHook`）。测试注入本钩子短路。
   /// 生产代码不设置此值，走真实服务调用。
   @visibleForTesting
   static Future<void> Function()? replanHook;
@@ -94,13 +116,11 @@ class BackgroundServiceManager {
       await hook();
       return;
     }
-    _svc.invoke('replan'); // 返回 void（fire-and-forget）
+    await _invoke('replan');
   }
 
-  Future<void> setGuard(bool enabled) async =>
-      _svc.invoke('guard', {'enabled': enabled});
-  Future<void> setPowerMode(String mode) async =>
-      _svc.invoke('powerMode', {'mode': mode});
+  Future<void> setGuard(bool enabled) => _invoke('guard', {'enabled': enabled});
+  Future<void> setPowerMode(String mode) => _invoke('powerMode', {'mode': mode});
 
   /// 远程「立即执行任务动作」：转交引擎隔离执行并等待结果。
   ///
