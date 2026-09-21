@@ -12,6 +12,8 @@
 #   ONLY_DEVICE=1 bash ...               # 只跑设备层（迭代设备用例时不必重跑 465 例宿主测试）
 #   APP_ID=... bash ...                  # 覆盖包名（默认 com.sonicshield.sonic_shield）
 # 退出码：0=全绿；1=有门禁失败（代码回归）；3=代码全绿但有**环境阻塞**（未执行，非失败）。
+#   ⚠️ 压测层红时先看整机负载：负载 ≥60% 判为"墙钟预算测量无效"→ 归入 3（环境阻塞），
+#      而不是 1（真回归）。判定依据见 machine_load() 的注释（2026-09-21 实证）。
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
 # 注意：flutter test 输出需 tr '\r' '\n'（compact reporter 刷行）；构建类输出要落盘。
 # =====================================================================
@@ -47,6 +49,54 @@ fail_dump() {  # $1=标签  $2=完整输出
   echo "  ── 完整输出已存: $f ──"
   printf '%s\n' "$2" | tail -15
 }
+
+# 整机 CPU 负载探针（0–100；-1 = 取不到）。
+#
+# 为什么门禁需要它：压测层是**墙钟预算**（"≤3s"、"≤8000ms"），
+# 别的项目吃 CPU 时会把结果整体推高。而下面"首次失败 → 重跑一次"的
+# 重跑机制在**持续争用**下两次都会红，于是把噪声判成"真回归"。
+#
+# 2026-09-21 实测：另一个项目的 Docker 构建让整机 CPU 长时间 84–91%，
+# 压测层两条墙钟预算用例分别超出 8% 与 69%，门禁报"[FAIL] 真回归"——
+# 而本轮只新增了一个测试文件，与数据层写入/调度物化毫无因果关系。
+# 结论：**没有负载证据的"真回归"判定是不可信的**。
+machine_load() {
+  if command -v typeperf >/dev/null 2>&1; then
+    typeperf "\Processor(_Total)\% Processor Time" -sc 3 2>/dev/null \
+      | tr -d '\r' | grep -oE '[0-9]+\.[0-9]+"$' | tr -d '"' \
+      | awk '{s+=$1;n++} END{if(n>0)printf "%d",s/n; else print -1}'
+  elif [ -r /proc/loadavg ]; then
+    awk -v n="$(nproc 2>/dev/null || echo 1)" '{printf "%d", $1*100/n}' /proc/loadavg
+  else
+    echo -1
+  fi
+}
+
+# 负载 ≥ 该值时，压测层的墙钟预算视为**测量无效**（不是失败）。可用环境变量覆盖以便自测。
+LOAD_SUSPECT="${LOAD_SUSPECT:-60}"
+
+# 压测层"红"的**定性**：负载高 → 测量无效（环境阻塞）；负载正常 → 真回归。
+#
+# 抽成函数只有一个理由：**判定逻辑要能被单独验证**（注入式验证见 docs/17 §47⑦）。
+# 内联在 if 里的话，验证它就得跑完整门禁 —— 而它决定的是 RC=1 还是 RC=3，
+# 判错方向的代价（把回归当噪声放过去 / 把噪声当回归报上去）都不小。
+#   用法： verdict=$(perf_verdict "$LOAD_START" "$LOAD_NOW")
+perf_verdict() {  # $1=压测前负载  $2=失败时负载  → 回显 BLOCKED | FAIL
+  if [ "${1:--1}" -ge "$LOAD_SUSPECT" ] || [ "${2:--1}" -ge "$LOAD_SUSPECT" ]; then
+    echo "BLOCKED"
+  else
+    echo "FAIL"
+  fi
+}
+
+# 开工前的整机负载提示（只提示，不改判定；判定逻辑在压测层失败分支）。
+LOAD_START=$(machine_load)
+if [ "$LOAD_START" -ge "$LOAD_SUSPECT" ]; then
+  echo "⚠️  整机 CPU 负载 = ${LOAD_START}% —— 压测层（墙钟预算）结果可能不可信。"
+  echo "    常见来源：另一个项目的 Docker / WSL2（vmmemWSL）/ 模拟器 / 构建。"
+  echo "    建议等它结束再跑；否则压测层若红，门禁会按**环境阻塞(RC=3)**报，而不是真回归。"
+  echo "    查占用： tasklist | grep -iE 'vmmem|docker|wsl'"
+fi
 
 # `ONLY_DEVICE=1` 只跑设备层：迭代设备用例时不必重跑 465 例宿主测试。
 if [ "${ONLY_DEVICE:-0}" != "1" ]; then
@@ -100,10 +150,24 @@ else
       echo "  ⚠️ 首次未过是**机器负载噪声**，不是代码回归。首次实测见上方 dump。"
       echo "     若想每次都一次定生死：PERF_RETRY=0 bash scripts/gates.sh"
     else
-      echo "[FAIL] 压测层（重跑仍未过 → 真回归）"
-      echo "$out2" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
-      fail_dump 压测层重跑 "$out2"
-      FAIL=$((FAIL+1))
+      # 重跑也红 —— 但**先看负载**：墙钟预算在机器被别的项目占满时
+      # 两次都会红，这不是回归，是测量无效（见 machine_load / perf_verdict）。
+      LOAD_NOW=$(machine_load)
+      verdict=$(perf_verdict "$LOAD_START" "$LOAD_NOW")
+      echo "  · 失败时整机 CPU 负载 = ${LOAD_NOW}%（阈值 ${LOAD_SUSPECT}%）→ 定性: $verdict"
+      if [ "$verdict" = "BLOCKED" ]; then
+        echo "[BLOCKED] 压测层：机器负载 ${LOAD_START}% → ${LOAD_NOW}%，**墙钟预算测量无效**。"
+        echo "  这不是代码回归，也**不是通过** —— 请在空闲机器上复跑："
+        echo "    flutter test --tags perf --concurrency=1"
+        echo "$out2" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
+        fail_dump 压测层重跑 "$out2"
+        BLOCKED=$((BLOCKED+1))
+      else
+        echo "[FAIL] 压测层（重跑仍未过，且机器负载正常 → 真回归）"
+        echo "$out2" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
+        fail_dump 压测层重跑 "$out2"
+        FAIL=$((FAIL+1))
+      fi
     fi
   else
     echo "[FAIL] 压测层（PERF_RETRY=0，未重跑确认）"
