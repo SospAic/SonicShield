@@ -875,6 +875,68 @@ analyze      No issues found! (ran in 19.3s)   [PASS]
 **下一轮**：覆盖率冲刺（用户第 4 项要求 99%+；全局 57.5%+，设备层豁免 ≈1419 行，
 可测面剩余 ≈640 行，逐文件清单见 docs/17 §45⑦）。
 
+### 第二十一轮（2026-09-21）：覆盖率冲刺开工 —— 先修测量，再修两个真缺陷
+
+**Fixed（BUG-063：远程任务页忽略共享选择，会静默操作错误的设备）**
+
+`remote_tasks_tab._load()` 用的是
+`_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId`，
+**完全忽略 `store.selectedEndpointId`**。而设备列表 / 控制台 / 对讲 / 指令组
+四处都走 `initialSelectedId(...)` —— 它是唯一漏网的。
+
+后果：用户在「我的设备」里选中 B 并快速连接，再切到「任务」子页，
+本页仍指向 **A** 且无任何提示 —— **启停/编辑/删除静默落在错误的设备上**
+（删除会删掉 A 上的任务）。不是"显示不对"，是**操作对象错**。
+
+修法：改用 `initialSelectedId(...)`，与三个兄弟页对齐。
+回归锁 `RTT-16`/`RTT-17`；还原成旧写法即红（`Found 0 widgets with text "B 机"`）。
+
+**Fixed（BUG-064：TURN 设置对话框在关闭动画期间使用了已释放的 controller）**
+
+`remote_screen._editTurn()` 在 `await showDialog(...)` 之后**立刻** dispose
+三个 `TextEditingController`。但 `showDialog` 的 future 在 `Navigator.pop`
+那刻就完成，而路由**退场动画还在跑** → `TextField` 仍引用已释放的 controller
+→ debug 下抛 `A TextEditingController was used after being disposed`（红屏），
+**且异常会污染同文件后续用例**（RRS-12/13/14 连带红、单独跑却全绿）。
+
+修法：抽出 `_TurnDialog`（StatefulWidget）自己持有并在 `dispose()` 里释放 ——
+**时机由框架保证**；返回值改为 record `(url, user, cred)`。
+
+**Fixed（测量缺陷：覆盖率分母漏算 40% 的代码）**
+
+Dart 覆盖率只统计**运行期被加载过的库**：未被任何 import 触及的文件在
+`lcov.info` 里**完全不存在**（不计分子也不计分母）→ **越不测越好看**。
+
+实测 `lib/` 下 74 个 `.dart`，lcov 里只有 44 个 `SF:` 记录 ——
+**30 个文件（含全部主要 UI 页）从未被 import**。
+
+| 口径 | 数值 |
+|---|---|
+| 旧（错） | 57.5% = 2878/5003（分母只有 44 个文件） |
+| **新（对）** | **39.68% = 2932/7390**（分母 = `lib/` 全部文件） |
+
+修法：`test/coverage_sentinel_test.dart`（生成物，只 import 不调用）+
+COV-01 自检锁（新增 lib 文件忘刷新哨兵即红）+ `tool/coverage_report.dart`
+（双口径 + 4 条锁）。证伪：注入新 lib 文件 → COV-01 红并点名。
+
+**Tested**
+
+| 文件 | 例数 | 内容 |
+|---|---|---|
+| `test/remote_tasks_tab_test.dart` | 19 | 空态/禁用态/列表/摘要/开关/跳过/删除确认与取消/立即执行超时/exec 留痕/无主回执/离线入队 + BUG-063 锁 ×2 |
+| `test/remote_screen_test.dart` | 14 | 开关落库/身份复制/broker 保存与取消/TURN 保存/配对校验不留半条/配对归一化/扫码入口 |
+
+覆盖率：**39.68% → 45.52%**（3372/7408），用例 **579 → 612**。
+`remote_tasks_tab` 0.30% → **71.55%**；`remote_screen` 0.84% → **73.12%**。
+
+**Tooling**
+
+`scripts/gates.sh`：analyze 失败时**打印具体问题行 + 落盘完整输出** ——
+原先只 `tail -1`，门禁报 `[FAIL] analyze` 却看不到是哪一条
+（2026-09-21 实测踩到，只能手工重跑 analyze 才知道）。已注入 lint 证伪。
+
+**设备层豁免清单仍为空** —— 豁免必须用证据换，不先假设（判定法见 docs/17 §46⑤）。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

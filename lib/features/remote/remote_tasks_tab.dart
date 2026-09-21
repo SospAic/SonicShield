@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../features/tasks/task_editor_screen.dart';
+import '../../remote/command_channel.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
@@ -20,7 +21,18 @@ import '../../remote/task_wire.dart';
 /// 协议 v1.7（docs/14 §2.1）：`task.list(full)` / `task.get` / `task.upsert` /
 /// `task.delete` / `task.runNow` / `asset.list` / `preset.list`。
 class RemoteTasksTab extends ConsumerStatefulWidget {
-  const RemoteTasksTab({super.key});
+  const RemoteTasksTab({super.key, this.channel});
+
+  /// 命令通道注入缝 —— 与 [RemoteConsoleTab.channel] / [RemoteScriptsTab.channel]
+  /// 同一形状：传 null 走 `RcEndpointService.instance`（生产默认），
+  /// 传入即可在**宿主机单测**里驱动本页，无需 broker 与真机。
+  ///
+  /// ⚠️ **已知缺口（未闭环）**：`assist_join_screen` 给控制台与指令组都传了
+  /// [AssistChannel]，**唯独没有给本页传** —— 因为本页的 `_load()` 建立在
+  /// `RemoteStore.paired()`（已配对端点）之上，而协助会话里根本没有配对表。
+  /// 要让"协助会话也能管理远端任务"，需要把 `_endpoint` 的来源也抽象出来
+  /// （不只是命令通道），属于独立改动，不在本轮范围。
+  final RcCommandChannel? channel;
 
   @override
   ConsumerState<RemoteTasksTab> createState() => _RemoteTasksTabState();
@@ -43,7 +55,8 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   void initState() {
     super.initState();
     _load();
-    _evtSub = RcEndpointService.instance.events.listen(_onEvent);
+    _evtSub = (widget.channel?.events ?? RcEndpointService.instance.events)
+        .listen(_onEvent);
   }
 
   @override
@@ -63,9 +76,17 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
     setState(() {
       _endpoints = store.paired();
       _enabled = store.enabled;
-      _selectedId = _endpoints.isEmpty
-          ? ''
-          : (_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId);
+      // ⚠️ **必须走共享选择**（BUG-063）。
+      //
+      // 原先这里是 `_selectedId.isEmpty ? _endpoints.first.deviceId : _selectedId`
+      // —— 完全忽略 `store.selectedEndpointId`。而设备列表 / 控制台 / 对讲 /
+      // 指令组四处都走 [initialSelectedId]，于是出现**跨页不一致**：
+      // 用户在「我的设备」里选中 B 并快速连接，再切到本页，
+      // 本页仍指向 **A**，且界面上没有任何提示 —— 启停/编辑/删除会
+      // **静默落在错误的设备上**。
+      //
+      // 这不是"显示不对"，是**操作对象错**：删除会把 A 上的任务删掉。
+      _selectedId = initialSelectedId(_endpoints, store.selectedEndpointId);
     });
     if (_selectedId.isNotEmpty) await refresh();
   }
@@ -130,10 +151,13 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   Future<void> _send(String type, Map<String, dynamic> payload) async {
     final ep = _endpoint;
     if (ep == null) return;
-    final store = await _store();
+    final ch = widget.channel;
+    final store = ch == null ? await _store() : null;
     setState(() => _awaiting = true);
-    final ok = await RcEndpointService.instance
-        .sendTo(ep, RcMessage.now(type, payload), store);
+    final ok = ch != null
+        ? await ch.send(RcMessage.now(type, payload))
+        : await RcEndpointService.instance
+            .sendTo(ep, RcMessage.now(type, payload), store!);
     if (!mounted) return;
     if (!ok) {
       setState(() => _awaiting = false);
@@ -149,11 +173,14 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
       {Duration timeout = const Duration(seconds: 8)}) async {
     final ep = _endpoint;
     if (ep == null) return false;
-    final store = await _store();
+    final ch = widget.channel;
+    final store = ch == null ? await _store() : null;
     final msg = RcMessage.now(type, payload);
     final completer = Completer<bool>();
     _acks[msg.id] = completer;
-    final published = await RcEndpointService.instance.sendTo(ep, msg, store);
+    final published = ch != null
+        ? await ch.send(msg)
+        : await RcEndpointService.instance.sendTo(ep, msg, store!);
     if (!published) {
       _acks.remove(msg.id);
       return false;

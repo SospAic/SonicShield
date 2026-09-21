@@ -57,7 +57,13 @@ echo "$out" | tail -1
 if echo "$out" | grep -q "No issues found"; then
   echo "[PASS] analyze"
 else
-  echo "[FAIL] analyze"; FAIL=$((FAIL+1))
+  # ⚠️ 只 `tail -1` 会得到一句 "N issues found." —— **是哪一条被吞掉了**。
+  # 2026-09-21 实测踩到：门禁报 "[FAIL] analyze" 却看不到问题，
+  # 只能手工再跑一次 analyze 才知道。与 `fail_dump` 同源（失败必须留证据）。
+  echo "[FAIL] analyze"
+  echo "$out" | grep -E "^\s*(info|warning|error)\s*-" | head -20 || true
+  fail_dump analyze "$out"
+  FAIL=$((FAIL+1))
 fi
 
 echo "=== 门禁 2/3: 功能层（--exclude-tags perf）==="

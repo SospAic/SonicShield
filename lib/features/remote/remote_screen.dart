@@ -57,72 +57,36 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   ///
   /// 不内置公共 TURN：中继会经手媒体流量，把使用者的通话交给来路不明的
   /// 免费中继既不安全也不可靠。默认留空（纯 STUN 打洞），由使用者填自建服务。
+  ///
+  /// ⚠️ **BUG-064：controller 的释放时机**。
+  ///
+  /// 原实现在 `await showDialog(...)` 之后**立刻** `dispose()` 三个
+  /// `TextEditingController`。但 `showDialog` 的 future 在 `Navigator.pop`
+  /// 那一刻就完成了，而路由的**退场动画**还在跑 —— `TextField` 仍挂在树上
+  /// 引用这些 controller，于是抛
+  /// `A TextEditingController was used after being disposed`
+  /// （debug 下对话框关闭时红屏；该异常还会污染同文件后续用例）。
+  ///
+  /// 现在把 controller 的所有权交给 [_TurnDialog]：框架会在路由真正
+  /// 移除子树后才调它的 `dispose()`，时机由框架保证，不靠人估延时。
   Future<void> _editTurn() async {
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
-    final urlCtrl = TextEditingController(text: store.turnUrl);
-    final userCtrl = TextEditingController(text: store.turnUser);
-    final credCtrl = TextEditingController(text: store.turnCred);
 
     // 跨 await 后必须复查 mounted 才能用 context（use_build_context_synchronously）。
-    if (!mounted) {
-      urlCtrl.dispose();
-      userCtrl.dispose();
-      credCtrl.dispose();
-      return;
-    }
+    if (!mounted) return;
 
-    final ok = await showDialog<bool>(
+    final v = await showDialog<({String url, String user, String cred})>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('TURN 中继'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                '仅在双方都处于对称 NAT（常见于 4G/5G、企业网）时才需要。'
-                '留空即关闭中继。',
-                style: TextStyle(fontSize: 12),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: urlCtrl,
-                decoration: const InputDecoration(
-                  labelText: '地址',
-                  hintText: 'turn:example.com:3478',
-                ),
-              ),
-              TextField(
-                controller: userCtrl,
-                decoration: const InputDecoration(labelText: '用户名（可选）'),
-              ),
-              TextField(
-                controller: credCtrl,
-                decoration: const InputDecoration(labelText: '密码（可选）'),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('保存')),
-        ],
+      builder: (_) => _TurnDialog(
+        url: store.turnUrl,
+        user: store.turnUser,
+        cred: store.turnCred,
       ),
     );
-
-    if (ok == true) {
-      await store.setTurn(
-          url: urlCtrl.text, user: userCtrl.text, cred: credCtrl.text);
-      await _load();
-    }
-    urlCtrl.dispose();
-    userCtrl.dispose();
-    credCtrl.dispose();
+    if (v == null) return;
+    await store.setTurn(url: v.url, user: v.user, cred: v.cred);
+    await _load();
   }
 
   Future<void> _toggleEnabled(bool v) async {
@@ -412,6 +376,93 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
           const _HowItWorks(),
         ],
       ),
+    );
+  }
+}
+
+/// TURN 配置对话框。
+///
+/// 单独做成 StatefulWidget 的唯一理由是 **controller 的释放时机**（BUG-064）：
+/// `showDialog` 的 future 在 `Navigator.pop` 时就完成，而退场动画尚未结束，
+/// 调用方此时 `dispose()` 会让仍在树上的 `TextField` 引用到已释放的 controller。
+/// 交给本 widget 在 `dispose()` 中释放 —— 框架保证那时子树已经摘除。
+///
+/// 返回值：保存时回传三项配置；取消时回传 null（[Navigator.pop] 无参）。
+class _TurnDialog extends StatefulWidget {
+  const _TurnDialog({
+    required this.url,
+    required this.user,
+    required this.cred,
+  });
+
+  final String url;
+  final String user;
+  final String cred;
+
+  @override
+  State<_TurnDialog> createState() => _TurnDialogState();
+}
+
+class _TurnDialogState extends State<_TurnDialog> {
+  late final TextEditingController _url =
+      TextEditingController(text: widget.url);
+  late final TextEditingController _user =
+      TextEditingController(text: widget.user);
+  late final TextEditingController _cred =
+      TextEditingController(text: widget.cred);
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _user.dispose();
+    _cred.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('TURN 中继'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '仅在双方都处于对称 NAT（常见于 4G/5G、企业网）时才需要。'
+              '留空即关闭中继。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _url,
+              decoration: const InputDecoration(
+                labelText: '地址',
+                hintText: 'turn:example.com:3478',
+              ),
+            ),
+            TextField(
+              controller: _user,
+              decoration: const InputDecoration(labelText: '用户名（可选）'),
+            ),
+            TextField(
+              controller: _cred,
+              decoration: const InputDecoration(labelText: '密码（可选）'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, (
+            url: _url.text.trim(),
+            user: _user.text.trim(),
+            cred: _cred.text,
+          )),
+          child: const Text('保存'),
+        ),
+      ],
     );
   }
 }

@@ -1827,11 +1827,14 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 **§45，第二十轮开场 = 第四次交接**）拿到「尚未闭环」清单与开场提示词，
-以及 docs/12 的最后一节（当前是 §45）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 578/578、压测 24/24、analyze 零问题，
+再读 docs/17 的最后一节（当前是 **§46，第二十一轮 = 覆盖率冲刺开工**）拿到「尚未闭环」清单与开场提示词，
+以及 docs/12 的最后一节（当前是 §46）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 612/612、压测 24/24、analyze 零问题，
 **可审计面已全量审完（4 个面：switch 兜底 21、`??=` 5、`firstWhere` 4、`??` 262）**。
-`bash scripts/gates.sh` → EXIT=0（2026-09-21 实测 8m54s）。
+`bash scripts/gates.sh` → EXIT=0（2026-09-21 实测 4m58s）。
+**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）45.52%**（3372/7408）——
+⚠️ **旧的"57.5%"是错的**（分母漏算了 30 个从未被 import 的文件），
+跑 `dart run tool/coverage_report.dart` 看双口径报告，别引用旧数字。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
 ⚠️ 第十七轮推翻/纠正了**七条**旧叙述，**读 §1.13 / §1.14 / §1.19 / §1.20 / §1.21 再动手，别沿用旧叙述**：
@@ -1887,20 +1890,38 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 当前可选的非硬件项（按建议优先级）：
 0. ★ **覆盖率冲刺（用户第 4 项明确要求 99%+，当前最高优先级）**
-   全局 **57.5% → 约 58.5%+**（edge_coverage + prob_gate 后未重测）。
-   口径：**设备层豁免 ≈ 1419 行**（endpoint 576 / engine 316 / call 231 /
-   multi_call 124 / playback 85 / bg_mgr 55 / notification 32，不可宿主测）；
-   **可测面剩余 ≈ 640 行**，按文件从大到小补：
-   task_editor 215、device_list 105、remote_console 86、providers 35、
-   script_executor 20、remote_scripts_tab 31、assist_host_screen 19、occurrence 18、
-   protocol 16、native_bridge 14、action 13、remote_store 12、assist_join_screen 11、
-   app_db 10、assist_host 10、schedule_engine 9、assist 7、random 6、
-   command_channel 6、assist_join 5、rc_script 4、condition/guarded/task_wire 3。
-   device_list 与 remote_console 用现成 channel 抽象注入 fake。
-   ⚠️ 新用例若出现"DBG 打印与断言自相矛盾"，**先迁到独立文件再排查**
-   （dart 宿主缓存互扰，见 docs/17 §44③）。
+   **真实基线 45.52%**（3372/7408，第二十一轮实测）。
+   ⚠️ **口径已修**：旧的"57.5%"分母漏算了 30 个从未被 import 的文件
+   （Dart 覆盖率只统计运行期加载过的库）→ 现由
+   `test/coverage_sentinel_test.dart` + `tool/coverage_report.dart` 保证分母完整。
+   **跑法**：`flutter test --coverage --exclude-tags perf` →
+   `dart run tool/coverage_report.dart --top=30`。
+   **剩余 4036 行**，分两组（完整清单见 docs/17 §46⑤）：
+   - **A · 疑似设备层（必须先逐行取证才允许进豁免清单）**：
+     endpoint_service 563 / background_engine 316 / call_service 231 /
+     multi_call_service 124 / playback_service 85 / bg_mgr 55 / sound_guard 39
+   - **B · 纯宿主可测（下一批主攻）**：task_editor_screen 215 /
+     settings_screen 182 / script_builder_screen 157 / multi_video_screen 141 /
+     sound_library_screen 117 / device_list_screen 104 / task_list_screen 101 /
+     guard_screen 96 / ptt_tab 93 / log_screen 91 / call_incoming_overlay 91 /
+     stats_screen 88 / dashboard_screen 83 / pair_qr_screen 83 / call_screen 76 /
+     **router.dart 59**（可整体 pump，顺带锁 IA 与 4 条旧路径重定向）/
+     controller_service 59 / permission_flow 52 / remote_section 48 /
+     quick_scripts_card 45 / providers 34 / main 33
+   - **ROI 已验证**：UI 页"一条 pump + 2–4 条交互断言"就能拿 **60–75%**
+     （样本：`remote_tasks_tab` 0.30%→71.55%、`remote_screen` 0.84%→73.12%）。
+   - **每批 2–3 个文件跑一次覆盖率量化**；补完记得同步 HANDOVER/CHANGELOG/docs。
+   - ⚠️ 新用例若出现"DBG 打印与断言自相矛盾"，**先迁到独立文件再排查**
+     （dart 宿主缓存互扰，见 docs/17 §44③）。
+   - ⚠️ 同文件多条一起红、**单独跑全绿** ⇒ 先找**第一条**红的根因
+     （BUG-064 的连带失败就是这个形状），别逐条改后面的断言。
 0b. **权限"已授予"主路径真机跑通**（需 `pm grant` 预授权）；
    多设备视频**多路实际连通性**（需 ≥2 台设备）。
+0c. **协助会话管理远端任务**（第二十一轮发现的功能缺口）：
+   `assist_join_screen` 给控制台/指令组都传了 `AssistChannel`，**唯独没给任务页传**
+   —— 因为 `RemoteTasksTab._load()` 建立在 `RemoteStore.paired()` 上，
+   协助会话里没有配对表。要让协助会话也能管远端任务，需把 `_endpoint` 的
+   **来源**也抽象出来（不只是命令通道），属独立改动。已在代码注释里登记。
 1. ~~**`RemoteScriptsTab` 改走 `RcCommandChannel`**（P3）~~ ✅ **第十七轮续八已闭环**
    （协助会话目标现在能执行已收藏的指令组；协助页加了「指令组」Tab；
    新增 RS-05…RS-08 四例锁并经变异证伪）。剩余边界：协助会话下**只能执行已收藏**的模板，
@@ -1982,33 +2003,41 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 **给用户的交接会话开场（人类可读版）**：
 
-> 本轮（第二十轮 / 第四次交接）**没有新功能**，只做一件事：
-> **把"门禁到底可不可信"查清楚，并交付一个可复现的绿色基线。**
+> 本轮（第二十一轮）**开工用户第 4 项：覆盖率冲刺**。结果分三块：
 >
-> 起因：第一次全量门禁**红了**，但 `git status` 全程干净、没动过相关代码。
-> 查证结果 —— **不是回归，是跨项目 CPU 争用**：另一个项目
-> （`sports-intelligence-os`）的 **17 个 Docker 容器**跑在 WSL2 里，
-> `vmmemWSL` 独占 **8.2 / 16 核**、整机 CPU 100%，把门禁整体拖慢 **12–18×**
-> （功能层 `00:38` → `07:33`，压测层 `01:07` → `13:30`）。
-> 两处"红"全是 `TimeoutException after 0:00:30`（钟表敏感用例），
-> 隔离复跑 `52/52 All tests passed!` ⇒ 实锤环境假红。
-> **未改一行业务代码、未放宽任何阈值。**
+> **① 先修了"覆盖率"这个数字本身（本轮最重要的发现）**
+> Dart 覆盖率只统计**运行期被加载过的库** —— 未被任何 import 触及的文件在
+> `lcov.info` 里**完全不存在**（不计分子也不计分母）→ **越不测越好看**。
+> 实测 `lib/` 74 个 `.dart` vs lcov 44 个 `SF:` 记录，**30 个文件
+> （含全部主要 UI 页）从未被 import**。
+> 旧口径 **57.5%** 是错的（分母只有 44 个文件）；**真实基线 39.68%**。
+> 已用"覆盖率哨兵 + COV-01 自检锁 + 双口径报告工具"把分母变成**不可作弊**的，
+> 并注入新文件证伪过锁能红。
 >
-> 干净门禁基线（Docker 栈退出后重跑，`/tmp/gates_r20.log`）：
-> `analyze No issues`（19.3s）/ **功能层 578/578**（2m14s）/
-> **压测层 24/24**（2m57s）/ `bash scripts/gates.sh` → **RC=0**，总 8m54s。
+> **② 补测试过程中抓到并修掉两个真缺陷**
+> - **BUG-063**：远程任务页是唯一忽略"共享选择"的页 —— 用户在「我的设备」
+>   选中 B 再切到「任务」子页，本页仍指向 A 且无提示，
+>   **启停/编辑/删除会静默落在错误的设备上**（删除会删掉 A 上的任务）。
+>   已对齐三个兄弟页并上锁（还原旧写法即红）。
+> - **BUG-064**：TURN 设置对话框在 `await showDialog` 之后立刻 dispose
+>   controller，但**退场动画还在跑** → debug 下红屏，且异常**污染同文件后续用例**
+>   （3 条连带红、单独跑全绿）。改为对话框自己持有并释放。
 >
-> 用户点名的收尾项已对账：`prob_gate_test.dart` 最后一条失败断言已按
-> **实现的实际契约**锁定（`toJson` 对 `probabilityPct` **非 null 即写，含 100**），
-> 复核 `prob_gate + edge_coverage` → **14/14 绿**（提交 `c27d1df`）。
+> **③ 覆盖率 39.68% → 45.52%**（3372/7408），用例 **579 → 612**。
+> `remote_tasks_tab` 0.30%→**71.55%**、`remote_screen` 0.84%→**73.12%**
+> —— UI 页"一条 pump + 2–4 条交互断言"就能拿 60–75%，这是当前最高 ROI 的打法。
 >
-> 教训已沉淀进技能 `flutter-flaky-gate-triage`：新增
-> **"更隐蔽的一类：别的项目在吃 CPU（Docker / WSL2 / 模拟器）"**。
-> **开工前先看整机空不空** —— 这一步能省下 40 分钟白跑。
+> 门禁：`analyze No issues`（20.3s）/ **功能层 612/612** / **压测 24/24** /
+> `bash scripts/gates.sh` → **RC=0**（总 4m58s）。
+> 顺带修了门禁自身一个缺陷：analyze 失败时只回显 "N issues found."
+> 而**看不到是哪一条**，现已打印具体问题行 + 落盘（注入 lint 证伪）。
 >
-> 下一轮建议：**优先推进覆盖率冲刺**（用户第 4 项要求 99%+；
-> 当前全局 57.5%+，设备层豁免 ≈1419 行，可测面剩余 ≈640 行，清单见 docs/17 §45⑦）。
-> 其余：权限"已授予"主路径真机跑通、多设备视频多路实际连通性（需 ≥2 台设备）。
+> **下一轮**：继续按 docs/17 §46⑤B 从大到小补（建议每批 2–3 个文件，
+> 每批跑一次覆盖率量化）。最高优先的单项是 **`lib/core/router.dart`**
+> —— 一条整体 pump 就能拿 59 行，且是**真实的 IA 回归锁**
+> （顺带验证 4 条旧路径重定向 + 5 个 TAB 的壳）。
+> 另：**设备层豁免清单当前故意为空** —— 豁免必须逐行取证才能进，
+> 不许先假设（判定法见 docs/17 §46⑤A）。
 
 ## 10. 代码地图（新会话快速定位）
 
