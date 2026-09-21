@@ -73,11 +73,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       };
       final dir = await getTemporaryDirectory();
       final stamp = DateTime.now().millisecondsSinceEpoch;
-      final path = '$dir/sonic_shield_tasks_$stamp.json';
+      // ⚠️ BUG-065：必须用 `dir.path`，**不能**写 `'$dir/...'`。
+      // `Directory.toString()` 返回的是 `Directory: 'C:\Temp\xxx'`
+      // （带 `Directory: ` 前缀和引号，实测），插值后得到
+      // `Directory: 'C:\Temp\xxx'/sonic_shield_tasks_123.json` ——
+      // 一个根本不存在的路径，`writeAsString` 必抛 `FileSystemException`，
+      // 被下面的 catch 吞成「导出失败：…」。也就是说：**加密与非加密两条导出
+      // 路径在真机上都从来没成功过**，而用户只看到一个语焉不详的失败提示。
+      final path = '${dir.path}/sonic_shield_tasks_$stamp.json';
       // 可选密码加密（v2.0）：输入密码 → PBKDF2+AES-GCM 加密备份。
+      //
+      // ⚠️ BUG-066：`_askPassword` 返回 `null` = **用户取消**或**两次密码不一致**
+      // —— 两者都必须**整体中止**，绝不能落到下面的明文分支。旧写法
+      // （`if (password != null && password.isNotEmpty)`）会把这两种情况
+      // 静默降级成"明文导出"：用户明确要加密、只因两次输入不一致，就得到一份
+      // 含全部任务与音源引用的明文备份并交给系统分享面板。这与
+      // 「隐私开关不得静默失效」（BUG-056 同源）是同一条红线。
       final password = await _askPassword('加密备份（留空则明文导出）');
+      if (password == null) return; // 取消 / 两次不一致 → 不导出
       final body = const JsonEncoder.withIndent('  ').convert(payload);
-      if (password != null && password.isNotEmpty) {
+      if (password.isNotEmpty) {
         final enc = await ExportCrypto.encrypt(body, password);
         await File('$path.enc').writeAsString(enc, flush: true);
         if (mounted) {
