@@ -930,12 +930,27 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           loopFill: _loopFill,
         );
       case ActionKindChoice.soundscape:
+        // ⚠️ BUG-067：`SoundscapeAction` 的 assert 要求 1–4 轨，而 `_save()`
+        // 是 **async** —— 断言在构造期抛出会变成**未处理的 Future 错误**：
+        // debug 下红屏，release 下 assert 被剥离 → **静默保存一个 0 轨声景**，
+        // 到点什么都不播，用户只会以为"任务没生效"。
+        // 校验必须发生在构造**之前**，并给出可读提示（与"每周未选星期"同形）。
+        if (_scTracks.isEmpty) {
+          if (mounted) _toast(context, '声景混音至少需要 1 条轨道');
+          return null;
+        }
         action = SoundscapeAction(
           tracks: List<SoundscapeTrack>.from(_scTracks),
           durationSec: _scDurationSec,
           fadeOutSec: _scFadeOutSec,
         );
       case ActionKindChoice.randomFrom:
+        // 同理：`ActionSetAction` 要求 2–12 个候选（1 个候选谈不上"随机"，
+        // 0 个会在 `pick()` 里越界）。
+        if (_setCandidates.length + _setPreserved.length < 2) {
+          if (mounted) _toast(context, '随机指令集至少需要 2 个候选动作');
+          return null;
+        }
         action = ActionSetAction(candidates: [
           for (var i = 0; i < _setCandidates.length; i++)
             ActionSetCandidate(
