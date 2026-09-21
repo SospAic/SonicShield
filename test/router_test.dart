@@ -46,7 +46,6 @@ import 'package:sonic_shield/features/tasks/task_editor_screen.dart';
 /// 3. **禁止 `pumpAndSettle`**。`DashboardScreen` 有 `Timer.periodic(1s)`，
 ///    永远「settle」不了；而且它挂在 shell 的 `IndexedStack` 里，切到别的
 ///    TAB 也不会被卸载 —— 一旦用了就是超时。
-///
 /// 4. **收尾必须 drain**。fake async 里 sqflite 的**锁超时 Timer（10s）不会
 ///    自己取消**，测试收尾时会被判「A Timer is still pending」。`drain()`
 ///    借 `runAsync` 让真实 isolate 往返跑完，锁一释放 Timer 就取消了；
