@@ -1092,6 +1092,90 @@ A 组逐行取证；覆盖率 ratchet 进门禁。
 `log_screen` 67 / `stats_screen` 64）；② A 组逐行取证；③ 覆盖率 ratchet 进门禁
 （`COVERAGE_MIN`）；④ **BUG-065/066 补一条设备层端到端**（`WITH_DEVICE=1`）。
 
+### 第二十四轮（2026-09-21）：`task_editor_screen` —— 覆盖率 58.35% → 61.18%，并抓到 **BUG-067**（"既崩又静默"）
+
+**Fixed（缺陷修复）**
+
+- **BUG-067（P2，debug 崩 + release 静默）**：任务编辑器里「声景混音」**一条轨道都没加**
+  就点保存 → `SoundscapeAction` 的构造期 `assert(tracks.length >= 1)` 抛出；
+  「随机指令集」候选不足 2 个同理（`ActionSetAction` 要求 2–12）。
+  **两种失败形态同时成立**：
+  - **debug 崩** —— `_save()` 是 `async`，断言被包成它的 **Future 错误**、无人 await
+    → 走 zone 的 `onError` → 红屏；
+  - **release 静默** —— assert 被剥离 → **真的存下一个 0 轨声景**，到点什么都不播，
+    用户只会以为"任务没生效"。
+
+  ⚠️ 同一个 `_buildTask` 里的「每周定时」**有**前置校验 + 提示
+  （`请至少选择一个星期`）→ 说明这是**漏了**，不是设计如此。
+  修复：构造**之前**校验 + 可读提示
+  （`声景混音至少需要 1 条轨道` / `随机指令集至少需要 2 个候选动作`）。
+  **刻意不给 `_save()` 套 `try/catch`** —— 那会把"崩"变成"静默失败"，
+  还会掩盖以后新增的真缺陷。
+
+**Tested（`test/task_editor_deep_test.dart` 重写，38 例 TEI-A..F）**
+
+- **回填**（`_applyTask` 每个分支）：按 id 读库 / 6 种触发 / 声景 / 三种单动作 /
+  组合 / 指令集含"不可编辑"子动作（明示保留）/ **条件层六字段（含显式 false）**
+- **交互**（本轮缺口的主体）：声景轨道增删与滑条、条件区三个开关 + 概率门 +
+  两个下拉、触发区时刻/星期/日期范围/窗口时刻/两处步进器、
+  动作区两条 RangeSlider + 两个开关 + TTS 文本 + 录音时长 + 候选权重
+- **保存**（`_buildTask` 每个分支）：本机落库 + pop / 远程失败提示且**不关页** /
+  校验拦截 / **6 种触发产物** / **7 种动作产物** / 关掉安全默认必须落显式 false /
+  BUG-067 两条复发锁
+
+⚠️ 重写文件时删掉了原有 3 条用例，其中"条件回填"的覆盖被漏掉 ——
+是**覆盖率数字**发现的（185–191 行仍红），不是人眼发现的。已补回。
+**教训：重写测试文件后必须重新量覆盖率。**
+
+**覆盖率：58.35% → 61.18%（4537/7416，+212 行 / +2.83pt），用例 694 → 729（+35）**
+
+| 文件 | 轮前 | 轮后 |
+|---|---|---|
+| `task_editor_screen.dart` | 211/591 = 64.30% | **3/595 = 99.50%** |
+
+⚠️ 分母 7412 → 7416（BUG-067 修复多 4 行）。
+
+**逐行取证：剩余 3 行结构不可达（= 本文件可覆盖上限）**
+
+835 / 844（`_setIcon` / `_setLabel` 的 `RcStepKind.delay`）与 972
+（`_buildTask` 候选 switch 的 `delay`）：`_setCandidates` 只有两个来源 ——
+`stepKindOfAction(...)`（play/tts/notify/vibrate/record 或 **null**）与
+「＋候选」chips（同五种）—— **都不可能是 `delay`**。
+⇒ 上限 **592/595 = 99.50%**，已打满。
+
+⚠️ **登记一个未爆的雷（不修）**：972 行把 `delay` 映射成 `RecordEvidenceAction`
+是一处**猜**（BUG-058 同形）。现在不可达所以无害；若以后给编辑器加"时延"候选，
+保存会**静默产出录音取证**。**不擅自改不可达代码**（改了也无法用测试锁住）。
+
+**门禁（实测，一次过）**
+
+| analyze | 功能层 | 压测层 | RC |
+|---|---|---|---|
+| No issues (13.3s) | **729/729** ✅ | **24/24** ✅ | **0** |
+
+⚠️ 跑门禁时整机负载 **94%**，压测层**仍然全绿** —— 说明 60% 的 `LOAD_SUSPECT`
+阈值是**保守**的（只在真破线时才升级成 `[BLOCKED]`）。**未放宽任何阈值。**
+
+**Docs / Skills**
+
+- `docs/17 §49`、`docs/12 §49`
+- 技能 **`flutter-widget-test-harness` 由「六类」扩到「七类」**，新增：
+  - **陷阱 7**：**异步回调里抛的异常 `takeException()` 看不到** ——
+    `onPressed: _save` 的 Future 无人 await → 抛出被包成 Future 错误 →
+    走 zone 的 `onError`、**绕过 `FlutterError.onError`** → 判据必须落在
+    "用户能看到什么"（提示文案 / 未落库），不能落在 `takeException()`；
+  - 新增附录「驱动 Material 大对话框」：`TimeOfDay.format` 走 `MaterialLocalizations`
+    （**别硬编码文案，问框架要**）、全屏选择器要**单独调小视口** + `ensureVisible`、
+    拨盘改用 `Icons.keyboard_outlined` 的输入模式、**必须让值真的变**
+    （只断言"对话框关了"的话，`onChanged` 没接上也能绿）；
+  - 另外三条：`pumpWidget` 重入**不重置路由栈**、带集合长度断言的构造函数
+    **不能 `const`**、**同一标签可能是两处代码**（别点一个就收工）。
+
+**下一轮**：① B 组 Top 继续（`multi_video_screen` 108 / `script_builder_screen` 100 /
+`sound_library_screen` 93 / `call_incoming_overlay` 91 / `log_screen` 67 /
+`stats_screen` 64）；② A 组逐行取证；③ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`）；
+④ **BUG-065/066/067 补设备层端到端**（`WITH_DEVICE=1`）。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

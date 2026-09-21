@@ -73,7 +73,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 694/694 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-21 第二十三轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues 17.8s / 功能层 01:16 / 压测 01:54）。⚠️ 第二十二轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 729/729 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-21 第二十四轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues 13.3s / 功能层 01:23 / 压测 00:58）。⚠️ 第二十二轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）。⚠️ 第二十四轮在负载 **94%** 下跑门禁仍全绿 ⇒ 60% 阈值是**保守**的，只在真破线时才升级成 `[BLOCKED]` + 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟢 **冒烟 4/4 + 桥接 6/6 + 自动收尾端到端均已成功**（第十七轮续十三，见 §1.25）；AOT / 双端点 E2E 待补。⚠️ 无线调试链路**不持久**（会掉线），首次预装需**人工点一次**确认框，之后**覆盖安装免弹窗**（脚本 `ensure_device_app()` 已自动判断）。⚠️ **跑完设备门禁手机上应用会变不可启动**（测试入口包 → 黑屏），现**由 `scripts/gates.sh` 自动收尾装回真包**（见 §1.22），无需再手工恢复 |
@@ -1827,18 +1827,18 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 **§48，第二十三轮 = `task_list_screen` + `settings_screen`，
-顺带抓到两个"功能从来没成功过"的真缺陷 BUG-065/066**）拿到「尚未闭环」清单与开场提示词，
-以及 docs/12 的最后一节（当前是 §48）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 **694/694**、压测 **24/24**、analyze 零问题，
+再读 docs/17 的最后一节（当前是 **§49，第二十四轮 = `task_editor_screen` 64.30%→99.50%
++ BUG-067「既崩又静默」**）拿到「尚未闭环」清单与开场提示词，
+以及 docs/12 的最后一节（当前是 §49）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 **729/729**、压测 **24/24**、analyze 零问题，
 **可审计面已全量审完（4 个面：switch 兜底 21、`??=` 5、`firstWhere` 4、`??` 262）**。
-`bash scripts/gates.sh` → **RC=0**（2026-09-21 第二十三轮实测：analyze No issues /
-功能层 694/694 / 压测 24/24）。
+`bash scripts/gates.sh` → **RC=0**（2026-09-21 第二十四轮实测：analyze No issues /
+功能层 729/729 / 压测 24/24）。
 ⚠️ **门禁现在会看整机负载**：压测层红时若负载 ≥60% 报 `[BLOCKED]`+**RC=3**
 （**测量无效，不是通过也不是回归**），负载正常才报 `[FAIL]`+RC=1（真回归）。
 同一轮首次跑就是这么红的 —— 另一个项目的 Docker 让整机 CPU 到 84–91%，
 复跑（争用消退）即 24/24 全绿（五步取证见 docs/17 §47⑦）。
-**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）58.35%**（4325/7412）——
+**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）61.18%**（4537/7416）——
 ⚠️ 更早的"57.5%"是错的（分母漏算 30 个从未被 import 的文件）；
 跑 `dart run tool/coverage_report.dart` 看双口径报告，别引用旧数字。
 ⚠️ **写宿主 widget 测试前先读技能 `flutter-widget-test-harness`** ——
@@ -1904,24 +1904,25 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 当前可选的非硬件项（按建议优先级）：
 0. ★ **覆盖率冲刺（用户第 4 项明确要求 99%+，当前最高优先级）**
-   **真实基线 58.35%**（4325/7412，第二十三轮实测；上一轮 54.82%）。
+   **真实基线 61.18%**（4537/7416，第二十四轮实测；上一轮 58.35%）。
    ⚠️ **口径已修**：旧的"57.5%"分母漏算了 30 个从未被 import 的文件
    （Dart 覆盖率只统计运行期加载过的库）→ 现由
    `test/coverage_sentinel_test.dart` + `tool/coverage_report.dart` 保证分母完整。
    **跑法**：`flutter test --coverage --exclude-tags perf` →
    `dart run tool/coverage_report.dart --top=30`。
-   **剩余 3087 行**，分两组（完整清单见 docs/17 §48②）：
+   **剩余 2879 行**，分两组（完整清单见 docs/17 §49⑧）：
    - **A · 疑似设备层（必须先逐行取证才允许进豁免清单）**：
      endpoint_service 562 / background_engine 316 / call_service 229 /
      multi_call_service 116 / playback_service 81 / background_service_manager 46 /
      sound_guard_service 39
-   - **B · 纯宿主可测（下一批主攻）**：task_editor_screen 211 /
-     multi_video_screen 108 / script_builder_screen 100 / remote_tasks_tab 97 /
-     sound_library_screen 93 / call_incoming_overlay 91 / remote_console_tab 86 /
-     device_list_screen 75 / remote_screen 68 / log_screen 67 / stats_screen 64 /
-     controller_service 59 / ptt_tab 56 / guard_screen 54 / pair_qr_screen 36
-     （`settings_screen` 136→**182/183 = 99.45%**、`task_list_screen` 103→**100/103
-     = 97.09%** 已于第二十三轮闭环）
+   - **B · 纯宿主可测（下一批主攻）**：multi_video_screen 108 /
+     script_builder_screen 100 / remote_tasks_tab 97 / sound_library_screen 93 /
+     call_incoming_overlay 91 / remote_console_tab 86 / device_list_screen 75 /
+     remote_screen 68 / log_screen 67 / stats_screen 64 / controller_service 59 /
+     ptt_tab 56 / guard_screen 54 / pair_qr_screen 36
+     （`task_editor_screen` 211→**3/595 = 99.50%**、`settings_screen` 136→**182/183
+     = 99.45%**、`task_list_screen` 103→**100/103 = 97.09%** 已闭环；
+     ⚠️ `task_editor_screen` 余下 3 行**结构不可达**，见 docs/17 §49⑥）
    - **ROI 已验证**：UI 页"一条 pump + 2–4 条交互断言"就能拿 **60–75%**
      （样本：`remote_tasks_tab` 0.30%→71.55%、`remote_screen` 0.84%→73.12%）。
    - ★ **性价比最高的一档：先写"整个 App 外壳"的 pump**。第二十二轮实测：
@@ -2028,55 +2029,69 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 **给用户的交接会话开场（人类可读版）**：
 
-> 本轮（第二十三轮）**继续用户第 4 项：覆盖率冲刺**。结果分四块：
+> 本轮（第二十四轮）**继续用户第 4 项：覆盖率冲刺**，取的是全仓 B 组**单文件最大**的一块。
+> 结果分四块：
 >
-> **① 覆盖率 54.82% → 58.35%**（4325/7412，+259 行 / +3.49pt），用例 **644 → 694**（+50）
-> 这一轮取的是上一轮排的 B 组 Top 两个页面：`task_list_screen`（19/103 → **100/103 = 97.09%**）
-> 与 `settings_screen`（47/183 → **182/183 = 99.45%**，只剩构造函数一行）。
+> **① 覆盖率 58.35% → 61.18%**（4537/7416，+212 行 / +2.83pt），用例 **694 → 729**（+35）
+> 单文件：`task_editor_screen.dart` **64.30% → 99.50%**（211 → 3 行未覆盖）。
+> 这一轮缺口性质与上一轮不同：**211 行里 90% 是 UI 回调**（Slider / Switch / Dropdown /
+> `showTimePicker` / `showDateRangePicker` / 步进器）—— **不点就永远不计**，
+> 只能把控件真的点一遍，靠读代码写断言补不上。
 >
-> **② 顺带抓到两个"功能从来没有成功过"的真缺陷（本轮最大产出）**
-> 它们不是覆盖率数字，是**用户真的点不动**的功能：
-> - **BUG-065 · 导出备份的路径拼错了**：`'$dir/sonic_shield_tasks_$stamp.json'` ——
->   Dart 的 `Directory.toString()` 实测返回 `Directory: 'C:\Temp\abc'`（**带前缀和引号**），
->   插值后是个**不存在的路径** → `writeAsString` 必抛 → **加密与非加密两条导出路径
->   从未成功过**。全仓 7 处目录拼接**只有这一处漏了 `.path`**。已修 + 加机器锁
->   `test/dir_path_interpolation_test.dart`（扫全 `lib/` 的 `$dir` 插值），
->   **变异验证过**：改回 `$dir` → 锁红且**直接定位到 `settings_screen.dart:83`**。
-> - **BUG-066 · 用户要加密，却拿到明文备份**：`_askPassword` 用 `null` 同时表示
->   **「取消」**和**「两次密码不一致」**，旧写法两种都落到明文分支 → 用户明确选了加密，
->   却得到**含全部任务与音源引用的明文备份**并交给分享面板。与 BUG-056
->   （"隐私开关不得静默失效"）同源。修法 `if (password == null) return;`。
-> ⚠️ 两者目前**只做了宿主验证**：真机"导出 → 分享面板真的弹出"需设备层补一条。
+> **② 顺带抓到 BUG-067 —— 一个"既崩又静默"的缺陷（本轮最大产出）**
+> 编辑器里「声景混音」**一条轨道都没加**就点保存 → `SoundscapeAction` 的构造期
+> `assert(tracks.length >= 1)` 抛出；「随机指令集」候选不足 2 个同理。**两种形态同时成立**：
+> - **debug 崩**：`_save()` 是 `async`，断言被包成它的 **Future 错误**、无人 await
+>   → 走 zone 的 `onError` → 红屏；
+> - **release 静默**：assert 被**剥离** → **真的存下一个 0 轨声景**，到点什么都不播，
+>   用户只会以为"任务没生效"。
 >
-> **③ 新增 3 个测试文件、50 例**
-> `task_list_screen_test.dart`（24 例 TLS-01..08）、`settings_screen_test.dart`（23 例 SET-01..06）、
-> `dir_path_interpolation_test.dart`（3 例 DIP-01..03，BUG-065 复发锁）。
-> 顺带给 `BackgroundServiceManager` 加了 `invokeHook` 测试缝 ——
-> 非 Android/iOS 上 `FlutterBackgroundServicePlatform.instance` **直接抛**，
-> 异常发生在 `setState` 之前，界面会停在旧值（SET-02 就是这么红的）。
+> ⚠️ 同一个 `_buildTask` 里的「每周定时」**有**前置校验 + 提示
+> （`请至少选择一个星期`）→ 说明这是**漏了**，不是设计如此。
+> 修复：构造**之前**校验 + 可读提示。**刻意不给 `_save()` 套 `try/catch`** ——
+> 那会把"崩"变成"静默失败"，还会掩盖以后新增的真缺陷。
 >
-> **④ 门禁：功能层 694/694、压测 24/24、analyze 零问题、RC=0**（一次过，未放宽任何阈值）
+> **③ 逐行取证：剩余 3 行结构不可达 = 本文件的可覆盖上限**
+> 835 / 844（`_setIcon` / `_setLabel` 的 `RcStepKind.delay`）与 972（`_buildTask` 的
+> `delay` 支）：`_setCandidates` 只有两个来源 —— `stepKindOfAction(...)`
+> （play/tts/notify/vibrate/record 或 **null**）与「＋候选」chips（同五种）——
+> **都不可能是 `delay`**。⇒ 上限 **592/595 = 99.50%**，已打满。
+> ⚠️ 顺手登记一个**未爆的雷**（**不修**）：972 行把 `delay` 映射成
+> `RecordEvidenceAction` 是一处**猜**（BUG-058 同形）。现在不可达所以无害，
+> 但若以后给编辑器加"时延"候选，保存会**静默产出录音取证**。
 >
-> **本轮另一个产出是"又挖出三类假故障"**（技能 `flutter-widget-test-harness`
-> 由四类扩到**六类**）：
-> - **推翻上一轮的推论**：`databaseFactoryFfi` 把 SQLite 放**后台 isolate**，
->   用例体里**查/写库同样挂死**（不只是"开库"）。实测首个文件 **10m21s**（1 例挂死 +
->   18 例级联失败，报的却是 `Guarded function conflict` —— 指不到真因），
->   全包 `tester.runAsync` + `timeout: 90s` 后 **37s**。
-> - **⑤ 用固定轮数 drain 等异步重读 → 时红时绿**：`ref.invalidate()` 后 `AsyncValue`
->   **先带旧值**再重读，固定 5 轮是碰运气 → 改 `waitFor(cond)` 有界轮询 + 超时 `fail`。
-> - **⑥ 按 widget 下标取值 → 顺序未定义**：`listAll` 是 `priority DESC, created_at DESC`，
->   同毫秒同优先级**平局** → 改按 `find.ancestor/descendant` **关系**定位。
-> - 附带两条实测教训：`path_provider` 打到通道上的方法名是 **`getTemporaryDirectory`**
->   （不是 `getTemporaryPath` —— 我靠推理写错过一次，探针实测才定位）；
->   `writeAsString` 是异步的，文件**先创建后写满**，等"文件存在"会读到空文件。
+> **④ 门禁：功能层 729/729、压测 24/24、analyze 零问题、RC=0**（一次过，未放宽任何阈值）
+> ⚠️ 跑门禁时整机负载 **94%**，压测层**仍然全绿** —— 说明 60% 的 `LOAD_SUSPECT`
+> 阈值是**保守**的（只在真破线时才升级成 `[BLOCKED]`），不是"负载一高就拦"。
 >
-> **下一轮**：① 按 docs/17 §48② 未覆盖行降序继续补（`task_editor_screen` 211 /
-> `multi_video_screen` 108 / `script_builder_screen` 100 / `sound_library_screen` 93 /
-> `call_incoming_overlay` 91 / `log_screen` 67 / `stats_screen` 64 …）；
+> **本轮另一个产出是"又挖出一类假故障"**（技能 `flutter-widget-test-harness`
+> 由六类扩到**七类**）：
+> - **陷阱 7（新）· 异步回调里抛的异常 `takeException()` 看不到**：第一版守卫写成
+>   `expect(tester.takeException(), isNull)` —— **实测返回 null，但测试仍然是红的**。
+>   根因：`onPressed: _save` 的 Future 没人 await → 抛出被包成 Future 错误 →
+>   走 zone 的 `onError`、**绕过 `FlutterError.onError`** → 被框架当成"测试体外
+>   抛出的异常"直接判失败（错误里那句 `(but after the test had completed)` 就是信号）。
+>   修法：判据落在"用户能看到什么"（提示文案 / 未落库）。
+> - 新增附录「驱动 Material 大对话框」：`TimeOfDay.format` 走 `MaterialLocalizations`
+>   （**别硬编码文案，问框架要**：`t.format(tester.element(...))`）；
+>   全屏选择器要**单独调小视口** + `ensureVisible`（实测在 6000 高的宿主里日期格
+>   落在 `y=6107`，点不到）；拨盘改用 `Icons.keyboard_outlined` 的输入模式；
+>   **必须让值真的变**（只断言"对话框关了"的话，`onChanged` 没接上也能绿）。
+> - 另外三条：`pumpWidget` 重入**不重置路由栈**（同一用例里循环 pump 会撞上上次
+>   push 的页面）；带**集合长度断言**的构造函数**不能 `const`**（编译错误）；
+>   **同一标签可能是两处代码**（`随机窗口` 与 `随机间隔` 都有"最短间隔"步进器，
+>   只点一个会漏掉另一条 `onChanged`）。
+> - ⚠️ 一条自我教训：重写这个测试文件时**删掉了原有 3 条用例**，"条件回填"的覆盖
+>   被漏掉 —— 是**覆盖率数字**发现的（185–191 行仍红），不是人眼发现的。
+>   **重写测试文件后必须重新量覆盖率。**
+>
+> **下一轮**：① 按 docs/17 §49⑧ 未覆盖行降序继续补（`multi_video_screen` 108 /
+> `script_builder_screen` 100 / `remote_tasks_tab` 97 / `sound_library_screen` 93 /
+> `call_incoming_overlay` 91 / `log_screen` 67 / `stats_screen` 64 …，
+> 前两个视频类大概率要**注入 `CallService` 假实现**）；
 > ② A 组（`endpoint_service` 562 / `background_engine` 316 / `call_service` 229 /
 > `multi_call_service` 116）逐行取证；③ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`）；
-> ④ 给 BUG-065/066 补一条设备层端到端（`WITH_DEVICE=1`）。
+> ④ 给 BUG-065/066/**067** 补设备层端到端（`WITH_DEVICE=1`）。
 > 另：**设备层豁免清单仍故意为空** —— 豁免必须逐行取证才能进（docs/17 §46⑤A）。
 
 ## 10. 代码地图（新会话快速定位）
