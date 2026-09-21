@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -108,8 +106,8 @@ void main() {
       trigger: const DailyTrigger(time: TimeSpec(hour: 8)),
       actionType: ActionType.randomFrom,
       action: ActionSetAction(candidates: [
-        ActionSetCandidate(weight: 3, action: const TtsAction(text: '提醒')),
-        ActionSetCandidate(weight: 1, action: const VibrateAction()),
+        const ActionSetCandidate(weight: 3, action: TtsAction(text: '提醒')),
+        const ActionSetCandidate(weight: 1, action: VibrateAction()),
       ]),
       assetIds: const [],
       cooldownSec: 300,
