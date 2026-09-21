@@ -1019,6 +1019,79 @@ COV-01 自检锁（新增 lib 文件忘刷新哨兵即红）+ `tool/coverage_rep
 （`task_editor_screen` 211 / `settings_screen` 136 / `multi_video_screen` 108 …）；
 A 组逐行取证；覆盖率 ratchet 进门禁。
 
+### 第二十三轮（2026-09-21）：`task_list_screen` + `settings_screen` —— 顺带抓到两个「功能从来没成功过」的真缺陷
+
+**Fixed（缺陷修复）—— 本轮最大产出**
+
+- **BUG-065（P1，功能级）：导出备份的路径从来就不存在。**
+  `'$dir/sonic_shield_tasks_$stamp.json'` —— `Directory.toString()` **实测**返回
+  `Directory: 'C:\Temp\abc'`（带 `Directory: ` 前缀和一层引号），插值后是**不存在的路径**
+  → `writeAsString` 必抛 → **加密导出与非加密导出两条路径从未成功过**。
+  全仓 7 处目录拼接**只有这一处漏了 `.path`**（所以看着"和旁边一样"）。
+  修复：`'${dir.path}/…'`。
+- **BUG-066（P1，隐私红线）：用户要加密，却拿到明文备份。**
+  `_askPassword` 用 `null` 同时表示**「取消」**与**「两次密码不一致」**，
+  旧写法两种都落进明文分支 → 用户明确选了加密，却得到**含全部任务与音源引用的明文备份**
+  并交给系统分享面板。与 BUG-056（"隐私开关不得静默失效"）**同源**。
+  修复：`if (password == null) return;`（取消/不一致 → **整体中止，不导出**）。
+
+**Added（新增测试）**
+
+- **`test/task_list_screen_test.dart`（24 例 TLS-01..08）**：空态 / 列表渲染（含"下次：MM-DD HH:MM"）/
+  启停开关**双向落库** / 跳过下一次 4 分支 / 导航意图 + **返回后重读库** / 长按复制·删除
+  （**级联清 occurrence**）/ 外壳与失败 / 下拉刷新。
+- **`test/settings_screen_test.dart`（23 例 SET-01..06）**：渲染回填 / 电源策略落库（双向）/
+  免打扰时段落库 / 两个弹窗 + `openExactAlarmSettings` 通道 / 导出 7 例 / 导入 6 例
+  （含**半批回滚**、解密失败、空密码）。平台通道全部打桩
+  （`path_provider` / `share_plus`），`file_picker` 走官方注入点 `FilePicker.platform`。
+- **`test/dir_path_interpolation_test.dart`（3 例 DIP-01..03）**：BUG-065 **复发锁** ——
+  **源码扫描**全 `lib/` 的 `$dir` 插值（不锁字面量、锁"这一类"），含**自检**（反面样本必被检出）
+  与**防空转哨兵**（API 改名后锁会空转 → 必须显式报警）。
+
+**Changed（可测性）**
+
+- `BackgroundServiceManager` 新增 `@visibleForTesting static invokeHook` 测试缝 ——
+  非 Android/iOS 上 `FlutterBackgroundServicePlatform.instance` **直接抛**，
+  且异常发生在 `setState` 之前（界面停在旧值，指不到真因）。`replanHook` 早为同一原因存在，
+  但 `setGuard` / `setPowerMode` / `stop` 漏了。**生产路径一行未变**。
+
+**覆盖率：54.82% → 58.35%（4325/7412，+259 行 / +3.49pt），用例 644 → 694（+50）**
+
+| 文件 | 轮前 | 轮后 |
+|---|---|---|
+| `settings_screen.dart` | 47/183 = 25.7% | **182/183 = 99.45%** |
+| `task_list_screen.dart` | 19/103 = 18.4% | **100/103 = 97.09%** |
+
+⚠️ 分母 7411 → **7412**（BUG-066 的修复多一行）；覆盖率分母是**代码行**，"修缺陷"会同时抬高分母。
+
+**门禁（实测，一次过，未放宽任何阈值）**
+
+| analyze | 功能层 | 压测层 | RC |
+|---|---|---|---|
+| No issues (17.8s) | **694/694** ✅ | **24/24** ✅ | **0** |
+
+**Docs / Skills**
+
+- `docs/17 §48`、`docs/12 §48`
+- 技能 **`flutter-widget-test-harness` 由「四类」扩到「六类」假故障**：
+  - **推翻上一轮的推论**：`databaseFactoryFfi` 把 SQLite 放**后台 isolate**，
+    用例体里**查/写库同样挂死**（不只是"开库"）。实测首个文件 **10m21s**
+    （1 例挂死 + 18 例级联失败，报的却是 `Guarded function conflict` —— 指不到真因），
+    全包 `tester.runAsync` + `timeout: 90s` 后 **37s**。
+  - **⑤ 固定轮数 drain 等异步重读 → 时红时绿**（`invalidate()` 后 `AsyncValue` 先带旧值）
+    → `waitFor(cond)` 有界轮询 + **超时显式 `fail`**（静默放行会让负向断言恒真）。
+  - **⑥ 按 widget 下标取值 → 顺序未定义**（`priority DESC, created_at DESC` 平局）
+    → 按 `find.ancestor/descendant` **关系**定位。
+  - 新增附录「给会调插件的页面打桩三条路」；速查表扩到 9 行。
+  - 两条实测教训：`path_provider` 打到通道上的方法名是 **`getTemporaryDirectory`**
+    （不是 `getTemporaryPath`）；`writeAsString` 异步，文件**先创建后写满**，
+    等"文件存在"会读到**空文件**。
+
+**下一轮**：① B 组 Top 继续（`task_editor_screen` 211 / `multi_video_screen` 108 /
+`script_builder_screen` 100 / `sound_library_screen` 93 / `call_incoming_overlay` 91 /
+`log_screen` 67 / `stats_screen` 64）；② A 组逐行取证；③ 覆盖率 ratchet 进门禁
+（`COVERAGE_MIN`）；④ **BUG-065/066 补一条设备层端到端**（`WITH_DEVICE=1`）。
+
 ## [1.7.3] - 2026-09-19
 
 > 主题：**真机 arm64 首次跑通设备门禁**（冒烟 4/4）+ 把人工三向覆盖比对

@@ -73,7 +73,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 644/644 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-21 第二十二轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues 15.9s / 功能层 00:22 / 压测 01:01）。⚠️ 同一轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 694/694 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-21 第二十三轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues 17.8s / 功能层 01:16 / 压测 01:54）。⚠️ 第二十二轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）+ 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟢 **冒烟 4/4 + 桥接 6/6 + 自动收尾端到端均已成功**（第十七轮续十三，见 §1.25）；AOT / 双端点 E2E 待补。⚠️ 无线调试链路**不持久**（会掉线），首次预装需**人工点一次**确认框，之后**覆盖安装免弹窗**（脚本 `ensure_device_app()` 已自动判断）。⚠️ **跑完设备门禁手机上应用会变不可启动**（测试入口包 → 黑屏），现**由 `scripts/gates.sh` 自动收尾装回真包**（见 §1.22），无需再手工恢复 |
@@ -1827,24 +1827,28 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 **§47，第二十二轮 = 路由表整体 pump**）拿到「尚未闭环」清单与开场提示词，
-以及 docs/12 的最后一节（当前是 §47）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 **644/644**、压测 **24/24**、analyze 零问题，
+再读 docs/17 的最后一节（当前是 **§48，第二十三轮 = `task_list_screen` + `settings_screen`，
+顺带抓到两个"功能从来没成功过"的真缺陷 BUG-065/066**）拿到「尚未闭环」清单与开场提示词，
+以及 docs/12 的最后一节（当前是 §48）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 **694/694**、压测 **24/24**、analyze 零问题，
 **可审计面已全量审完（4 个面：switch 兜底 21、`??=` 5、`firstWhere` 4、`??` 262）**。
-`bash scripts/gates.sh` → **RC=0**（2026-09-21 第二十二轮实测：analyze No issues 15.9s /
-功能层 644/644 / 压测 24/24）。
+`bash scripts/gates.sh` → **RC=0**（2026-09-21 第二十三轮实测：analyze No issues /
+功能层 694/694 / 压测 24/24）。
 ⚠️ **门禁现在会看整机负载**：压测层红时若负载 ≥60% 报 `[BLOCKED]`+**RC=3**
 （**测量无效，不是通过也不是回归**），负载正常才报 `[FAIL]`+RC=1（真回归）。
 同一轮首次跑就是这么红的 —— 另一个项目的 Docker 让整机 CPU 到 84–91%，
 复跑（争用消退）即 24/24 全绿（五步取证见 docs/17 §47⑦）。
-**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）54.82%**（4063/7411）——
+**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）58.35%**（4325/7412）——
 ⚠️ 更早的"57.5%"是错的（分母漏算 30 个从未被 import 的文件）；
 跑 `dart run tool/coverage_report.dart` 看双口径报告，别引用旧数字。
 ⚠️ **写宿主 widget 测试前先读技能 `flutter-widget-test-harness`** ——
-`testWidgets` 跑在 `FakeAsync` 里，有四类报错毫不相似、根因相同的假故障
-（① 用例体里 `await` 真实 I/O → **永久挂死**；② `go()` 在首帧之后 → **uri 对但屏幕是旧页**；
-③ sqflite 锁超时 Timer 残留；④ Riverpod `autoDispose` 的零时长 Timer）。
-`test/router_test.dart` 是可抄的样板。
+`testWidgets` 跑在 `FakeAsync` 里，有**六类**报错毫不相似、根因相同的假故障
+（① 用例体里 `await` 真实 I/O → **永久挂死**（含 DB **读写**，不只是开库）；
+② `go()` 在首帧之后 → **uri 对但屏幕是旧页**；
+③ sqflite 锁超时 Timer 残留；④ Riverpod `autoDispose` 的零时长 Timer；
+⑤ **用固定轮数 drain 等异步重读** → 时红时绿（`invalidate()` 后先带旧值）；
+⑥ **按 widget 下标取值** → 依赖 `ORDER BY` 平局导致的未定义顺序）。
+`test/router_test.dart` / `test/task_list_screen_test.dart` 是可抄的样板。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
 ⚠️ 第十七轮推翻/纠正了**七条**旧叙述，**读 §1.13 / §1.14 / §1.19 / §1.20 / §1.21 再动手，别沿用旧叙述**：
@@ -1900,23 +1904,24 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 当前可选的非硬件项（按建议优先级）：
 0. ★ **覆盖率冲刺（用户第 4 项明确要求 99%+，当前最高优先级）**
-   **真实基线 54.82%**（4063/7411，第二十二轮实测；上一轮 45.52%）。
+   **真实基线 58.35%**（4325/7412，第二十三轮实测；上一轮 54.82%）。
    ⚠️ **口径已修**：旧的"57.5%"分母漏算了 30 个从未被 import 的文件
    （Dart 覆盖率只统计运行期加载过的库）→ 现由
    `test/coverage_sentinel_test.dart` + `tool/coverage_report.dart` 保证分母完整。
    **跑法**：`flutter test --coverage --exclude-tags perf` →
    `dart run tool/coverage_report.dart --top=30`。
-   **剩余 3348 行**，分两组（完整清单见 docs/17 §47⑤）：
+   **剩余 3087 行**，分两组（完整清单见 docs/17 §48②）：
    - **A · 疑似设备层（必须先逐行取证才允许进豁免清单）**：
      endpoint_service 562 / background_engine 316 / call_service 229 /
-     multi_call_service 116 / playback_service 85 / bg_mgr 55 / sound_guard 39
+     multi_call_service 116 / playback_service 81 / background_service_manager 46 /
+     sound_guard_service 39
    - **B · 纯宿主可测（下一批主攻）**：task_editor_screen 211 /
-     settings_screen 136 / multi_video_screen 108 / script_builder_screen 100 /
-     remote_tasks_tab 97 / sound_library_screen 93 / call_incoming_overlay 91 /
-     remote_console_tab 86 / device_list_screen / task_list_screen /
-     guard_screen / ptt_tab / log_screen / stats_screen / dashboard_screen /
-     pair_qr_screen / call_screen / controller_service / permission_flow /
-     remote_section / quick_scripts_card / providers / main
+     multi_video_screen 108 / script_builder_screen 100 / remote_tasks_tab 97 /
+     sound_library_screen 93 / call_incoming_overlay 91 / remote_console_tab 86 /
+     device_list_screen 75 / remote_screen 68 / log_screen 67 / stats_screen 64 /
+     controller_service 59 / ptt_tab 56 / guard_screen 54 / pair_qr_screen 36
+     （`settings_screen` 136→**182/183 = 99.45%**、`task_list_screen` 103→**100/103
+     = 97.09%** 已于第二十三轮闭环）
    - **ROI 已验证**：UI 页"一条 pump + 2–4 条交互断言"就能拿 **60–75%**
      （样本：`remote_tasks_tab` 0.30%→71.55%、`remote_screen` 0.84%→73.12%）。
    - ★ **性价比最高的一档：先写"整个 App 外壳"的 pump**。第二十二轮实测：
@@ -2023,45 +2028,55 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 **给用户的交接会话开场（人类可读版）**：
 
-> 本轮（第二十二轮）**继续用户第 4 项：覆盖率冲刺**，落地了上一轮排的
-> 「最高优先单项」。结果分四块：
+> 本轮（第二十三轮）**继续用户第 4 项：覆盖率冲刺**。结果分四块：
 >
-> **① 覆盖率 45.52% → 54.82%**（4063/7411，+691 行 / +9.30pt），用例 **612 → 644**
-> 被测的 `lib/core/router.dart` 自己只有 **59 行（现 100%）**，
-> 但这一条"整个 App 外壳"的 pump **顺带**把 5 个分组页 + 10 条整页路由的
-> `build()` 全跑了一遍 —— **+691 行里 97% 来自它顺带构建出来的别的页面**。
-> 这是当前性价比最高的一档打法，已写进技能与 §6 优先级。
+> **① 覆盖率 54.82% → 58.35%**（4325/7412，+259 行 / +3.49pt），用例 **644 → 694**（+50）
+> 这一轮取的是上一轮排的 B 组 Top 两个页面：`task_list_screen`（19/103 → **100/103 = 97.09%**）
+> 与 `settings_screen`（47/183 → **182/183 = 99.45%**，只剩构造函数一行）。
 >
-> **② 新增 `test/router_test.dart`（32 例 RTR-01..06）—— 真实的 IA 回归锁**
-> 路由表是唯一把「URL / 深链 / 底部导航 / 二级 TAB」绑在一起的地方，
-> 而它出错**全是静默的**（改 `_destinations` 顺序 → 点「日志」进「设置」）。
-> 逐条上锁：4 条旧路径重定向 + 未登记路径不被改写、底部导航 5 项顺序/文案、
-> 再点当前 TAB 回分支根、切走切回保留分支位置、`?t=` 深链（含非法/越界 clamp）、
-> 10 条整页路由可达且盖掉底部导航、**路径参数值**传递。
-> **6 个变异逐个注入验证过**（含 `initialLocation` 的真/假两个方向）。
+> **② 顺带抓到两个"功能从来没有成功过"的真缺陷（本轮最大产出）**
+> 它们不是覆盖率数字，是**用户真的点不动**的功能：
+> - **BUG-065 · 导出备份的路径拼错了**：`'$dir/sonic_shield_tasks_$stamp.json'` ——
+>   Dart 的 `Directory.toString()` 实测返回 `Directory: 'C:\Temp\abc'`（**带前缀和引号**），
+>   插值后是个**不存在的路径** → `writeAsString` 必抛 → **加密与非加密两条导出路径
+>   从未成功过**。全仓 7 处目录拼接**只有这一处漏了 `.path`**。已修 + 加机器锁
+>   `test/dir_path_interpolation_test.dart`（扫全 `lib/` 的 `$dir` 插值），
+>   **变异验证过**：改回 `$dir` → 锁红且**直接定位到 `settings_screen.dart:83`**。
+> - **BUG-066 · 用户要加密，却拿到明文备份**：`_askPassword` 用 `null` 同时表示
+>   **「取消」**和**「两次密码不一致」**，旧写法两种都落到明文分支 → 用户明确选了加密，
+>   却得到**含全部任务与音源引用的明文备份**并交给分享面板。与 BUG-056
+>   （"隐私开关不得静默失效"）同源。修法 `if (password == null) return;`。
+> ⚠️ 两者目前**只做了宿主验证**：真机"导出 → 分享面板真的弹出"需设备层补一条。
 >
-> **③ 本轮最大产出其实是"怎么写对这类测试"**（新技能 `flutter-widget-test-harness`）
-> `testWidgets` 的用例体跑在 `FakeAsync` 里，由此派生出**四类报错毫不相似、
-> 根因相同**的假故障：① 用例体里 `await` 真实 I/O → **永久挂死**
-> （实测 `AppDatabase.open` 卡满 6 分钟）；② `go()` 在首帧之后 →
-> **`uri` 对但屏幕上还是旧页**（最阴：断言"跳转成功"的测试全绿）；
-> ③ sqflite 锁超时 Timer（10s）残留；④ Riverpod `autoDispose` 的零时长 Timer。
-> 另有 `pumpAndSettle` 在 `IndexedStack` 下必超时。
+> **③ 新增 3 个测试文件、50 例**
+> `task_list_screen_test.dart`（24 例 TLS-01..08）、`settings_screen_test.dart`（23 例 SET-01..06）、
+> `dir_path_interpolation_test.dart`（3 例 DIP-01..03，BUG-065 复发锁）。
+> 顺带给 `BackgroundServiceManager` 加了 `invokeHook` 测试缝 ——
+> 非 Android/iOS 上 `FlutterBackgroundServicePlatform.instance` **直接抛**，
+> 异常发生在 `setState` 之前，界面会停在旧值（SET-02 就是这么红的）。
 >
-> **④ 门禁：功能层 644/644、压测 24/24、RC=0**
-> 但**首次**跑时压测层红过：失败时整机 CPU **84–91%**，`vmmemWSL` 14.1 GB +
-> `com.docker.build.exe`（**另一个项目**的 Docker 构建）在跑；本轮 `lib/` **一行未改**；
-> 两次红的还不是同一条用例（首次 A、重跑 B）；同层 24 例里 23 例通过。
-> **争用消退后复跑 → 同一份代码、同一套预算 → 24/24 全绿 + RC=0**（终局证据）。
-> **顺手修掉门禁一个缺陷**：原逻辑"首次红 → 重跑 → 还红即真回归"在**持续争用**下
-> 必然误判 → 现补 `machine_load()` 整机负载探针，负载 ≥60% 报
-> `[BLOCKED]` + **RC=3（环境阻塞）**，负载正常才报 `[FAIL]` + RC=1。
-> 该分支**两个方向都验证过**（避免"恒报 BLOCKED"的假锁掩盖真回归）。
-> **未放宽任何性能阈值。**
+> **④ 门禁：功能层 694/694、压测 24/24、analyze 零问题、RC=0**（一次过，未放宽任何阈值）
 >
-> **下一轮**：① 按 docs/17 §47⑤ 未覆盖行降序继续补（`task_editor_screen` 211 /
-> `settings_screen` 136 / `multi_video_screen` 108 / `script_builder_screen` 100 …），
-> **优先"整壳 pump"那一档**；② A 组逐行取证；③ 覆盖率 ratchet 进门禁。
+> **本轮另一个产出是"又挖出三类假故障"**（技能 `flutter-widget-test-harness`
+> 由四类扩到**六类**）：
+> - **推翻上一轮的推论**：`databaseFactoryFfi` 把 SQLite 放**后台 isolate**，
+>   用例体里**查/写库同样挂死**（不只是"开库"）。实测首个文件 **10m21s**（1 例挂死 +
+>   18 例级联失败，报的却是 `Guarded function conflict` —— 指不到真因），
+>   全包 `tester.runAsync` + `timeout: 90s` 后 **37s**。
+> - **⑤ 用固定轮数 drain 等异步重读 → 时红时绿**：`ref.invalidate()` 后 `AsyncValue`
+>   **先带旧值**再重读，固定 5 轮是碰运气 → 改 `waitFor(cond)` 有界轮询 + 超时 `fail`。
+> - **⑥ 按 widget 下标取值 → 顺序未定义**：`listAll` 是 `priority DESC, created_at DESC`，
+>   同毫秒同优先级**平局** → 改按 `find.ancestor/descendant` **关系**定位。
+> - 附带两条实测教训：`path_provider` 打到通道上的方法名是 **`getTemporaryDirectory`**
+>   （不是 `getTemporaryPath` —— 我靠推理写错过一次，探针实测才定位）；
+>   `writeAsString` 是异步的，文件**先创建后写满**，等"文件存在"会读到空文件。
+>
+> **下一轮**：① 按 docs/17 §48② 未覆盖行降序继续补（`task_editor_screen` 211 /
+> `multi_video_screen` 108 / `script_builder_screen` 100 / `sound_library_screen` 93 /
+> `call_incoming_overlay` 91 / `log_screen` 67 / `stats_screen` 64 …）；
+> ② A 组（`endpoint_service` 562 / `background_engine` 316 / `call_service` 229 /
+> `multi_call_service` 116）逐行取证；③ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`）；
+> ④ 给 BUG-065/066 补一条设备层端到端（`WITH_DEVICE=1`）。
 > 另：**设备层豁免清单仍故意为空** —— 豁免必须逐行取证才能进（docs/17 §46⑤A）。
 
 ## 10. 代码地图（新会话快速定位）
