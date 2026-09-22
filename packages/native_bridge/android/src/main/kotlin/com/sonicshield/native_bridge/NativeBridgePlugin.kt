@@ -16,6 +16,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodChannel
@@ -205,7 +206,15 @@ class NativeBridgePlugin : FlutterPlugin {
         var ok = 0
         for (t in times) {
             val pi = watchdogPendingIntent(ctx, t)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // ⚠️ 守卫必须是 M(23)，**不是** S(31)。
+            // `setExactAndAllowWhileIdle` 自 API 23 就可用（已用 SDK 的
+            // `platforms/android-36/data/api-versions.xml` 核对：method@23）。
+            // 曾按 S 分支 ⇒ API 24–30（Android 7.0–11）静默走 `setExact`，
+            // 而 `setExact` 在 Doze 下会被推迟到下一个维护窗口（可能数小时）——
+            // 于是"Doze 下可靠唤醒"在低版本上只是文档里的说法（docs/03 §, docs/05 §1.2
+            // 都写的是 AllowWhileIdle），实现里并不成立。这是**向下兼容缺口**，不是新特性。
+            // else 分支在 minSdk=24 下不可达，保留只为声明"更低的版本只能用 setExact"。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, pi)
             } else {
                 am.setExact(AlarmManager.RTC_WAKEUP, t, pi)
@@ -417,6 +426,29 @@ class NativeBridgePlugin : FlutterPlugin {
     }
 
     /**
+     * 振动属性（`AudioAttributes` 形式）的**唯一构造出口**。
+     *
+     * 官方文档：应用在**后台**发起振动**必须**提供振动属性（以 `AudioAttributes`
+     * 形式），因为后台仅支持 attentional haptics；文档示例正是 `USAGE_ALARM`
+     * （BUG-069 / docs/20 §2.2-3）。`AudioAttributes` 与
+     * `Vibrator.vibrate(long[], int, AudioAttributes)` 都自 **API 21** 可用 ——
+     * 所以"低版本"**没有**任何理由丢属性。抽成单一出口是为了让
+     * 「API 24/25 的旧重载」与「API 26+ 的 VibrationEffect 重载」**不可能漂移**：
+     * 两条路都从这里取属性，改一处即两处生效。
+     */
+    private fun vibrationAttributes(useAlarm: Boolean): AudioAttributes =
+        AudioAttributes.Builder()
+            .setUsage(
+                if (useAlarm) {
+                    AudioAttributes.USAGE_ALARM
+                } else {
+                    AudioAttributes.USAGE_NOTIFICATION
+                }
+            )
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+
+    /**
      * 下发效果，**携带振动属性**。
      *
      * ⚠️ BUG-069（docs/20 §2.3）：旧实现一个 attributes 都没传。官方文档明确
@@ -425,7 +457,18 @@ class NativeBridgePlugin : FlutterPlugin {
      * `USAGE_ALARM`。本应用的振动**全部**发生在后台（前台服务 / AlarmManager
      * 驱动），因此必须补上 —— 否则较新 Android 上可能被忽略，
      * 表现为"任务到点了但没震"这种**静默失效**。
+     *
+     * 三级分级的**真实 API 等级**（已用 SDK `api-versions.xml` 核对，不要凭印象改）：
+     * - `vibrate(VibrationEffect, VibrationAttributes)` → **API 33**
+     *   （注意：`VibrationAttributes` **类**是 API 30，但该**重载**是 33 —— 不能按 30 放宽）
+     * - `vibrate(VibrationEffect, AudioAttributes)` → **API 26**
+     * - `vibrate(VibrationEffect)` → **API 26**（裸重载，无属性）
+     *
+     * 另：`VibrationEffect` 本身是 API 26 起，所以本函数在 API < 26 上**不可达**
+     * （调用方已按 SDK 分支，走的是带 `AudioAttributes` 的旧重载）。保留 else 只为
+     * 防御性兜底，不构成实际路径。
      */
+    @RequiresApi(Build.VERSION_CODES.O)
     private fun applyEffect(
         ctx: Context,
         effect: VibrationEffect,
@@ -442,19 +485,8 @@ class NativeBridgePlugin : FlutterPlugin {
                     }
                     v.vibrate(effect, VibrationAttributes.createForUsage(usage))
                 }
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                    val attrs = AudioAttributes.Builder()
-                        .setUsage(
-                            if (useAlarm) {
-                                AudioAttributes.USAGE_ALARM
-                            } else {
-                                AudioAttributes.USAGE_NOTIFICATION
-                            }
-                        )
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                    v.vibrate(effect, attrs)
-                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                    v.vibrate(effect, vibrationAttributes(useAlarm))
                 else -> {
                     @Suppress("DEPRECATION")
                     v.vibrate(effect)
@@ -497,8 +529,15 @@ class NativeBridgePlugin : FlutterPlugin {
                 }
                 applyEffect(ctx, eff, useAlarm)
             } else {
+                // API 24/25（Android 7.x）：没有 `VibrationEffect`，只能走旧重载。
+                // ⚠️ 但**属性照样要传** —— `vibrate(long[], int, AudioAttributes)`
+                // 自 **API 21** 就存在（api-versions.xml: method@21），旧实现却用了
+                // 两参重载（无属性），等于把 BUG-069「后台振动必须带属性」在低版本上
+                // 又留了一遍。这不是"低版本做不到"，是当时漏了。
+                // 另外旧重载**没有振幅**（`amplitudes` 在 API < 26 无法表达），
+                // 这条降级由能力探测（`hasAmplitudeControl=false`）如实上报给 Dart 侧。
                 @Suppress("DEPRECATION")
-                v.vibrate(timings.toLongArray(), repeat)
+                v.vibrate(timings.toLongArray(), repeat, vibrationAttributes(useAlarm))
                 true
             }
         } catch (e: Exception) {
@@ -514,6 +553,7 @@ class NativeBridgePlugin : FlutterPlugin {
      * ⚠️ 系统**不为包络效果提供 fallback** —— 不支持时效果会被**完全忽略**，
      * 所以这里必须显式返回 false 让上层走降级链（docs/20 §5.2）。
      */
+    @RequiresApi(API_BAKLAVA)
     private fun vibrateEnvelope(
         ctx: Context,
         points: List<Map<String, Any>>,

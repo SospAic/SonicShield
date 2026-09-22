@@ -53,7 +53,15 @@ class MicGuardService : Service() {
                 .setOngoing(true)
                 .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // ⚠️ 守卫必须是 R(30)，**不是** Q(29)。
+        // `ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE` 的官方起始版本是
+        // **API 30**（已用 SDK `platforms/android-36/data/api-versions.xml` 核对：
+        // field@30；同批里 LOCATION / DATA_SYNC / MEDIA_PLAYBACK 才是 @29）。
+        // 曾按 Q 分支 ⇒ 在 API 29（Android 10）上会向 `startForeground` 传一个
+        // 该版本尚不存在的类型位。API 29 本来就没有"麦克风前台服务类型"这个语义
+        // （麦克风后台访问的 while-in-use 约束是 Android 11 / API 30 才引入的），
+        // 所以低版本走两参重载是**正确**的，不是降级。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             startForeground(
                 NOTIFICATION_ID,
                 notification,

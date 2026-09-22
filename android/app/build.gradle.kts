@@ -30,10 +30,19 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
-        // 限制 ABI：减少原生构建与包体体积（模拟器 x86_64 + 主流真机 arm64）。
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
+        // ⚠️ 这里**故意不写** `ndk { abiFilters += ... }`。
+        // Flutter 的 Gradle 插件在本文件顶部的 `plugins{}` 里 apply 时就会执行
+        // `extension.defaultConfig.ndk { abiFilters.clear(); abiFilters.addAll(PLATFORM_ABI_LIST) }`
+        // （flutter_tools/gradle/.../FlutterPlugin.kt:591-600），而 `android{}` 在其后求值 ——
+        // 所以在这里写 `+=` 只会**追加重复项**：既排除不掉 ABI、也减不了体积。
+        // 实测 `unzip -l app-debug.apk | grep lib/` 三个 ABI 齐全。
+        //
+        // 这与"尽可能向下兼容低版本安卓"是**一致**的：`PLATFORM_ABI_LIST` 是
+        // `[armeabi-v7a, arm64-v8a, x86_64]`（FlutterPluginConstants.kt:48-53），
+        // **armeabi-v7a 必须保留** —— API 24/25 时代的低端机大量是 32 位，
+        // 排除它会让这些设备 `INSTALL_FAILED_NO_MATCHING_ABIS` 直接装不上。
+        // 若确实要减体积，用 `flutter build apk --split-per-abi`（按 ABI 拆成多份 APK），
+        // **不要**在这里收窄 abiFilters。
     }
 
     buildTypes {
