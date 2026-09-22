@@ -250,6 +250,36 @@
   ③ `rootBundle` 是全局单例、缓存**跨用例存活** ⇒ `setUp` 必须 `rootBundle.clear()`；
   ④ `debugPrint` 的节流 Timer 会留在 fake zone → 打印全丢，**探针一律用 `print`**。
 
+### Changed（工程）· 第三十一轮补记（2026-09-22）：Android 向下兼容审计 + 守卫锁
+
+> 用户指令：**「软件中所有的实现尽可能向低版本安卓兼容，直到你评估认为的最低可支持版本」**。
+> 本轮不抬 `minSdk`（它已是地板），而是**修掉 API 24–30 上行为不正确的地方**并机器钉住。
+
+- **裁决：最低可支持版本 = API 24（Android 7.0）** —— 由 Flutter SDK 自身
+  （`FlutterExtension.kt:26` → `minSdkVersion = 24`）与 5 个插件共同锁死，**不可能再低**。
+- **C1 精确闹钟**：`setExactAndAllowWhileIdle` 的守卫 `>= S(31)` → **`>= M(23)`**。
+  该 API **自 API 23 就有**（`api-versions.xml: method@23`），原实现让 **API 24–30**
+  静默走受 Doze 抑制的 `setExact` ⇒ "Doze 下可靠唤醒"在低版本上只是文档里的说法。
+- **C2 振动属性**：API<26 的旧重载由 `vibrate(long[], int)`（无属性）改为
+  `vibrate(long[], int, AudioAttributes)`。该重载 **自 API 21 就有** ⇒
+  这不是"低版本做不到"，是把 BUG-069 在低版本上又留了一遍。
+  同时把属性构造收敛为**唯一出口** `vibrationAttributes()`。
+- **C3 前台服务类型**：麦克风 FGS 类型位守卫 `>= Q(29)` → **`>= R(30)`**
+  （`FOREGROUND_SERVICE_TYPE_MICROPHONE` 官方起始版本是 **API 30**）。
+- **加固**：`applyEffect` / `vibrateEnvelope` 补 `@RequiresApi`。
+- **纠正长期误导**：`android/app/build.gradle.kts` 里 `ndk { abiFilters += ... }`
+  **完全无效**（Flutter 插件先 `abiFilters.clear()` 再用全量列表覆盖），已删除并改为诚实注释。
+  ⇒ `armeabi-v7a` 实际一直在包里，这对 32 位老设备是好事。
+- **新增回归锁** `test/android_compat_lock_test.dart`（**21 例**）：FLOOR/GUARD/ATTR/FGS/SDK 五组，
+  其中 SDK 组把**等级表自身**与 `api-versions.xml` 交叉核对。
+  **5 项变异证伪全部通过**（含一次"两张表导致假绿"的自查修复）。
+- 结果：功能层 **940 → 972**（+11 `device_list_screen` 上轮未提交 + 21 本轮）；
+  覆盖率 **70.28% → 71.18%**（6005 → **6082** / 8545）；ratchet `COVERAGE_MIN` **70.2 → 71.1**。
+- ⚠️ **未达成且不可达成**：用户要求的"覆盖率 100%" —— 未覆盖 2463 行里
+  **约 1857 行依赖真实平台能力**（WebRTC / MQTT-TLS / 摄像头 / 音频硬件 / 前台服务），
+  宿主测试触及不到；凑数只能靠**造假用例**或**删功能**，两者都违反项目通则。
+  分桶证据见 docs/12 §57.6。
+
 ### Changed（工程）· 第三十轮补记（2026-09-22）：覆盖率冲刺 —— 远程控制台
 
 - `test/remote_console_tab_test.dart`：**10 → 21 例**（新增 `RCT-01..RCT-11`）；
