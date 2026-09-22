@@ -3,6 +3,115 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+## [1.9.0-alpha] - 2026-09-22
+
+### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20）
+
+- **随机振动** `RandomVibrateAction`：一次触发内产生**随机脉冲串** ——
+  总时长、单脉冲时长、脉冲间隔、强度各自在区间内随机；
+  `maxPulses` 防爆（超限截断并审计）、`rampUpSec` 渐强、`respectDnd` 勿扰开关。
+  与既有 `RandomIntervalTrigger`（FR-14）组合即得**"随机间隔的随机振动"**：
+  触发层决定"什么时候震"，动作层决定"震成什么样"——**零新触发代码**。
+- **持续振动** `ContinuousVibrateAction`：一段时长内连续振动，
+  **强度区间随机波动**（`jitterMs` 波动周期）、锐度区间（仅 Android 16 包络）、
+  占空比、渐强/渐弱。用户决策 D1 = **不设时长硬上限**，对价是可停止 + 审计。
+- **设备能力三级降级**：Android 16 包络（强度+锐度）→ 波形+振幅（强度）→
+  on/off（强度满格）。每一级降级都由 `vibrateDegradations` 产出**显式说明**，
+  进 `exec_logs` 与设置页「设备振动能力」卡片（FR-34 口径修正：**不得静默降级**）。
+  存在理由：Android 上 `hasAmplitudeControl()==false` 时**所有非零振幅一律被当成
+  100%**（官方文档原文），同一份配置在不同设备上体感完全不同**且不报错**。
+- **分片续发** `VibrateSession`：每次只下发 `chunkMs`=20s 的振动，由 3s keep-alive
+  续发下一片（**刻意不复用** `SchedulerConfig.engineTick`=15s）。这让
+  「进程一死就没人续发」成为**结构性**保证，而不是靠自觉。
+- **四条失效安全（D1 的对价，不可裁剪）**：
+  S1 进程死亡即停（分片续发）｜S2 重启**绝不续发**（`recoverAfterRestart`，
+  有残留时额外写审计）｜S3 任何时刻都能停（本地按钮 + 远程 `vibrate.stop`）｜
+  S4 低电量自动降级（**启动闸 + 在跑检查**，只挡启动是不够的）。
+- **夜间独立豁免**（用户决策 D4「默认受约束，同时增加所有功能的夜间独立豁免选项」）：
+  **双钥匙** = 设置页主开关（prefs）∧ 任务级 `quiet_exempt`（DB），缺一即回到
+  受约束的 `skip`/`shift`。配 **撤销即清**（`deletePendingQuietExempt`）、
+  **远程丢弃**（`TaskWire.fromWire` 显式忽略入站该字段）、
+  **审计计数**（设置页「本月豁免次数」）、**备份不携带**。
+- 编辑器：动作类型新增「震动·固定节奏 / 震动·随机脉冲 / 震动·持续」三项，
+  各自表单 + 能力降级提示条 + 「遵循系统勿扰」开关 + 夜间豁免开关。
+- 远程（决策 D2「本地+远程一起做」）：
+  - 新命令 `RcCmd.vibrateStop`（`vibrate.stop`）→ 停止端点**全部**进行中的振动；
+    控制台新增「停止端点振动」按钮。
+  - `RcStepKind.vibrate` **参数化**：`mode` ∈ {fixed, random, continuous}，
+    `mode` 缺省 = `fixed` ⇒ **老控制器发的 `{}` 行为一字不变**（协议向后兼容）。
+    振动步时长**计入**指令组 30 分钟总预算（此前只统计 `delay`）。
+  - `RcStep.describe()` 给出人话（"持续振动 10–30 秒（强度 50–100%｜波动 800ms）"）。
+  - `TaskWire._sanitizeActionMap` 新增 `randomVibrate` / `continuousVibrate` /
+    `randomFrom` 三个分支，**逐字段夹紧**。
+
+### Fixed（缺陷修复）
+
+- **BUG-070** 免打扰窗口设置**从未被任何执行路径读取** ——
+  设置页写入 `quiet_start` / `quiet_end`，而 `replan()` 与端点 `_rematerialize()`
+  都使用硬编码的 22:00–07:00。用户改了窗口**完全不生效且无任何提示**（界面在说谎）。
+  修法：`PrefsKeys` 收敛为唯一真源 + `normalizeQuietWindow()` 归一化
+  （非法值回落默认、起止相同回落默认）+ 两处执行路径接通。
+- **BUG-071** `ActionKindChoice` 里**没有任何震动选项** ——
+  打开任一 `ActionType.vibrate` 任务再保存，动作会被**静默改写成播放音频**
+  （`_applyTask` 缺分支 + `_save` 缺 case）。用户只看到"任务变了"，
+  不知道是被自己点坏的。修法：补三个选项 + 三个回填分支 + **AK-01 满射锁**
+  （每个 `ActionType` 都必须有可产生它的 `ActionKindChoice`）。
+- **BUG-072** `randomFrom`（动作集）在 `_sanitizeActionMap` 里**既没有分支也不递归**
+  —— 落进 `default:` 原样透传。后果不是"少夹紧一层"，而是**远程校验被整体绕过**：
+  对端把未夹紧的 `continuousVibrate`（`amplitudeMin: 5`）塞进
+  `candidates[0].action` 即可，release 下 `assert` 被剥离 → 自相矛盾动作写入 DB
+  → 物化期崩。修法：补 `randomFrom` 分支并**递归**夹紧每个候选的 `action`
+  （候选数 2–12、权重收敛到有限数 —— 权重 `Infinity` 会让选中逻辑静默失效）。
+- 附带：`TaskWire.maxVibrateSteps` 与 `VibrateLimits.maxPatternSteps` 收敛为同源，
+  消除固定节奏模式串步数上限的两处硬编码。
+
+### Security / 合规
+
+- **入站振动一律强制「遵循系统勿扰」**（`TaskWire.inboundRespectDnd` /
+  `RcStep._inboundRespectDnd`）。`respectDnd=false` 会让原生改用 `USAGE_ALARM`
+  即**穿透系统勿扰**；允许已配对的对端打开它，等于让对端绕过本机的合规护栏 ——
+  与 `quietExempt` 同一类问题，触碰红线（docs/08 §2）。
+  本机任务仍可由用户自己关闭（UI 有显式警告），**远程路径不提供这个能力**。
+  对端若试图关闭，端点写审计「对端请求关闭『遵循勿扰』已被拒绝」。
+- 夜间豁免**远程不可开启**，三层落地：`fromWire` 显式 `false` + 源码扫描锁
+  （`lib/remote` / `lib/features/remote` 不得出现写入）+ 「只有 `settings_screen`
+  可写主开关」锁。**读取允许** —— 否则远程改一次任务会把已授权的夜间计划静默清掉。
+- `vibrate.stop` 权限位 = `vibrate`（能震的才能停）：本工具是自我保护用途，
+  让没有振动权限的对端停掉用户自己的报警振动同样不可接受。
+
+### Tested
+
+- 功能层 **868/868** 全绿；压测层 **24/24**；合计 **892**（`bash scripts/gates.sh`）。
+- `flutter analyze` → No issues。
+- 覆盖率 **64.45%（5506/8543）**（分母 77 个 lib 文件，由 `coverage_sentinel_test` 保证完整）。
+- 新增测试文件 6 个：
+  - `vibrate_resolve_test.dart`（22）—— 强度换算不为 0、包络**必须以 intensity==0 收尾**、
+    三级降级选对模式、on/off 不带 amplitudes、时间轴合计 == 审计值、DPRNG 可复现、
+    降级说明（含"用户没设锐度就不要吓他"）、物化期计划区间。
+  - `vibrate_session_test.dart`（17）—— S1 单片不超 chunkMs、S2 重启绝不续发、
+    S3 空活跃表也要下发 cancel、S4 启动闸 + 在跑掉电、勿扰透传、降级进审计。
+  - `vibrate_remote_wire_test.dart`（11）—— 逐字段夹紧、上下界互换、
+    `randomFrom` 递归、`respectDnd` 强制、**覆盖锁**（每个动作 kind 必须有显式
+    `case`，配 `extends ActionConfig` 计数防空转）。
+  - `rc_vibrate_step_test.dart`（16）—— 协议向后兼容（`{}` 描述一字不变）、
+    路由**绝不退回固定节奏**、规格键 == 模型 `toJson` 键（表单↔执行器不分叉）。
+  - `vibrate_remote_dispatch_test.dart`（4）—— `stopVibrate` 两条腿都走、
+    引擎未运行时如实失败（不私自下发）。
+  - `quiet_exempt_lock_test.dart`（21）—— 双钥匙缺一即回受约束、默认未授权、
+    远程丢弃入站字段（含**源码扫描**：`lib/remote` 不得出现主开关写入口）、
+    撤销即清（`deletePendingQuietExempt` 端到端不变量）、窗口归一化不整体关掉。
+- 另新增 `action_kind_coverage_test.dart`（5）—— 编辑器选项 ↔ `ActionType`
+  **满射/单射**锁（BUG-071 的复发锁）。
+- 变异证伪 2 项（均已恢复并复验）：`case 'randomFrom':` 改名 → VW-06 红；
+  路由缺处理器时退回 `legacyFixed` → RV-15 红。⚠️ 只声明**留下输出**的两项，
+  不把未留痕的注入计入（见 docs/17 §52⑤ 口径声明）。
+
+### Docs
+
+- 新增 docs/20《振动能力设计（随机振动与持续振动）》。
+- docs/07 补 `quiet_exempt` 列与振动字段语义；docs/08 §2/§4 补豁免与勿扰红线；
+  docs/12 §52 本轮测试报告；docs/17 末节续作清单刷新。
+
 ## [1.8.0-alpha] - 2026-09-19
 
 ### Added（新增）—— 多条件 × 随机编排（docs/19）
