@@ -77,8 +77,10 @@ import 'package:sonic_shield/services/playback_service.dart';
 ///   也报超时。看到"多条一起超时"先怀疑第一条，别逐条改断言。
 /// * **不要用 `debugPrint` 做探针打印**：它的节流 Timer 会被留在 fake zone 里，
 ///   之后的打印全部丢失，会把你引到错误的行号上（这个坑本文件踩过）。
-/// * `find.byType(FilledButton)` 匹配不到 `FilledButton.tonalIcon`
-///   （runtimeType 是私有 `_FilledButtonWithIcon`）→ 用 `byWidgetPredicate`。
+/// * `find.byType(FilledButton)` 与 `byWidgetPredicate((w) => w is FilledButton)`
+///   在 3.47.3 上**等价**（`FilledButton.tonalIcon` 是普通构造器，
+///   `runtimeType == FilledButton`，非私有子类）。本文件用后者，是为了对
+///   "以后换成子类实现 / 再加一个 FilledButton"更稳，不是因为前者匹配不到。
 const _timeout = Timeout(Duration(seconds: 90));
 
 /// 预置库清单在资源通道上的 key（页面里写死的那一个）。
@@ -368,9 +370,12 @@ void main() {
 
   /// 取「导入预置库」按钮。
   ///
-  /// ⚠️ 用 `byWidgetPredicate` 而不是 `byType(FilledButton)`：
-  /// `FilledButton.tonalIcon` 造出来的是私有子类 `_FilledButtonWithIcon`，
-  /// 而 `find.byType` 比的是**精确 runtimeType**，匹配不到父类。
+  /// ⚠️ 用 `byWidgetPredicate` 而不是 `byType(FilledButton)`：本页只有一个
+  /// FilledButton，两者**都能命中**；但 `byType` 比的是**精确 runtimeType**，
+  /// 一旦以后把按钮换成 `FilledButton.icon` 的子类实现（或页面里再加一个
+  /// FilledButton）就会静默失配 —— 用谓词是**对未来改动更稳**的写法。
+  /// （2026-09-22 实测：3.47.3 的 `FilledButton.tonalIcon` 是普通构造器，
+  /// `runtimeType == FilledButton`，故两种写法等价。）
   FilledButton presetsButton(WidgetTester tester) => tester.widget<FilledButton>(
       find.byWidgetPredicate((w) => w is FilledButton).first);
 
