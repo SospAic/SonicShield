@@ -23,6 +23,34 @@ BLOCKED=0          # 环境阻塞（未执行 ≠ 失败），见文件末尾的
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_ID="${APP_ID:-com.sonicshield.sonic_shield}"
 
+# =====================================================================
+# 环境自愈（2026-09-22 实测）
+#
+# 两个与代码**完全无关**的环境问题会让门禁给出**误导性的红**：
+#
+# 1) `%PROGRAMFILES(X86)% environment variable not found.`（RC=1，只有这一行）
+#    Windows 上 `flutter` 的批处理包装会读该变量；受限宿主（沙箱 / CI 的
+#    Git Bash）可能不注入它。bash 无法 `export` 带括号的变量名，
+#    因此用 `env` 重新执行本脚本。
+#
+# 2) `Unable to connect to flutter_tester process:
+#     WebSocketException: Invalid WebSocket upgrade request`
+#    `flutter test` 与被测进程通过 **127.0.0.1 随机端口**的 WebSocket 通信。
+#    若环境里存在 `http_proxy` / `https_proxy`（宿主注入的沙箱代理），
+#    该连接会被代理接管而失败。报错里**一个字都没提代理** ——
+#    极易被误读成"测试坏了"。
+#
+# 两者都不是回归。门禁在此主动消除，避免把环境问题记成代码问题。
+# =====================================================================
+if ! env | grep -q '^PROGRAMFILES(X86)='; then
+  export SONICSHIELD_ENV_HEALED=1
+  exec env 'PROGRAMFILES(X86)=C:\Program Files (x86)' bash "${BASH_SOURCE[0]}" "$@"
+fi
+if [ -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${all_proxy:-}" ]; then
+  echo "[env] 检测到代理变量，已为本次门禁清除（flutter_tester 走本机 WebSocket，不能经代理）"
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+fi
+
 gate() {
   local name="$1" expect="$2"; shift 2
   echo ""
