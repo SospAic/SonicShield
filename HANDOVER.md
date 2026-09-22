@@ -1536,6 +1536,22 @@ Monkey 400 零崩溃。
 > ⚠️ `run-as` 需要 `shared_prefs/` 已存在；首次安装时该目录还不存在 →
 > **先 `mkdir -p shared_prefs`**（否则 `cp` 报 `No such file or directory`）。
 
+0. **P1（第二十六轮新增，2026-09-22）振动能力：随机振动 / 持续振动** ——
+   **设计已定稿，见 `docs/20-振动能力设计（随机振动与持续振动）.md`**（15 节 + 分阶段计划）。
+   用户四条决策：**D1 不设时长硬上限**（改为"可停止+审计"）/ **D2 本地+远程一起做** /
+   **D3 本轮补 iOS CoreHaptics 桥** / **D4 震动默认受免打扰约束 + 为所有功能增加夜间独立豁免**。
+   ⚠️ **P0 取证必须先做、不得跳过**：真机 `960f853` 实测四条能力
+   （`hasVibrator` / `hasAmplitudeControl` / `areEnvelopeEffectsSupported` /
+   `envelopeEffectInfo.minControlPointDurationMillis`）+ **BUG-069 定性**
+   （现有后台振动**未携带 vibration attributes**，官方文档称后台振动"必须"提供；
+   但**未实测前不得断言是缺陷**）+ 确认 `dumpsys vibrator_manager` 取证手段可用。
+   产出 `tool/vibrate_probe.dart` + docs/12 一节。**P0 未完成前不得进入原生改动**。
+   ⚠️ 两条"削弱护栏/无上限"的决策必须按 docs/20 §7.2 与 §8 的约束落地：
+   持续振动的 **S1–S4 四条失效安全**（分片续发/重启不续发/全局停止/低电量降级）
+   **不可裁剪**；夜间豁免必须**双重开关默认关 + 全量留痕 + 远程不可开启**
+   （`TaskWire.fromWire` 显式丢弃该字段 —— 否则等于允许已配对对端绕过合规护栏）。
+   ⚠️ 本轮**未跑门禁、未改用例数、未改覆盖率**，基线仍是 **763/763 + 24/24，RC=0，64.44%**。
+
 1. **P0 真机补测协助会话握手**（S3 验收的最后残余维度）。
    **状态（第十七轮续七更新）：真机已接入，且设备层门禁已可自动跑。**
    接入走 **Android 11+「无线调试」**（不是 USB）：
@@ -2152,6 +2168,36 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 > ③ A 组（`endpoint_service` 557 / `background_engine` 316 / `call_service` 229）
 > 逐行取证；④ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`，当前 64.44%）；
 > ⑤ BUG-065/066/067/**068** 设备层端到端补测（`WITH_DEVICE=1`）。
+
+> **用户新需求（第二十六轮，2026-09-22 提出）：振动能力 —— 随机振动（随机间隔）
+> 与持续振动（可设定随机振幅及其他可调节项）**。本轮**只做调研 + 设计 + 登记，
+> 一行产品代码未改**（无门禁/用例数/覆盖率变更）。
+>
+> **交付：新增 `docs/20-振动能力设计（随机振动与持续振动）.md`**（设计定稿，555 行）+
+> `docs/02` 新增 FR-36/37/38/39/39a 并**修正 FR-34 口径**（"静默降级" → "**明示降级**"，
+> 与项目通则一致）+ `docs/00` 索引 + docs/17 §51。
+>
+> **核心结论**：**不需要新触发器** —— "随机间隔的随机振动" = 现有
+> `RandomIntervalTrigger`（FR-14，已有）× 新 `RandomVibrateAction` 的**正交组合**，
+> 与 docs/19 §1 同一设计哲学。
+>
+> **模型层关键决策**：**不**扩展 `VibrateAction`（会得到 nullable 字段汤 →
+> 正是 BUG-068 的成因），改为**新增两个 sealed 子类** + 两个 `ActionType` 枚举值；
+> 老任务 `action_json` 一字不改（向后兼容），穷尽 switch 强制所有消费点显式处理。
+>
+> **取证要点**：`NativeBridgePlugin.kt:317` 只调 `createWaveform(pattern, -1)` ——
+> **无振幅、无循环、无 attributes、无 cancel**；`ios/Runner/` **无任何震动桥**。
+> 官方文档确认：① `hasAmplitudeControl()` 为 false 的设备**所有非零振幅一律被当成 100%**
+> （退化成 on/off，**且不报错**）；② **Android 16 (API 36) 新增包络振动**
+> `BasicEnvelopeBuilder.addControlPoint(intensity, sharpness, durationMs)`
+> —— 正是"持续 + 随机振幅"的最优解，且**真机 `960f853` 就是 Android 16**，
+> 但**系统不提供 fallback**（必须自建降级链）。
+>
+> **两个登记项**：**BUG-069（候选，待 P0 定性）** 后台振动未带 attributes；
+> **FR-34 口径修正**。
+>
+> **下一轮入口**：**P0 取证必须先做**（真机四条能力 + BUG-069 定性 + `dumpsys vibrator_manager`），
+> **P0 未完成前不得进入原生改动** —— 原生实现必须建立在实测能力之上，而不是文档推断。
 
 ## 10. 代码地图（新会话快速定位）
 
