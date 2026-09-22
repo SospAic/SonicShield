@@ -10,6 +10,8 @@
 #   PREINSTALL_TRIES=3 bash ...          # 真机预装的重试次数（默认 3）
 #   RESTORE_APP=0 bash ...               # 跳过"跑完设备层自动装回可启动真包"（默认做）
 #   ONLY_DEVICE=1 bash ...               # 只跑设备层（迭代设备用例时不必重跑 465 例宿主测试）
+#   COVERAGE_MIN=70 bash ...             # 覆盖率 ratchet 阈值（默认见下方 COVERAGE_MIN）
+#   SKIP_COVERAGE=1 bash ...             # 跳过覆盖率 ratchet（只在排查覆盖率工具本身时用）
 #   APP_ID=... bash ...                  # 覆盖包名（默认 com.sonicshield.sonic_shield）
 # 退出码：0=全绿；1=有门禁失败（代码回归）；3=代码全绿但有**环境阻塞**（未执行，非失败）。
 #   ⚠️ 压测层红时先看整机负载：负载 ≥60% 判为"墙钟预算测量无效"→ 归入 3（环境阻塞），
@@ -111,6 +113,30 @@ machine_load() {
 # 判为 BLOCKED 时退出码是 3（非零），所以**不会被静默放过**。
 LOAD_SUSPECT="${LOAD_SUSPECT:-60}"
 
+# ---------- 覆盖率 ratchet（v1.9.0-alpha 起进门禁） ----------
+#
+# 为什么要有它：覆盖率**只会悄悄退步**。在此之前每次都得靠人记得跑
+# `dart run tool/coverage_report.dart` 并肉眼比对 —— 这正是"靠自觉"的护栏，
+# 而本项目已经吃过一次亏：旧的 57.5% 分母漏算了 30 个**从未被 import** 的文件，
+# 长期没人发现（docs/17 §46⑤）。现在它变成门禁的一部分。
+#
+# 语义是 **ratchet（只降不升）**，不是"目标值"：
+#   - 涨了 → 下次把这行数字往上改（门槛跟着涨，不回落）；
+#   - 跌了 → **红**。要么补测试，要么**有意识地**下调，并在 docs/12 记录理由。
+#     ⚠️ 下调必须留痕：否则"阈值"就变成了"事后追认现状"，ratchet 失效。
+#
+# ⚠️ 这里用工具的 `--gate` 而不是自己比大小：口径（分母完整性、豁免白名单、
+#    声明式文件反向锁）都在工具里，门禁只消费结论。
+#
+# ⚠️ **阈值必须比实测值留一点余量**（2026-09-22 实测踩到）：
+#    同一份代码、同一条命令，两次跑出 **5506 / 5507 行**（差 1 行 = 0.012pt）。
+#    第一版把阈值写成 64.45，正好卡在两次实测值（64.4487% / 64.4604%）**中间**
+#    → 同一份代码会时红时绿。这与压测层的"负载噪声"是同一类错误：
+#    **ratchet 要抓的是真回落，不是测量抖动**。
+#    因此取比实测低约 0.05pt 的整数刻度：容忍 ±1–2 行抖动，
+#    但真回落（通常一次掉几十行）照样红。
+COVERAGE_MIN="${COVERAGE_MIN:-64.4}"
+
 # 压测层"红"的**定性**：负载高 → 测量无效（环境阻塞）；负载正常 → 真回归。
 #
 # 抽成函数只有一个理由：**判定逻辑要能被单独验证**（注入式验证见 docs/17 §47⑦）。
@@ -137,7 +163,7 @@ fi
 # `ONLY_DEVICE=1` 只跑设备层：迭代设备用例时不必重跑 465 例宿主测试。
 if [ "${ONLY_DEVICE:-0}" != "1" ]; then
 
-echo "=== 门禁 1/3: flutter analyze ==="
+echo "=== 门禁 1/4: flutter analyze ==="
 out=$(flutter analyze 2>&1 | tr '\r' '\n')
 echo "$out" | tail -1
 if echo "$out" | grep -q "No issues found"; then
@@ -152,8 +178,12 @@ else
   FAIL=$((FAIL+1))
 fi
 
-echo "=== 门禁 2/3: 功能层（--exclude-tags perf）==="
-out=$(flutter test --exclude-tags perf 2>&1 | tr '\r' '\n')
+echo "=== 门禁 2/4: 功能层（--exclude-tags perf）==="
+# 功能层**顺带产出** coverage/lcov.info（第 4 步的 ratchet 据此判定），
+# 不额外多跑一遍测试。SKIP_COVERAGE=1 退回裸跑。
+COV_FLAG=""
+if [ "${SKIP_COVERAGE:-0}" != "1" ]; then COV_FLAG="--coverage"; fi
+out=$(flutter test --exclude-tags perf $COV_FLAG 2>&1 | tr '\r' '\n')
 echo "$out" | tail -1
 if echo "$out" | grep -q "All tests passed"; then
   echo "[PASS] 功能层"
@@ -164,7 +194,7 @@ else
   FAIL=$((FAIL+1))
 fi
 
-echo "=== 门禁 3/3: 压测层（--tags perf --concurrency=1，必须单并发）==="
+echo "=== 门禁 3/4: 压测层（--tags perf --concurrency=1，必须单并发）==="
 run_perf() { flutter test --tags perf --concurrency=1 2>&1 | tr '\r' '\n'; }
 out=$(run_perf)
 echo "$out" | tail -1
@@ -208,6 +238,36 @@ else
   else
     echo "[FAIL] 压测层（PERF_RETRY=0，未重跑确认）"
     FAIL=$((FAIL+1))
+  fi
+fi
+
+# ---------- 门禁 4/4：覆盖率 ratchet ----------
+# 只降不升：跌破 COVERAGE_MIN 即红。lcov.info 由第 2 步（功能层）顺带产出。
+if [ "${SKIP_COVERAGE:-0}" != "1" ]; then
+  echo "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=${COVERAGE_MIN}%）==="
+  if [ ! -f coverage/lcov.info ]; then
+    # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。
+    echo "[BLOCKED] 覆盖率：找不到 coverage/lcov.info（功能层可能没跑成）"
+    BLOCKED=$((BLOCKED+1))
+  else
+    out=$(dart run tool/coverage_report.dart --gate="$COVERAGE_MIN" 2>&1 | tr '\r' '\n')
+    echo "$out" | grep -E "全局|可测面|门禁(通过|未过)|❌ 报告不可信" | head -6 || true
+    if echo "$out" | grep -q "门禁通过"; then
+      echo "[PASS] 覆盖率 ratchet"
+    elif echo "$out" | grep -q "门禁未过"; then
+      echo "[FAIL] 覆盖率 ratchet：跌破 ${COVERAGE_MIN}%"
+      echo "  ⇒ 两条路：① 补测试把它推回去；② **有意识地**下调 COVERAGE_MIN，"
+      echo "     并在 docs/12 本轮章节写明理由（下调留痕，否则 ratchet 失效）。"
+      fail_dump 覆盖率 "$out"
+      FAIL=$((FAIL+1))
+    else
+      # 工具自己报"报告不可信"（分母不完整 / 豁免幽灵文件 / 白名单失效）——
+      # 这类问题的危险之处是**它会让数字变好看**，所以必须当失败处理。
+      echo "[FAIL] 覆盖率报告不可信 —— 先修工具报的问题（见下方 ❌ 段）"
+      echo "$out" | tail -20
+      fail_dump 覆盖率 "$out"
+      FAIL=$((FAIL+1))
+    fi
   fi
 fi
 
