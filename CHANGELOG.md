@@ -203,6 +203,53 @@
   抖动**不在本轮新增块**（该文件两次均 355/355），是既有的已知抖动，
   阈值 68.1 覆盖它 —— **ratchet 抓真回落，不抓测量抖动**。
 
+### Fixed（修复）· BUG-074：**Android 端从未构建成功**（`Long` → `Int` 赋值）
+
+- `NativeBridgePlugin.vibrateCapabilities` 里
+  `minCp = v.envelopeEffectInfo.minControlPointDurationMillis` ——
+  该字段是 **`Long`**（API 36），而 `minCp` 声明为 `Int`
+  ⇒ **Kotlin 编译失败**：`Assignment type mismatch: actual type is 'Long', but 'Int' was expected.`
+- **为什么四轮都没发现**：宿主测试（`flutter test`）**不编译 Kotlin**、
+  `flutter analyze` **不看 Kotlin**、而真机构建此前**从未成功跑完**
+  （被"设备链路不持久"掩盖）⇒ **三道闸门一道都没拦住**。
+- **修复**：补 `.toInt()`（毫秒值远小于 `Int.MAX`，转换安全）+ 就地注释。
+- **回归锁**：`integration_test/vibrate_device_test.dart` 一旦被跑就**必然先过**
+  `assembleDebug` ⇒ 天然是这条锁。已登记进 `scripts/gates.sh` 设备层（`device_vibrate`）。
+
+### Added（设备取证）· P0 振动能力实测（docs/20 §13）
+
+- 新增 `tool/vibrate_probe.dart`（人肉探针，A–G 七段取证行）与
+  `integration_test/vibrate_device_test.dart`（VD-01..06，**可回归的设备用例**）。
+- 真机 `shennong`（Redmi K70 至尊版 / **Android 16 / API 36**）实测四条能力：
+  `hasVibrator=true`、`hasAmplitudeControl=true`、**`hasEnvelope=false`**、`minControlPointMs=0`。
+- ★ **核心结论：Android 16 ≠ 支持振动包络** —— 系统侧 `mMaxEnvelopeEffectSize = 0` 印证。
+  ⇒ docs/20 的**三级降级不是过度设计，是必需品**；"包络优先"这条路径在本机永远走不到。
+- `dumpsys vibrator_manager` 逐条对上号：`usage: ALARM` / `usage: NOTIFICATION` 如实传递；
+  振幅 `[0,255,0,128]` → 记录 `1.00 / 0.50`（**没被一律拉满**）；
+  8s 长振动被 `vibrateStop` 在 2020ms 处 `cancelled_by_user` 终止（S3「任何时刻都能停」成立）。
+- **BUG-069 定性**：带 attributes 的振动**确实产生了系统侧记录** ⇒ "带了反而没震"不成立。
+  ⚠️ "不带 attributes"的对照组**未做**（代码里已无该路径）；真"后台"（退后台/锁屏）场景**未覆盖**。
+
+### Changed（工程）· 第二十九轮补记（2026-09-22）：覆盖率冲刺 —— 音效库页
+
+- 新增 `test/sound_library_screen_test.dart`（SLB-01..21，**21 例**）。
+- `lib/features/sounds/sound_library_screen.dart` 加 `@visibleForTesting` **注入缝**
+  （`previewPlayer`，与 `RemoteTasksTab.channel` 同形；生产传 `null` **行为一字未变**）。
+- **ratchet 抬高**：`COVERAGE_MIN` **68.1 → 69.2**（"新实测值 − 0.05pt"）。
+- 结果：功能层 **908 → 929**；覆盖率 **68.15% → 69.26%**（5823 → 5918 / 8545）；
+  `sound_library_screen.dart` **94 → 0** 行未覆盖（120/120）。
+  分母 8543 → 8545（+2）是**可复核的源码事实**（注入缝可执行行净增 2，`git diff` 可验）。
+- 对照跑归因：+95 行中 **94 行来自该文件**、1 行来自 `assist_host_screen.dart` 公共路径，
+  **其余 74 个文件 0 行变化**。
+- ★ 顺带固化的框架事实（一条**推翻上一轮结论**）：
+  ① `testWidgets` 里 `await runAsync(回调)` **会死锁** —— 框架驱动循环只在**段与段之间**
+  排空 fake 微任务 ⇒ **分段驱动**（`unawaited` 启动 + 真实 Timer + `pump()`），
+  实测"675 轮零进展 → 5 轮走完"；
+  ② **`flutter/assets` 打桩后 `rootBundle` 在 `runAsync` 里可用** ⇒ 预置库导入
+  **整条链可端到端测**（推翻上一轮"宿主不可达"）；
+  ③ `rootBundle` 是全局单例、缓存**跨用例存活** ⇒ `setUp` 必须 `rootBundle.clear()`；
+  ④ `debugPrint` 的节流 Timer 会留在 fake zone → 打印全丢，**探针一律用 `print`**。
+
 ### Docs
 
 - 新增 docs/20《振动能力设计（随机振动与持续振动）》。
