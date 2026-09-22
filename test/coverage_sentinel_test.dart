@@ -31,7 +31,9 @@ import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/condition.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
+import 'package:sonic_shield/domain/models/vibrate_caps.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
+import 'package:sonic_shield/domain/scheduling/vibrate_resolve.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';
 import 'package:sonic_shield/features/dashboard/quick_scripts_card.dart';
 import 'package:sonic_shield/features/guard/guard_screen.dart';
@@ -89,6 +91,7 @@ import 'package:sonic_shield/services/playback_service.dart';
 import 'package:sonic_shield/services/power_service.dart';
 import 'package:sonic_shield/services/preset_import.dart';
 import 'package:sonic_shield/services/sound_guard_service.dart';
+import 'package:sonic_shield/services/vibrate_session.dart';
 
 void main() {
   // ① 分母自检：lib/ 现场枚举 vs 哨兵 import 列表，必须完全一致。

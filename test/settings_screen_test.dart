@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -178,7 +179,16 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [databaseProvider.overrideWith((ref) async => db)],
+        overrides: [
+          databaseProvider.overrideWith((ref) async => db),
+          // ⚠️ 「本月豁免次数」必须**换掉**，不能让它真去查库：
+          // 真实 sqflite 往返跑在 `FakeAsync` 里会留下未完成的锁超时
+          // `Timer`（10s），用例收尾时判 "A Timer is still pending"
+          // 而失败，并且会**连带污染同文件后续用例**。
+          // 该 provider 自身的行为由 `quiet_exempt_lock_test.dart` QE-25
+          // 在真实 DB 上验证 —— 界面用例只关心"渲染得对不对"。
+          quietExemptCountProvider.overrideWith((ref) async => 0),
+        ],
         child: const MaterialApp(home: SettingsScreen()),
       ),
     );
@@ -194,6 +204,8 @@ void main() {
       (await SharedPreferences.getInstance()).getString(key);
   Future<int?> prefInt(String key) async =>
       (await SharedPreferences.getInstance()).getInt(key);
+  Future<bool?> prefBool(String key) async =>
+      (await SharedPreferences.getInstance()).getBool(key);
 
   /// 当前电源策略分段按钮的选中值。
   Set<String> selectedSegment(WidgetTester tester) => tester
@@ -226,6 +238,7 @@ void main() {
       for (final section in [
         '电源策略',
         '强制免打扰时段（合规护栏）',
+        '夜间独立豁免', // v1.9 新增分区
         '后台保活',
         '任务备份',
       ]) {
@@ -241,6 +254,9 @@ void main() {
       expect(find.text('导出任务（JSON）'), findsOneWidget);
       expect(find.text('导入任务（JSON）'), findsOneWidget);
       expect(find.text('合规使用须知'), findsOneWidget);
+      // v1.9：夜间独立豁免主开关（合规护栏的**削弱**入口，必须在页面上可见）
+      expect(find.text('夜间独立豁免（主开关）'), findsOneWidget);
+      expect(find.textContaining('本月豁免次数'), findsOneWidget);
       // 省电模式的边界条件必须写出来（用户得知道"什么时候会暂停"）
       expect(find.textContaining('电量 < 15%'), findsOneWidget);
     }, timeout: perTest);
@@ -347,6 +363,108 @@ void main() {
 
       expect(await prefInt('quiet_end'), 9);
       expect(await prefInt('quiet_start'), 20, reason: '开始时段不应被动到');
+    }, timeout: perTest);
+  });
+
+  // ─────────────────── SET-05 夜间独立豁免（v1.9，docs/20 §8） ───────────────────
+  //
+  // 这一组锁的是**削弱合规护栏**的那条路径。它不是"又一个开关"：
+  // docs/08 §4 原本把免打扰标为"不可绕过"，用户拍板开的口子必须满足
+  // 「默认关 / 二次确认 / 每次留痕 / 远程不可开」四条，
+  // 前三条在本组，第四条在 `quiet_exempt_lock_test.dart`。
+
+  group('SET-05 夜间独立豁免', () {
+    testWidgets('SET-05 默认关闭（无偏好 ⇒ 不授权）', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      final sw = tester.widget<SwitchListTile>(
+          find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      expect(sw.value, isFalse, reason: '默认必须是"未授权"');
+      expect(await prefBool(PrefsKeys.quietExemptMaster) ?? false, isFalse);
+    }, timeout: perTest);
+
+    testWidgets('SET-05b 点击开关 → 必须先弹二次确认；取消 ⇒ **不落库**',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      await waitFor(tester, () => find.text('开启夜间独立豁免？').evaluate().isNotEmpty,
+          reason: '削弱护栏的操作必须二次确认');
+      // 文案必须写明后果，而不是一句"确定吗"
+      expect(find.textContaining('请勿用它干扰他人'), findsOneWidget);
+
+      await tester.tap(find.text('取消'));
+      await waitFor(
+          tester, () => find.text('开启夜间独立豁免？').evaluate().isEmpty,
+          reason: '弹窗应关闭');
+      expect(await prefBool(PrefsKeys.quietExemptMaster) ?? false, isFalse,
+          reason: '取消后**绝不能**落库 —— 否则等于一键开启护栏豁免');
+      final sw = tester.widget<SwitchListTile>(
+          find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      expect(sw.value, isFalse, reason: '取消后界面也不应变');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-05c 确认 → 落库 true，且提示"仍需逐任务开启"',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      await waitFor(tester, () => find.text('开启夜间独立豁免？').evaluate().isNotEmpty,
+          reason: '应弹二次确认');
+      await tester.tap(find.text('我了解后果，开启'));
+      await waitFor(
+          tester,
+          () => find.textContaining('已开启夜间豁免主开关').evaluate().isNotEmpty,
+          reason: '应有成功提示');
+      expect(await prefBool(PrefsKeys.quietExemptMaster), isTrue);
+      // 双钥匙：主开关开启**不等于**任务已豁免，文案必须说清
+      expect(find.textContaining('仍需在任务编辑器中逐任务开启'), findsOneWidget);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-05d 关闭 → 落库 false，且提示已清除豁免计划', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        PrefsKeys.quietExemptMaster: true,
+      });
+      await pumpSettings(tester);
+
+      final sw = tester.widget<SwitchListTile>(
+          find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      expect(sw.value, isTrue, reason: '应回填已授权状态');
+
+      await tester.tap(find.widgetWithText(SwitchListTile, '夜间独立豁免（主开关）'));
+      await waitFor(
+          tester,
+          () => find.textContaining('已关闭夜间豁免主开关').evaluate().isNotEmpty,
+          reason: '关闭**不需要**二次确认（回到更安全的一侧），但必须给回执');
+      expect(await prefBool(PrefsKeys.quietExemptMaster), isFalse);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-05e 豁免计数读不到时显示「—」而不是 0', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // 让 provider 一直处于 loading：真实实现下"读库失败"也是这个形态。
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWith((ref) async => db),
+            quietExemptCountProvider.overrideWith((ref) => Completer<int>().future),
+          ],
+          child: const MaterialApp(home: SettingsScreen()),
+        ),
+      );
+      tester.view.physicalSize = const Size(1200, 4000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pump(const Duration(milliseconds: 50));
+      await waitFor(tester, () => find.textContaining('本月豁免次数').evaluate().isNotEmpty,
+          reason: '设置页应渲染');
+      expect(find.textContaining('本月豁免次数：—'), findsOneWidget,
+          reason: '把"读不到"显示成 0 会让用户以为护栏完好，属于误导');
     }, timeout: perTest);
   });
 

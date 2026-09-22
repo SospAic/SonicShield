@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/script_builder_screen.dart';
+import 'package:sonic_shield/remote/rc_script.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 /// 指令组装器（`/remote/script-builder/:endpointId`）的宿主测试。
@@ -299,18 +300,22 @@ void main() {
       expect(_order(tester), ['通知「声盾」']);
     });
 
-    testWidgets('SBS-08e 编辑「震动」：没有可编辑参数也要能确定退出',
+    testWidgets('SBS-08e 编辑「震动」：v1.9 起有模式选择器，默认仍是固定节奏',
         (tester) async {
       await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
       await _addStep(tester, '震动');
 
       await tester.tap(_tile('震动'));
       await tester.pumpAndSettle();
-      // 明确告知「没有可编辑参数」，而不是给一个空白框让用户猜。
-      expect(find.text('（无可编辑参数）'), findsOneWidget);
+      // v1.8 及以前这里是「（无可编辑参数）」；v1.9 起振动可参数化
+      // （docs/20 §10.1）。默认模式仍是 `fixed` → 明确告知"固定节奏无可编辑
+      // 参数"，同时把模式选择器摆出来，而不是给一个空白框让用户猜。
+      expect(find.textContaining('固定节奏无可编辑参数'), findsOneWidget);
+      expect(find.text('振动模式'), findsOneWidget);
       await tester.tap(find.text('确定'));
       await tester.pumpAndSettle();
 
+      // 不动任何东西 → 参数保持 `{}`（老控制器线格式一字不变）。
       expect(_order(tester), ['震动']);
     });
 
@@ -347,6 +352,109 @@ void main() {
       // 「失败必须留痕」：outbox 里应有一条待发记录（上线后自动冲刷）。
       expect(store.outbox(), hasLength(1));
       expect(store.outbox().first['endpointId'], 'devA');
+    });
+  });
+
+  group('SBS-V 振动步骤参数化（v1.9，docs/20 §10.1）', () {
+    Future<void> openVibrate(WidgetTester tester) async {
+      await tester.tap(_tile('震动'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> pickMode(WidgetTester tester, String label) async {
+      await tester.tap(find.byType(DropdownButton<RcVibrateMode>));
+      await tester.pumpAndSettle();
+      // 菜单项与按钮上的当前值同名 → 取 overlay 里那一个（后插入）。
+      await tester.tap(find.text(label).last);
+      await tester.pumpAndSettle();
+    }
+
+    /// 按**标签**定位字段，而不是按下标 —— 下标顺序依赖 build 顺序，
+    /// 一旦字段重排就会静默改错别的字段（BUG-068 同类）。
+    Future<void> fill(WidgetTester tester, String label, String value) async {
+      final f =
+          find.ancestor(of: find.text(label), matching: find.byType(TextField));
+      expect(f, findsOneWidget, reason: '对话框里找不到字段「$label」');
+      await tester.ensureVisible(f);
+      await tester.enterText(f, value);
+      await tester.pump();
+    }
+
+    testWidgets('SBS-V01 切到随机脉冲 → 填参数 → 标题反映实际生效值', (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '震动');
+      await openVibrate(tester);
+
+      expect(find.textContaining('固定节奏无可编辑参数'), findsOneWidget);
+      await pickMode(tester, '随机脉冲');
+
+      // 字段由 `rcVibrateFieldsFor(mode)` 生成 —— 与执行器**同一份声明**。
+      expect(find.textContaining('固定节奏无可编辑参数'), findsNothing);
+      await fill(tester, '最短时长（秒）', '5');
+      await fill(tester, '最长时长（秒）', '20');
+      await fill(tester, '最高强度（0–1）', '0.8');
+
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      final title = _order(tester).single;
+      expect(title, contains('随机振动'));
+      expect(title, contains('5–20 秒'));
+      expect(title, contains('80%'));
+    });
+
+    testWidgets('SBS-V02 取消：切了模式也不落盘', (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '震动');
+      await openVibrate(tester);
+
+      await pickMode(tester, '持续振动');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      expect(_order(tester), ['震动']);
+    });
+
+    testWidgets('SBS-V03 持续振动：强度区间与波动周期进入标题', (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '震动');
+      await openVibrate(tester);
+
+      await pickMode(tester, '持续振动');
+      await fill(tester, '最短时长（秒）', '10');
+      await fill(tester, '最长时长（秒）', '30');
+      await fill(tester, '最低强度（0–1）', '0.5');
+      await fill(tester, '最高强度（0–1）', '1');
+      await fill(tester, '强度波动周期（毫秒，0=恒定）', '800');
+
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      final title = _order(tester).single;
+      expect(title, contains('持续振动 10–30 秒'));
+      expect(title, contains('50%'));
+      expect(title, contains('波动 800ms'));
+    });
+
+    testWidgets('SBS-V04 振动时长计入 30 分钟预算 → 超限即拒发', (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '震动');
+      await openVibrate(tester);
+      await pickMode(tester, '持续振动');
+      // 单段 30 分钟正好卡在上限内（取区间**上界**判定）。
+      await fill(tester, '最短时长（秒）', '1800');
+      await fill(tester, '最长时长（秒）', '1800');
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      // 再加 10 分钟时延 → 合计 40 分钟 → 必须拒绝。
+      // ⚠️ 只发**一次**：SnackBar 是排队显示的，连发两次时第二次要等第一条
+      // 超时（4s）才出现，`pumpAndSettle` 会把这一条读成"没弹出"。
+      await _addStep(tester, '时延');
+      await _editStep(tester, '等待 5s', text: '600');
+      await _send(tester);
+
+      expect(find.text('时延与振动合计超过 30 分钟上限'), findsOneWidget);
     });
   });
 }

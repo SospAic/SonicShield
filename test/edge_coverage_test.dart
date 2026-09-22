@@ -17,15 +17,20 @@ void main() {
   databaseFactory = databaseFactoryFfi;
 
   group('ActionType/AudioChannel label 全枚举', () {
-    test('ActionType.label 八种', () {
+    test('ActionType.label 全部（v1.9：十种）', () {
       expect(ActionType.playAudio.label, '播放音频');
       expect(ActionType.soundscape.label, '声景混音');
       expect(ActionType.tts.label, '语音喊话');
       expect(ActionType.notify.label, '发送通知');
       expect(ActionType.recordEvidence.label, '录音取证');
-      expect(ActionType.vibrate.label, '震动');
+      // v1.9 起 `vibrate` 明确为"固定节奏"，与新增的随机/持续振动区分开。
+      expect(ActionType.vibrate.label, '震动（固定节奏）');
+      expect(ActionType.randomVibrate.label, '随机振动');
+      expect(ActionType.continuousVibrate.label, '持续振动');
       expect(ActionType.composite.label, '组合动作');
       expect(ActionType.randomFrom.label, '随机指令集');
+      // 枚举增长时这里会红：提醒同步 label 断言（而不是让新值悄悄没测）。
+      expect(ActionType.values.length, 10);
     });
 
     test('AudioChannel.label 两种', () {
