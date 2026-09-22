@@ -137,6 +137,15 @@ abstract final class RcCmd {
 
   /// 端点预置音源分类：{} → rc.presets {categories}
   static const presetList = 'preset.list';
+
+  // ---- v1.9：振动（docs/20 §10.2）----
+
+  /// 停止端点**全部**进行中的振动：{} → rc.ack {stopped}
+  ///
+  /// 与 D1「持续振动不设时长硬上限」配套：上限换来的是**任何时刻都能停**，
+  /// 本地有「停止振动」按钮，远程有本命令。它是让"不设上限"站得住的那半边。
+  /// ⚠️ 不携带 taskId：停止是全局的，避免"停错了对象"这类静默失效。
+  static const vibrateStop = 'vibrate.stop';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------

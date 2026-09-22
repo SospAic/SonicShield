@@ -387,6 +387,22 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                 child: const Text('停止指令组')),
           ],
         ),
+        const SizedBox(height: 12),
+        _section('振动（v1.9）'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            // D1 配套：持续振动**不设时长硬上限**，换来的是"任何时刻都能停"。
+            // 这个按钮就是那半边 —— 没有它，"不设上限"就是一句空话。
+            OutlinedButton.icon(
+                icon: const Icon(Icons.vibration, size: 18),
+                onPressed: _allowed(RcCmd.vibrateStop)
+                    ? () => _send(RcCmd.vibrateStop, {}, '停止端点振动')
+                    : null,
+                label: const Text('停止端点振动')),
+          ],
+        ),
         const SizedBox(height: 16),
         if (_lastStatus != null &&
             (_lastStatus!['pendingCount'] as num?) != null) ...[

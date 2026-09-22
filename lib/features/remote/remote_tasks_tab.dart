@@ -610,6 +610,18 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
       case 'composite':
         final p = (m['primary'] as Map?)?.cast<String, dynamic>();
         return '$base · 通知 + ${_actionLabel(_kindToType(p?['kind']))}';
+      // v1.9 振动族：把关键可调项摊在摘要里（远程与本机功能对齐 ——
+      // 控制端看到的必须是"这任务会怎么震"，而不是一句"随机振动"）。
+      case 'randomVibrate':
+        return '$base · 强度 ${_pct(m['amplitudeMin'])}–${_pct(m['amplitudeMax'])}'
+            ' · ${m['durationSecMin'] ?? '?'}–${m['durationSecMax'] ?? '?'}s'
+            ' · ≤${m['maxPulses'] ?? '?'} 脉冲';
+      case 'continuousVibrate':
+        return '$base · 强度 ${_pct(m['amplitudeMin'])}–${_pct(m['amplitudeMax'])}'
+            ' · ${m['durationSecMin'] ?? '?'}–${m['durationSecMax'] ?? '?'}s'
+            '${(m['jitterMs'] as num?) != null && (m['jitterMs'] as num) > 0 ? ' · 波动 ${m['jitterMs']}ms' : ''}';
+      case 'vibrate':
+        return '$base · ${((m['patternMs'] as List?) ?? const []).length} 步';
     }
     return base;
   }
@@ -662,6 +674,10 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         'notify' => 'notify',
         'record' => 'recordEvidence',
         'vibrate' => 'vibrate',
+        // v1.9：随机/持续振动（docs/20 §4）。漏登记的后果与 composite 那次一样 ——
+        // 摘要里出现空标签（LBL-01 会红）。
+        'randomVibrate' => 'randomVibrate',
+        'continuousVibrate' => 'continuousVibrate',
         'composite' => 'composite',
         'randomFrom' => 'randomFrom',
         _ => '',
@@ -684,7 +700,10 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         'tts' => '语音喊话',
         'notify' => '发送通知',
         'recordEvidence' => '录音取证',
-        'vibrate' => '震动',
+        // 与 `ActionType.label` 保持一致（v1.9 起 `vibrate` 明确为"固定节奏"）。
+        'vibrate' => '震动（固定节奏）',
+        'randomVibrate' => '随机振动',
+        'continuousVibrate' => '持续振动',
         'composite' => '组合动作',
         'randomFrom' => '随机指令集',
         _ => (raw == null || '$raw'.isEmpty) ? '未知动作' : '$raw',

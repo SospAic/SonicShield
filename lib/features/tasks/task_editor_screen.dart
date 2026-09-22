@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/constants.dart';
 import '../../core/providers.dart';
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
 import '../../remote/rc_script.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
+import '../../domain/models/vibrate_caps.dart';
+import '../../domain/scheduling/vibrate_resolve.dart';
 import '../../services/background_service_manager.dart';
+import '../../services/native_bridge.dart';
 
 /// 「随机指令集」子动作 → [RcStepKind] 的回填映射；**不可表示的类型返回 null**。
 ///
@@ -30,6 +35,36 @@ RcStepKind? stepKindOfAction(ActionConfig a) => switch (a) {
       CompositeAction() => null,
       SoundscapeAction() => null,
       ActionSetAction() => null,
+      // 随机/持续振动（v1.9）同样**不可表示**：`RcStepKind.vibrate` 的编辑控件
+      // 只会生成 `VibrateAction`（固定节奏），映射过去会在保存时把随机脉冲串
+      // **静默降级**成固定节奏 —— 与 BUG-058 是同一类错误。
+      // 因此返回 null，由 `_setPreserved` 原样保留。
+      // ⚠️ 若将来把 `RcStepKind.vibrate` 参数化（docs/20 §10.1），
+      // 需要同步放开这里，并补一条"参数不丢"的往返锁。
+      RandomVibrateAction() => null,
+      ContinuousVibrateAction() => null,
+    };
+
+/// 编辑器动作选项 → 领域动作类型（**唯一映射点**，提成顶层函数以便上锁）。
+///
+/// ⚠️ 为什么必须是可调用的函数而不是 `_save()` 里的一段内联 switch：
+/// 曾经 [ActionKindChoice] 里**没有** `vibrate`，于是 `ActionType.vibrate`
+/// 的任务打开编辑器后落回默认的 `play`，一按保存就被**静默改成播放任务**。
+/// 这个缺陷靠人眼审查发现不了（枚举与选项集在两个地方）。
+/// 提成纯函数后，`test/action_kind_coverage_test.dart` 可以断言
+/// **每个 [ActionType] 都存在至少一个可产生它的编辑器选项**，
+/// 将来新增动作类型时若忘了加选项，那条锁立刻变红。
+ActionType actionTypeOfChoice(ActionKindChoice c) => switch (c) {
+      ActionKindChoice.play => ActionType.playAudio,
+      ActionKindChoice.soundscape => ActionType.soundscape,
+      ActionKindChoice.tts => ActionType.tts,
+      ActionKindChoice.record => ActionType.recordEvidence,
+      ActionKindChoice.notify => ActionType.notify,
+      ActionKindChoice.composite => ActionType.composite,
+      ActionKindChoice.randomFrom => ActionType.randomFrom,
+      ActionKindChoice.vibrateFixed => ActionType.vibrate,
+      ActionKindChoice.vibrateRandom => ActionType.randomVibrate,
+      ActionKindChoice.vibrateContinuous => ActionType.continuousVibrate,
     };
 
 /// 任务编辑器：触发方式 -> 时间参数 -> 动作 -> 音源 -> 保存。
@@ -101,6 +136,41 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   bool _loopFill = false;
   int _rampUpSec = 0;
 
+  // ---------------- 振动族（v1.9，docs/20 §4/§9） ----------------
+
+  /// 固定节奏：`[起始延迟, 振, 停, 振, …]`（毫秒）。默认与 `VibrateAction` 一致。
+  List<int> _vibPattern = const [0, 300, 200, 300];
+
+  // 随机脉冲（RandomVibrateAction）
+  int _rvDurMin = 3, _rvDurMax = 10;
+  int _rvOnMin = 150, _rvOnMax = 400;
+  int _rvOffMin = 100, _rvOffMax = 600;
+  double _rvAmpMin = 0.4, _rvAmpMax = 1.0;
+  int _rvMaxPulses = 200;
+  int _rvRampUp = 0;
+  bool _rvRespectDnd = true;
+
+  // 持续振动（ContinuousVibrateAction）
+  int _cvDurMin = 10, _cvDurMax = 30;
+  double _cvAmpMin = 0.5, _cvAmpMax = 1.0;
+  int _cvJitterMs = 0;
+  double _cvSharpMin = 0.0, _cvSharpMax = 0.0;
+  int _cvDutyPct = 100;
+  int _cvRampUp = 0, _cvRampDown = 0;
+  bool _cvRespectDnd = true;
+
+  /// 本机振动能力（null = 尚未读到）。用于**明示降级**（FR-34 口径修正）：
+  /// 承诺了振幅/锐度就必须说清"这台设备做不到"。
+  VibrateCaps? _caps;
+
+  /// 夜间独立豁免（任务级，v1.9，docs/20 §8）。默认 false。
+  /// 主开关关闭时界面**置灰不可点**（Two-Key Safety）。
+  bool _quietExempt = false;
+
+  /// 主开关（设置页）当前状态。**只读** —— 编辑器不提供开启入口。
+  /// 读 `SharedPreferences`（不做 DB 往返，避免 widget 测试里的假故障）。
+  bool _quietExemptMaster = false;
+
   // 声景混音（v1.3）
   final List<SoundscapeTrack> _scTracks = [];
   int _scDurationSec = 60;
@@ -139,6 +209,38 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   void initState() {
     super.initState();
     _load();
+    _probeEnv();
+  }
+
+  /// 读取本机振动能力（v1.9，docs/20 §5.2 / FR-38）+ 夜间豁免主开关状态。
+  ///
+  /// ## ⚠️ 为什么这两件事**不能**放进 `_load()`
+  ///
+  /// `_load()` 在 `taskId == null`（新建）时是**同步**走到 `_loaded = true` 的 ——
+  /// `async` 函数体在第一个 `await` 之前是同步执行的，而那句 `_loaded = true`
+  /// **没有包在 `setState` 里**（依赖"首帧之前就已置位"这一事实）。
+  ///
+  /// 一旦在它前面插入任何 `await`（例如读 prefs / 探能力），`_loaded` 就会
+  /// 晚于首帧才被置位，而它不会触发重建 → 界面**永远停在加载圈**，
+  /// `pumpAndSettle` 直接超时。实测（2026-09-22）：编辑器 30+ 条用例连锁红。
+  ///
+  /// 所以：任何**环境探测**都必须走这里 —— 独立异步 + `setState` 回写，
+  /// 读不到就保持"未授权/未知"（都是更安全的一侧），绝不阻塞页面可用性。
+  Future<void> _probeEnv() async {
+    try {
+      final caps = await NativeBridge.vibrateCapabilities();
+      if (mounted) setState(() => _caps = caps);
+    } on Object {
+      // 桥不可用（桌面 / 测试未打桩）→ 保持 null，不猜。
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final on = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
+      if (mounted) setState(() => _quietExemptMaster = on);
+    } on Object {
+      // 读不到就按"未授权"处理 —— 降级到**更安全**的一侧（开关置灰）。
+      if (mounted) setState(() => _quietExemptMaster = false);
+    }
   }
 
   Future<void> _load() async {
@@ -179,6 +281,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   /// 把已解析的任务回填到编辑器的各控件（本机与远程模式共用）。
   void _applyTask(Task t) {
     {
+      // 夜间独立豁免（v1.9）：**必须回填**，否则"打开编辑器再保存"
+      // 会把用户已开的豁免静默关掉（保存路径显式写 `_quietExempt`）。
+      _quietExempt = t.quietExempt;
       // 条件层回填（v1.3；v1.7 新增字段）。
       final c = t.condition;
       if (c != null) {
@@ -254,6 +359,37 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _actionKind = ActionKindChoice.record;
       } else if (a is NotifyAction) {
         _actionKind = ActionKindChoice.notify;
+      } else if (a is VibrateAction) {
+        // v1.9 修复：此前没有这条分支 → 震动任务打开编辑器后 `_actionKind`
+        // 停留在默认 `play`，保存即**静默变成播放任务**。
+        _vibPattern = List<int>.from(a.patternMs);
+        _actionKind = ActionKindChoice.vibrateFixed;
+      } else if (a is RandomVibrateAction) {
+        _rvDurMin = a.durationSecMin;
+        _rvDurMax = a.durationSecMax;
+        _rvOnMin = a.pulseOnMsMin;
+        _rvOnMax = a.pulseOnMsMax;
+        _rvOffMin = a.pulseOffMsMin;
+        _rvOffMax = a.pulseOffMsMax;
+        _rvAmpMin = a.amplitudeMin;
+        _rvAmpMax = a.amplitudeMax;
+        _rvMaxPulses = a.maxPulses;
+        _rvRampUp = a.rampUpSec;
+        _rvRespectDnd = a.respectDnd;
+        _actionKind = ActionKindChoice.vibrateRandom;
+      } else if (a is ContinuousVibrateAction) {
+        _cvDurMin = a.durationSecMin;
+        _cvDurMax = a.durationSecMax;
+        _cvAmpMin = a.amplitudeMin;
+        _cvAmpMax = a.amplitudeMax;
+        _cvJitterMs = a.jitterMs;
+        _cvSharpMin = a.sharpnessMin;
+        _cvSharpMax = a.sharpnessMax;
+        _cvDutyPct = a.dutyCyclePct;
+        _cvRampUp = a.rampUpSec;
+        _cvRampDown = a.rampDownSec;
+        _cvRespectDnd = a.respectDnd;
+        _actionKind = ActionKindChoice.vibrateContinuous;
       } else if (a is CompositeAction) {
         _actionKind = ActionKindChoice.composite;
         if (a.primary is PlayAudioAction) {
@@ -330,6 +466,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             ],
           ),
           ..._actionInputs(context),
+          const SizedBox(height: 16),
+          if (widget.remoteTarget == null) ...[
+            _section(context, '夜间独立豁免'),
+            _quietExemptTile(),
+          ],
           const SizedBox(height: 16),
           _section(context, '执行条件'),
           ..._conditionInputs(context),
@@ -723,7 +864,306 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ];
       case ActionKindChoice.randomFrom:
         return _randomSetInputs(ctx);
+      case ActionKindChoice.vibrateFixed:
+        return _vibrateFixedInputs();
+      case ActionKindChoice.vibrateRandom:
+        return _vibrateRandomInputs();
+      case ActionKindChoice.vibrateContinuous:
+        return _vibrateContinuousInputs();
     }
+  }
+
+  /// 能力提示条（v1.9，FR-38 / docs/20 §5.2）。
+  ///
+  /// ⚠️ **不得静默降级**：承诺了振幅/锐度却做不到时，必须在这里说清楚。
+  /// 与"无震动设备"是两回事 —— 后者是"这台机器没有硬件"，
+  /// 前者是"设置保存了但系统会忽略它"。
+  List<Widget> _vibrateCapHint(ActionConfig action) {
+    final caps = _caps;
+    if (caps == null) {
+      return const [
+        SizedBox(height: 8),
+        Text('无法读取本机振动能力（桥不可用），实际效果以设备为准。',
+            style: TextStyle(fontSize: 12)),
+      ];
+    }
+    final notes = vibrateDegradations(caps, action);
+    if (notes.isEmpty) return const [];
+    return [
+      const SizedBox(height: 8),
+      Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('本机能力提示',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              for (final n in notes)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('· $n', style: const TextStyle(fontSize: 12)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// 固定节奏（v1.x 既有能力）：模式串 + 时长/强度不受随机化影响。
+  List<Widget> _vibrateFixedInputs() {
+    final a = VibrateAction(patternMs: _vibPattern);
+    return [
+      const SizedBox(height: 8),
+      const Text('按固定节奏振动（毫秒序列：起始延迟、振、停、振…）。',
+          style: TextStyle(fontSize: 12)),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        children: [
+          for (var i = 0; i < _vibPattern.length; i++)
+            InputChip(
+              label: Text('${_vibPattern[i]}ms'),
+              onPressed: () => setState(() {
+                final v = _vibPattern[i];
+                _vibPattern = List<int>.from(_vibPattern)..[i] = v >= 1000 ? 50 : v + 50;
+              }),
+            ),
+        ],
+      ),
+      const SizedBox(height: 4),
+      Text('点击任一格 +50ms（超过 1000ms 回到 50ms）。共 ${_vibPattern.length} 步。',
+          style: const TextStyle(fontSize: 11)),
+      ..._vibrateCapHint(a),
+    ];
+  }
+
+  /// 随机脉冲（FR-36）：脉冲时长 / 间隔 / 强度全部在区间内随机。
+  List<Widget> _vibrateRandomInputs() {
+    final a = RandomVibrateAction(
+      durationSecMin: _rvDurMin,
+      durationSecMax: _rvDurMax,
+      pulseOnMsMin: _rvOnMin,
+      pulseOnMsMax: _rvOnMax,
+      pulseOffMsMin: _rvOffMin,
+      pulseOffMsMax: _rvOffMax,
+      amplitudeMin: _rvAmpMin,
+      amplitudeMax: _rvAmpMax,
+      maxPulses: _rvMaxPulses,
+      rampUpSec: _rvRampUp,
+      respectDnd: _rvRespectDnd,
+    );
+    return [
+      const SizedBox(height: 8),
+      const Text('每个脉冲的时长、间隔与强度都在区间内随机（"计划即审计"：'
+          '实际取值在物化期敲定并落库，重启不漂移）。',
+          style: TextStyle(fontSize: 12)),
+      _RangeSliderTile(
+        label: '总时长（秒）',
+        min: 1,
+        max: 120,
+        start: _rvDurMin.toDouble(),
+        end: _rvDurMax.toDouble(),
+        format: (v) => '${v.round()}s',
+        onChanged: (s, e) => setState(() {
+          _rvDurMin = s.round().clamp(1, 120);
+          _rvDurMax = e.round().clamp(_rvDurMin, 120);
+        }),
+      ),
+      _RangeSliderTile(
+        label: '单次振动时长（毫秒）',
+        min: VibrateLimits.minPulseOnMs.toDouble(),
+        max: VibrateLimits.maxPulseOnMs.toDouble(),
+        start: _rvOnMin.toDouble(),
+        end: _rvOnMax.toDouble(),
+        format: (v) => '${v.round()}ms',
+        onChanged: (s, e) => setState(() {
+          _rvOnMin = s.round().clamp(VibrateLimits.minPulseOnMs, VibrateLimits.maxPulseOnMs);
+          _rvOnMax = e.round().clamp(_rvOnMin, VibrateLimits.maxPulseOnMs);
+        }),
+      ),
+      _RangeSliderTile(
+        label: '脉冲间隔（毫秒）',
+        min: 0,
+        max: VibrateLimits.maxPulseOffMs.toDouble(),
+        start: _rvOffMin.toDouble(),
+        end: _rvOffMax.toDouble(),
+        format: (v) => '${v.round()}ms',
+        onChanged: (s, e) => setState(() {
+          _rvOffMin = s.round().clamp(0, VibrateLimits.maxPulseOffMs);
+          _rvOffMax = e.round().clamp(_rvOffMin, VibrateLimits.maxPulseOffMs);
+        }),
+      ),
+      _RangeSliderTile(
+        label: '强度',
+        min: 0,
+        max: 1,
+        start: _rvAmpMin,
+        end: _rvAmpMax,
+        format: (v) => '${(v * 100).round()}%',
+        onChanged: (s, e) => setState(() {
+          _rvAmpMin = s.clamp(0.0, 1.0);
+          _rvAmpMax = e.clamp(_rvAmpMin, 1.0);
+        }),
+      ),
+      _IntStepper(
+        label: '脉冲数上限（防爆护栏）',
+        value: _rvMaxPulses,
+        min: 1,
+        max: VibrateLimits.maxPulses,
+        onChanged: (v) => setState(() => _rvMaxPulses = v),
+      ),
+      _IntStepper(
+        label: '渐强（秒，0=关闭）',
+        value: _rvRampUp,
+        min: 0,
+        max: VibrateLimits.maxRampSec,
+        onChanged: (v) => setState(() => _rvRampUp = v),
+      ),
+      _dndSwitch(
+        value: _rvRespectDnd,
+        onChanged: (v) => setState(() => _rvRespectDnd = v),
+      ),
+      ..._vibrateCapHint(a),
+    ];
+  }
+
+  /// 持续振动（FR-37）：可设随机振幅区间 + 波动周期 + 锐度 + 占空比 + 渐强/渐弱。
+  List<Widget> _vibrateContinuousInputs() {
+    final a = ContinuousVibrateAction(
+      durationSecMin: _cvDurMin,
+      durationSecMax: _cvDurMax,
+      amplitudeMin: _cvAmpMin,
+      amplitudeMax: _cvAmpMax,
+      jitterMs: _cvJitterMs,
+      sharpnessMin: _cvSharpMin,
+      sharpnessMax: _cvSharpMax,
+      dutyCyclePct: _cvDutyPct,
+      rampUpSec: _cvRampUp,
+      rampDownSec: _cvRampDown,
+      respectDnd: _cvRespectDnd,
+    );
+    return [
+      const SizedBox(height: 8),
+      const Text('持续振动：可在设定时长内保持振动，并让强度随机波动。',
+          style: TextStyle(fontSize: 12)),
+      _RangeSliderTile(
+        label: '总时长（秒）',
+        min: 1,
+        max: 600,
+        start: _cvDurMin.toDouble(),
+        end: _cvDurMax.toDouble(),
+        format: (v) => '${v.round()}s',
+        onChanged: (s, e) => setState(() {
+          _cvDurMin = s.round().clamp(1, 600);
+          _cvDurMax = e.round().clamp(_cvDurMin, 600);
+        }),
+      ),
+      _RangeSliderTile(
+        label: '随机振幅',
+        min: 0,
+        max: 1,
+        start: _cvAmpMin,
+        end: _cvAmpMax,
+        format: (v) => '${(v * 100).round()}%',
+        onChanged: (s, e) => setState(() {
+          _cvAmpMin = s.clamp(0.0, 1.0);
+          _cvAmpMax = e.clamp(_cvAmpMin, 1.0);
+        }),
+      ),
+      _IntStepper(
+        label: '强度波动周期（毫秒，0=恒定）',
+        value: _cvJitterMs,
+        min: 0,
+        max: VibrateLimits.maxJitterMs,
+        onChanged: (v) => setState(() => _cvJitterMs = v),
+      ),
+      _RangeSliderTile(
+        label: '锐度（仅 Android 16 生效）',
+        min: 0,
+        max: 1,
+        start: _cvSharpMin,
+        end: _cvSharpMax,
+        format: (v) => v.toStringAsFixed(2),
+        onChanged: (s, e) => setState(() {
+          _cvSharpMin = s.clamp(0.0, 1.0);
+          _cvSharpMax = e.clamp(_cvSharpMin, 1.0);
+        }),
+      ),
+      _IntStepper(
+        label: '占空比（%，100=不停顿）',
+        value: _cvDutyPct,
+        min: 10,
+        max: 100,
+        onChanged: (v) => setState(() => _cvDutyPct = v),
+      ),
+      _IntStepper(
+        label: '渐强（秒）',
+        value: _cvRampUp,
+        min: 0,
+        max: VibrateLimits.maxRampSec,
+        onChanged: (v) => setState(() => _cvRampUp = v),
+      ),
+      _IntStepper(
+        label: '渐弱（秒）',
+        value: _cvRampDown,
+        min: 0,
+        max: VibrateLimits.maxRampSec,
+        onChanged: (v) => setState(() => _cvRampDown = v),
+      ),
+      _dndSwitch(
+        value: _cvRespectDnd,
+        onChanged: (v) => setState(() => _cvRespectDnd = v),
+      ),
+      ..._vibrateCapHint(a),
+    ];
+  }
+
+  /// 「勿扰」开关：关掉会**穿透系统勿扰**，必须写明后果（与音频 alarm 通道同口径）。
+  Widget _dndSwitch({required bool value, required ValueChanged<bool> onChanged}) {
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: const Text('遵循系统勿扰'),
+      subtitle: Text(value
+          ? '开启：系统勿扰时段内不会振动（推荐）'
+          : '⚠️ 已关闭：将使用闹钟级振动属性，**会穿透系统勿扰**'),
+      value: value,
+      onChanged: onChanged,
+    );
+  }
+
+  /// 任务级夜间豁免开关（v1.9，docs/20 §8.1）。
+  ///
+  /// **主开关关闭时置灰不可点** —— Two-Key Safety 的第二把钥匙只有在
+  /// 第一把（设置页主开关）已开启时才有意义。置灰而不是隐藏：
+  /// 让用户看得见"这个能力存在、但需要先去设置页授权"，
+  /// 否则他只会以为本应用不支持。
+  Widget _quietExemptTile() {
+    final master = _quietExemptMaster;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('本任务豁免免打扰'),
+          subtitle: Text(master
+              ? (_quietExempt
+                  ? '已开启：本任务在免打扰时段（含夜间）照常执行，每次都会写日志'
+                  : '关闭中：本任务在免打扰时段按策略跳过或平移')
+              : '需要先在「设置 → 夜间独立豁免（主开关）」中开启，本开关才会生效'),
+          value: _quietExempt && master,
+          onChanged: master ? (v) => setState(() => _quietExempt = v) : null,
+        ),
+        if (!master)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 4),
+            child: Text('主开关关闭时，本开关不生效（双重开关设计，防止误开）。',
+                style: TextStyle(fontSize: 12)),
+          ),
+      ],
+    );
   }
 
   /// 随机指令集编辑（v1.8）：候选动作列表 + 权重滑条。
@@ -977,6 +1417,52 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ]);
       case ActionKindChoice.tts:
         action = TtsAction(text: _ttsText);
+      case ActionKindChoice.vibrateFixed:
+        // 固定节奏：模式串至少要有"延迟 + 一次振动"。
+        if (_vibPattern.length < 2) {
+          if (mounted) _toast(context, '固定节奏至少需要 2 个数值（延迟 + 振动时长）');
+          return null;
+        }
+        action = VibrateAction(patternMs: List<int>.from(_vibPattern));
+      case ActionKindChoice.vibrateRandom:
+        // ⚠️ 区间约束由 `assert` 表达，而 `_save()` 是 async ——
+        // 断言在构造期抛出会变成**未处理的 Future 错误**（BUG-067 同形）。
+        // 因此必须在这里**先校验再构造**，并给可读提示。
+        if (_rvDurMin > _rvDurMax || _rvOnMin > _rvOnMax || _rvOffMin > _rvOffMax) {
+          if (mounted) _toast(context, '随机振动的区间起点不能大于终点');
+          return null;
+        }
+        action = RandomVibrateAction(
+          durationSecMin: _rvDurMin,
+          durationSecMax: _rvDurMax,
+          pulseOnMsMin: _rvOnMin,
+          pulseOnMsMax: _rvOnMax,
+          pulseOffMsMin: _rvOffMin,
+          pulseOffMsMax: _rvOffMax,
+          amplitudeMin: _rvAmpMin,
+          amplitudeMax: _rvAmpMax,
+          maxPulses: _rvMaxPulses,
+          rampUpSec: _rvRampUp,
+          respectDnd: _rvRespectDnd,
+        );
+      case ActionKindChoice.vibrateContinuous:
+        if (_cvDurMin > _cvDurMax || _cvAmpMin > _cvAmpMax || _cvSharpMin > _cvSharpMax) {
+          if (mounted) _toast(context, '持续振动的区间起点不能大于终点');
+          return null;
+        }
+        action = ContinuousVibrateAction(
+          durationSecMin: _cvDurMin,
+          durationSecMax: _cvDurMax,
+          amplitudeMin: _cvAmpMin,
+          amplitudeMax: _cvAmpMax,
+          jitterMs: _cvJitterMs,
+          sharpnessMin: _cvSharpMin,
+          sharpnessMax: _cvSharpMax,
+          dutyCyclePct: _cvDutyPct,
+          rampUpSec: _cvRampUp,
+          rampDownSec: _cvRampDown,
+          respectDnd: _cvRespectDnd,
+        );
       case ActionKindChoice.record:
         action = RecordEvidenceAction(seconds: _recordSec);
       case ActionKindChoice.notify:
@@ -1003,19 +1489,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       enabled: _editing?.enabled ?? true,
       triggerType: _type,
       trigger: trigger,
-      actionType: switch (_actionKind) {
-        ActionKindChoice.play => ActionType.playAudio,
-        ActionKindChoice.soundscape => ActionType.soundscape,
-        ActionKindChoice.tts => ActionType.tts,
-        ActionKindChoice.record => ActionType.recordEvidence,
-        ActionKindChoice.notify => ActionType.notify,
-        ActionKindChoice.composite => ActionType.composite,
-        ActionKindChoice.randomFrom => ActionType.randomFrom,
-      },
+      actionType: actionTypeOfChoice(_actionKind),
       action: action,
       assetIds: _editing?.assetIds ?? const [],
-      cooldownSec: 300,
-      quietPolicy: QuietPolicy.skip,
+      cooldownSec: _editing?.cooldownSec ?? 300,
+      quietPolicy: _editing?.quietPolicy ?? QuietPolicy.skip,
+      // 夜间独立豁免（v1.9）：
+      // · 本机模式 → 用编辑器里的开关值；
+      // · **远程模式恒 false**（docs/20 §8.2 约束 1）：端点侧 `TaskWire.fromWire`
+      //   本来就会丢弃入站该字段，此处显式置 false 是为了让控制端**不产生**
+      //   "我开了豁免"的错觉 —— 界面也不显示这个开关。
+      quietExempt: widget.remoteTarget == null ? _quietExempt : false,
       // 注意 `!_condSkipCall`：关掉通话保护时必须落库一个显式 false 的条件对象，
       // 否则引擎的默认条件（skipInCall=true）会把它覆盖回去，使用者的关闭动作
       // 表现为"开关按了没用"。
@@ -1058,6 +1542,15 @@ enum ActionKindChoice {
   notify,
   composite,
   randomFrom,
+  // ---- 振动族（v1.9，docs/20 §9）----
+  // ⚠️ 这三个必须存在：在它们出现之前，`ActionType.vibrate` 的任务
+  // **在编辑器里根本没有对应选项** —— 打开就落回默认的 `play`，
+  // 一按保存就把震动任务**静默改成播放任务**（连 `action_json` 都被覆盖）。
+  // 这正是"动作类型枚举与编辑器选项集不同步"的后果，只能靠穷尽 switch +
+  // 「每种 ActionType 都有可回填的编辑器选项」的锁来防。
+  vibrateFixed,
+  vibrateRandom,
+  vibrateContinuous,
   ;
 
   String get label => switch (this) {
@@ -1068,6 +1561,18 @@ enum ActionKindChoice {
         ActionKindChoice.notify => '通知',
         ActionKindChoice.composite => '通知+播放',
         ActionKindChoice.randomFrom => '随机指令集',
+        ActionKindChoice.vibrateFixed => '震动·固定节奏',
+        ActionKindChoice.vibrateRandom => '震动·随机脉冲',
+        ActionKindChoice.vibrateContinuous => '震动·持续',
+      };
+
+  /// 是否属于"震动"分组（用于在界面上加一条分组说明与能力提示条）。
+  bool get isVibrate => switch (this) {
+        ActionKindChoice.vibrateFixed ||
+        ActionKindChoice.vibrateRandom ||
+        ActionKindChoice.vibrateContinuous =>
+          true,
+        _ => false,
       };
 }
 

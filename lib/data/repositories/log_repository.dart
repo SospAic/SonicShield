@@ -94,6 +94,19 @@ class LogRepository {
     return (r.first['c'] as int?) ?? 0;
   }
 
+  /// 夜间豁免次数（v1.9，docs/20 §8.2 约束 2：**不得静默生效**）。
+  ///
+  /// 设置页据此展示"本月豁免 N 次"——豁免是**削弱护栏**的行为，
+  /// 必须让用户看得见自己用了几次，否则等于无痕绕过。
+  Future<int> countQuietExemptSince(DateTime t) async {
+    final r = await _db.db.rawQuery(
+      'SELECT COUNT(*) AS c FROM exec_logs '
+      "WHERE action = 'quietExempt' AND created_at >= ?",
+      [t.millisecondsSinceEpoch],
+    );
+    return (r.first['c'] as int?) ?? 0;
+  }
+
   Future<int> purgeOlderThan(DateTime t) => _db.db.delete('exec_logs',
       where: 'created_at < ?', whereArgs: [t.millisecondsSinceEpoch]);
 }

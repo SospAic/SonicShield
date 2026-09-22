@@ -114,4 +114,20 @@ class OccurrenceRepository {
     await markStatus(rows.first['id'] as String, OccurrenceStatus.skipped);
     return 1;
   }
+
+  /// 清除**全部**未执行的夜间豁免计划（v1.9，docs/20 §8）。
+  ///
+  /// ## 为什么必须存在
+  /// `commitAll` 用 `ConflictAlgorithm.ignore`（"计划即审计"，已提交的计划不漂移）。
+  /// 因此用户**关闭**夜间豁免主开关后，先前已落库的豁免计划**不会被重算覆盖** ——
+  /// 它们会继续在 22:00–07:00 之间照常触发，直到执行完或超出 planHorizon。
+  /// 那意味着"关掉开关"在最长一个 planHorizon 内**没有任何效果**：
+  /// 护栏名义上恢复了，实际上还在被绕过。
+  ///
+  /// 所以关闭开关时必须**主动清除**，而不是等重算。方向是 fail-safe：
+  /// 宁可少响一次，也不能让已撤销的授权继续生效（与 S2「重启绝不续发」同一哲学）。
+  Future<int> deletePendingQuietExempt() => _db.db.delete(
+        'occurrences',
+        where: "status = 'pending' AND quiet_exempt = 1",
+      );
 }

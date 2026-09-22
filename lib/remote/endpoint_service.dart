@@ -16,6 +16,7 @@ import '../data/db/app_database.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
+import '../domain/models/action.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/scheduling/schedule_engine.dart';
@@ -68,6 +69,20 @@ class RcEndpointService {
   Future<String?> Function(String presetCategory)? resolvePresetHandler;
   Future<void> Function(String text, double volume)? ttsHandler;
   Future<void> Function(List<int> pattern)? vibrateHandler;
+
+  /// v1.9：参数化振动步骤（`mode` = random/continuous）的执行器。
+  ///
+  /// ⚠️ 与 [vibrateHandler] 分工明确：
+  /// - [vibrateHandler] 只处理**固定节奏**（老语义，协议向后兼容）；
+  /// - 本处理器处理随机/持续振动，转交引擎隔离的 `VibrateSession`。
+  ///
+  /// 未注入时随机/持续步骤**什么都不做并写 `skipped` 审计** ——
+  /// 绝不退回固定节奏"敷衍一下"：那是对端要"持续振动 30 秒（强度 50–100%）"、
+  /// 端点却震了两下就完了，属于"承诺了没做到还没留痕"（FR-34 / BUG-059 通则）。
+  Future<RunNowResult> Function({
+    required ActionConfig action,
+    required String occurrenceId,
+  })? vibrateActionHandler;
 
   bool get isRunning => _running;
 
@@ -473,6 +488,8 @@ class RcEndpointService {
         await _ack(msg, true);
       case RcCmd.soundPlay:
         await _playRemote(msg, peer, logs);
+      case RcCmd.vibrateStop:
+        await _stopVibrate(msg, peer, logs);
       case RcCmd.logsRecent:
         final limit = (msg.payload['limit'] as num?)?.toInt() ?? 50;
         final rows = await logs.recent(limit: limit);
@@ -609,17 +626,27 @@ class RcEndpointService {
       return;
     }
 
-    final existed = await tasks.get(task.id) != null;
+    final prev = await tasks.get(task.id);
+    final existed = prev != null;
     await tasks.upsert(task);
     final dropped = await occ.deletePendingForTask(task.id);
     final planned = await _rematerialize(task, occ);
+    // 远程更新会**清掉**该任务在本机的夜间豁免（入站 `quietExempt` 一律被丢弃，
+    // docs/20 §8.2 约束 1）。这是安全方向，但**不得静默** —— 用户会看到
+    // "夜间提醒突然不响了"，必须有一条能对上的日志。
+    final exemptCleared = (prev?.quietExempt ?? false) && !task.quietExempt;
+    // 入站振动一律强制「遵循系统勿扰」（docs/20 §10.3 第 4 条）。
+    // 对端若试图关掉它，必须留痕 —— 否则用户只会发现"怎么半夜还会震"。
+    final dndForced = TaskWire.inboundDndDowngrade(j['action']);
     await logs.append(
         source: 'remote',
         action: 'task.upsert',
         status: 'success',
         taskId: task.id,
         message: 'by ${peer.name} · ${existed ? '更新' : '新建'}'
-            '「${task.name}」· 清理 $dropped 条旧计划 · 新计划 $planned 条');
+            '「${task.name}」· 清理 $dropped 条旧计划 · 新计划 $planned 条'
+            '${exemptCleared ? ' · 夜间豁免已被本次远程更新清除' : ''}'
+            '${dndForced ? ' · 对端请求关闭「遵循勿扰」已被拒绝（远程不得绕过本机护栏）' : ''}');
     await _send(RcMessage.now(RcEvt.task, {
       'for': msg.id,
       'task': TaskWire.toWire(task),
@@ -734,7 +761,26 @@ class RcEndpointService {
   Future<int> _rematerialize(Task task, OccurrenceRepository occ) async {
     if (!task.enabled) return 0;
     if (task.triggerType == TriggerType.soundTriggered) return 0;
-    final entries = const ScheduleEngine().materialize(task, DateTime.now());
+    // 夜间独立豁免主开关（v1.9）：**必须一并带上**。
+    // 若这里退回 `const ScheduleEngine()`（主开关恒 false），
+    // 则任何一次远程任务更新都会把该任务已豁免的夜间计划**静默清掉** ——
+    // 表现为"远程改了下任务，夜间提醒就没了"，且没有任何提示。
+    // 注意：豁免的**钥匙仍在本地**（主开关是本地设置、任务级字段入站被丢弃），
+    // 这里只是不把本地已授权的状态弄丢。
+    //
+    // 免打扰窗口同理（BUG-070）：重物化必须与 `replan()` 用**同一个窗口**，
+    // 否则"远程改一次任务"就会让该任务的免打扰判定与全局不一致。
+    final prefs = await SharedPreferences.getInstance();
+    final window = normalizeQuietWindow(
+      prefs.getInt(PrefsKeys.quietStartHour),
+      prefs.getInt(PrefsKeys.quietEndHour),
+    );
+    final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
+    final entries = ScheduleEngine(
+      quietStartHour: window.start,
+      quietEndHour: window.end,
+      allowQuietExempt: allowExempt,
+    ).materialize(task, DateTime.now());
     if (entries.isEmpty) return 0;
     await occ.commitAll([
       for (final e in entries)
@@ -745,6 +791,7 @@ class RcEndpointService {
           status: OccurrenceStatus.pending,
           volume: e.volume,
           durationMs: e.durationMs,
+          quietExempt: e.quietExempted,
         ),
     ]);
     return entries.length;
@@ -871,6 +918,24 @@ class RcEndpointService {
     await _ack(msg, r.ok, data: r.path == null ? r.reason : null);
   }
 
+  /// 远程 `vibrate.stop`：停止端点**全部**进行中的振动。
+  ///
+  /// ⚠️ 这里**刻意不回** "停了几项"：活跃振动表在**引擎隔离**里，主 isolate
+  /// 读不到真实计数。回一个 `stopped=0` 是最糟的选择 —— 它看起来像成功，
+  /// 而用户真正想确认的"按下去有没有用"完全没被回答（典型的静默降级）。
+  /// 真实计数由引擎侧的 `vibrateStop` 监听写在审计里（它在隔离内，数字是准的）。
+  Future<void> _stopVibrate(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    await BackgroundServiceManager.instance.stopVibrate(reason: '远程停止');
+    await logs.append(
+        source: 'remote',
+        action: 'vibrate.stop',
+        status: 'success',
+        message: 'by ${peer.name} · 已请求停止全部进行中的振动'
+            '（实际停止条数见引擎审计）');
+    await _ack(msg, true);
+  }
+
   Future<void> _runScript(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
     final script = RcScript.fromPayload(msg.payload);
@@ -886,8 +951,14 @@ class RcEndpointService {
           '${script.name}（${script.steps.length} 步）—— 立即执行',
     );
 
+    // 步序计数器：`runner` 的签名不带下标，而振动步的**波动种子**要能复现
+    // （"同一次执行 → 同一条曲线"），必须有一个稳定且唯一的 occurrenceId 来源。
+    // 执行器是顺序的，故一个自增计数器即可。
+    var stepSeq = 0;
+
     Future<void> runner(RcStep step) async {
       final cancel = RcScriptExecutor.instance.activeCancel;
+      final stepIndex = stepSeq++;
       switch (step.kind) {
         case RcStepKind.delay:
           final sec = ((step.params['seconds'] as num?)?.toDouble() ?? 1)
@@ -919,9 +990,7 @@ class RcEndpointService {
               title: step.params['title'] as String? ?? '声盾',
               body: step.params['body'] as String? ?? '');
         case RcStepKind.vibrate:
-          if (vibrateHandler != null) {
-            await vibrateHandler!(const [0, 300, 200, 300]);
-          }
+          await _runVibrateStep(step, script, stepIndex, logs);
         case RcStepKind.record:
           await _recordEvidence(
               seconds: (step.params['seconds'] as num?)?.toInt() ?? 30);
@@ -947,6 +1016,54 @@ class RcEndpointService {
       'scriptId': script.scriptId,
       'state': done ? 'done' : 'stopped',
     })));
+  }
+
+  /// 执行指令组里的一个振动步骤（v1.9，docs/20 §10.1）。
+  ///
+  /// 两条路径**必须分开**，不允许"随机/持续不支持就退回固定节奏"：
+  /// - `fixed`（含老控制器发的 `{}`）→ [vibrateHandler]，行为与 v1.8 一字不差；
+  /// - `random` / `continuous` → [vibrateActionHandler] 转交引擎隔离。
+  ///
+  /// 后者未接线时写 `skipped` 审计并**什么都不做**。理由：对端要的是
+  /// "持续振动 30 秒（强度 50–100%）"，端点震两下就结束是**承诺了没做到**，
+  /// 而且用户看不出区别（FR-34 口径修正 / BUG-059 通则）。
+  Future<void> _runVibrateStep(
+      RcStep step, RcScript script, int stepIndex, LogRepository logs) async {
+    final mode = step.vibrateMode;
+    final occurrenceId = 'rcscript:${script.scriptId}:$stepIndex';
+    final route = routeRcVibrateStep(
+      mode,
+      hasLegacyHandler: vibrateHandler != null,
+      hasActionHandler: vibrateActionHandler != null,
+    );
+
+    switch (route) {
+      case RcVibrateRoute.legacyFixed:
+        final cfg = step.vibrateConfig();
+        final pattern =
+            cfg is VibrateAction ? cfg.patternMs : const [0, 300, 200, 300];
+        await vibrateHandler!(pattern);
+
+      case RcVibrateRoute.actionHandler:
+        final cfg = step.vibrateConfig();
+        final r = await vibrateActionHandler!(
+            action: cfg, occurrenceId: occurrenceId);
+        await logs.append(
+            source: 'remote',
+            action: 'script.run',
+            status: r.ok ? 'success' : 'skipped',
+            message: '${cfg.kind}（${mode.name}）· ${r.message} · $occurrenceId');
+
+      case RcVibrateRoute.skip:
+        // 关键分支：**随机/持续振动在缺少处理器时只能什么都不做**。
+        // 退回固定节奏是静默降级（对端要 30 秒持续，端点震两下就完了）。
+        await logs.append(
+            source: 'remote',
+            action: 'script.run',
+            status: 'skipped',
+            message: '振动步骤被跳过：${mode == RcVibrateMode.fixed ? '端点未注入振动处理器' : '端点未接线参数化振动（mode=${mode.name}）'}'
+                '，不退回固定节奏以免静默降级（$occurrenceId）');
+    }
   }
 
   /// 终止监听哨兵：终止时立即停掉当前播放器（playHandler 内部循环也会轮询）。

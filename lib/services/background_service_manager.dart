@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_background_service/flutter_background_service.dart';
 
 import '../core/constants.dart';
+import '../domain/models/action.dart';
 import 'background_engine.dart';
+import 'native_bridge.dart';
 
 /// UI 侧对后台服务的封装：启动/停止、开关守卫、订阅引擎状态。
 class BackgroundServiceManager {
@@ -122,6 +125,18 @@ class BackgroundServiceManager {
   Future<void> setGuard(bool enabled) => _invoke('guard', {'enabled': enabled});
   Future<void> setPowerMode(String mode) => _invoke('powerMode', {'mode': mode});
 
+  /// 远程 `vibrate.stop`（v1.9）：停止全部进行中的振动。
+  ///
+  /// 两步都要做：
+  /// 1. `vibrateStop` 转交引擎 → 清活跃表（**停掉分片续发**，否则下一片
+  ///    到期会自己震起来）+ 原生 cancel；
+  /// 2. 兜底直调原生 cancel —— 引擎没跑时第 1 步发向不存在的服务没有效果。
+  ///    原生 cancel 幂等，引擎在跑时重复调一次无害。
+  Future<void> stopVibrate({String reason = '远程停止'}) async {
+    await _invoke('vibrateStop', {'reason': reason});
+    await NativeBridge.vibrateStop();
+  }
+
   /// 远程「立即执行任务动作」：转交引擎隔离执行并等待结果。
   ///
   /// 引擎未运行时直接返回失败（调用方据此回 `rc.ack ok=false` 并给出
@@ -132,10 +147,38 @@ class BackgroundServiceManager {
       return const RunNowResult(ok: false, message: '调度引擎未运行');
     }
     final reqId = 'run${_runSeq++}_${DateTime.now().microsecondsSinceEpoch}';
+    return _awaitResult(
+        reqId, 'runNow', {'taskId': taskId, 'reqId': reqId}, timeout);
+  }
+
+  /// 远程指令组里的振动步骤（v1.9，docs/20 §10.1）。
+  ///
+  /// 与 [runNow] 同构：转交引擎隔离执行并等回投。引擎没跑时直接返回失败 ——
+  /// 不在主 isolate 私自下发，因为那样会绕过分片续发与 `vibrate.stop`（见
+  /// `background_engine` 的 `vibrateStep` 监听处的注记）。
+  Future<RunNowResult> runVibrateStep({
+    required ActionConfig action,
+    required String occurrenceId,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    if (!isRunning) {
+      return const RunNowResult(ok: false, message: '调度引擎未运行');
+    }
+    final reqId = 'vib${_runSeq++}_${DateTime.now().microsecondsSinceEpoch}';
+    return _awaitResult(reqId, 'vibrateStep', {
+      'reqId': reqId,
+      'occurrenceId': occurrenceId,
+      'action': jsonEncode(action.toJson()),
+    }, timeout);
+  }
+
+  /// 发出命令并等 `rcRunResult` 回投（超时是**返回值**而非异常）。
+  Future<RunNowResult> _awaitResult(String reqId, String method,
+      Map<String, Object?> args, Duration timeout) async {
     final completer = Completer<RunNowResult>();
     _pendingRun[reqId] = completer;
     // invoke 返回 void（fire-and-forget）：结果由 rcRunResult 回投。
-    _svc.invoke('runNow', {'taskId': taskId, 'reqId': reqId});
+    _svc.invoke(method, args);
     try {
       return await completer.future.timeout(timeout);
     } on TimeoutException {

@@ -4,12 +4,14 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -18,6 +20,14 @@ import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodChannel
 import kotlin.math.roundToInt
+
+/**
+ * Android 16 / API 36（Baklava）——包络振动 API 的起始版本。
+ *
+ * 刻意用**本地常量**而不是 `Build.VERSION_CODES.BAKLAVA`：常量名随 SDK
+ * 预发布状态变动过，写死数字可避免"升级 compileSdk 后编译期找不到符号"。
+ */
+private const val API_BAKLAVA = 36
 
 /**
  * 声盾原生桥插件。
@@ -97,6 +107,39 @@ class NativeBridgePlugin : FlutterPlugin {
                                 (call.argument<List<*>>("pattern") ?: emptyList<Any>())
                                     .map { (it as Number).toLong() }
                             vibrate(ctx, pattern)
+                            result.success(true)
+                        }
+                        // ---- v1.9 振动能力（docs/20 §5.1）----
+                        "vibrateCapabilities" ->
+                            result.success(vibrateCapabilities(ctx))
+                        "vibrateWaveform" -> {
+                            val timings =
+                                (call.argument<List<*>>("timings") ?: emptyList<Any>())
+                                    .map { (it as Number).toLong() }
+                            val amps = call.argument<List<*>>("amplitudes")
+                                ?.map { (it as Number).toInt() }
+                            val repeat = call.argument<Int>("repeat") ?: -1
+                            val alarm = call.argument<Boolean>("useAlarmUsage") ?: false
+                            result.success(
+                                vibrateWaveform(ctx, timings, amps, repeat, alarm)
+                            )
+                        }
+                        "vibrateEnvelope" -> {
+                            val raw = call.argument<List<*>>("points") ?: emptyList<Any>()
+                            val pts = raw.mapNotNull { e ->
+                                (e as? Map<*, *>)?.let { m ->
+                                    mapOf(
+                                        "intensity" to (m["intensity"] ?: 0),
+                                        "sharpness" to (m["sharpness"] ?: 0),
+                                        "durationMs" to (m["durationMs"] ?: 20),
+                                    )
+                                }
+                            }
+                            val alarm = call.argument<Boolean>("useAlarmUsage") ?: false
+                            result.success(vibrateEnvelope(ctx, pts, alarm))
+                        }
+                        "vibrateStop" -> {
+                            vibrateStop(ctx)
                             result.success(true)
                         }
                         "volume.set" -> {
@@ -311,21 +354,205 @@ class NativeBridgePlugin : FlutterPlugin {
         )
     }
 
-    // ---------- 震动 ----------
+    // ---------- 振动（v1.9，docs/20 §5） ----------
 
+    /** 取默认振动器（API 31+ 走 VibratorManager）。 */
+    private fun vibratorOf(ctx: Context): Vibrator? = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)
+                ?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * 能力探测（FR-38）。
+     *
+     * ⚠️ `hasAmplitudeControl == false` 时系统会把**所有非零振幅一律当成 100%**
+     * （官方文档原文），即"强度设置静默失效"。所以这个值必须如实上报给
+     * Dart 侧并由 UI 明示 —— 这是 FR-34 口径从"静默降级"改为"明示降级"的依据。
+     */
     @Suppress("DEPRECATION")
+    private fun vibrateCapabilities(ctx: Context): Map<String, Any> {
+        val v = vibratorOf(ctx)
+        val hasVib = try {
+            v?.hasVibrator() == true
+        } catch (e: Exception) {
+            false
+        }
+        var amp = false
+        if (hasVib && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            amp = try {
+                v!!.hasAmplitudeControl()
+            } catch (e: Exception) {
+                false
+            }
+        }
+        var env = false
+        var minCp = 20
+        if (hasVib && Build.VERSION.SDK_INT >= API_BAKLAVA) {
+            try {
+                env = v!!.areEnvelopeEffectsSupported()
+                minCp = v.envelopeEffectInfo.minControlPointDurationMillis
+            } catch (e: Exception) {
+                env = false
+            }
+        }
+        return mapOf(
+            "hasVibrator" to hasVib,
+            "hasAmplitudeControl" to amp,
+            "hasEnvelope" to env,
+            "minControlPointMs" to minCp,
+            "platform" to "android",
+        )
+    }
+
+    /**
+     * 下发效果，**携带振动属性**。
+     *
+     * ⚠️ BUG-069（docs/20 §2.3）：旧实现一个 attributes 都没传。官方文档明确
+     * "当应用处于**后台**时发起振动，**必须**提供振动属性（以 AudioAttributes
+     * 形式），因为后台仅支持 attentional haptics"，文档给出的后台示例正是
+     * `USAGE_ALARM`。本应用的振动**全部**发生在后台（前台服务 / AlarmManager
+     * 驱动），因此必须补上 —— 否则较新 Android 上可能被忽略，
+     * 表现为"任务到点了但没震"这种**静默失效**。
+     */
+    private fun applyEffect(
+        ctx: Context,
+        effect: VibrationEffect,
+        useAlarm: Boolean,
+    ): Boolean {
+        val v = vibratorOf(ctx) ?: return false
+        return try {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                    val usage = if (useAlarm) {
+                        VibrationAttributes.USAGE_ALARM
+                    } else {
+                        VibrationAttributes.USAGE_NOTIFICATION
+                    }
+                    v.vibrate(effect, VibrationAttributes.createForUsage(usage))
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
+                    val attrs = AudioAttributes.Builder()
+                        .setUsage(
+                            if (useAlarm) {
+                                AudioAttributes.USAGE_ALARM
+                            } else {
+                                AudioAttributes.USAGE_NOTIFICATION
+                            }
+                        )
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                    v.vibrate(effect, attrs)
+                }
+                else -> {
+                    @Suppress("DEPRECATION")
+                    v.vibrate(effect)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 波形振动（`timings` 交替 静止/振动，首元素为起始静止）。
+     *
+     * [amplitudes] 非空且长度匹配、且设备**真的支持**振幅控制时才走振幅分支 ——
+     * 否则传给系统也会被一律拉满，不如显式走 on/off 分支（与能力探测口径一致）。
+     */
+    private fun vibrateWaveform(
+        ctx: Context,
+        timings: List<Long>,
+        amplitudes: List<Int>?,
+        repeat: Int,
+        useAlarm: Boolean,
+    ): Boolean {
+        if (timings.isEmpty()) return false
+        val v = vibratorOf(ctx) ?: return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val ampOk = amplitudes != null &&
+                    amplitudes.size == timings.size &&
+                    v.hasAmplitudeControl()
+                val eff = if (ampOk) {
+                    VibrationEffect.createWaveform(
+                        timings.toLongArray(),
+                        amplitudes!!.toIntArray(),
+                        repeat,
+                    )
+                } else {
+                    VibrationEffect.createWaveform(timings.toLongArray(), repeat)
+                }
+                applyEffect(ctx, eff, useAlarm)
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(timings.toLongArray(), repeat)
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 包络振动（Android 16 / API 36）。**不支持时返回 false，不静默降级**。
+     *
+     * ⚠️ 官方文档硬约束：基础包络效果**必须以 intensity == 0 的控制点结尾**，
+     * 否则抛 `IllegalStateException`。Dart 侧已保证，这里再兜一层（双保险）。
+     * ⚠️ 系统**不为包络效果提供 fallback** —— 不支持时效果会被**完全忽略**，
+     * 所以这里必须显式返回 false 让上层走降级链（docs/20 §5.2）。
+     */
+    private fun vibrateEnvelope(
+        ctx: Context,
+        points: List<Map<String, Any>>,
+        useAlarm: Boolean,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < API_BAKLAVA) return false
+        if (points.isEmpty()) return false
+        val v = vibratorOf(ctx) ?: return false
+        return try {
+            if (!v.areEnvelopeEffectsSupported()) return false
+            val minCp = v.envelopeEffectInfo.minControlPointDurationMillis
+                .toLong().coerceAtLeast(1L)
+            val builder = VibrationEffect.BasicEnvelopeBuilder()
+            var last = 0f
+            for (p in points) {
+                val intensity =
+                    ((p["intensity"] as? Number)?.toFloat() ?: 0f).coerceIn(0f, 1f)
+                val sharpness =
+                    ((p["sharpness"] as? Number)?.toFloat() ?: 0f).coerceIn(0f, 1f)
+                val dur =
+                    ((p["durationMs"] as? Number)?.toLong() ?: 20L).coerceAtLeast(minCp)
+                builder.addControlPoint(intensity, sharpness, dur)
+                last = intensity
+            }
+            if (last != 0f) builder.addControlPoint(0f, 0f, minCp)
+            applyEffect(ctx, builder.build(), useAlarm)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 停止本应用发起的所有振动（docs/20 §7.2 S3）。 */
+    private fun vibrateStop(ctx: Context) {
+        try {
+            vibratorOf(ctx)?.cancel()
+        } catch (e: Exception) {
+            // 无振动能力平台：无需处理
+        }
+    }
+
+    /** v1.x 固定节奏入口（向后兼容）。现已统一走 [vibrateWaveform]（带属性）。 */
     private fun vibrate(ctx: Context, pattern: List<Long>) {
-        val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val vm = ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-            vm.defaultVibrator
-        } else {
-            ctx.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern.toLongArray(), -1))
-        } else {
-            vibrator.vibrate(pattern.toLongArray(), -1)
-        }
+        if (pattern.isEmpty()) return
+        vibrateWaveform(ctx, pattern, null, -1, false)
     }
 
     // ---------- 音量（远程 volume.set，docs/16 §9） ----------

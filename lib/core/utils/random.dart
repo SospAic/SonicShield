@@ -31,6 +31,21 @@ int planSeed(String taskId, DateTime localDate) {
   return h;
 }
 
+/// 任意字符串 → 32bit 种子（FNV-1a）。
+///
+/// 用途：同一字符串在任意次重算中给出同一随机序列。
+/// 与 [planSeed] 的分工：`planSeed` 绑定「任务 ID + 计划日」这一领域语义，
+/// 本函数是**通用**字符串种子 —— 振动强度波动曲线（docs/20 §4.4）用它，
+/// 键是 `'{occurrenceId}#jitter'`，从而"同一次执行的波动曲线可复现"。
+int stringSeed(String s) {
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.codeUnitAt(i);
+    h = (h * 0x01000193) & 0x7fffffff;
+  }
+  return h;
+}
+
 /// [min, max) 均匀分布（毫秒级精度）。
 int nextIntBetween(Random rng, int min, int max) {
   assert(min <= max);

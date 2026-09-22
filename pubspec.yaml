@@ -5,7 +5,7 @@ description: >-
   支持声音触发自动响应、系统级后台执行与精细电源管理。
   仅限合法用途（取证记录、提醒、助眠、守护等），严禁用于骚扰他人。
 publish_to: "none"
-version: 1.8.0-alpha+16
+version: 1.9.0-alpha+17
 
 environment:
   sdk: ">=3.5.0 <4.0.0"

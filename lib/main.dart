@@ -101,7 +101,21 @@ Future<void> _wireRemoteEndpoint() async {
         }
       }
     }
-    ..vibrateHandler = (pattern) => NativeBridge.vibrate(pattern);
+    // ⚠️ 箭头函数**必须加括号**：`..a = (x) => f(x)` 的 body 是 `expression`，
+    // 而级联也是 expression —— 不括起来，`=>` 会一路把后面的 `..vibrateActionHandler`
+    // 吃成 `f(x)..vibrateActionHandler = ...`（实测报错："setter 未定义于 Future<void>"，
+    // 完全指不到真正的原因）。
+    ..vibrateHandler = ((pattern) => NativeBridge.vibrate(pattern))
+    // v1.9：随机/持续振动步骤转交**引擎隔离**的 VibrateSession。
+    // 不在本 isolate 直接下发：分片续发、`vibrate.stop`、低电量降级都只在
+    // 引擎里（见 `background_engine` 的 `vibrateStep` 监听处注记）。
+    // 引擎未运行时返回失败，端点据此写 skipped 审计，不静默成功。
+    ..vibrateActionHandler = (({
+      required ActionConfig action,
+      required String occurrenceId,
+    }) =>
+        BackgroundServiceManager.instance
+            .runVibrateStep(action: action, occurrenceId: occurrenceId));
 
   final prefs = await SharedPreferences.getInstance();
   final store = RemoteStore(prefs);

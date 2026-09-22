@@ -34,6 +34,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   int _quietStart = ComplianceGuardrails.defaultQuietStartHour;
   int _quietEnd = ComplianceGuardrails.defaultQuietEndHour;
 
+  /// 夜间独立豁免主开关（v1.9，docs/20 §8.1）。默认 **false = 未授权**。
+  ///
+  /// 存 `SharedPreferences`（与本页其它设置同一存储）。**不做 DB 读取** ——
+  /// kv 表要走一次 sqflite 往返，会让整页 widget 测试留下未完成的锁超时 Timer。
+  bool _quietExemptMaster = false;
+
   // ---------------- 任务备份（导出/导入，v1.3） ----------------
 
   Future<void> _exportTasks() async {
@@ -236,6 +242,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void initState() {
     super.initState();
     _load();
+    // 进入页面时让豁免计数重新算一次（provider 刻意不是 `autoDispose` ——
+    // 靠这一句保证"每次进来都是新的"，同时避开 autoDispose 的零延时 Timer）。
+    //
+    // ⚠️ 必须放进 post-frame 回调：`ref.invalidate` 会去 `dependOnInheritedWidget`
+    // 找 `UncontrolledProviderScope`，而在 `initState()` 返回之前做这件事会被
+    // 框架直接断言拦下（实测：整页用例全红）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.invalidate(quietExemptCountProvider);
+    });
   }
 
   Future<void> _load() async {
@@ -243,11 +258,59 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (!mounted) return;
     setState(() {
       _powerMode = p.getString('power_mode') ?? 'balanced';
-      _quietStart =
-          p.getInt('quiet_start') ?? ComplianceGuardrails.defaultQuietStartHour;
-      _quietEnd =
-          p.getInt('quiet_end') ?? ComplianceGuardrails.defaultQuietEndHour;
+      _quietStart = p.getInt(PrefsKeys.quietStartHour) ??
+          ComplianceGuardrails.defaultQuietStartHour;
+      _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
+          ComplianceGuardrails.defaultQuietEndHour;
+      _quietExemptMaster = p.getBool(PrefsKeys.quietExemptMaster) ?? false;
     });
+  }
+
+  /// 切换夜间独立豁免主开关（v1.9，docs/20 §8.1）。
+  ///
+  /// 开启前**必须**二次确认并写明后果：这是**削弱**合规护栏的操作
+  /// （docs/08 §4 原本标注"不可绕过"），不能一键静默开启。
+  Future<void> _toggleQuietExempt(bool next) async {
+    if (next) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('开启夜间独立豁免？'),
+          content: const SingleChildScrollView(
+            child: Text(
+              '开启后，逐个任务还可以选择"豁免免打扰"。只有两处都开启时，'
+              '该任务才会在免打扰时段（默认 22:00–07:00）照常执行。\n\n'
+              '这意味着：\n'
+              '· 夜间可能响起你为这些任务配置的声音/震动；\n'
+              '· 本应用定位为个人自动化工具，请勿用它干扰他人；\n'
+              '· 每次豁免执行都会写入日志，本页可查看本月次数。\n\n'
+              '随时可在此关闭；关闭后已排入的豁免计划会被立即清除。',
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('我了解后果，开启')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(PrefsKeys.quietExemptMaster, next);
+    if (mounted) setState(() => _quietExemptMaster = next);
+    // 立刻重算：开启后豁免计划才会被物化；关闭后引擎会清除已落库的豁免计划。
+    await BackgroundServiceManager.instance.replan();
+    if (mounted) {
+      ref.invalidate(quietExemptCountProvider);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(next
+              ? '已开启夜间豁免主开关（仍需逐任务开启"豁免免打扰"）'
+              : '已关闭夜间豁免主开关，待执行的豁免计划已清除')));
+    }
   }
 
   Future<void> _savePower(String mode) async {
@@ -259,8 +322,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _saveQuiet() async {
     final p = await SharedPreferences.getInstance();
-    await p.setInt('quiet_start', _quietStart);
-    await p.setInt('quiet_end', _quietEnd);
+    await p.setInt(PrefsKeys.quietStartHour, _quietStart);
+    await p.setInt(PrefsKeys.quietEndHour, _quietEnd);
     await BackgroundServiceManager.instance.replan();
   }
 
@@ -320,6 +383,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               },
             ),
           ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6),
+            child: Text(
+                '合规护栏：默认 22:00–07:00 强制免打扰。此处只能把窗口**调窄**，不能调宽。',
+                style: TextStyle(fontSize: 12)),
+          ),
+          const SizedBox(height: 4),
+          const Divider(height: 32),
+          Text('夜间独立豁免', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          // ---- 夜间独立豁免（v1.9，docs/20 §8）：跨功能的 Two-Key Safety 主开关 ----
+          Builder(builder: (context) {
+            final enabled = _quietExemptMaster;
+            // 计数走 provider：设置页只消费，且 widget 测试能把它换掉
+            // （真实 sqflite 往返在 FakeAsync 里会留下未完成的 Timer）。
+            final count = ref.watch(quietExemptCountProvider);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.nightlight_round),
+                  title: const Text('夜间独立豁免（主开关）'),
+                  subtitle: Text(enabled
+                      ? '已开启：仍需在任务编辑器中逐任务开启"豁免免打扰"'
+                      : '关闭中：所有任务在免打扰时段一律跳过或平移'),
+                  value: enabled,
+                  onChanged: _toggleQuietExempt,
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 56, bottom: 4),
+                  child: Text(
+                    // 读不到时显示"—"而不是 0：把"读失败"显示成"没豁免过"
+                    // 会让用户以为护栏完好，属于误导。
+                    '本月豁免次数：${count.valueOrNull?.toString() ?? '—'}'
+                    '（每次豁免执行都会写入日志）',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(left: 56, bottom: 8),
+                  child: Text(
+                    '⚠️ 开启豁免即削弱合规护栏，仅限个人场景（夜间静默提醒/闹钟）。'
+                    '远程对端无法开启本开关，也无法为任务开启豁免。',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            );
+          }),
           const Divider(height: 32),
           Text('后台保活', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),

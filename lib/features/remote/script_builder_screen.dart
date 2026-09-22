@@ -55,7 +55,9 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
         case RcStepKind.notify:
           _steps.add(ScriptDraftStep(kind, {'title': '声盾', 'body': '远程通知内容'}));
         case RcStepKind.vibrate:
-          _steps.add(ScriptDraftStep(kind, {}));
+          // 默认仍是固定节奏（`{}`），与老控制器发的线格式完全一致。
+          _steps.add(
+              ScriptDraftStep(kind, rcVibrateDefaultParams(RcVibrateMode.fixed)));
         case RcStepKind.record:
           _steps.add(ScriptDraftStep(kind, {'seconds': 30}));
         case RcStepKind.delay:
@@ -95,54 +97,56 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
         RcStepKind.vibrate => '',
       };
 
+  /// 编辑框标签：**按 kind 取**（switch 穷尽 → 新增 kind 忘补即编译报错）。
+  static String _editLabelOf(RcStepKind k) => switch (k) {
+        RcStepKind.tts => '播报文本',
+        RcStepKind.notify => '通知内容',
+        RcStepKind.delay => '时延（秒，0.5–600）',
+        RcStepKind.record => '录音时长（秒）',
+        RcStepKind.play => '播放时长（秒）',
+        RcStepKind.vibrate => '（振动参数见下方选择器）',
+      };
+
   Future<void> _editStep(int index) async {
     final s = _steps[index];
-    final ctrl = TextEditingController(text: _initialEditText(s));
-    final ok = await showDialog<bool>(
+
+    // 振动步自 v1.9 起**有可编辑参数**（mode + 各区间），走专用对话框
+    // （docs/20 §10.1）。固定节奏仍是"无可编辑参数"，但模式本身可切换。
+    if (s.kind == RcStepKind.vibrate) {
+      final out = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (ctx) => _VibrateStepDialog(params: s.params),
+      );
+      if (out != null && mounted) setState(() => s.params = out);
+      return;
+    }
+
+    final text = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('编辑步骤 · ${s.describe()}'),
-        content: TextField(
-          controller: ctrl,
-          decoration: InputDecoration(
-            labelText: switch (s.kind) {
-              RcStepKind.tts => '播报文本',
-              RcStepKind.notify => '通知内容',
-              RcStepKind.delay => '时延（秒，0.5–600）',
-              RcStepKind.record => '录音时长（秒）',
-              RcStepKind.play => '播放时长（秒）',
-              RcStepKind.vibrate => '（无可编辑参数）',
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('确定')),
-        ],
+      builder: (ctx) => _TextStepDialog(
+        title: '编辑步骤 · ${s.describe()}',
+        label: _editLabelOf(s.kind),
+        initial: _initialEditText(s),
       ),
     );
-    if (ok == true) {
-      setState(() {
-        switch (s.kind) {
-          case RcStepKind.tts:
-            s.params['text'] = ctrl.text;
-          case RcStepKind.notify:
-            s.params['body'] = ctrl.text;
-          case RcStepKind.delay:
-            s.params['seconds'] = double.tryParse(ctrl.text) ?? 5;
-          case RcStepKind.record:
-            s.params['seconds'] = int.tryParse(ctrl.text) ?? 30;
-          case RcStepKind.play:
-            s.params['durationSec'] = int.tryParse(ctrl.text) ?? 10;
-          case RcStepKind.vibrate:
-            break;
-        }
-      });
-    }
+    if (text == null || !mounted) return;
+    setState(() {
+      switch (s.kind) {
+        case RcStepKind.tts:
+          s.params['text'] = text;
+        case RcStepKind.notify:
+          s.params['body'] = text;
+        case RcStepKind.delay:
+          s.params['seconds'] = double.tryParse(text) ?? 5;
+        case RcStepKind.record:
+          s.params['seconds'] = int.tryParse(text) ?? 30;
+        case RcStepKind.play:
+          s.params['durationSec'] = int.tryParse(text) ?? 10;
+        // 振动步已在上面 return，不会走到这里；留着是为了让 switch 穷尽。
+        case RcStepKind.vibrate:
+          break;
+      }
+    });
   }
 
   Future<void> _send({bool saveFirst = false}) async {
@@ -286,4 +290,172 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
         RcStepKind.record => '录音取证',
         RcStepKind.delay => '时延',
       };
+}
+
+/// 单行文本编辑对话框。
+///
+/// ⚠️ 控制器由**对话框自己**持有并在 `dispose()` 释放（BUG-064 的形状）：
+/// `await showDialog` 返回 ≠ 对话框已从树上移除 —— 退场动画期间 `TextField`
+/// 仍在引用 controller。此前本文件在外层 `new` 了 controller 且**从不释放**，
+/// 既是泄漏，也把 BUG-064 的坑原样留在那里（一旦有人"顺手"补一句
+/// `ctrl.dispose()` 就会踩中它）。
+class _TextStepDialog extends StatefulWidget {
+  const _TextStepDialog({
+    required this.title,
+    required this.label,
+    required this.initial,
+  });
+
+  final String title;
+  final String label;
+  final String initial;
+
+  @override
+  State<_TextStepDialog> createState() => _TextStepDialogState();
+}
+
+class _TextStepDialogState extends State<_TextStepDialog> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
+        content: TextField(
+          controller: _ctrl,
+          decoration: InputDecoration(labelText: widget.label),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, _ctrl.text),
+              child: const Text('确定')),
+        ],
+      );
+}
+
+/// 振动步骤编辑对话框（v1.9，docs/20 §10.1）。
+///
+/// 表单字段来自 [rcVibrateFieldsFor] —— 与端点执行器**共用同一份声明**，
+/// 于是"表单能填的键"与"执行器认识的键"在结构上不可能分叉（否则会静默取默认值）。
+/// 控制器同样由本对话框持有并释放（BUG-064）。
+class _VibrateStepDialog extends StatefulWidget {
+  const _VibrateStepDialog({required this.params});
+
+  final Map<String, dynamic> params;
+
+  @override
+  State<_VibrateStepDialog> createState() => _VibrateStepDialogState();
+}
+
+class _VibrateStepDialogState extends State<_VibrateStepDialog> {
+  late RcVibrateMode _mode = rcVibrateModeOf(widget.params['mode']);
+  final _ctrls = <String, TextEditingController>{};
+
+  @override
+  void dispose() {
+    for (final c in _ctrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  static String _modeLabel(RcVibrateMode m) => switch (m) {
+        RcVibrateMode.fixed => '固定节奏',
+        RcVibrateMode.random => '随机脉冲',
+        RcVibrateMode.continuous => '持续振动',
+      };
+
+  static String _fmt(num v) =>
+      v is double && v != v.roundToDouble() ? '$v' : '${v.toInt()}';
+
+  /// 初始值：**先读当前参数，读不到才用该 mode 的默认值**。
+  /// 不走 `??` 链在别的字段里瞎猜（BUG-068 的教训）。
+  String _initial(RcVibrateField f) {
+    final v = widget.params[f.key];
+    if (v is num) return _fmt(v);
+    final d = rcVibrateDefaultParams(_mode)[f.key];
+    return d is num ? _fmt(d) : '';
+  }
+
+  TextEditingController _ctrl(RcVibrateField f) =>
+      _ctrls.putIfAbsent(f.key, () => TextEditingController(text: _initial(f)));
+
+  /// 收集结果。解析不了/留空的键**不写入** → 端点按默认值夹紧，
+  /// 而列表标题会立刻显示夹紧后的实际生效值（不制造"填了却没生效"的错觉）。
+  Map<String, dynamic> _collect() {
+    if (_mode == RcVibrateMode.fixed) return <String, dynamic>{};
+    final out = <String, dynamic>{'mode': _mode.name};
+    for (final f in rcVibrateFieldsFor(_mode)) {
+      final t = _ctrl(f).text.trim();
+      final n = f.fraction ? double.tryParse(t) : int.tryParse(t);
+      if (n != null) out[f.key] = n;
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fields = rcVibrateFieldsFor(_mode);
+    return AlertDialog(
+      title: const Text('编辑步骤 · 震动'),
+      content: SizedBox(
+        width: 380,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const Text('振动模式'),
+                  const SizedBox(width: 12),
+                  DropdownButton<RcVibrateMode>(
+                    value: _mode,
+                    onChanged: (m) {
+                      if (m != null) setState(() => _mode = m);
+                    },
+                    items: [
+                      for (final m in RcVibrateMode.values)
+                        DropdownMenuItem(value: m, child: Text(_modeLabel(m))),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (fields.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('固定节奏无可编辑参数（协议向后兼容：`{}` 语义不变）',
+                      style: TextStyle(fontSize: 12)),
+                ),
+              for (final f in fields)
+                TextField(
+                  controller: _ctrl(f),
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(
+                    labelText: f.label,
+                    helperText: '范围 ${_fmt(f.min)}–${_fmt(f.max)}',
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(context, _collect()),
+            child: const Text('确定')),
+      ],
+    );
+  }
 }

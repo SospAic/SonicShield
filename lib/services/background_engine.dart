@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show DartPluginRegistrant;
@@ -22,11 +23,13 @@ import '../domain/models/condition.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/scheduling/schedule_engine.dart';
+import '../domain/scheduling/vibrate_resolve.dart';
 import 'condition_env.dart';
 import 'notification_service.dart';
 import 'native_bridge.dart';
 import 'playback_service.dart';
 import 'sound_guard_service.dart';
+import 'vibrate_session.dart';
 
 /// 后台引擎状态快照（服务 -> UI 广播）。
 class EngineState {
@@ -103,12 +106,35 @@ Future<void> _engineBody(ServiceInstance service) async {
   final tasksRepo = TaskRepository(db);
   final occs = OccurrenceRepository(db);
   final logs = LogRepository(db);
-  const engine = ScheduleEngine();
   final playback = PlaybackService();
   final guard = SoundGuardService();
   const native = MethodChannel(Channels.method);
   final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
+
+  // 振动会话（v1.9，docs/20 §7）：分片续发 + S1–S4 失效安全。
+  final vibrate = VibrateSession.standard(
+    logs,
+    battery: () async {
+      try {
+        final level = await battery.batteryLevel;
+        final st = await battery.batteryState;
+        return (
+          level: level,
+          charging: st == BatteryState.charging || st == BatteryState.full,
+        );
+      } on Object {
+        // 无电池平台：视为"电量充足且充电中"。**不因读不到而停掉振动** ——
+        // 与条件层"无法判定按满足处理"同一约定（BUG-041 的教训）。
+        return (level: 100, charging: true);
+      }
+    },
+    kvGet: db.kvGet,
+    kvSet: db.kvSet,
+  );
+  // S2（docs/20 §7.2）：每次服务启动**一律停止**残留振动，绝不续发。
+  // 宁可少震一次，也不可失控 —— 与补执行限流 catchUpLimit 同一哲学。
+  await vibrate.recoverAfterRestart();
 
   var guardEnabled = prefs.getBool('guard_enabled') ?? false;
   StreamSubscription<SoundEvent>? guardSub;
@@ -380,7 +406,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 动作执行统一串行 await：保证 occurrence 状态与审计日志严格一致
   /// （此前 fire-and-forget 在 TTS 挂起时导致日志永远缺失——BUG-011 关联）。
   Future<bool> runSingle(Task task, ActionConfig cfg, double volume,
-      int durationMs, String source) async {
+      int durationMs, String source, {String? occurrenceId}) async {
     switch (cfg) {
       case final PlayAudioAction p:
         await playAndLog(task, p, volume, durationMs, source);
@@ -401,22 +427,58 @@ Future<void> _engineBody(ServiceInstance service) async {
             taskId: task.id);
         return true;
       case final VibrateAction v:
+        // FR-34 口径修正（v1.9，docs/20 §2.3）：无振动能力时**不再静默**。
+        // 旧实现 `on Object { /* 静默 */ }` 会让"到点了但没震"完全无迹可寻，
+        // 与本项目通则（承诺了就必须做到，做不到必须留痕）冲突。
+        final caps = await vibrate.capabilities();
+        if (!caps.hasVibrator) {
+          await logs.append(
+              source: source,
+              action: 'vibrate',
+              status: 'skipped',
+              taskId: task.id,
+              occurrenceId: occurrenceId,
+              message: '无振动能力：${vibrateDegradations(caps, v).join('；')}');
+          return true;
+        }
         try {
           await native.invokeMethod('vibrate', {'pattern': v.patternMs});
           await logs.append(
               source: source,
               action: 'vibrate',
               status: 'success',
-              taskId: task.id);
+              taskId: task.id,
+              occurrenceId: occurrenceId);
         } on Object {
-          // 无震动能力平台静默
+          await logs.append(
+              source: source,
+              action: 'vibrate',
+              status: 'failed',
+              taskId: task.id,
+              occurrenceId: occurrenceId,
+              message: '原生调用失败（桥不可用或被拒绝）');
         }
         return true;
       case final RecordEvidenceAction rec:
         await recordAndLog(task, rec.seconds, source);
         return true;
+      // ---- v1.9 振动（docs/20 §4/§7）----
+      // 两类都交给 VibrateSession：它负责能力探测、降级明示、分片续发与
+      // S1–S4 失效安全。`volume` 在振动语义下是**强度**，`durationMs` 是总时长，
+      // 两者都由物化期敲定（"计划即审计"）。
+      case final RandomVibrateAction _:
+      case final ContinuousVibrateAction _:
+        return vibrate.start(
+          occurrenceId: occurrenceId ?? '${task.id}@runtime',
+          taskId: task.id,
+          action: cfg,
+          durationMs: durationMs > 0 ? durationMs : 5000,
+          amplitude: volume.clamp(0.0, 1.0),
+          source: source,
+        );
       case final CompositeAction c:
-        return runSingle(task, c.primary, volume, durationMs, source);
+        return runSingle(task, c.primary, volume, durationMs, source,
+            occurrenceId: occurrenceId);
       case final ActionSetAction set:
         // 动作集（v1.8）：按权重随机选一执行，审计记录"为什么选了这个"。
         final chosen = set.pick(math.Random());
@@ -426,13 +488,15 @@ Future<void> _engineBody(ServiceInstance service) async {
             status: 'success',
             taskId: task.id,
             message: '权重 ${chosen.weight} → 选中 ${chosen.action.runtimeType}');
-        return runSingle(task, chosen.action, volume, durationMs, source);
+        return runSingle(task, chosen.action, volume, durationMs, source,
+            occurrenceId: occurrenceId);
     }
   }
 
   /// 动作执行器（顶层分派，全部写审计日志）。
   Future<bool> runAction(
-      Task task, double volume, int durationMs, String source) async {
+      Task task, double volume, int durationMs, String source,
+      {String? occurrenceId}) async {
     lastAction = '${task.name} · ${task.actionType.label}';
     try {
       final cfg = task.action;
@@ -442,9 +506,11 @@ Future<void> _engineBody(ServiceInstance service) async {
           await NotificationService.instance
               .showEvent(title: pre.title, body: pre.body);
         }
-        return await runSingle(task, cfg.primary, volume, durationMs, source);
+        return await runSingle(task, cfg.primary, volume, durationMs, source,
+            occurrenceId: occurrenceId);
       }
-      return await runSingle(task, cfg, volume, durationMs, source);
+      return await runSingle(task, cfg, volume, durationMs, source,
+          occurrenceId: occurrenceId);
     } catch (e) {
       await logs.append(
           source: source,
@@ -492,6 +558,36 @@ Future<void> _engineBody(ServiceInstance service) async {
   Future<void> replan() async {
     final now = DateTime.now();
     final all = await tasksRepo.listAll(enabledOnly: true);
+    // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
+    // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
+    // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
+    final window = normalizeQuietWindow(
+      prefs.getInt(PrefsKeys.quietStartHour),
+      prefs.getInt(PrefsKeys.quietEndHour),
+    );
+    // 夜间独立豁免主开关（v1.9，docs/20 §8.1）：**每轮重读**，不用服务启动时的快照。
+    // 用户在引擎运行期间改设置后，下一轮物化即生效（无需重启服务）。
+    // 读的是 `SharedPreferences`（与本项目其它用户级设置同一存储）。
+    final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
+    if (!allowExempt) {
+      // 授权被撤销 ⇒ **立刻清除**已落库的豁免计划。
+      // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
+      // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
+      // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
+      final purged = await occs.deletePendingQuietExempt();
+      if (purged > 0) {
+        await logs.append(
+            source: 'schedule',
+            action: 'quietExempt',
+            status: 'skipped',
+            message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划');
+      }
+    }
+    final engine = ScheduleEngine(
+      quietStartHour: window.start,
+      quietEndHour: window.end,
+      allowQuietExempt: allowExempt,
+    );
     final newEntries = <PlannedEntry>[];
     for (final t in all) {
       if (t.triggerType == TriggerType.soundTriggered) continue;
@@ -511,6 +607,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: OccurrenceStatus.pending,
           volume: e.volume,
           durationMs: e.durationMs,
+          quietExempt: e.quietExempted,
         ),
     ]);
     final alarmTimes = newEntries
@@ -571,10 +668,23 @@ Future<void> _engineBody(ServiceInstance service) async {
             message: gateFail);
         continue;
       }
-      final ok =
-          await runAction(task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule');
+      final ok = await runAction(
+          task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule',
+          occurrenceId: o.id);
       await occs.markStatus(
           o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+      // 夜间独立豁免审计（v1.9，docs/20 §8.2 约束 2）：**不得静默生效**。
+      // 读的是**计划条目上持久化的标记**（而非任务当前配置）——
+      // 任务配置可能在计划生成后被改掉，标记才代表"这条计划当时为何被放行"。
+      if (o.quietExempt) {
+        await logs.append(
+            source: 'schedule',
+            action: 'quietExempt',
+            status: ok ? 'success' : 'failed',
+            taskId: task.id,
+            occurrenceId: o.id,
+            message: '用户豁免免打扰（任务级）');
+      }
     }
     if (due.isNotEmpty) await broadcast();
   }
@@ -662,6 +772,28 @@ Future<void> _engineBody(ServiceInstance service) async {
     await service.stopSelf();
   });
 
+  /// 远程 `vibrate.stop`（v1.9，docs/20 §10.2）：停止**全部**进行中的振动。
+  ///
+  /// ⚠️ 必须落在**引擎隔离**里，只调用原生 `vibrateStop()` 是不够的：
+  /// 持续振动是「20 秒一片 + 3 秒 keep-alive」分片续发的（docs/20 §6），
+  /// 光 cancel 掉当前这一片，下一片到期又会自己震起来。
+  /// 因此走 `VibrateSession.stopAll()` —— 它同时清活跃表（停掉续发）
+  /// 并调原生 cancel。
+  service.on('vibrateStop').listen((m) async {
+    final reason = m?['reason'] as String? ?? '远程停止';
+    final before = vibrate.activeCount;
+    await vibrate.stopAll(reason: reason);
+    await logs.append(
+      source: 'remote',
+      action: 'vibrate.stop',
+      status: before > 0 ? 'success' : 'skipped',
+      message: before > 0
+          ? '由远程停止 $before 项进行中的振动'
+          : '远程请求停止，但当前没有进行中的振动',
+    );
+    await broadcast();
+  });
+
   /// 远程「立即执行」（协议 v1.7，docs/14 §2.1）。
   ///
   /// 端点服务运行在**主 isolate**，无法直接调用本引擎的 `runAction`
@@ -717,6 +849,56 @@ Future<void> _engineBody(ServiceInstance service) async {
       'ok': ok,
       'message': message,
     });
+    await broadcast();
+  });
+
+  /// 远程指令组里的**振动步骤**（v1.9，docs/20 §10.1）。
+  ///
+  /// ⚠️ 为什么必须转交引擎、而不是在主 isolate 直接调 `NativeBridge`：
+  /// `VibrateSession` 是**唯一**持有「活跃振动表 + 分片续发 + S1–S4 失效安全」
+  /// 的对象，而它只存在于本隔离内。主 isolate 单次下发一个长命令会有两个洞：
+  /// ① 包络路径的 `maxEnvelopePointsPerChunk` 会截断，实际振动**短于**请求值
+  ///   （静默缩短，正是 FR-34 禁止的那类降级）；
+  /// ② `vibrate.stop` 与低电量降级都够不着它。
+  /// 转交引擎后，指令组的振动与定时任务走**同一条**执行路径。
+  service.on('vibrateStep').listen((m) async {
+    final reqId = m?['reqId'] as String? ?? '';
+    final occurrenceId = m?['occurrenceId'] as String? ?? '';
+    var ok = false;
+    var message = '';
+    try {
+      final raw = m?['action'];
+      final decoded = raw is String
+          ? jsonDecode(raw)
+          : raw is Map
+              ? raw
+              : null;
+      if (decoded is! Map<String, dynamic>) {
+        message = '动作定义非法';
+      } else {
+        final action = ActionConfig.fromJson(decoded);
+        final plan = resolveVibratePlan(
+            action, math.Random(stringSeedOf(occurrenceId, action)), occurrenceId);
+        ok = await vibrate.start(
+          occurrenceId: occurrenceId,
+          taskId: 'remote-script',
+          action: action,
+          durationMs: plan?.durationMs ?? 0,
+          amplitude: plan?.baseAmplitude ?? 0,
+          source: 'remote-script',
+        );
+        message = ok ? '已执行' : '被跳过或原生拒绝（见审计）';
+      }
+    } on Object catch (e) {
+      message = e.toString();
+    }
+    if (reqId.isNotEmpty) {
+      service.invoke('rcRunResult', {
+        'reqId': reqId,
+        'ok': ok,
+        'message': message,
+      });
+    }
     await broadcast();
   });
 

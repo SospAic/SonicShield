@@ -19,7 +19,7 @@ class AppMeta {
   /// 它长期被漏改（BUG-049：pubspec 已 1.7.1 而这里仍 1.7.0-alpha.1，
   /// 于是远程 status/device 回执上报的是**过期的版本号**）——
   /// 现已由 `test/version_consistency_test.dart` 强制三者一致。
-  static const String version = '1.8.0-alpha';
+  static const String version = '1.9.0-alpha';
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换
 }
@@ -72,4 +72,36 @@ class ComplianceGuardrails {
 
   /// 同一任务最短冷却间隔（秒），避免变成连续轰炸。
   static const int minCooldownSeconds = 60;
+}
+
+/// `SharedPreferences` 键名（**唯一真源**）。
+///
+/// ## 为什么要集中（BUG-070，2026-09-22）
+/// `quiet_start` / `quiet_end` 自 v1.0 起就由设置页**写入**，
+/// 但全仓**没有任何执行路径读取它们** —— 键名字符串只出现在设置页与它的
+/// widget 测试里，于是形成一条"看着接通、其实是断的"链路：
+/// 用户把免打扰窗口调窄，界面回显也变了，**实际执行仍恒为 22:00–07:00**。
+///
+/// 教训与 BUG-065（`Directory.toString()` 不是路径）同族：
+/// **凡是"写在一处、用在另一处"的字符串，都要有唯一真源 + 一条端到端锁**，
+/// 否则静态检查全绿而功能是空的。
+abstract final class PrefsKeys {
+  /// 免打扰开始小时（0–23）。读取方：`background_engine.replan()`
+  /// 与 `endpoint_service._rematerialize()`，经 `normalizeQuietWindow()` 归一化。
+  static const String quietStartHour = 'quiet_start';
+
+  /// 免打扰结束小时（0–23）。读取方同上。
+  static const String quietEndHour = 'quiet_end';
+
+  /// 夜间独立豁免**主开关**（v1.9，docs/20 §8.1）。默认 false。
+  ///
+  /// 读取方：`background_engine.replan()`、`endpoint_service._rematerialize()`、
+  /// 设置页与任务编辑器（第二把钥匙的可见性）。
+  ///
+  /// ⚠️ 为什么放 `SharedPreferences` 而不是 DB 的 kv 表：
+  /// 本仓库把**全部用户级设置**（电源策略 / 免打扰时段 / 守卫开关）都放在
+  /// prefs —— 主开关是同类东西，走同一个存储才有"设置都在一处"的可预期性；
+  /// 而且 prefs 是**进程内同步可读**的，UI 读它不产生平台往返
+  /// （kv 表要走一次 sqflite 查询，会让整页 widget 测试留下未完成的 Timer）。
+  static const String quietExemptMaster = 'quiet_exempt_master';
 }

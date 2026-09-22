@@ -6,7 +6,9 @@ enum ActionType {
   tts, // TTS 喊话（如固定提示语）
   notify, // 仅通知
   recordEvidence, // 录音取证（本地保存，带清晰标注）
-  vibrate, // 震动
+  vibrate, // 震动（固定节奏；v1.x 起，向后兼容不动）
+  randomVibrate, // 随机振动：一次触发内随机脉冲串（v1.9，docs/20 §4.2）
+  continuousVibrate, // 持续振动：一段时长内连续 + 随机振幅（v1.9，docs/20 §4.3）
   randomFrom, // 动作集：加权随机选一执行（v1.8）
   composite, // 组合：主动作 + 可选的「先通知」
   ;
@@ -17,9 +19,30 @@ enum ActionType {
         ActionType.tts => '语音喊话',
         ActionType.notify => '发送通知',
         ActionType.recordEvidence => '录音取证',
-        ActionType.vibrate => '震动',
+        ActionType.vibrate => '震动（固定节奏）',
+        ActionType.randomVibrate => '随机振动',
+        ActionType.continuousVibrate => '持续振动',
         ActionType.composite => '组合动作',
         ActionType.randomFrom => '随机指令集',
+      };
+
+  /// 是否属于「震动」族（UI 分组、能力提示、统计归类共用）。
+  ///
+  /// ⚠️ 用**显式穷尽**而不是 `== vibrate || ...` 的散列判断：
+  /// 新增震动子类型时编译器会在这里报错，逼人做出分类决策。
+  bool get isVibrateFamily => switch (this) {
+        ActionType.vibrate ||
+        ActionType.randomVibrate ||
+        ActionType.continuousVibrate =>
+          true,
+        ActionType.playAudio ||
+        ActionType.soundscape ||
+        ActionType.tts ||
+        ActionType.notify ||
+        ActionType.recordEvidence ||
+        ActionType.randomFrom ||
+        ActionType.composite =>
+          false,
       };
 }
 
@@ -40,12 +63,32 @@ sealed class ActionConfig {
 
   Map<String, dynamic> toJson();
 
+  /// 与 `toJson()['kind']` **逐字一致**的稳定标识（审计/统计/日志筛选用）。
+  ///
+  /// 为什么单独给一个 getter 而不是让调用方读 `toJson()['kind']`：
+  /// 后者每次都要构造一个 Map，且类型是 `dynamic` —— 审计字段拼错不会被编译器拦住。
+  /// 这里是**穷尽 switch**：新增子类忘记登记会直接编译报错。
+  String get kind => switch (this) {
+        PlayAudioAction() => 'play',
+        TtsAction() => 'tts',
+        NotifyAction() => 'notify',
+        RecordEvidenceAction() => 'record',
+        VibrateAction() => 'vibrate',
+        RandomVibrateAction() => 'randomVibrate',
+        ContinuousVibrateAction() => 'continuousVibrate',
+        ActionSetAction() => 'randomFrom',
+        CompositeAction() => 'composite',
+        SoundscapeAction() => 'soundscape',
+      };
+
   static ActionConfig fromJson(Map<String, dynamic> j) => switch (j['kind']) {
         'play' => PlayAudioAction.fromJson(j),
         'tts' => TtsAction.fromJson(j),
         'notify' => NotifyAction.fromJson(j),
         'record' => RecordEvidenceAction.fromJson(j),
         'vibrate' => VibrateAction.fromJson(j),
+        'randomVibrate' => RandomVibrateAction.fromJson(j),
+        'continuousVibrate' => ContinuousVibrateAction.fromJson(j),
         'randomFrom' => ActionSetAction.fromJson(j),
         'composite' => CompositeAction.fromJson(j),
         'soundscape' => SoundscapeAction.fromJson(j),
@@ -183,6 +226,207 @@ class VibrateAction extends ActionConfig {
 
   @override
   Map<String, dynamic> toJson() => {'kind': 'vibrate', 'patternMs': patternMs};
+}
+
+/// 振动参数的**结构健全性上界**（docs/20 §10.3）。
+///
+/// ⚠️ 这是「配置不可自相矛盾」的健全性边界，**不是产品护栏** ——
+/// 用户拍板 D1「持续振动不设时长硬上限」，所以这里取 24 小时这个
+/// 与 `TaskWire.maxCooldownSec` 同量级的粗上界，只用于拒绝畸形配置
+/// （例如误填 999999 小时导致分片表爆掉），不用于限制正常使用。
+abstract final class VibrateLimits {
+  static const int maxDurationSec = 86400; // 24h
+  static const int minPulseOnMs = 20; // 低于 20ms 系统不保证生效
+  static const int maxPulseOnMs = 2000;
+  static const int maxPulseOffMs = 5000;
+  static const int maxPulses = 1000;
+  static const int maxJitterMs = 5000;
+  static const int maxRampSec = 600;
+
+  /// 固定节奏模式串：步数上限（与 Android Vibrator 模式串长度同量级）
+  /// 与单步时长上限。
+  static const int maxPatternSteps = 32;
+  static const int maxPatternStepMs = 60000;
+}
+
+/// **随机振动（v1.9，docs/20 §4.2）**：一次触发内产生**随机脉冲串** ——
+/// 每个脉冲的时长、间隔、强度都在各自区间内随机。
+///
+/// 与 `randomInterval` 触发组合即得到「随机间隔的随机振动」（FR-36）：
+/// 触发层决定"什么时候震"，本动作决定"震成什么样"。
+///
+/// ⚠️ 为什么不塞进 [VibrateAction]：固定节奏与随机脉冲串的参数集**不相交**，
+/// 合并后每个字段都得可空 → 消费点必然写出 `??` 链猜值（**BUG-068 的成因**）。
+/// 新增 sealed 子类换来的是：老任务 `action_json` 一字不改（向后兼容）+
+/// 所有穷尽 switch 编译期强制处理。
+class RandomVibrateAction extends ActionConfig {
+  const RandomVibrateAction({
+    this.durationSecMin = 3,
+    this.durationSecMax = 10,
+    this.pulseOnMsMin = 150,
+    this.pulseOnMsMax = 400,
+    this.pulseOffMsMin = 100,
+    this.pulseOffMsMax = 600,
+    this.amplitudeMin = 0.4,
+    this.amplitudeMax = 1.0,
+    this.maxPulses = 200,
+    this.rampUpSec = 0,
+    this.respectDnd = true,
+  })  : assert(durationSecMin >= 1 &&
+            durationSecMin <= durationSecMax &&
+            durationSecMax <= VibrateLimits.maxDurationSec),
+        assert(pulseOnMsMin >= VibrateLimits.minPulseOnMs &&
+            pulseOnMsMin <= pulseOnMsMax &&
+            pulseOnMsMax <= VibrateLimits.maxPulseOnMs),
+        assert(pulseOffMsMin >= 0 &&
+            pulseOffMsMin <= pulseOffMsMax &&
+            pulseOffMsMax <= VibrateLimits.maxPulseOffMs),
+        assert(amplitudeMin >= 0 && amplitudeMin <= amplitudeMax && amplitudeMax <= 1),
+        assert(maxPulses >= 1 && maxPulses <= VibrateLimits.maxPulses),
+        assert(rampUpSec >= 0 && rampUpSec <= VibrateLimits.maxRampSec);
+
+  final int durationSecMin;
+  final int durationSecMax;
+
+  /// 单个脉冲的振动时长区间。
+  final int pulseOnMsMin;
+  final int pulseOnMsMax;
+
+  /// 脉冲之间的停顿区间。
+  final int pulseOffMsMin;
+  final int pulseOffMsMax;
+
+  /// **强度区间**（核心可调项）。无振幅控制设备上会被系统一律拉满。
+  final double amplitudeMin;
+  final double amplitudeMax;
+
+  /// 脉冲数上限。**防爆护栏**：`on=20ms + off=0ms` 在 10 分钟内会产生 3 万个
+  /// 时间点，直接撑爆 Android waveform 数组。超限时由物化期**截断并审计**，
+  /// 不抛异常（与条件层"无法判定按满足处理"同一容错哲学）。
+  final int maxPulses;
+
+  /// 渐强：起始强度线性爬升到目标值的时长（0=关闭）。
+  final int rampUpSec;
+
+  /// 是否遵循系统勿扰。false ⇒ 原生侧用 `USAGE_ALARM`（**会穿透勿扰**，
+  /// 与音频 `AudioChannel.alarm` 同一合规口径，UI 必须显式提示）。
+  final bool respectDnd;
+
+  factory RandomVibrateAction.fromJson(Map<String, dynamic> j) =>
+      RandomVibrateAction(
+        durationSecMin: (j['durationSecMin'] as num? ?? 3).toInt(),
+        durationSecMax: (j['durationSecMax'] as num? ?? 10).toInt(),
+        pulseOnMsMin: (j['pulseOnMsMin'] as num? ?? 150).toInt(),
+        pulseOnMsMax: (j['pulseOnMsMax'] as num? ?? 400).toInt(),
+        pulseOffMsMin: (j['pulseOffMsMin'] as num? ?? 100).toInt(),
+        pulseOffMsMax: (j['pulseOffMsMax'] as num? ?? 600).toInt(),
+        amplitudeMin: (j['amplitudeMin'] as num? ?? 0.4).toDouble(),
+        amplitudeMax: (j['amplitudeMax'] as num? ?? 1.0).toDouble(),
+        maxPulses: (j['maxPulses'] as num? ?? 200).toInt(),
+        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
+        respectDnd: j['respectDnd'] as bool? ?? true,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'randomVibrate',
+        'durationSecMin': durationSecMin,
+        'durationSecMax': durationSecMax,
+        'pulseOnMsMin': pulseOnMsMin,
+        'pulseOnMsMax': pulseOnMsMax,
+        'pulseOffMsMin': pulseOffMsMin,
+        'pulseOffMsMax': pulseOffMsMax,
+        'amplitudeMin': amplitudeMin,
+        'amplitudeMax': amplitudeMax,
+        'maxPulses': maxPulses,
+        'rampUpSec': rampUpSec,
+        'respectDnd': respectDnd,
+      };
+}
+
+/// **持续振动（v1.9，docs/20 §4.3）**：一段时长内**连续**振动，强度可在区间内
+/// **随机波动**，支持渐强/渐弱、占空比与锐度。
+///
+/// 实现按设备能力三级降级（docs/20 §5.2）：
+/// Android 16 包络（强度+锐度）→ 波形+振幅（强度）→ on/off（强度满格）。
+/// **每一级降级都必须明示用户**（FR-34 口径修正）。
+class ContinuousVibrateAction extends ActionConfig {
+  const ContinuousVibrateAction({
+    this.durationSecMin = 10,
+    this.durationSecMax = 30,
+    this.amplitudeMin = 0.5,
+    this.amplitudeMax = 1.0,
+    this.jitterMs = 0,
+    this.sharpnessMin = 0.0,
+    this.sharpnessMax = 0.0,
+    this.dutyCyclePct = 100,
+    this.rampUpSec = 0,
+    this.rampDownSec = 0,
+    this.respectDnd = true,
+  })  : assert(durationSecMin >= 1 &&
+            durationSecMin <= durationSecMax &&
+            durationSecMax <= VibrateLimits.maxDurationSec),
+        assert(amplitudeMin >= 0 && amplitudeMin <= amplitudeMax && amplitudeMax <= 1),
+        assert(jitterMs >= 0 && jitterMs <= VibrateLimits.maxJitterMs),
+        assert(sharpnessMin >= 0 &&
+            sharpnessMin <= sharpnessMax &&
+            sharpnessMax <= 1),
+        assert(dutyCyclePct >= 10 && dutyCyclePct <= 100),
+        assert(rampUpSec >= 0 && rampUpSec <= VibrateLimits.maxRampSec),
+        assert(rampDownSec >= 0 && rampDownSec <= VibrateLimits.maxRampSec);
+
+  final int durationSecMin;
+  final int durationSecMax;
+
+  /// **随机振幅区间**（核心可调项）。
+  final double amplitudeMin;
+  final double amplitudeMax;
+
+  /// 强度波动周期：每 N 毫秒重新取一次随机强度（0=恒定，只取一次基准值）。
+  final int jitterMs;
+
+  /// 锐度区间（**仅 Android 16 包络生效**，其余平台忽略并明示）。
+  final double sharpnessMin;
+  final double sharpnessMax;
+
+  /// 占空比：100=不停顿；50=振一半停一半。低于 100 时实现为等长 on/off 波形。
+  final int dutyCyclePct;
+
+  final int rampUpSec;
+  final int rampDownSec;
+
+  final bool respectDnd;
+
+  factory ContinuousVibrateAction.fromJson(Map<String, dynamic> j) =>
+      ContinuousVibrateAction(
+        durationSecMin: (j['durationSecMin'] as num? ?? 10).toInt(),
+        durationSecMax: (j['durationSecMax'] as num? ?? 30).toInt(),
+        amplitudeMin: (j['amplitudeMin'] as num? ?? 0.5).toDouble(),
+        amplitudeMax: (j['amplitudeMax'] as num? ?? 1.0).toDouble(),
+        jitterMs: (j['jitterMs'] as num? ?? 0).toInt(),
+        sharpnessMin: (j['sharpnessMin'] as num? ?? 0.0).toDouble(),
+        sharpnessMax: (j['sharpnessMax'] as num? ?? 0.0).toDouble(),
+        dutyCyclePct: (j['dutyCyclePct'] as num? ?? 100).toInt(),
+        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
+        rampDownSec: (j['rampDownSec'] as num? ?? 0).toInt(),
+        respectDnd: j['respectDnd'] as bool? ?? true,
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'continuousVibrate',
+        'durationSecMin': durationSecMin,
+        'durationSecMax': durationSecMax,
+        'amplitudeMin': amplitudeMin,
+        'amplitudeMax': amplitudeMax,
+        'jitterMs': jitterMs,
+        'sharpnessMin': sharpnessMin,
+        'sharpnessMax': sharpnessMax,
+        'dutyCyclePct': dutyCyclePct,
+        'rampUpSec': rampUpSec,
+        'rampDownSec': rampDownSec,
+        'respectDnd': respectDnd,
+      };
 }
 
 /// 组合动作：主动作 + 可选前缀通知（仅两段，保持简单可预期）。

@@ -17,6 +17,7 @@ class Task {
     required this.assetIds,
     required this.cooldownSec,
     required this.quietPolicy,
+    this.quietExempt = false,
     this.condition,
     required this.priority,
     required this.createdAt,
@@ -38,6 +39,15 @@ class Task {
   final int cooldownSec;
 
   final QuietPolicy quietPolicy;
+
+  /// 夜间独立豁免（v1.9，docs/20 §8）：**任务级**开关，默认 false = 受免打扰约束。
+  ///
+  /// ⚠️ 单独为 true **不生效** —— 必须同时满足全局主开关
+  /// `SettingsRepository.quietExemptMaster()` 为 true（双重开关 / Two-Key Safety）。
+  /// 默认取 false 是因为它落在**更安全**的一侧：漏配 = 仍受护栏约束。
+  /// ⚠️ 远程不得开启：`TaskWire.fromWire` 显式丢弃入站该字段（docs/20 §8.2 约束 1）。
+  final bool quietExempt;
+
   final TaskCondition? condition; // 执行前置条件（null=无条件，v1.3）
   final int priority; // 数值大者先执行（同刻冲突时）
   final DateTime createdAt;
@@ -53,6 +63,7 @@ class Task {
     List<String>? assetIds,
     int? cooldownSec,
     QuietPolicy? quietPolicy,
+    bool? quietExempt,
     TaskCondition? condition,
     int? priority,
     DateTime? updatedAt,
@@ -68,6 +79,7 @@ class Task {
         assetIds: assetIds ?? this.assetIds,
         cooldownSec: cooldownSec ?? this.cooldownSec,
         quietPolicy: quietPolicy ?? this.quietPolicy,
+        quietExempt: quietExempt ?? this.quietExempt,
         condition: condition ?? this.condition,
         priority: priority ?? this.priority,
         createdAt: createdAt,
@@ -85,6 +97,7 @@ class Task {
         'asset_ids': assetIds,
         'cooldown_sec': cooldownSec,
         'quiet_policy': quietPolicy.name,
+        'quiet_exempt': quietExempt ? 1 : 0,
         'priority': priority,
         'condition_json':
             condition == null ? null : jsonEncode(condition!.toJson()),
@@ -103,6 +116,9 @@ class Task {
         assetIds: _decodeAssetIds(r['asset_ids']),
         cooldownSec: r['cooldown_sec'] as int,
         quietPolicy: QuietPolicy.values.byName(r['quiet_policy'] as String),
+        // 缺列/空值一律按 **false（不豁免）** 处理 —— 即"降级到更安全的一侧"。
+        // 建表默认值本就是 0，v2→v3 迁移补列后亦为 0，故此处不会掩盖真实配置。
+        quietExempt: (r['quiet_exempt'] as int? ?? 0) != 0,
         condition: TaskCondition.fromJsonOrNull(r['condition_json'] as String?),
         priority: r['priority'] as int? ?? 0,
         createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
@@ -137,6 +153,7 @@ class PlannedOccurrence {
     required this.status,
     this.volume,
     this.durationMs,
+    this.quietExempt = false,
   });
 
   final String id;
@@ -146,6 +163,10 @@ class PlannedOccurrence {
   final double? volume; // 执行期落地参数（审计用）
   final int? durationMs;
 
+  /// 本条计划是**因夜间独立豁免**才在免打扰时段存活（v1.9，docs/20 §8）。
+  /// 执行层据此写 `action='quietExempt'` 审计。
+  final bool quietExempt;
+
   Map<String, dynamic> toRow() => {
         'id': id,
         'task_id': taskId,
@@ -153,6 +174,7 @@ class PlannedOccurrence {
         'status': status.name,
         'volume': volume,
         'duration_ms': durationMs,
+        'quiet_exempt': quietExempt ? 1 : 0,
       };
 
   static PlannedOccurrence fromRow(Map<String, dynamic> r) => PlannedOccurrence(
@@ -162,5 +184,7 @@ class PlannedOccurrence {
         status: OccurrenceStatus.values.byName(r['status'] as String),
         volume: (r['volume'] as num?)?.toDouble(),
         durationMs: r['duration_ms'] as int?,
+        // 缺列按 false 处理 —— 降级到**更安全**的一侧（不豁免）。
+        quietExempt: (r['quiet_exempt'] as int? ?? 0) != 0,
       );
 }

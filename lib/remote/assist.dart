@@ -345,6 +345,10 @@ abstract final class RcPermGate {
         // 出声 / 改音量
         RcCmd.soundPlay || RcCmd.pttVoice => 'media',
         RcCmd.volumeSet => 'volume',
+        // v1.9：停止振动只会**减弱**端点正在做的事，但仍要求 `vibrate` 位 ——
+        // 本工具是自我保护用途，让没有振动权限的对端停掉用户自己的报警振动
+        // 同样是不可接受的。能震的才能停。
+        RcCmd.vibrateStop => 'vibrate',
         // 隐私
         RcCmd.locationGet => 'location',
         RcCmd.cameraSnap => 'video',

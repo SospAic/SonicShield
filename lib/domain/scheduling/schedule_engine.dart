@@ -5,6 +5,37 @@ import '../../core/utils/random.dart';
 import '../models/action.dart';
 import '../models/task.dart';
 import '../models/trigger.dart';
+import 'vibrate_resolve.dart';
+
+/// 归一化用户配置的免打扰窗口（v1.9，修复 **BUG-070**）。
+///
+/// ## 为什么需要它
+/// 设置页把用户选择的起止小时写进 `SharedPreferences`，但**执行路径从不读取**：
+/// `background_engine.replan()` 与 `endpoint_service._rematerialize()` 都直接
+/// `ScheduleEngine()`（默认 22:00–07:00）。结果是"界面在说谎"——
+/// 用户把窗口调窄，回显变了、落库也变了，**行为一点没变**。
+///
+/// 本函数是"从原始 int 到引擎参数"的唯一转换点，由服务层调用；
+/// 放在 domain 层是为了保持**纯函数、可单测**（不 import shared_preferences）。
+///
+/// ## 归一化规则（合规护栏不得被损坏配置绕过）
+/// - 合法区间 `[0, 23]`；越界或缺失 → **回落合规默认**（22:00–07:00），
+///   而不是夹到边界。读不懂的值说明配置已损坏，此时"回到默认"比
+///   "猜一个边界值"更可预期；且默认值位于护栏最严的一侧。
+/// - `start == end` 视为**空窗口**（引擎会判成零长度 → 免打扰完全失效），
+///   同样回落默认。这一条是护栏的兜底：不允许配置把护栏整体关掉。
+({int start, int end}) normalizeQuietWindow(int? start, int? end) {
+  bool valid(int? v) => v != null && v >= 0 && v <= 23;
+  final s = valid(start) ? start! : ComplianceGuardrails.defaultQuietStartHour;
+  final e = valid(end) ? end! : ComplianceGuardrails.defaultQuietEndHour;
+  if (s == e) {
+    return (
+      start: ComplianceGuardrails.defaultQuietStartHour,
+      end: ComplianceGuardrails.defaultQuietEndHour,
+    );
+  }
+  return (start: s, end: e);
+}
 
 /// 物化结果：一条计划 + 其执行参数（音量/时长在物化期一并确定，
 /// 保证「计划即审计」：重启后不漂移，日志可追溯）。
@@ -15,6 +46,7 @@ class PlannedEntry {
     required this.fireAt,
     required this.volume,
     required this.durationMs,
+    this.quietExempted = false,
   });
 
   final String occurrenceId;
@@ -22,6 +54,12 @@ class PlannedEntry {
   final DateTime fireAt; // 本地时区时刻
   final double volume;
   final int durationMs;
+
+  /// 本条计划是**因夜间独立豁免**才得以在免打扰时段存活（v1.9，docs/20 §8）。
+  ///
+  /// 落库后由执行层写一条 `action='quietExempt'` 审计 —— 豁免是**削弱护栏**
+  /// 的行为，必须可计数、可回溯（docs/20 §8.2 约束 2：不得静默生效）。
+  final bool quietExempted;
 }
 
 /// 调度引擎（纯函数、无 I/O，可完全单测）。
@@ -32,14 +70,23 @@ class PlannedEntry {
 /// 2. 滚动物化：每次生成 [now, now+planHorizon] 内的条目；
 ///    已提交的条目由仓库层幂等合并（同 id 不重复）。
 /// 3. 免打扰（quiet hours）：命中者按 QuietPolicy 跳过或平移到免打扰结束点。
+///    例外：**双重开关皆开**的夜间独立豁免（v1.9，docs/20 §8）。
 /// 4. 冷却：物化期即保证同任务相邻条目间隔 >= cooldownSec。
 class ScheduleEngine {
   const ScheduleEngine(
       {this.quietStartHour = ComplianceGuardrails.defaultQuietStartHour,
-      this.quietEndHour = ComplianceGuardrails.defaultQuietEndHour});
+      this.quietEndHour = ComplianceGuardrails.defaultQuietEndHour,
+      this.allowQuietExempt = false});
 
   final int quietStartHour;
   final int quietEndHour;
+
+  /// **主开关**：用户是否授权"夜间独立豁免"。
+  ///
+  /// 默认 false。与任务级 [Task.quietExempt] 构成 Two-Key Safety：
+  /// 只有两者**同时**为真，命中免打扰时段的计划才会被放行。
+  /// 单独置真不生效 —— 任一把钥匙丢失即回到受约束状态（fail-safe 方向）。
+  final bool allowQuietExempt;
 
   /// 为任务物化未来计划。
   ///
@@ -71,37 +118,52 @@ class ScheduleEngine {
 
     final out = <PlannedEntry>[];
     for (final fire in raw) {
-      final resolved = _applyQuiet(fire, task.quietPolicy, now);
-      if (resolved == null) continue;
+      final quiet = _applyQuiet(fire, task.quietPolicy, now,
+          taskExempt: task.quietExempt);
+      if (quiet == null) continue;
+      final resolved = quiet.at;
       final ms = resolved.millisecondsSinceEpoch;
       if (existing.contains(ms)) continue; // 幂等
       final a = task.action;
-      final play = switch (a) {
-        PlayAudioAction p => p,
-        CompositeAction c => switch (c.primary) {
-            final PlayAudioAction p => p,
-            _ => null,
-          },
+      // 组合动作的"主动作"才是真正要执行的东西（v1.9：振动也要穿透 composite）。
+      final primary = switch (a) {
+        CompositeAction c => c.primary,
+        _ => a,
+      };
+      final play = switch (primary) {
+        final PlayAudioAction p => p,
         _ => null,
       };
       final rng = Random(planSeed('${task.id}#$ms', resolved));
-      final volume = play == null
-          ? 0.8
-          : nextDoubleBetween(
-              rng,
-              play.volumeMin,
-              min(play.volumeMax,
-                  ComplianceGuardrails.maxMediaVolumePercent / 100));
-      final durationMs = play == null
-          ? 0
-          : nextIntBetween(
-              rng, play.durationSecMin * 1000, play.durationSecMax * 1000 + 1);
+      final occurrenceId = '${task.id}@$ms';
+      // 振动动作：物化期敲定「总时长 + 基准强度 + 波动种子」（docs/20 §4.4）。
+      // ⚠️ 必须放在音量/时长分支**之前**：非振动动作时它不消耗 rng，
+      // 因此不改变既有动作的随机序列（向后兼容）。
+      final vib = resolveVibratePlan(primary, rng, occurrenceId);
+      final double volume;
+      final int durationMs;
+      if (vib != null) {
+        volume = vib.baseAmplitude;
+        durationMs = vib.durationMs;
+      } else if (play != null) {
+        volume = nextDoubleBetween(
+            rng,
+            play.volumeMin,
+            min(play.volumeMax,
+                ComplianceGuardrails.maxMediaVolumePercent / 100));
+        durationMs = nextIntBetween(
+            rng, play.durationSecMin * 1000, play.durationSecMax * 1000 + 1);
+      } else {
+        volume = 0.8;
+        durationMs = 0;
+      }
       out.add(PlannedEntry(
-        occurrenceId: '${task.id}@$ms',
+        occurrenceId: occurrenceId,
         taskId: task.id,
         fireAt: resolved,
         volume: volume,
         durationMs: durationMs,
+        quietExempted: quiet.exempted,
       ));
     }
     out.sort((a, b) => a.fireAt.compareTo(b.fireAt));
@@ -109,7 +171,18 @@ class ScheduleEngine {
   }
 
   /// 免打扰处理。返回 null 表示跳过；平移目标已过期同样放弃（防唤醒后连响）。
-  DateTime? _applyQuiet(DateTime fireAt, QuietPolicy policy, DateTime now) {
+  ///
+  /// 返回值额外带 `exempted`：本条之所以**没有**被跳过/平移，是因为用户开了
+  /// 夜间独立豁免。执行层据此写审计（docs/20 §8.2 约束 2）。
+  ({DateTime at, bool exempted})? _applyQuiet(
+    DateTime fireAt,
+    QuietPolicy policy,
+    DateTime now, {
+    required bool taskExempt,
+  }) {
+    // Two-Key Safety：主开关（本引擎的 allowQuietExempt）与任务级开关（taskExempt）
+    // **同时**为真才放行。任一为假 → 走原有 skip/shift 逻辑。
+    final exempt = allowQuietExempt && taskExempt;
     final day = DateTime(fireAt.year, fireAt.month, fireAt.day);
     // 候选窗口：免打扰时段可能跨午夜（如 22:00-07:00），
     // 因此对任一时刻最多有两个“可能命中”的窗口（今晚 / 昨晚）。
@@ -137,15 +210,16 @@ class ScheduleEngine {
     }
     for (final (qs, qe) in windows) {
       if (!fireAt.isBefore(qs) && fireAt.isBefore(qe)) {
+        if (exempt) return (at: fireAt, exempted: true);
         switch (policy) {
           case QuietPolicy.skip:
             return null;
           case QuietPolicy.shift:
-            return qe.isAfter(now) ? qe : null;
+            return qe.isAfter(now) ? (at: qe, exempted: false) : null;
         }
       }
     }
-    return fireAt;
+    return (at: fireAt, exempted: false);
   }
 
   List<DateTime> _daily(DailyTrigger t, DateTime now, DateTime end) {

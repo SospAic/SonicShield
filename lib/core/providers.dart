@@ -26,6 +26,26 @@ final logRepoProvider = FutureProvider<LogRepository>((ref) async {
   return LogRepository(db);
 });
 
+/// 本月夜间豁免次数（v1.9，docs/20 §8.2 约束 2：不得静默生效）。
+///
+/// 独立成 provider 而不是在设置页 `initState` 里直接查库，有两个原因：
+/// 1. 页面**只消费**结果，不关心怎么算；
+/// 2. **widget 测试必须能把它换掉** —— 真实 sqflite 往返跑在 `FakeAsync` 里
+///    会留下未完成的锁超时 `Timer`，让整页用例连带失败（见
+///    `flutter-widget-test-harness` 技能第 ③ 类假故障）。
+///    测试里 `overrideWith((ref) async => 0)` 即可，无需打桩数据库。
+///
+/// ⚠️ **刻意不加 `autoDispose`**：`autoDispose` 的 provider 在最后一个监听者
+/// 离开时会走 `Timer(Duration.zero)` 延迟销毁；在 `FakeAsync` 里这个零延时
+/// Timer 常常来不及被 elapse，于是**任何渲染过设置页的用例**都可能在收尾时
+/// 判「A Timer is still pending」（实测：`router_test` RTR-06 因它变红）。
+/// 新鲜度由设置页在进入时 `ref.invalidate` 保证，不依赖自动销毁。
+final quietExemptCountProvider = FutureProvider<int>((ref) async {
+  final repo = await ref.watch(logRepoProvider.future);
+  final now = DateTime.now();
+  return repo.countQuietExemptSince(DateTime(now.year, now.month));
+});
+
 /// 音源仓储（音源库界面的**唯一**数据入口：列表/批量导入/删除都走它，
 /// 界面不再直接持有 `db` —— 否则批量写入与原子性无从复用）。
 final assetRepoProvider = FutureProvider<AssetRepository>((ref) async {

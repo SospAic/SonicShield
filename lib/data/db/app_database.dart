@@ -15,7 +15,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const int dbVersion = 2;
+  static const int dbVersion = 3;
   static AppDatabase? _instance;
 
   static Future<AppDatabase> open([String? dirOverride]) async {
@@ -86,6 +86,7 @@ class AppDatabase {
         asset_ids TEXT NOT NULL DEFAULT '[]',
         cooldown_sec INTEGER NOT NULL DEFAULT 300,
         quiet_policy TEXT NOT NULL DEFAULT 'skip',
+        quiet_exempt INTEGER NOT NULL DEFAULT 0,
         priority INTEGER NOT NULL DEFAULT 0,
         condition_json TEXT,
         created_at INTEGER NOT NULL,
@@ -110,7 +111,8 @@ class AppDatabase {
         fire_at INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         volume REAL,
-        duration_ms INTEGER
+        duration_ms INTEGER,
+        quiet_exempt INTEGER NOT NULL DEFAULT 0
       )''');
     await db.execute('CREATE INDEX idx_occ_fire ON occurrences(fire_at)');
     await db.execute('CREATE INDEX idx_occ_status ON occurrences(status)');
@@ -149,6 +151,13 @@ class AppDatabase {
     // v1 → v2：任务条件层（2026-09，v1.3）。
     if (oldV < 2) {
       await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
+    }
+    // v2 → v3：夜间独立豁免（2026-09，v1.9，docs/20 §8）。
+    // 任务级开关，**默认 0 = 不豁免**；主开关另存于 kv，两者皆开才放行。
+    // 老库补列后全部为 0，等价于"功能未启用"，行为与升级前一致。
+    if (oldV < 3) {
+      await db.execute(
+          'ALTER TABLE tasks ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
     }
   }
 
