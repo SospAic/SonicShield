@@ -11,8 +11,11 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-20）**：v1.8.0-alpha，功能层 **528/528** + 压测 **24/24** 全绿，
+**当前状态（2026-09-22）**：v1.8.0-alpha，功能层 **763/763** + 压测 **24/24** 全绿，
 `flutter analyze` 零问题；AOT 绝对验收与设备端验收均已闭环（见 §5）。
+**覆盖率（用户第 4 项）64.44%**（4781/7419，第二十五轮）——
+B 组屏幕类只剩 `remote_tasks_tab` / `sound_library_screen` / `remote_console_tab` /
+`device_list_screen` / `remote_screen` 等成熟配方块（见 docs/17 §50⑨）。
 **仿真多机连通已真正打通**（模拟器端点 ↔ 宿主控制器，走**真实公网 broker**，
 `tool/rc_probe.dart` **9/9**，含远程任务 CRUD 8 步）—— 见 §1.14。
 **真机已能装上并跑通设备冒烟（4/4，arm64 / Android 16）**，
@@ -73,7 +76,7 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 |---|---|
 | 版本 | **1.8.0-alpha+16**（pubspec；`AppMeta.version` / CHANGELOG 顶部 / HANDOVER 由 `test/version_consistency_test.dart` 强制一致） |
 | 提交链 | …→v1.7.0-alpha.1→v1.7.1（门禁脚本 + 三向复扫 BUG-046 + 音源库批量写入 BUG-047）→v1.7.2（远程音源库点选播放 + BUG-048）→v1.7.3（真机 arm64 冒烟 4/4 + 协议三向覆盖机器锁）→v1.8.0-alpha（docs/19 多条件×随机编排）→**第十七轮（探针密钥身份错配 BUG-052 + 仿真多机连通 9/9）** |
-| 测试 | **功能层 729/729 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-21 第二十四轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues 13.3s / 功能层 01:23 / 压测 00:58）。⚠️ 第二十二轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）。⚠️ 第二十四轮在负载 **94%** 下跑门禁仍全绿 ⇒ 60% 阈值是**保守**的，只在真破线时才升级成 `[BLOCKED]` + 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
+| 测试 | **功能层 763/763 全绿**（`--exclude-tags perf`）+ **压测层 24/24 全绿**（JIT 护栏口径；AOT 绝对验收见 §5）—— 2026-09-22 第二十五轮实测 `bash scripts/gates.sh` → **RC=0**（analyze No issues / 功能层 763/763 / 压测 24/24）。⚠️ 第二十二轮**首次**跑时压测层红过，取证为**整机 CPU 争用（另一个项目的 Docker，84–91%）导致测量无效**，非回归；门禁现已内置负载探针（见 docs/17 §47⑦）。⚠️ 第二十四轮在负载 **94%** 下跑门禁仍全绿；第二十五轮负载 **99%** 时压测层最紧一条首次 51ms>50ms、**重跑全绿**（门禁判负载噪声）—— 60% 阈值是**保守**的，只在真破线时才升级成 `[BLOCKED]` + 设备层 **冒烟 4/4** / 桥接 6/6 / AOT 6/6（模拟器 x86_64）+ **真机 arm64 冒烟 4/4 + 桥接 6/6 + 自动收尾端到端成功**（走无线调试，见 §1.20 / §1.22 / §1.25）+ **仿真多机连通 9/9**（模拟器端点 ↔ 宿主控制器，真实公网 broker） |
 | analyze | **No issues found!** |
 | **协议三向覆盖机器锁** | ✅ **已闭环**（第十六轮）：`test/rc_protocol_coverage_test.dart`（9 例）把人工三向比对变成门禁不变量；含 2 例**防登记表腐烂**。缺口表见 §6 第 14 项 |
 | **真机 arm64 设备端验收** | 🟢 **冒烟 4/4 + 桥接 6/6 + 自动收尾端到端均已成功**（第十七轮续十三，见 §1.25）；AOT / 双端点 E2E 待补。⚠️ 无线调试链路**不持久**（会掉线），首次预装需**人工点一次**确认框，之后**覆盖安装免弹窗**（脚本 `ensure_device_app()` 已自动判断）。⚠️ **跑完设备门禁手机上应用会变不可启动**（测试入口包 → 黑屏），现**由 `scripts/gates.sh` 自动收尾装回真包**（见 §1.22），无需再手工恢复 |
@@ -1827,27 +1830,34 @@ Monkey 400 零崩溃。
 
 【第 1 步 · 恢复上下文（先做，别跳）】
 读 HANDOVER.md 的 §0（五分钟上手）→ §1（状态快照）→ §6（优先级清单），
-再读 docs/17 的最后一节（当前是 **§49，第二十四轮 = `task_editor_screen` 64.30%→99.50%
-+ BUG-067「既崩又静默」**）拿到「尚未闭环」清单与开场提示词，
-以及 docs/12 的最后一节（当前是 §49）拿真实门禁数据。
-项目当前是 v1.8.0-alpha：功能层 **729/729**、压测 **24/24**、analyze 零问题，
+再读 docs/17 的最后一节（当前是 **§50，第二十五轮 = B 组三块连补
+`script_builder`+`log`+`stats` 61.18%→64.42% + BUG-068「编辑框读 A 写 B」**）
+拿到「尚未闭环」清单与开场提示词，
+以及 docs/12 的最后一节（当前是 §50）拿真实门禁数据。
+项目当前是 v1.8.0-alpha：功能层 **763/763**、压测 **24/24**、analyze 零问题，
 **可审计面已全量审完（4 个面：switch 兜底 21、`??=` 5、`firstWhere` 4、`??` 262）**。
-`bash scripts/gates.sh` → **RC=0**（2026-09-21 第二十四轮实测：analyze No issues /
-功能层 729/729 / 压测 24/24）。
+`bash scripts/gates.sh` → **RC=0**（2026-09-22 第二十五轮实测：analyze No issues /
+功能层 761/761 → 收尾 763 / 压测 24/24 —— 负载 99% 下压测层最紧一条首次
+51ms>50ms，重跑全绿，门禁判**负载噪声**非回归）。
 ⚠️ **门禁现在会看整机负载**：压测层红时若负载 ≥60% 报 `[BLOCKED]`+**RC=3**
 （**测量无效，不是通过也不是回归**），负载正常才报 `[FAIL]`+RC=1（真回归）。
 同一轮首次跑就是这么红的 —— 另一个项目的 Docker 让整机 CPU 到 84–91%，
 复跑（争用消退）即 24/24 全绿（五步取证见 docs/17 §47⑦）。
-**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）61.18%**（4537/7416）——
+**覆盖率（真实口径，分母 = lib/ 全部 74 个文件）64.44%**（4781/7419，
+第二十五轮实测；上一轮 61.18%）——
 ⚠️ 更早的"57.5%"是错的（分母漏算 30 个从未被 import 的文件）；
 跑 `dart run tool/coverage_report.dart` 看双口径报告，别引用旧数字。
 ⚠️ **写宿主 widget 测试前先读技能 `flutter-widget-test-harness`** ——
-`testWidgets` 跑在 `FakeAsync` 里，有**六类**报错毫不相似、根因相同的假故障
+`testWidgets` 跑在 `FakeAsync` 里，有**八类**报错毫不相似、根因相同的假故障
 （① 用例体里 `await` 真实 I/O → **永久挂死**（含 DB **读写**，不只是开库）；
 ② `go()` 在首帧之后 → **uri 对但屏幕是旧页**；
 ③ sqflite 锁超时 Timer 残留；④ Riverpod `autoDispose` 的零时长 Timer；
 ⑤ **用固定轮数 drain 等异步重读** → 时红时绿（`invalidate()` 后先带旧值）；
-⑥ **按 widget 下标取值** → 依赖 `ORDER BY` 平局导致的未定义顺序）。
+⑥ **按 widget 下标取值** → 依赖 `ORDER BY` 平局导致的未定义顺序；
+⑦ **异步回调里抛的异常 `takeException()` 看不到**（Future 无人 await 走 zone
+onError，判据要落在"用户能看到什么"，docs/17 §49⑤）；
+⑧ **`RefreshIndicator` 的手势在 `FakeAsync` 里永不触发**（用
+`RefreshIndicatorState.show()` 直接触发，测接线本身，docs/17 §50⑤））。
 `test/router_test.dart` / `test/task_list_screen_test.dart` 是可抄的样板。
 **仿真多机连通已打通**（模拟器端点 ↔ 宿主控制器，真实公网 broker，
 `tool/rc_probe.dart` 9/9，含远程任务 CRUD 8 步）—— 见 docs/12 §27。
@@ -1904,7 +1914,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 当前可选的非硬件项（按建议优先级）：
 0. ★ **覆盖率冲刺（用户第 4 项明确要求 99%+，当前最高优先级）**
-   **真实基线 61.18%**（4537/7416，第二十四轮实测；上一轮 58.35%）。
+   **真实基线 64.44%**（4781/7419，第二十五轮实测；上一轮 61.18%）。
    ⚠️ **口径已修**：旧的"57.5%"分母漏算了 30 个从未被 import 的文件
    （Dart 覆盖率只统计运行期加载过的库）→ 现由
    `test/coverage_sentinel_test.dart` + `tool/coverage_report.dart` 保证分母完整。
@@ -2093,6 +2103,55 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 > `multi_call_service` 116）逐行取证；③ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`）；
 > ④ 给 BUG-065/066/**067** 补设备层端到端（`WITH_DEVICE=1`）。
 > 另：**设备层豁免清单仍故意为空** —— 豁免必须逐行取证才能进（docs/17 §46⑤A）。
+
+> 本轮（第二十五轮，2026-09-22）**继续用户第 4 项：B 组三块连补**。
+> 结果分四块：
+>
+> **① 覆盖率 61.18% → 64.44%**（4781/7419，+244 行 / +3.26pt），用例 **729 → 763**（+34）
+> 单文件：`script_builder_screen.dart` 100 未覆盖 → **6 行（96.25%，全部结构不可达）**；
+> `log_screen.dart` / `stats_screen.dart` → **100%**（连错误分支都锁了）。
+>
+> **② 视频类先探后弃**：`MultiCallService` 无测试缝、`_VideoTile` 依赖
+> `RTCVideoRenderer`（插件）→ 要么桩一整套平台通道要么改生产代码，收益/风险比
+> 不划算。**别在下轮无脑续接 §49⑧ 的前两项** —— 先给 `CallService` 设计测试缝。
+>
+> **③ 顺带抓到 BUG-068（P2）—— 编辑框"读 A 写 B"**：`_editStep()` 用一条
+> `??` 链（`text ?? title ?? seconds`）给六种 kind 取编辑框初始值 →
+> `play` 的时长在 `durationSec`（三键全不命中 → **空框**，确定即覆盖原值）；
+> `notify` 的内容在 `body`，`title` 先命中（**框里显示标题、标签写「通知内容」、
+> 改完写回 `body`**）。两类都**不抛异常**，用户只会改错东西。
+> 修复：`_initialEditText()` switch 表达式按 kind 穷尽（新增 kind 忘补 = 编译报错）。
+> **登记项（SBS-08f）**：列表标题仍取 `title`（改通知内容列表不刷新）——
+> 展示列选择是产品决策，锁现状不擅自改。
+> ⚠️ `saveFirst` 保存模板分支（168–175）**全仓无调用点** = 死代码，
+> 与 183 行（发送成功 pop，需真实控制器）一并**逐行取证登记**，宿主口径上限
+> 154/160 = 96.25% 已打满。
+>
+> **④ 两类新坑进技能（七类 → 八类 + 新附录）**：
+> - **陷阱 8（新）· `RefreshIndicator` 手势在 `FakeAsync` 里永不触发**：
+>   `fling`/`drag` 无论幅度速度都收不到手势（手势竞技场要 `pumpAndSettle`
+>   走完入场动画才完成识别）。**取证结论：测量问题，不是生产缺陷**。
+>   修法：`RefreshIndicatorState.show()` 直接触发 —— 绕开手势识别，
+>   测的仍是 `onRefresh` 接线。空库时 body 是 `Center`，下拉用例必须先 seed。
+> - **`@Timeout` 文件级注解位置坑**：`perTest` 包装会"未使用"告警（testWidgets
+>   有自己的 timeout 参数）；改文件级 `@Timeout` 后，注解附着 `library` 指令，
+>   而 `library;` **必须先于所有 import** → **注解 + `library;` 放文件最顶部**。
+> - **错误分支一条 override 喂两页**：`logRepoProvider.overrideWith((ref) => throw ...)`
+>   同时让 `logListProvider`（`logs.when(error:)`）与 `StatsScreen._snapshot()`
+>   （FutureBuilder `hasError`）进错误态 —— LOG-11/ST-07 各吃 1 行，两文件清零。
+>
+> **⑤ 门禁 RC=0，负载噪声判据又验证一次**：负载 **99%** 时压测层最紧一条
+> （数据层查询 ≤50ms）首次 **51ms** 破线（超 2%）→ 门禁自动重跑 → 全绿，
+> 判"负载噪声，不是代码回归"（§47⑦ 判据的又一次实证）；**争用消退（60%）后
+> 复跑 763/763 + 24/24，无需重跑直接全绿**。
+>
+> **下一轮**：① B 组成熟配方块继续（`remote_tasks_tab` 97 / `sound_library_screen` 93 /
+> `remote_console_tab` 86 / `device_list_screen` 75 / `remote_screen` 68 …）；
+> ② 视频类（`multi_video_screen` 108 / `call_incoming_overlay` 91 /
+> `multi_call_service` 116）**先设计测试缝再立项**；
+> ③ A 组（`endpoint_service` 557 / `background_engine` 316 / `call_service` 229）
+> 逐行取证；④ 覆盖率 ratchet 进门禁（`COVERAGE_MIN`，当前 64.44%）；
+> ⑤ BUG-065/066/067/**068** 设备层端到端补测（`WITH_DEVICE=1`）。
 
 ## 10. 代码地图（新会话快速定位）
 
