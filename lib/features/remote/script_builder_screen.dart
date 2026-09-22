@@ -73,14 +73,31 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
     });
   }
 
+  /// 编辑框初始值：**按 kind 取当前值**，不能用 `??` 链猜。
+  ///
+  /// ⚠️ BUG-068：原写法是
+  /// `params['text'] ?? params['title'] ?? params['seconds']?.toString() ?? ''`，
+  /// 于是 ——
+  /// - `play` 的当前时长存在 `durationSec` 里，三个键**一个都取不到** →
+  ///   编辑框是**空的**。用户看不到自己在改什么，一确定就把 10 覆盖成他输入的值，
+  ///   且无从对照；
+  /// - `notify` 的当前内容存在 `body` 里，却**读的是 `title`** → 读写不是同一个字段：
+  ///   标签写着「通知内容」，框里显示的却是标题。
+  ///
+  /// 两类都不抛异常，只会让用户改错东西（项目纪律：展示/编辑类写错**只能靠锁**）。
+  /// 用 **switch 表达式**（必须穷尽）→ 将来新增 kind 忘补会编译报错。
+  static String _initialEditText(ScriptDraftStep s) => switch (s.kind) {
+        RcStepKind.tts => s.params['text']?.toString() ?? '',
+        RcStepKind.notify => s.params['body']?.toString() ?? '',
+        RcStepKind.delay => s.params['seconds']?.toString() ?? '',
+        RcStepKind.record => s.params['seconds']?.toString() ?? '',
+        RcStepKind.play => s.params['durationSec']?.toString() ?? '',
+        RcStepKind.vibrate => '',
+      };
+
   Future<void> _editStep(int index) async {
     final s = _steps[index];
-    final ctrl = TextEditingController(
-        text: (s.params['text'] ??
-                s.params['title'] ??
-                s.params['seconds']?.toString() ??
-                '')
-            .toString());
+    final ctrl = TextEditingController(text: _initialEditText(s));
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
