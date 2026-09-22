@@ -89,11 +89,13 @@ void main() {
   /// 有界轮询等待（见文件头第 3 条）：每轮让**真实事件循环**跑一次再 pump。
   ///
   /// 超时**显式 fail**，而不是悄悄放行 —— 否则"等不到"会退化成"没测"。
+  /// ⚠️ `maxRounds` 是**上限不是断言**：提高它只给真实 IO 更多轮次，不削弱检查
+  /// （依据：2026-09-22 第二十九轮负载 100% 下的同类假红）。
   Future<void> waitFor(
     WidgetTester tester,
     bool Function() cond, {
     required String reason,
-    int maxRounds = 60,
+    int maxRounds = 300,
   }) async {
     for (var i = 0; i < maxRounds; i++) {
       if (cond()) return;

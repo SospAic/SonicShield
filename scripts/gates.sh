@@ -136,14 +136,19 @@ LOAD_SUSPECT="${LOAD_SUSPECT:-60}"
 #    因此取比实测低约 0.05pt 的整数刻度：容忍 ±1–2 行抖动，
 #    但真回落（通常一次掉几十行）照样红。
 #
-# ⚠️ **这是地板，不是目标值 —— 每次补完测试必须同步抬高**（第二十七/二十八轮实测）：
+# ⚠️ **这是地板，不是目标值 —— 每次补完测试必须同步抬高**（第二十七～二十九轮实测）：
 #    5506/8543（64.45%）→ 5711/8543（66.85%，+205 行）→ 阈值 64.4 → 66.8
-#    → 5823/8543（68.16%，+112 行）→ 阈值 66.8 → **68.1**。
+#    → 5823/8543（68.16%，+112 行）→ 阈值 66.8 → 68.1
+#    → 5918/8545（69.26%，+95 行）→ 阈值 68.1 → **69.2**。
 #    忘了抬 = ratchet 形同虚设（下一轮掉 100 行也照样绿）。
 #    归因用**对照跑**（把新测试文件移出 test/ 再跑一次全量，逐行 diff 两份 lcov）：
-#    本轮 +112 行中 111 行来自 `remote_tasks_tab.dart`（111 → 0，355/355），
+#    第二十八轮 +112 行中 111 行来自 `remote_tasks_tab.dart`（111 → 0，355/355），
 #    另 1 行是同批补的 `notify` 分支；**其他文件一行未变**。
-COVERAGE_MIN="${COVERAGE_MIN:-68.1}"
+#    第二十九轮 +95 行中 94 行来自 `sound_library_screen.dart`（94 → 0，120/120），
+#    另 1 行是顺带走到的 `assist_host_screen.dart` 公共路径；**其余 74 个文件 0 行变化**。
+#    ⚠️ 该轮分母 8543 → 8545（+2）：给该页加了 `@visibleForTesting` 注入缝，
+#    可执行行净增 2 —— 是**可复核的源码事实**（`git diff` 可验），不是测量噪声。
+COVERAGE_MIN="${COVERAGE_MIN:-69.2}"
 
 # 压测层"红"的**定性**：负载高 → 测量无效（环境阻塞）；负载正常 → 真回归。
 #
@@ -458,6 +463,10 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
       cache_real_apk || true
       run_device_test "设备冒烟（app_smoke_test，4 例）" integration_test/app_smoke_test.dart device_smoke
       run_device_test "设备桥接（native_bridge_test，6 例）" integration_test/native_bridge_test.dart device_bridge
+      # 振动能力 P0 取证（docs/20 §13）：四条能力 + usage 传递 + 包络一致性 + 停止。
+      # ⚠️ 本文件是 **BUG-074**（Kotlin `Long`→`Int` 赋值导致 Android 端从未构建成功）
+      #    的天然回归锁 —— 它一旦被跑，就必然先过 `assembleDebug`。
+      run_device_test "设备振动（vibrate_device_test，6 例）" integration_test/vibrate_device_test.dart device_vibrate
       # ---- 收尾：把可启动的真包装回去 ----
       if [ "${RESTORE_APP:-1}" = "1" ]; then
         echo "=== 收尾: 恢复可启动的真包（不恢复的话手机上打开会永久黑屏）==="

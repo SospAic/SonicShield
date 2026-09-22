@@ -19,9 +19,25 @@ import '../../services/preset_import.dart';
 /// [embedded] = true 时作为「自动化」分组页的子 TAB 使用：保留「导入预置库」
 /// 操作（否则该能力在新 IA 下不可达），仅去掉标题与返回键。
 class SoundLibraryScreen extends ConsumerStatefulWidget {
-  const SoundLibraryScreen({super.key, this.embedded = false});
+  const SoundLibraryScreen({
+    super.key,
+    this.embedded = false,
+    this.previewPlayer,
+  });
 
   final bool embedded;
+
+  /// 试听播放器的**注入缝**（与 [RemoteTasksTab.channel] 同一形状）。
+  ///
+  /// 生产路径传 `null` → 页面自建 [PlaybackService]，**行为一字未变**。
+  ///
+  /// 为什么必须有这个缝：宿主（`flutter test`）上音频插件不可用 ——
+  /// `PlaybackService.play()` 要经 `AudioSession.instance` 与 `just_audio`
+  /// 打平台通道，实测**直接挂死**（不是抛异常，是 Future 永不完成）。
+  /// 没有缝，「试听按钮的停止/切换」这段逻辑就只能靠读代码，测不了 ——
+  /// 而它恰恰是最容易写错的一处（`_previewingId == id` 时要点第二下停）。
+  @visibleForTesting
+  final PlaybackService? previewPlayer;
 
   @override
   ConsumerState<SoundLibraryScreen> createState() => _SoundLibraryScreenState();
@@ -30,7 +46,8 @@ class SoundLibraryScreen extends ConsumerStatefulWidget {
 class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
   bool _importingPresets = false;
   String? _previewingId;
-  final PlaybackService _previewPlayer = PlaybackService();
+  late final PlaybackService _previewPlayer =
+      widget.previewPlayer ?? PlaybackService();
 
   Future<AssetRepository> _assets() => ref.read(assetRepoProvider.future);
 

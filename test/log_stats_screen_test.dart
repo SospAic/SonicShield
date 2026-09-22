@@ -104,11 +104,15 @@ void main() {
     await tester.runAsync(body);
   }
 
+  /// ⚠️ `maxRounds` 是**防死循环的上限，不是断言**（断言是 `cond()`）——
+  /// 提高它**不削弱任何检查**，只是给**真实 IO** 更多轮次。
+  /// 依据：2026-09-22 第二十九轮（负载 100% 下 SET-05b 因 60 轮不够而假红，
+  /// 单独跑必过）—— 与 `settings_screen_test.dart` 的 `waitFor` 同一处置。
   Future<void> waitFor(
     WidgetTester tester,
     bool Function() cond, {
     required String reason,
-    int maxRounds = 60,
+    int maxRounds = 300,
   }) async {
     for (var i = 0; i < maxRounds; i++) {
       if (cond()) return;

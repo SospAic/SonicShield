@@ -397,7 +397,12 @@ class NativeBridgePlugin : FlutterPlugin {
         if (hasVib && Build.VERSION.SDK_INT >= API_BAKLAVA) {
             try {
                 env = v!!.areEnvelopeEffectsSupported()
-                minCp = v.envelopeEffectInfo.minControlPointDurationMillis
+                // ⚠️ `minControlPointDurationMillis` 是 **Long**（API 36），
+                // 而 `minCp` 要作为 Int 进 Map 给 Dart 侧（Dart 按 `num` 收）。
+                // 漏了 `.toInt()` 会**编译失败**（BUG-074）—— 而宿主测试不编译
+                // Kotlin、`flutter analyze` 也不看 Kotlin，所以这个错误能一路
+                // 溜到真机构建才炸。毫秒值远小于 Int.MAX，转换安全。
+                minCp = v.envelopeEffectInfo.minControlPointDurationMillis.toInt()
             } catch (e: Exception) {
                 env = false
             }

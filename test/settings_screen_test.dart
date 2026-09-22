@@ -126,11 +126,15 @@ void main() {
     await tester.runAsync(body);
   }
 
+  /// ⚠️ `maxRounds` 是**防死循环的上限，不是断言**（断言是 `cond()`）——
+  /// 提高它**不削弱任何检查**，只是给**真实 IO**（写盘 / 调起分享）更多轮次。
+  /// 依据：2026-09-22 第二十九轮，整机负载 100% 时 60 轮（≈1.2s）不够，
+  /// SET-05b 报"等待超时"而**单独跑必过** ⇒ 环境性 flaky，非回归。
   Future<void> waitFor(
     WidgetTester tester,
     bool Function() cond, {
     required String reason,
-    int maxRounds = 60,
+    int maxRounds = 300,
   }) async {
     for (var i = 0; i < maxRounds; i++) {
       if (cond()) return;
