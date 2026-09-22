@@ -250,6 +250,34 @@
   ③ `rootBundle` 是全局单例、缓存**跨用例存活** ⇒ `setUp` 必须 `rootBundle.clear()`；
   ④ `debugPrint` 的节流 Timer 会留在 fake zone → 打印全丢，**探针一律用 `print`**。
 
+### Changed（工程）· 第三十轮补记（2026-09-22）：覆盖率冲刺 —— 远程控制台
+
+- `test/remote_console_tab_test.dart`：**10 → 21 例**（新增 `RCT-01..RCT-11`）；
+  355 → 631 行（+278 / −2）。**零生产代码改动**。
+- **ratchet 抬高**：`COVERAGE_MIN` **69.2 → 70.2**（"新实测值 − 0.05pt"）。
+- 结果：功能层 **929 → 940**；覆盖率 **69.26% → 70.28%**（5918 → **6005** / 8545）；
+  `remote_console_tab.dart` **87 → 0** 行未覆盖（**331/331**）。
+  **分母 8545 未变**（本轮没碰生产代码）—— 与上一轮"+2"形成对照。
+- 对照跑归因：+87 行**全部**来自该文件；"其余 76 个文件 0 行变化"是**闭合**的
+  （全局 Δ = 该文件 Δ，而加测试不可能让覆盖率下降 ⇒ 其余 Δ 之和为 0 ⇒ 只能全为 0）。
+- 覆盖的缺口（此前 10 例**全部**走协助会话通道，`channel != null`）：
+  **「已配对端点」整条默认路径**（`_endpointSelector` / `_endpoint` / `_store` /
+  `_send` 端点分支 / 「端点离线：已入队」）、「远程模块未开启」引导与「尚未配对」空态、
+  通道两条**失败**分支（`canSend==false` / `send` 返回 false）、`updates` 重建钩子（BUG-030）、
+  7 个命令入口（Ping/拍照/固定分类/守卫关/音量/停止指令组/停止振动）、
+  四条回执事件（`pong`/`status`/`location`/`photo`）及卡片、`_PhotoView` 解码失败兜底。
+- ★ **可行性发现**：`RcEndpointService.instance` 未启动时 `_client == null` ⇒
+  `sendTo` 只 `store.enqueue` 并返回 `false`（**不发网络**）⇒ 「已配对端点」这条路
+  在宿主上**可端到端测**，**无需给生产代码加注入缝**。
+- ★ **修正一条上一轮写错的框架结论**：`find.byType(FilledButton)` **能**匹配
+  `FilledButton.tonalIcon`（3.47.3 上它是普通构造器，`runtimeType == FilledButton`；
+  探针实测 `byType=1 runtimeType=FilledButton`）。技能与 `sound_library_screen_test.dart`
+  注释已更正。教训：**"某 finder 匹配不到某 widget"这类框架行为结论，先打探针再写。**
+- ⚠️ **设备层本轮阻塞（如实报告）**：有线 `dc14e06b`（MI MAX 2 / API 25）持续 `offline`、
+  无线 `shennong` `mdns services` 6 次全空 ⇒ 真"后台"振动、老设备降级链**未执行**
+  （**未执行 ≠ 失败**）。标准四步门禁 **RC=0 全绿**（analyze 16.7s / 功能层 940/940 01:58 /
+  压测 24/24 02:13 / ratchet 70.28% ≥ 70.2%；负载 82%）。
+
 ### Docs
 
 - 新增 docs/20《振动能力设计（随机振动与持续振动）》。
