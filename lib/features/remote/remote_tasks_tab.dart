@@ -112,7 +112,10 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
           _awaiting = false;
         });
       case RcEvt.task:
-        // task.get / task.upsert 的单条回执：刷新列表即可（列表才是数据源）。
+        // `task.get` / `task.upsert` 的单条回执：这里**只解除等待态**。
+        // 列表刷新由保存路径负责（`_openEditor` 拿到编辑器的 `true` 后
+        // `refresh()`）—— 端点侧 upsert 之后只会推这一条单任务回执，
+        // **不会**主动推 `rc.tasks`，所以别指望这里能顺带刷新。
         setState(() => _awaiting = false);
       case RcEvt.status:
         setState(() {

@@ -1304,7 +1304,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       final ok = await remote.save(task);
       if (!mounted) return;
       if (ok) {
-        Navigator.of(context).pop();
+        // ⚠️ **必须带上 `true`**（BUG-073）：远程模式的唯一调用方
+        // （`remote_tasks_tab._openEditor`）用的是 `push<bool>`，并在
+        // `saved == true` 时才刷新列表 + 提示「已写入端点」。
+        // 原先这里是无参 `pop()` → 结果恒为 `null` → 那个分支**永远不执行**：
+        // 任务其实写进端点了，但列表不刷新、也没有任何确认，
+        // 用户会以为"没保存成功"。
+        // 与"离线入队被误报成功"相反 —— 这是**成功被误报成沉默**。
+        Navigator.of(context).pop(true);
       } else {
         _toast(context, '端点未确认（离线或拒绝该定义），未写入端点');
       }
