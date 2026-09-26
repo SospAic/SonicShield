@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 
+import 'call_lifecycle.dart';
 import 'call_service.dart' show CallService;
 import 'endpoint_service.dart';
 import 'protocol.dart';
@@ -21,7 +22,14 @@ String? ownedCallIdOf(Map<String, dynamic> m, Set<String> owned) {
   // ⚠️ 不能用 `m['callId'] as String?`：远端报文字段类型**不可信**，
   // 收到非 String（如数字）时 `as` 会**抛异常**，把"忽略一条无关信令"
   // 变成"整条事件流处理崩溃"。用 `is` 判定则天然不抛（MCS-04 锁住）。
-  final raw = m['callId'];
+  //
+  // ⚠️ 必须从 `payload` 里取（BUG-023 同形状）：事件信封是
+  // `{v, id, ts, type, payload, from, peerId, peerName}`（见 `rcPayloadOf`），
+  // 业务字段**全部**在 `payload` 之内。曾直接读顶层 `m['callId']` → 恒为 null
+  // ⇒ 本服务丢弃**所有** answer/candidate/end ⇒ 多路视频永远接不通
+  // （UI 永久停在"连接中…"）。这是 P0 全链路断链。
+  // 反向锁：`test/multi_call_ownership_test.dart` 断言**顶层形状不命中**。
+  final raw = rcPayloadOf(m)['callId'];
   if (raw is! String || raw.isEmpty) return null;
   return owned.contains(raw) ? raw : null;
 }
@@ -59,6 +67,15 @@ class MultiCallSession {
   MediaStream? remoteStream;
   MultiCallPhase phase = MultiCallPhase.connecting;
   String? failure;
+
+  /// 是否已收到应答（SDP answer 或媒体连通）。
+  ///
+  /// 供 [timedOutMeansMissed] 判定用：**已应答后**残留的计时器
+  /// 不得再把一路通话报成"对方无应答"。
+  bool answered = false;
+
+  /// "等待应答"计时器（未接超时）。
+  Timer? waitTimer;
 }
 
 /// 多路视频同连（主控视角：同时连多台设备，点窗口切换目标）。
@@ -118,13 +135,18 @@ class MultiCallService {
     if (deviceId == null) return;
     final s = _sessions[deviceId];
     if (s == null) return;
+    // `type` 是信封**唯一**留在顶层的业务字段（见 `RcMessage.toJson`）；
+    // 其余（callId/sdp/candidate…）都在 `payload` 内，必须走 `rcPayloadOf`。
     final type = m['type'] as String? ?? '';
+    final payload = rcPayloadOf(m);
     if (type == RcCmd.callAnswer) {
-      final sdp = m['sdp'] as String? ?? '';
-      final kind = m['sdpType'] as String? ?? m['kind'] as String? ?? 'answer';
+      final sdp = payload['sdp'] as String? ?? '';
+      final kind = payload['sdpType'] as String? ??
+          payload['kind'] as String? ??
+          'answer';
       unawaited(_applyAnswer(s, sdp, kind));
     } else if (type == RcCmd.callCandidate) {
-      final c = m['candidate'];
+      final c = payload['candidate'];
       if (c is Map) unawaited(_applyCandidate(s, c.cast<String, dynamic>()));
     } else if (type == RcCmd.callEnd) {
       unawaited(hangUp(deviceId));
@@ -136,8 +158,13 @@ class MultiCallService {
     if (pc == null || sdp.isEmpty) return;
     try {
       await pc.setRemoteDescription(RTCSessionDescription(sdp, kind));
+      // 应答到达 ⇒ "等待应答"到此结束（否则 45s 后会把一路**已经应答**的
+      // 会话报成"对方无应答"）。
+      s.answered = true;
+      _cancelWaitTimer(s);
     } on Object {
       // 信令异常：标记失败，让 UI 能显示"这路没连上"，而不是停在"连接中"。
+      _cancelWaitTimer(s);
       s.phase = MultiCallPhase.failed;
       s.failure = '应答信令处理失败';
       _notify();
@@ -157,6 +184,36 @@ class MultiCallService {
     } on Object {
       // 单个候选失败不影响整路，忽略（ICE 会继续尝试其他候选）。
     }
+  }
+
+  /// 启动"等待应答"计时（本服务只负责**本机发起**的 outbound，故 `isCaller: true`）。
+  ///
+  /// 上限与"超时是否算未接"的判定**全部复用** `call_lifecycle.dart` 的纯函数
+  /// （[waitLimitMs] / [timedOutMeansMissed]），不另造一套 ——
+  /// 两处超时值一旦漂移，同一台设备在"单路"与"多路"下会得到不同结论。
+  void _startWaitTimer(MultiCallSession s) {
+    _cancelWaitTimer(s);
+    s.answered = false;
+    final limit = Duration(milliseconds: waitLimitMs(isCaller: true));
+    final sw = Stopwatch()..start();
+    s.waitTimer = Timer(limit, () {
+      // 到点时复核：期间可能已应答，也可能本路已被挂断移除。
+      if (!timedOutMeansMissed(
+          answered: s.answered,
+          elapsedMs: sw.elapsedMilliseconds,
+          limit: limit)) {
+        return;
+      }
+      s.phase = MultiCallPhase.failed;
+      s.failure = '对方无应答';
+      _notify();
+      unawaited(hangUp(s.peer.deviceId));
+    });
+  }
+
+  void _cancelWaitTimer(MultiCallSession s) {
+    s.waitTimer?.cancel();
+    s.waitTimer = null;
   }
 
   /// 连接一台设备（发起一路 outbound 会话）。
@@ -194,12 +251,18 @@ class MultiCallService {
       pc.onConnectionState = (state) {
         switch (state) {
           case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+            // 媒体已连通 ⇒ 必然已应答。这里再确认一次，防止"answer 信令丢了
+            // 但媒体通了"的极端情形下超时把一路通话报成"未接"。
+            s.answered = true;
+            _cancelWaitTimer(s);
             s.phase = MultiCallPhase.connected;
           case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+            _cancelWaitTimer(s);
             s.phase = MultiCallPhase.failed;
             s.failure = '连接失败（多处于对称 NAT 时需配置 TURN）';
           case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
           case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+            _cancelWaitTimer(s);
             if (s.phase != MultiCallPhase.failed) {
               s.phase = MultiCallPhase.closed;
             }
@@ -246,6 +309,10 @@ class MultiCallService {
         await hangUp(deviceId);
         return false;
       }
+      // invite 已发出 → 开始"等待应答"计时（未接超时）。
+      // 没有它，被叫没收到/没接通时本路会**无限停在"连接中…"**，
+      // 且没有任何"未接"反馈（与 BUG-050 同形状）。
+      _startWaitTimer(s);
       return true;
     } on Object {
       s.phase = MultiCallPhase.failed;
@@ -283,6 +350,7 @@ class MultiCallService {
   Future<void> hangUp(String deviceId) async {
     final s = _sessions.remove(deviceId);
     if (s == null) return;
+    _cancelWaitTimer(s);
     _byCallId.remove(s.callId);
     try {
       await s.pc?.close();

@@ -75,8 +75,11 @@ class _CallOverlayHostState extends ConsumerState<CallOverlayHost> {
 
   @override
   Widget build(BuildContext context) {
-    final showCall =
-        _phase == CallPhase.ringing || _phase == CallPhase.connected;
+    // ⚠️ 必须覆盖 `connecting`：被叫点「接听」后 phase 从 ringing → connecting，
+    // 若这里只认 ringing/connected，覆盖层会在**整段"协商中"**消失、
+    // 到 connected 才回来 —— 用户点完接听界面突然不见了，看起来像应用崩了。
+    // 通话界面覆盖"除 idle/ended 之外"的全部阶段。
+    final showCall = _phase != CallPhase.idle && _phase != CallPhase.ended;
     // ⚠️ 必须用 `Stack` 把 `child` **留在树里**，不能直接 return 通话界面 ——
     // 后者会把 Navigator 整个卸载掉，通话结束后导航栈被重置回初始路由。
     //

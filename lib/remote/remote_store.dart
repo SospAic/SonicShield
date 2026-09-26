@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -139,8 +140,32 @@ class RemoteStore {
   static const _kTurnUser = 'rc_turn_user';
   static const _kTurnCred = 'rc_turn_cred';
 
+  // ---- Q2.B：用户自带 broker（host/port/用户名/密码全配置化，默认仍公共） ----
+  static const _kBrokerHost = 'rc_broker_host';
+  static const _kBrokerPort = 'rc_broker_port';
+  static const _kBrokerUser = 'rc_broker_user';
+  static const _kBrokerPass = 'rc_broker_pass';
+
   /// 默认公共演示 broker（生产建议自建 EMQX/Mosquitto，docs/14 §6）。
   static const defaultBroker = 'broker.emqx.io';
+
+  /// broker 端口：**TLS 8883**（C-13 P0，禁止回落明文 1883）。
+  ///
+  /// ## 为什么不给"明文开关"
+  ///
+  /// 业务载荷本身是 AES-256-GCM 端到端加密、broker 看不到内容 —— 但**明文端口
+  /// 仍然泄露元数据**（谁与谁通信、消息长度与时序、`clientId`/主题里的设备 ID），
+  /// 且信封可被链路上的中间人**篡改 / 丢弃 / 抑制**：重放有 90s 窗口 + 去重挡着，
+  /// 而"把 `script.stop` 丢掉"这种攻击**没有任何防线**。
+  ///
+  /// 因此这里**刻意**不做成偏好项：没有"关闭 TLS"的运行时开关，
+  /// 也就没有一条能在生产上悄悄回落到明文的路径（自建 broker 同样必须启用
+  /// TLS，docs/14）。
+  ///
+  /// 真源是 [rcBrokerPort]（`protocol.dart`，无 Flutter 依赖）——
+  /// 这样纯 Dart 的端到端工具能引用**同一个**常量，不会各写一个数字。
+  /// 回归锁：`test/rc_transport_lock_test.dart`。
+  static const defaultBrokerPort = rcBrokerPort;
 
   // ---------------- TURN 中继配置（S5） ----------------
   //
@@ -175,7 +200,61 @@ class RemoteStore {
 
   String get deviceId => _prefs.getString(_kDeviceId) ?? '';
   String get deviceName => _prefs.getString(_kDeviceName) ?? '';
-  String get broker => _prefs.getString(_kBroker) ?? defaultBroker;
+
+  /// MQTT 代理地址。
+  ///
+  /// 语义（Q2.B 后保持不变的部分）：未配置自定义 host 时返回**原公共地址**
+  /// （`rc_broker` 或 [defaultBroker]）—— 默认行为与旧版一字不差。
+  /// 配置了 [brokerHost] 时优先返回它（自建 broker 接管连接目标）。
+  String get broker {
+    final h = brokerHost.trim();
+    if (h.isNotEmpty) return h;
+    return _prefs.getString(_kBroker) ?? defaultBroker;
+  }
+
+  // ---------------- 用户自带 broker（Q2.B，全部可空） ----------------
+  //
+  // 为什么全部可空：四个字段都是「可选覆盖」—— 空/null 表示"用默认公共
+  // broker（[defaultBroker]:[defaultBrokerPort]，无鉴权）"。不配置时行为
+  // 与旧版完全一致，不产生任何迁移负担。
+  //
+  // 端口**不是**"关 TLS"的开关：无论连哪个 broker，传输都固定走 TLS
+  // （C-13，回归锁 test/rc_transport_lock_test.dart TL-07）；自定义端口
+  // 只是自建 broker 监听端口不同，没有明文回落路径。
+
+  /// 自定义 broker 主机；空串 = 未配置（回落公共 broker）。
+  String get brokerHost => _prefs.getString(_kBrokerHost) ?? '';
+
+  /// 自定义 broker 端口；null = 未配置（回落 [defaultBrokerPort]，TLS 8883）。
+  int? get brokerPort => _prefs.getInt(_kBrokerPort);
+
+  /// broker 用户名（自建 broker 开启鉴权时填）；空串 = 未配置。
+  String get brokerUsername => _prefs.getString(_kBrokerUser) ?? '';
+
+  /// broker 密码；空串 = 未配置。明文落盘与 [turnCred] 同一信任级别
+  /// （仅本机 SharedPreferences，不参与任何同步/上报）。
+  String get brokerPassword => _prefs.getString(_kBrokerPass) ?? '';
+
+  /// 保存自定义 broker 配置（`host` 传空串即整体清除、回到默认公共）。
+  ///
+  /// 端口传 null / 非正数即视为"未配置"，清除已存的端口（回落 TLS 8883）。
+  /// 连接侧（读这四个字段并重连）由远程模块在下一次启动时完成 ——
+  /// 因此 UI 上写明「保存后重启远程模块生效」。
+  Future<void> setBrokerAdvanced({
+    required String host,
+    int? port,
+    String username = '',
+    String password = '',
+  }) async {
+    await _prefs.setString(_kBrokerHost, host.trim());
+    if (port != null && port > 0) {
+      await _prefs.setInt(_kBrokerPort, port);
+    } else {
+      await _prefs.remove(_kBrokerPort);
+    }
+    await _prefs.setString(_kBrokerUser, username.trim());
+    await _prefs.setString(_kBrokerPass, password);
+  }
 
   Future<void> setIdentity(String id, String name) async {
     await _prefs.setString(_kDeviceId, id);
@@ -235,6 +314,14 @@ class RemoteStore {
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
   }
 
+  /// 解除配对：把该 deviceId 移出本机配对表（**授权撤销的唯一真源**）。
+  ///
+  /// ⚠️ 只删列表**不足以**撤销授权 —— 它必须同时让该 deviceId 的后续入站
+  /// 命令被**拒绝**。这一半由端点侧的准入裁决承担（`RcEndpointService._handleRaw`
+  /// → `decideRcAdmission`：发送方必须在**当前**配对表里，否则拒收并写审计）。
+  /// 本方法落盘之后，端点侧收到的下一条来自该 deviceId 的命令就会被拒 ——
+  /// 因此**不要在别处"只删列表"而不接准入**，那正是 P0「配对移出了列表、
+  /// 对方仍能控制本机」的形状（A3 §2「撤销」）。
   Future<void> removePaired(String deviceId) async {
     final list = [
       ...paired().where((p) => p.deviceId != deviceId),
@@ -361,6 +448,7 @@ extension RemoteStoreScripts on RemoteStore {
   Future<void> enqueue(String wire, String endpointId) async {
     final list = outbox()
       ..add({
+        'id': _newOutboxId(),
         'endpointId': endpointId,
         'wire': wire,
         'at': DateTime.now().millisecondsSinceEpoch
@@ -368,6 +456,10 @@ extension RemoteStoreScripts on RemoteStore {
     if (list.length > 200) list.removeRange(0, list.length - 200);
     await _prefs.setString(RemoteStore._kOutbox, jsonEncode(list));
   }
+
+  static String _newOutboxId() =>
+      'o${DateTime.now().microsecondsSinceEpoch}'
+      '_${Random.secure().nextInt(1 << 32)}';
 
   List<Map<String, dynamic>> drainOutbox(String endpointId) {
     final all = outbox();
@@ -377,4 +469,41 @@ extension RemoteStoreScripts on RemoteStore {
         jsonEncode(all.where((m) => m['endpointId'] != endpointId).toList()));
     return mine;
   }
+
+  /// 某端点的待发命令（**只读**，不删除任何条目）。
+  ///
+  /// ⚠️ 与 [drainOutbox] 的区别是本方法**不取走**。补发路径必须用它 ——
+  /// [drainOutbox] 是"取走即删"，一旦补发中途失败（连接断了、密文损坏、
+  /// 进程被杀），命令就**永久消失**，而 UI 上写着"端点上线后自动执行"。
+  /// 只读读取 + 成功后才 [removeOutbox]，才能保证"没发出去就还在"。
+  List<Map<String, dynamic>> outboxFor(String endpointId) =>
+      outbox().where((m) => m['endpointId'] == endpointId).toList();
+
+  /// 删除某端点的**指定**待发命令（补发成功后才调用）。
+  ///
+  /// 只删 [sent] 里列出的条目，**不碰**同端点的其它条目；`sent` 为空时不写盘。
+  Future<void> removeOutbox(
+      String endpointId, List<Map<String, dynamic>> sent) async {
+    if (sent.isEmpty) return;
+    final keys = {for (final m in sent) outboxKeyOf(m)};
+    final rest = outbox()
+        .where((m) =>
+            m['endpointId'] != endpointId || !keys.contains(outboxKeyOf(m)))
+        .toList();
+    await _prefs.setString(RemoteStore._kOutbox, jsonEncode(rest));
+  }
+}
+
+/// 一条待发命令的稳定标识（同一端点内唯一）。
+///
+/// 优先用 [enqueue] 写入的 `id`：`at`（毫秒）+ `wire` 在同毫秒内重复发送
+/// 同一条命令时会**碰撞** —— 那时按 key 删会一次删掉两条，
+/// 把"还没发出去的那条"也抹掉（正是本模块要杜绝的丢命令）。
+/// 老数据没有 `id`，退回 `at|wire`（可接受：那只影响升级前残留的条目）。
+///
+/// 放在**顶层**而不是 extension 的静态成员：Dart 的扩展静态成员无法通过
+/// `RemoteStore.xxx` 访问，调用点会变得别扭且容易写错。
+String outboxKeyOf(Map<String, dynamic> m) {
+  final id = m['id'];
+  return id is String && id.isNotEmpty ? id : '${m['at']}|${m['wire']}';
 }

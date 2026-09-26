@@ -23,9 +23,16 @@ class SoundLibraryScreen extends ConsumerStatefulWidget {
     super.key,
     this.embedded = false,
     this.previewPlayer,
+    this.confirmDelete = true,
   });
 
   final bool embedded;
+
+  /// 删除前是否弹确认对话框（QR3）。生产默认 `true`；
+  /// 测试注入 `false` 以绕过对话框（对话框本身由 SLB-22 单独锁定）——
+  /// 确认对话框与「真实文件 I/O 的 runAsync 分段驱动」在同一测试里无法共存
+  /// （runAsync 重入被禁），注入缝是唯一让两者都成立的干净做法。
+  final bool confirmDelete;
 
   /// 试听播放器的**注入缝**（与 [RemoteTasksTab.channel] 同一形状）。
   ///
@@ -147,6 +154,19 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
     }
   }
 
+  /// 删除主体：先删记录再删文件（顺序不可换，理由见调用点注释）。
+  Future<void> _deleteAsset(AudioAsset a) async {
+    final repo = await _assets();
+    await repo.delete(a.id);
+    try {
+      final f = File(a.path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {
+      // 孤儿文件不影响使用，下次同路径写入会覆盖。
+    }
+    if (mounted) setState(() {});
+  }
+
   Future<void> _preview(String path, String id) async {
     if (_previewingId != null) {
       await _previewPlayer.stop();
@@ -156,12 +176,21 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
       }
     }
     if (mounted) setState(() => _previewingId = id);
-    await _previewPlayer.play(
-      path: path,
-      channel: AudioChannel.media,
-      volume: 0.9,
-      maxDurationMs: 8000,
-    );
+    try {
+      await _previewPlayer.play(
+        path: path,
+        channel: AudioChannel.media,
+        volume: 0.9,
+        maxDurationMs: 8000,
+      );
+    } on Object catch (e) {
+      // 播放失败（文件被清理 / 编解码不支持）必须可见，且必须复位
+      // `_previewingId`，否则图标永远停在"停止"态，再次点击行为错乱。
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('试听失败：$e')));
+      }
+    }
     if (mounted) setState(() => _previewingId = null);
   }
 
@@ -250,17 +279,31 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
                       icon: const Icon(Icons.delete_outline),
                       tooltip: '删除',
                       onPressed: () async {
-                        final repo = await _assets();
-                        // 先删记录再删文件：反过来的话，删文件成功而删记录失败
-                        // 会留下一条指向不存在文件的记录（点试听即报错）。
-                        await repo.delete(a.id);
-                        try {
-                          final f = File(a.path);
-                          if (await f.exists()) await f.delete();
-                        } catch (_) {
-                          // 孤儿文件不影响使用，下次同路径写入会覆盖。
+                        // 删除前必须确认：音源可能被任务引用，误删后
+                        // 任务到点播放会失败（文件缺失），不可一键撤销。
+                        // （测试可经 `confirmDelete: false` 关闭，见字段注释。）
+                        if (!widget.confirmDelete) {
+                          await _deleteAsset(a);
+                          return;
                         }
-                        if (mounted) setState(() {});
+                        final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: Text('删除「${a.name}」？'),
+                            content:
+                                const Text('将同时删除音频文件，引用它的任务将无法再播放该音源。'),
+                            actions: [
+                              TextButton(
+                                  onPressed: () => Navigator.pop(ctx, false),
+                                  child: const Text('取消')),
+                              TextButton(
+                                  onPressed: () => Navigator.pop(ctx, true),
+                                  child: const Text('删除')),
+                            ],
+                          ),
+                        );
+                        if (ok != true) return;
+                        await _deleteAsset(a);
                       },
                     ),
                   ],

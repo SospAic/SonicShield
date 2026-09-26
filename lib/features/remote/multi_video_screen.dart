@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../remote/call_lifecycle.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/multi_call_service.dart';
 import '../../remote/protocol.dart';
@@ -45,7 +47,14 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
 
   Future<void> _addDevice() async {
     final store = _store;
-    if (store == null) return;
+    if (store == null) {
+      // 初始化未完成时点了 + 不能"没反应"。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('正在加载设备列表，请稍后再试')),
+      );
+      return;
+    }
     final candidates =
         _endpoints.where((e) => _svc.sessionOf(e.deviceId) == null).toList();
     if (candidates.isEmpty) {
@@ -69,6 +78,23 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
       ),
     );
     if (picked == null) return;
+    // ⚠️ 权限必须在**发起之前**问（与单路 `call_screen._call` 同一做法）。
+    // 等 `getUserMedia` 失败再报错，用户看到的只是一句"连接失败"，
+    // 根本不知道是权限问题（BUG-062 同形状：失败必须可诊断、不得静默）。
+    // 本页固定 `video: true`（多路**视频**），故相机与麦克风都要。
+    final status = await [Permission.microphone, Permission.camera].request();
+    final blocked = callStartBlockFor(
+      micGranted: status[Permission.microphone]?.isGranted ?? false,
+      cameraGranted: status[Permission.camera]?.isGranted ?? false,
+      video: true,
+    );
+    if (blocked != null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(callStartBlockText(blocked))),
+      );
+      return;
+    }
     final ok = await _svc.connect(picked, store);
     if (!mounted) return;
     if (!ok) {

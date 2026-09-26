@@ -78,8 +78,10 @@ void main() {
 
       // ---------- 控制端侧：第二条真实 MQTT 连接 ----------
       final broker = store.broker;
-      ctrlClient = MqttServerClient.withPort(broker, ctrlId, 1883)
-        ..port = 1883
+      ctrlClient = MqttServerClient.withPort(
+              broker, ctrlId, RemoteStore.defaultBrokerPort)
+        ..port = RemoteStore.defaultBrokerPort
+        ..secure = true
         ..keepAlivePeriod = 30
         ..logging(on: false);
       ctrlClient.connectionMessage = MqttConnectMessage()

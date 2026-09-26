@@ -47,3 +47,12 @@ dist/
 # 本地工具状态（非项目产物）
 .flutter_tool_state
 .workbuddy-ai/
+
+# 本地验证工作区（命令中继 / 审计报告 / 探针）。**不入库**。
+# ⚠️ 该目录**禁止放 .dart 文件**：`flutter analyze` 会扫描项目下所有 Dart 文件，
+#    一份基线副本就能让门禁第 1 步炸出 315 条问题（2026-09-24 实测）。
+#    它同时被 analysis_options.yaml 的 exclude 覆盖。
+_pt/
+
+# WorkBuddy 工作区记忆（与 .workbuddy-ai/ 同源，不入库）
+.workbuddy/

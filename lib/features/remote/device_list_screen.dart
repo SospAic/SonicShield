@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../remote/device_group.dart';
+import '../../remote/endpoint_service.dart';
+import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 
 /// 「最近连接」的相对时间文案。
@@ -42,6 +45,8 @@ class DeviceListScreen extends StatefulWidget {
 class _DeviceListScreenState extends State<DeviceListScreen> {
   List<PairedEndpoint> _endpoints = const [];
   String _selectedId = '';
+  List<DeviceGroup> _groups = const [];
+  final Set<String> _checkedIds = <String>{};
   bool _loading = true;
 
   @override
@@ -54,11 +59,14 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       RemoteStore(await SharedPreferences.getInstance());
 
   Future<void> _load() async {
-    final store = await _store();
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    final groups = DeviceGroupStore(prefs);
     if (!mounted) return;
     setState(() {
       _endpoints = store.paired();
       _selectedId = store.selectedEndpointId;
+      _groups = groups.groups();
       _loading = false;
     });
   }
@@ -124,10 +132,134 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     if (yes != true) return;
     final store = await _store();
     await store.removePaired(e.deviceId);
+    // P1：撤销授权只删列表**不够**（`RemoteStore.removePaired` 自己的注释也在
+    // 说这件事）。必须先踢出配对表（让它的后续命令立刻被准入拒掉），
+    // **再**清掉它名下已经在跑的在途作业（指令组 / 通话）——
+    // 顺序不能反：反了就会出现"在途已停，但窗口期内它又下发了一条新命令"。
+    await RcEndpointService.instance.onPeerRevoked(e.deviceId);
     await _load();
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text('已删除「${e.displayName}」')));
+  }
+
+  // ---------------- 设备组（Q6.B：建组 / 删组 / 组内群发 Ping） ----------------
+
+  Future<void> _createGroup() async {
+    if (_checkedIds.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先勾选要入组的设备')));
+      return;
+    }
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('建组（${_checkedIds.length} 台设备）'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(
+            labelText: '给这批设备起个组名',
+            hintText: '如：一楼展厅、设备间',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (name == null) return;
+    // 判定在纯函数里（可锁），这里只执行其结论。
+    final err = validateGroupName(name);
+    if (err.isNotEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await DeviceGroupStore(prefs).save(DeviceGroup(
+      id: DeviceGroupStore.newId(),
+      name: name.trim(),
+      memberIds: _checkedIds.toList(),
+    ));
+    setState(_checkedIds.clear);
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已创建设备组「${name.trim()}」')));
+  }
+
+  Future<void> _deleteGroup(DeviceGroup g) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这个设备组？'),
+        content: Text('将移除分组「${g.name}」（组内 ${g.memberIds.length} 台）。'
+            '不影响设备本身的配对关系。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    final prefs = await SharedPreferences.getInstance();
+    await DeviceGroupStore(prefs).delete(g.id);
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已删除分组「${g.name}」')));
+  }
+
+  Future<void> _groupPing(DeviceGroup g) async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    // 目标 = 组名单 ∩ 当前配对表（判定在纯函数里）；组名单本身不可信。
+    final targets = resolveGroupTargets(g, store.paired());
+    if (!mounted) return;
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('组「${g.name}」没有可用设备（成员可能已全部解配对）')));
+      return;
+    }
+    final byId = {for (final e in store.paired()) e.deviceId: e};
+    final failed = <String>[];
+    for (final id in targets) {
+      final ok = await RcEndpointService.instance
+          .sendTo(byId[id]!, RcMessage.now(RcCmd.ping), store);
+      if (!ok) failed.add(byId[id]!.displayName);
+    }
+    if (!mounted) return;
+    final okCount = targets.length - failed.length;
+    if (failed.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              '「${g.name}」群发 Ping 完成：已发 ${targets.length} 台 / 失败 0 台')));
+      return;
+    }
+    // 失败必须点名（不许静默）：弹窗逐行列出，比一闪而过的 SnackBar 稳。
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('「${g.name}」群发 Ping 汇总'),
+        content: Text('已发 $okCount 台 / 失败 ${failed.length} 台：\n'
+            '${failed.map((n) => '· $n').join('\n')}'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+        ],
+      ),
+    );
   }
 
   @override
@@ -140,6 +272,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
             : ListView(
                 padding: const EdgeInsets.all(12),
                 children: [
+                  _groupSection(scheme),
                   for (final e in _endpoints) _deviceCard(e, scheme),
                 ],
               );
@@ -187,6 +320,69 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
         ),
       );
 
+  Widget _groupSection(ColorScheme scheme) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text('设备组',
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                TextButton.icon(
+                  onPressed: _checkedIds.isEmpty ? null : _createGroup,
+                  icon: const Icon(Icons.create_new_folder_outlined,
+                      size: 18),
+                  label: Text(_checkedIds.isEmpty
+                      ? '建组'
+                      : '建组（已选 ${_checkedIds.length} 台）'),
+                ),
+              ],
+            ),
+            if (_groups.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 8, bottom: 8),
+                child: Text(
+                  '还没有设备组：勾选下面的设备，再点「建组」。',
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: scheme.outline),
+                ),
+              )
+            else
+              for (final g in _groups)
+                ListTile(
+                  contentPadding: const EdgeInsets.only(left: 8),
+                  leading: const Icon(Icons.devices_other),
+                  title: Text(g.name),
+                  subtitle: Text('${g.memberIds.length} 台设备'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: '组内群发 Ping',
+                        icon: const Icon(Icons.notifications_active_outlined),
+                        onPressed: () => _groupPing(g),
+                      ),
+                      IconButton(
+                        tooltip: '删除组',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => _deleteGroup(g),
+                      ),
+                    ],
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _deviceCard(PairedEndpoint e, ColorScheme scheme) {
     final isCurrent = e.deviceId == _selectedId;
     return Card(
@@ -218,14 +414,31 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
         ),
         isThreeLine: true,
         onTap: () => _connect(e),
-        trailing: PopupMenuButton<String>(
-          onSelected: (v) async {
-            if (v == 'rename') await _rename(e);
-            if (v == 'remove') await _remove(e);
-          },
-          itemBuilder: (_) => const [
-            PopupMenuItem(value: 'rename', child: Text('改备注名')),
-            PopupMenuItem(value: 'remove', child: Text('删除')),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 勾选 = 只用于「建组」的临时选择，与「当前目标」（卡片本体
+            // 点击）互不干扰：勾选不改选择状态、不写连接时间。
+            Checkbox(
+              value: _checkedIds.contains(e.deviceId),
+              onChanged: (v) => setState(() {
+                if (v == true) {
+                  _checkedIds.add(e.deviceId);
+                } else {
+                  _checkedIds.remove(e.deviceId);
+                }
+              }),
+            ),
+            PopupMenuButton<String>(
+              onSelected: (v) async {
+                if (v == 'rename') await _rename(e);
+                if (v == 'remove') await _remove(e);
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'rename', child: Text('改备注名')),
+                PopupMenuItem(value: 'remove', child: Text('删除')),
+              ],
+            ),
           ],
         ),
       ),

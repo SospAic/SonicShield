@@ -105,6 +105,16 @@ void main() {
       expect(c.amplitudes, isNotNull);
       expect(c.amplitudes!.length, c.timings.length,
           reason: 'timings 与 amplitudes 必须一一对应，错位会让强度落在错误的段上');
+      // 哨兵（W5 P1）：必须真的存在「中间静止段」，否则下面的条件断言
+      // 一次都不跑（锁空转 = 恒绿）。cont 的 dutyCyclePct=100 ⇒ offMs=0
+      // ⇒ 每个 on 段之间必有 0ms 的静止条目；若波形布局重构后不再出现
+      // 中间 0 段，这里先红，逼人确认静止段断言还有没有判据对象。
+      final restIdx = [
+        for (var i = 1; i < c.timings.length; i++)
+          if (c.timings[i] == 0) i,
+      ];
+      expect(restIdx, isNotEmpty,
+          reason: '本种子下波形没有中间静止段，静止段振幅断言一次都不会执行 —— 锁空转');
       for (var i = 0; i < c.timings.length; i++) {
         expect(c.timings[i], greaterThanOrEqualTo(0));
         if (c.timings[i] == 0 && i > 0) {

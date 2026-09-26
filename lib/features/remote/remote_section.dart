@@ -51,7 +51,7 @@ class RemoteSection extends StatelessWidget {
         SectionTabSpec(
           label: '我的设备',
           icon: Icons.devices,
-          builder: (_) => const DeviceListScreen(embedded: true),
+          builder: (_) => const _DevicesTab(),
         ),
         SectionTabSpec(
           label: '控制台',
@@ -73,6 +73,56 @@ class RemoteSection extends StatelessWidget {
           icon: Icons.videocam,
           builder: (_) => const RemoteCallEntry(),
         ),
+      ],
+    );
+  }
+}
+
+/// 「我的设备」Tab：设备列表 + 顶部**可见文字**的协助会话入口。
+///
+/// 修复 P0-1 根因 a：协助会话此前的唯一入口是 AppBar 上的 4 个**纯图标**按钮
+/// （`support_agent` / `login` / …），移动端 `tooltip` 只在长按才出现，全应用
+/// 没有任何可见文字说明"临时协助" —— 使用者根本找不到，反馈即"本机根本没有
+/// 显示临时码"（其实连入口都没看见）。文字入口是唯一有效的可发现性修复；
+/// AppBar 图标保留作快捷方式，两条路径指向同一路由。
+class _DevicesTab extends StatelessWidget {
+  const _DevicesTab();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        Card(
+          margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          child: Column(
+            children: [
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: scheme.primaryContainer,
+                  child: Icon(Icons.support_agent,
+                      color: scheme.onPrimaryContainer),
+                ),
+                title: const Text('临时协助会话（生成临时码）'),
+                subtitle: const Text('让信任的人在 10 分钟内临时接入本机，权限默认全关'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/remote/assist'),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: scheme.secondaryContainer,
+                  child: Icon(Icons.login, color: scheme.onSecondaryContainer),
+                ),
+                title: const Text('接入协助会话'),
+                subtitle: const Text('输入对方屏幕上的临时码 + 访问密码，协助对方设备'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => context.push('/remote/assist/join'),
+              ),
+            ],
+          ),
+        ),
+        const Expanded(child: DeviceListScreen(embedded: true)),
       ],
     );
   }

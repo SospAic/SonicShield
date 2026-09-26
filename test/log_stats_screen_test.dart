@@ -357,7 +357,8 @@ void main() {
       await tester.pump();
 
       expect(find.byType(ListTile), findsNothing);
-      expect(find.textContaining('暂无日志'), findsOneWidget);
+      expect(find.textContaining('无匹配日志'), findsOneWidget,
+          reason: '筛选空态要与「真的没有日志」区分（QR4 双态文案）');
     });
 
     testWidgets('LOG-07 空库导出：明说"暂无日志可导出"，不生成文件', (tester) async {

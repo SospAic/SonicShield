@@ -26,7 +26,10 @@ class AlarmWatchdogReceiver : BroadcastReceiver() {
             }
         } catch (e: Exception) {
             // 平台限制下可能被拒；下一轮闹钟/用户打开 App 自愈。
+            // 但**不得静默**（N-3）：除 logcat 外再留一条用户可见通知，
+            // 否则"引擎未能自恢复"只进 logcat，用户与审计都看不见。
             Log.w("AlarmWatchdog", "kick failed: ${e.message}")
+            SelfHealNotice.failed(context, "看门狗闹钟未能拉起引擎：${e.message}")
         }
     }
 }

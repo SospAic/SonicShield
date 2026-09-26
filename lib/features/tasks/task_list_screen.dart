@@ -130,10 +130,21 @@ class _TaskTile extends ConsumerWidget {
             Switch(
               value: t.enabled,
               onChanged: (v) async {
-                final repo = await ref.read(taskRepoProvider.future);
-                await repo.setEnabled(t.id, v);
-                ref.invalidate(taskListProvider);
-                await BackgroundServiceManager.instance.replan();
+                try {
+                  final repo = await ref.read(taskRepoProvider.future);
+                  await repo.setEnabled(t.id, v);
+                  ref.invalidate(taskListProvider);
+                  await BackgroundServiceManager.instance.replan();
+                } on Object catch (e) {
+                  // 开关失败必须可见（历史 BUG-A 同形：失败时开关弹回 +
+                  // 零提示，用户以为"开关关不掉"）。失败后同样 invalidate，
+                  // 让开关回到与服务真实状态一致的回执值。
+                  ref.invalidate(taskListProvider);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('切换失败：$e')));
+                  }
+                }
               },
             ),
           ],
@@ -177,6 +188,11 @@ class _TaskTile extends ConsumerWidget {
               assetIds: t.assetIds,
               cooldownSec: t.cooldownSec,
               quietPolicy: t.quietPolicy,
+              // ⚠️ 必须带回：条件层（充电/电量/时段/Wi-Fi/通话保护/概率门）
+              // 与夜间豁免若丢失，副本启用后行为与原任务**静默不一致**
+              // （如原任务"仅充电时执行"，副本却无条件执行）。
+              condition: t.condition,
+              quietExempt: t.quietExempt,
               priority: t.priority,
               createdAt: now,
               updatedAt: now,

@@ -11,6 +11,12 @@ analyzer:
     - build/**
     - android/**
     - ios/**
+    # ⚠️ 本地验证工作区（命令中继 / 审计报告 / 探针），已在 .gitignore 中忽略。
+    #    必须排除：`flutter analyze` 扫的是**项目下所有 Dart 文件**，
+    #    子 Agent 为做"隔离 diff"在此留一份 `endpoint_service.dart` 基线副本
+    #    ⇒ 门禁第 1 步直接炸出 **315 条**问题（2026-09-24 实测，全部指向该副本）。
+    #    这类假红会让人去追一个不存在的回归，所以在这里从结构上堵死。
+    - _pt/**
 
 linter:
   rules:

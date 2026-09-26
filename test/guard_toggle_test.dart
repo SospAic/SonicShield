@@ -14,7 +14,7 @@ void main() {
   /// 记录被调用过的方法，用于断言"失败时不能再往下走"。
   final calls = <String>[];
 
-  Future<GuardToggleFailure> run({
+  Future<GuardToggleOutcome> run({
     required bool wanted,
     required bool engineRunning,
     bool micGranted = true,
@@ -49,14 +49,14 @@ void main() {
 
   test('GTO-01 引擎未运行 + 想开 -> engineNotRunning，且不下发命令', () async {
     final r = await run(wanted: true, engineRunning: false);
-    expect(r, GuardToggleFailure.engineNotRunning);
+    expect(r.failure, GuardToggleFailure.engineNotRunning);
     // 关键点：引擎没跑时 setGuard 是 no-op，不该假装下发过。
     expect(calls, isEmpty, reason: '引擎没跑时连权限都不该问，更不该 setGuard');
   });
 
   test('GTO-02 麦克风被拒 -> micDenied，且不下发命令', () async {
     final r = await run(wanted: true, engineRunning: true, micGranted: false);
-    expect(r, GuardToggleFailure.micDenied);
+    expect(r.failure, GuardToggleFailure.micDenied);
     expect(calls, ['requestMic']);
     expect(calls.contains('setGuard:true'), isFalse);
   });
@@ -64,22 +64,32 @@ void main() {
   test('GTO-03 下发后引擎未回投 -> engineNoResponse', () async {
     final r =
         await run(wanted: true, engineRunning: true, stateConfirms: false);
-    expect(r, GuardToggleFailure.engineNoResponse);
+    expect(r.failure, GuardToggleFailure.engineNoResponse);
     // 命令确实下发过，但没生效 —— 必须报出来，不能静默。
     expect(calls.contains('setGuard:true'), isTrue);
   });
 
   test('GTO-04 全部顺利 -> none', () async {
     final r = await run(wanted: true, engineRunning: true);
-    expect(r, GuardToggleFailure.none);
+    expect(r.failure, GuardToggleFailure.none);
     expect(calls.contains('persist'), isTrue);
     expect(calls.contains('startMicService'), isTrue);
     expect(calls.contains('setGuard:true'), isTrue);
   });
 
-  test('GTO-05 关闭不要求引擎在跑、也不问麦克风', () async {
+  // ⚠️ GTO-05 的语义（v1.10 复核，**保留**原行为，理由写在这里）：
+  //
+  // 「关闭不要求引擎在跑」**不是缺陷**，恰恰是必须的 ——
+  // 引擎没跑时守卫物理上不可能在运行（守卫活在引擎隔离里），此时若还要求
+  // "先开引擎才能关"，用户会被一个已经停掉的守卫**永久卡住**：开关清不掉。
+  // 所以关闭方向对 `engineRunning == false` 的正确响应是"成功清场"。
+  //
+  // 真正的缺陷在**另一半**：旧实现连"引擎在跑"时也不做状态确认（见
+  // `test/guard_symmetric_toggle_test.dart` GTX-01/02）。那条锁在这里补，
+  // 而不是把 GTO-05 改反 —— 改反会引入上面那个卡死的 bug。
+  test('GTO-05 关闭不要求引擎在跑、也不问麦克风（引擎没跑时=成功清场）', () async {
     final r = await run(wanted: false, engineRunning: false);
-    expect(r, GuardToggleFailure.none);
+    expect(r.failure, GuardToggleFailure.none);
     expect(calls.contains('requestMic'), isFalse);
     expect(calls.contains('stopMicService'), isTrue);
     expect(calls.contains('setGuard:false'), isTrue);

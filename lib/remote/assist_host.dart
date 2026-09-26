@@ -5,6 +5,7 @@ import 'assist.dart';
 import 'guarded_dispatch.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
+import 'task_wire.dart';
 
 /// 协助会话的传输抽象。
 ///
@@ -125,8 +126,25 @@ class RcAssistHost {
   // ---------------- 生命周期 ----------------
 
   /// 端点使用者主动发起：生成凭据并进入等待接入状态（C1：唯一入口）。
+  ///
+  /// ## 顺序契约（P0-1，不可随意调整）
+  /// `_emit()` **必须**发生在 `_session` 赋值之后、任何 `await` 之前。
+  /// 否则一旦后续副作用（`subscribe` / `audit` —— 后者是真实 sqflite insert）
+  /// 抛异常，UI 就**永远收不到**会话：`_session` 已非空但 `changes` 从未广播，
+  /// 表现为"本机根本没有显示临时码"。
+  ///
+  /// ## 模块未开启守卫
+  /// `_wireAssist` 只在 `RcEndpointService.start()` 内调用一次；模块关闭时
+  /// `_transport == null`，此时订阅是 no-op、`audit` 也写不进去，却仍会生成
+  /// 一个**必然连不上**的死码且不给任何提示。与 [AssistJoinClient.join] 的
+  /// "远程模块未开启，无法接入"口径对称：这里显式拒绝，宁可报错不装死。
   Future<AssistSession> start({Duration ttl = RcAssist.defaultTtl}) async {
     await close(reason: 'superseded', silent: true);
+
+    final transport = _transport;
+    if (transport == null) {
+      throw StateError('远程模块未开启，无法生成临时码');
+    }
 
     final code = RcAssist.generateCode();
     final password = RcAssist.generatePassword();
@@ -140,14 +158,23 @@ class RcAssistHost {
     _session = session;
     _seen.clear();
     _seenWires.clear();
+    _emit(); // ← 先让 UI 拿到"等待接入"的会话，再碰任何可失败副作用
 
-    await _transport?.subscribe(topic);
-    await audit?.call(
-        'assist.start', 'success', '等待接入（TTL ${ttl.inMinutes} 分钟）');
+    // 副作用各自隔离：任一失败都不得阻断"码已可见"这一事实。
+    try {
+      await transport.subscribe(topic);
+    } on Object {
+      // 订阅失败：码仍可见，使用者至少能看到并可重试。
+    }
+    try {
+      await audit?.call(
+          'assist.start', 'success', '等待接入（TTL ${ttl.inMinutes} 分钟）');
+    } on Object {
+      // 审计失败绝不阻断会话创建（fail-open on visibility）。
+    }
 
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => tick());
-    _emit();
     return session;
   }
 
@@ -190,12 +217,24 @@ class RcAssistHost {
       s.phase = AssistPhase.closed;
     }
 
-    await _transport?.unsubscribe(s.topic);
+    // ⚠️ 本地状态必须先收敛并广播，再碰 unsubscribe / audit 这些可失败副作用。
+    // 否则 `audit` 一抛，`_session = null` 与 `_emit()` 都不执行 ⇒ 留下
+    // `phase=closed` 但 `_session != null` 的**僵尸会话**：UI 卡在"等待接入"，
+    // 且再也生成不了新码（P0-1 根因 b 的同类，后果更严重）。
     _keys = null;
-    await audit?.call('assist.end', 'success', '原因：${_reasonLabel(reason)}');
-    _emit();
     _session = null;
     _emit();
+
+    try {
+      await _transport?.unsubscribe(s.topic);
+    } on Object {
+      // 退订失败不影响"本地已终止"这一事实。
+    }
+    try {
+      await audit?.call('assist.end', 'success', '原因：${_reasonLabel(reason)}');
+    } on Object {
+      // 审计失败不得复活/阻塞已终止的会话。
+    }
   }
 
   static String _reasonLabel(String reason) => switch (reason) {
@@ -251,6 +290,24 @@ class RcAssistHost {
   /// 指令组步骤 → 所需权限位。
   static String? requiredStepPerm(RcStepKind kind) =>
       RcPermGate.requiredStepPerm(kind);
+
+  /// 任务载荷的动作级裁决（D-7）。返回 null = 放行，否则为拒绝原因。
+  ///
+  /// 只覆盖 `task.upsert`：其载荷自带完整任务定义，可在本层静态裁决。
+  /// `task.runNow` 只带 `taskId`，本层无从得知目标任务的动作类型 ——
+  /// 该残余面（协助方 `runNow` 本机**既有**录音任务）需端点服务在
+  /// `_runTaskNow` 装配任务后裁决，本轮 endpoint_service 只读未动，
+  /// 见 `_pt/audit/X1-d7.md` 剩余风险。
+  static String? _taskPayloadDeny(AssistPerms perms, RcMessage msg) {
+    if (msg.type != RcCmd.taskUpsert) return null;
+    final raw = msg.payload['task'];
+    if (raw is! Map) return null; // 结构非法由 TaskWire.fromWire 兜底拒绝
+    final required = TaskWire.requiredPermBitsForTaskAction(raw['action']);
+    final missing =
+        TaskWire.firstMissingPermBit(required, (bit) => hasPerm(perms, bit));
+    if (missing == null) return null;
+    return '任务动作需要权限「${AssistPerms.labels[missing] ?? missing}」，未放行';
+  }
 
   // ---------------- 入站处理 ----------------
 
@@ -320,6 +377,26 @@ class RcAssistHost {
             'data': need == null
                 ? '已拒绝'
                 : '权限未放行：${AssistPerms.labels[need] ?? need}',
+          }));
+      return;
+    }
+
+    // ---- D-7：任务负载的动作级权限裁决（docs/22 §9 采集红线）----
+    //
+    // 命令级门控只看命令类型：`task.upsert`/`task.runNow` 都映射到 `script`
+    // 位。若不在载荷层再看一眼，只放行 `script` 的协助方可新建
+    // `actionType:'recordEvidence'` 的任务并 `task.runNow` 触发录音，
+    // 绕开步骤级闸门对 `record` 的 `denyAll`（docs/22 §3 D-7）。
+    final taskDeny = _taskPayloadDeny(s.perms, msg);
+    if (taskDeny != null) {
+      await audit?.call('assist.deny', 'skipped', '${msg.type} · $taskDeny');
+      await _publish(
+          k.epKey,
+          RcMessage.now(RcEvt.ack, {
+            'ok': false,
+            'for': msg.id,
+            'forType': msg.type,
+            'data': taskDeny,
           }));
       return;
     }

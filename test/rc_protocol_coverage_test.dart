@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'support/source_text.dart';
+
 /// 远程协议（`RcCmd` / `RcEvt`）的**三向覆盖机器锁**。
 ///
 /// ## 为什么要有这个文件
@@ -40,11 +42,27 @@ import 'package:flutter_test/flutter_test.dart';
 /// Dart 无运行时反射，故直接解析 `lib/remote/protocol.dart` 的类体文本。
 /// 这是**权衡而非首选**：若将来协议常量改由代码生成（如 protobuf），
 /// 应改为断言生成产物而不是源码文本。
+
+// **剥掉注释**再做文本扫描 —— 本锁能被信任的前提（W5 P1）。
+//
+// 本项目刻意在 `lib/` 的注释里**写明**"每条命令必须登记"这类约定及其理由。
+// 不剥注释：存在性断言（`case RcCmd.x`）会被注释冒充（假绿）；
+// 禁止性断言（缺口登记表"不得冗余"）会把说明文字判成违规（假红）。
+//
+// 实现见 `test/support/source_text.dart`（第 36 轮收敛到唯一真源；
+// 此前本文件抄的是 test/rc_transport_lock_test.dart:72 那份副本）。
+
+
 void main() {
   // ---------------- 源码读取 ----------------
-  final protocol = File('lib/remote/protocol.dart').readAsStringSync();
-  final endpoint = File('lib/remote/endpoint_service.dart').readAsStringSync();
-  final permGate = File('lib/remote/assist.dart').readAsStringSync();
+  // ⚠️ 读入即剥注释（W5 P1）：下面所有 `contains` / `refsIn` 判据
+  // 只认**代码**，注释里引用 `RcCmd.xxx` 不是发送、不是 case、不是登记。
+  final protocol =
+      stripComments(File('lib/remote/protocol.dart').readAsStringSync());
+  final endpoint =
+      stripComments(File('lib/remote/endpoint_service.dart').readAsStringSync());
+  final permGate =
+      stripComments(File('lib/remote/assist.dart').readAsStringSync());
 
   /// 除端点 / 权限闸门 / 协议定义之外的**所有** Dart 源（含 `tool/` 桌面控制器）。
   final others = <String, String>{};
@@ -57,7 +75,7 @@ void main() {
           p == 'lib/remote/assist.dart') {
         continue;
       }
-      others[p] = f.readAsStringSync();
+      others[p] = stripComments(f.readAsStringSync());
     }
   }
 
@@ -104,6 +122,28 @@ void main() {
     'taskGet': '端点有实现，但无 UI 入口：`task.list` 已返回完整定义，'
         '单条拉取属预留能力（第七轮已判定为有意保留）。'
         '解除条件：控制台做「按 id 拉取单条任务」时一并接线。',
+    'deviceAlert': '找回告警（Q9-B）：端点分发与原生桥已接线，'
+        '控制端 UI 入口下一轮加入。解除条件：控制台加「找回」按钮。',
+  };
+
+  /// **必须在协助会话被拒绝、但登记在别处**的命令。
+  ///
+  /// `RcPermGate.requiredPerm` 的 `_ => denyAll` 已经让它们天然被拒，
+  /// 只是那条登记**不在 `assist.dart` 里**，本文件按文件名取文本，因此
+  /// 需要在这里显式登记，否则下面的"三向之二"会把它们误报成缺口。
+  ///
+  /// ⚠️ 这不是"豁免"：登记在这张表里的命令，其**运行时拒绝**由
+  /// `test/pair_roundtrip_test.dart` 直接断言
+  /// （`RcPermGate.allows(全放行, cmd) == false`）。
+  /// 一旦有人给 `assist.dart` 里的它配上真实权限位，两处会同时红 ——
+  /// 表里"不得冗余"用例要求删除本条目，行为用例要求 denyAll 仍成立。
+  const cmdDeniedInAssist = <String, String>{
+    'pairRequest': '`pair.request` 是**配对**命令，不是协助命令：协助对端'
+        '**未配对**，允许它等于让人借"临时协助"把自己变成已配对设备（提权面）。'
+        '`requiredPerm` 未登记 ⇒ `denyAll` ⇒ 一律拒绝。'
+        '登记在此是因为 `lib/remote/assist.dart` 不在本轮的改动范围内；'
+        '运行时拒绝由 test/pair_roundtrip_test.dart 锁死。'
+        '解除条件：在 assist.dart 的 `requiredPerm` 里显式列出它（保持 denyAll 语义）。',
   };
 
   /// 无人发出的事件。
@@ -111,9 +151,7 @@ void main() {
   /// ⚠️ `callMissed` 已于第十七轮**闭环**（BUG-050）：端点侧 `_wireCall()` 会在
   /// 被叫振铃超时后发出它。按本表的规矩，修好就要删条目（见下方"不得冗余"用例）。
   const evtWithoutEmitter = <String, String>{
-    'photo': '`camera.snap` 因 camera 插件无 AGP9 兼容版而按设计降级'
-        '（docs/16 §9），端点不会发出 `rc.photo`。'
-        '解除条件：camera 插件发布 AGP9 兼容版后恢复 `_snapPhoto`。',
+    'photo': '`camera.snap` 因 camera 插件无 AGP9 兼容版而按设计降级',
   };
 
   /// 无人消费的事件。
@@ -150,9 +188,12 @@ void main() {
   });
 
   test('RcCmd 三向之一：每条命令端点都有 case', () {
+    // 收窄到 `_dispatch` 的函数体（W5 P1）：`case RcCmd.x` 必须真的落在
+    // 端点分发的 switch 里，而不是文件里任何角落（别的注释/文本都算不了数）。
+    final dispatch = methodBody(endpoint, 'Future<void> _dispatch(');
     final missing = [
       for (final c in cmds)
-        if (!endpoint.contains('case RcCmd.$c')) c,
+        if (!dispatch.contains('case RcCmd.$c')) c,
     ];
     expect(missing, isEmpty, reason: '这些命令端点没有处理分支：$missing');
   });
@@ -160,7 +201,8 @@ void main() {
   test('RcCmd 三向之二：每条命令都在权限闸门显式登记', () {
     final missing = [
       for (final c in cmds)
-        if (!permGate.contains('RcCmd.$c')) c,
+        if (!permGate.contains('RcCmd.$c') && !cmdDeniedInAssist.containsKey(c))
+          c,
     ];
     expect(missing, isEmpty,
         reason: '这些命令未登记进 RcPermGate.requiredPerm —— '
@@ -211,6 +253,7 @@ void main() {
   test('缺口登记表不得腐烂：登记的名字必须仍存在于协议中', () {
     for (final entry in [
       ...cmdWithoutSender.keys,
+      ...cmdDeniedInAssist.keys,
       ...evtWithoutEmitter.keys,
       ...evtWithoutConsumer.keys,
       ...evtWithoutInAppConsumer.keys,
@@ -228,6 +271,12 @@ void main() {
       if (refsIn(others, 'RcCmd.$c').isNotEmpty) {
         stale.add('cmdWithoutSender/$c');
       }
+    }
+    for (final c in cmdDeniedInAssist.keys) {
+      // assist.dart 一旦真的登记了它，本条目就该删 —— 否则"拒绝"会从
+      // "显式声明"退化成"靠 `_ => denyAll` 兜底"，而本表存在的意义正是
+      // 逼着人显式写下来（同时 pair_roundtrip_test 会锁 denyAll 语义）。
+      if (permGate.contains('RcCmd.$c')) stale.add('cmdDeniedInAssist/$c');
     }
     for (final e in evtWithoutEmitter.keys) {
       if (endpoint.contains('RcEvt.$e')) stale.add('evtWithoutEmitter/$e');

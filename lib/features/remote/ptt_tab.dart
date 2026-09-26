@@ -48,6 +48,8 @@ class _PttTabState extends State<PttTab> {
   void dispose() {
     _ticker?.cancel();
     unawaited(_ackSub?.cancel());
+    // 录音中直接离开页面会把麦克风一直占着 —— 释放路径必须兜底。
+    if (_recording) unawaited(RcControllerService.instance.pttCancel());
     super.dispose();
   }
 

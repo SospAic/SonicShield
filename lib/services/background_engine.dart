@@ -24,6 +24,7 @@ import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/scheduling/schedule_engine.dart';
 import '../domain/scheduling/vibrate_resolve.dart';
+import '../features/guard/guard_orchestration.dart';
 import 'condition_env.dart';
 import 'notification_service.dart';
 import 'native_bridge.dart';
@@ -39,6 +40,7 @@ class EngineState {
     this.nextFireAt,
     this.lastAction,
     this.guardActive = false,
+    this.guardError,
   });
 
   final bool running;
@@ -47,12 +49,21 @@ class EngineState {
   final String? lastAction;
   final bool guardActive;
 
+  /// 守卫启动失败原因（成功 / 未尝试时为 null）。
+  ///
+  /// 为什么要随状态一起回投：`guardActive:false` 只能说明"没跑起来"，
+  /// 说不出"为什么"。UI 侧 `waitForGuardActive(true)` 超时后只能报
+  /// "引擎无响应"，而真实原因（如麦克风被占用）就在引擎手里 —— 不回投
+  /// 就等于把失败静默掉（BUG-061 判据）。
+  final String? guardError;
+
   Map<String, Object?> toMap() => {
         'running': running,
         'pendingCount': pendingCount,
         'nextFireAt': nextFireAt?.millisecondsSinceEpoch,
         'lastAction': lastAction,
         'guardActive': guardActive,
+        'guardError': guardError,
       };
 }
 
@@ -138,7 +149,45 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   var guardEnabled = prefs.getBool('guard_enabled') ?? false;
   StreamSubscription<SoundEvent>? guardSub;
+  /// 守卫**采流异常**的订阅（见 [SoundGuardService.errors]）。
+  ///
+  /// 为什么必须订阅：`record` 的采流在中途出错（麦克风被其它应用抢占、
+  /// 录音器崩溃）时，守卫端只把 `isRunning` 置 false —— 没有审计、没有原因，
+  /// 用户只看到"守卫自己关了"。订阅后把原因写进审计并回投 `guardError`。
+  StreamSubscription<Object>? guardErrSub;
   String? lastAction;
+
+  /// `executeDue` 的重入守卫（A2-P0-2；与 `VibrateSession._pumping` 同形）。
+  ///
+  /// 为什么要它：通道A 有**两个同源可叠加**的触发点 ——
+  /// `Timer.periodic(engineTick)`（`background_engine.dart:1136`）与
+  /// `service.on('tick')`（`:941`），而 `executeDue` 内的 `runAction` 可长时间
+  /// 阻塞（播放 / 录音 / TTS，最长 1800s）。没有守卫时，15s 的 tick 会在上一轮
+  /// `runAction` 尚未返回时**再起一份** `executeDue`，而 `due()` 只筛
+  /// `status='pending'` —— 那条计划尚未落终态，于是被**并发取出执行两次**
+  /// （双响 / 重复录音 / 播放器互踩）。
+  ///
+  /// ⚠️ 只做「`if (flag) return; flag = true; try { … } finally { flag = false; }`」
+  /// 这件事：不在本修复里改 tick 间隔、不改 `runAction` 超时、不动任何执行语义。
+  bool executing = false;
+
+  /// `replan` 的重入守卫（同形；`service.on('replan')` 与 tick 续算同源可叠加）。
+  ///
+  /// ⚠️ 刻意**不与 [executing] 共用一个标志**：共用会让「执行一个长动作」把
+  /// 续算整段挡掉（`replan` 负责续算计划视界），可能出现计划迟迟不续算。
+  /// 两条路径各自持锁即可消除各自的重入，且互不干扰（详见 F2 报告）。
+  bool replanning = false;
+
+  /// 守卫启动失败原因（随每次 `state` 广播回投给 UI）。
+  /// 成功启动 / 主动关闭时清空 —— 否则 UI 会一直拿着一条过期的错误。
+  String? guardError;
+
+  /// 守卫"延时执行"的待发定时器（v1.10 编排增强）。
+  ///
+  /// 持有它是为了**能被取消**：用户关了守卫 / 停了引擎之后，已排定的延时
+  /// 声音绝不能再响 —— 否则"关掉守卫"在最长一个延时窗口内等于没关
+  /// （与 `replan()` 里清除夜间豁免计划同一类护栏）。
+  Timer? guardDelayTimer;
 
   /// 读取一次平台环境（电量 / 充电 / 通话 / 网络），供一轮内**复用**。
   ///
@@ -205,6 +254,32 @@ Future<void> _engineBody(ServiceInstance service) async {
     final roll = (rng ?? math.Random()).nextInt(100);
     if (roll < pct) return null;
     return '概率 $pct% 未命中（掷出 $roll）';
+  }
+
+  /// 单步兜底执行：失败**写审计 + 打日志**，但绝不中断调用方。
+  ///
+  /// 存在的理由（真机取证，BUG-A）：引擎启动序列是**串行**的
+  /// （`executeDue` → `replan` → `broadcast`），任何一步抛出去，它下面的
+  /// 代码就再也不会执行 —— 而 UI 的"引擎在跑"完全依赖末尾那次广播。
+  /// Mi 14 Pro（Android 16）上老库缺列 `occurrences.quiet_exempt`，
+  /// `replan()` 抛 `SQLITE_ERROR` ⇒ 引擎永远不广播 ⇒ 引擎/守卫开关都打不开。
+  ///
+  /// 两处都留痕是刻意的：
+  /// - 审计（`exec_logs`）给用户看 —— 界面上能查到"这一轮为什么没算出计划"；
+  /// - `print` 给 `logcat` 看 —— 连审计都写不进去时（DB 本身坏了）仍有痕迹。
+  Future<void> stepGuarded(String name, Future<void> Function() step) async {
+    try {
+      await step();
+    } on Object catch (e) {
+      // ignore: avoid_print
+      print('[sonic_shield][engine] $name 失败：$e');
+      try {
+        await logs.append(
+            source: 'schedule', action: name, status: 'failed', message: '$e');
+      } on Object {
+        // 审计通道自身不可用时不再二次抛出：上面已经打过留痕日志。
+      }
+    }
   }
 
   // ==================== 依赖底座（先声明后引用） ====================
@@ -360,15 +435,19 @@ Future<void> _engineBody(ServiceInstance service) async {
   Future<void> recordAndLog(Task task, int seconds, String source) async {
     final rec = AudioRecorder();
     try {
-      if (!await rec.hasPermission()) {
-        await logs.append(
-            source: source,
-            action: 'record',
-            status: 'failed',
-            taskId: task.id,
-            message: '无麦克风权限');
-        return;
-      }
+      // ⚠️ **不再用 `rec.hasPermission()` 做准入判定**（真机取证 + 与
+      // `SoundGuardService.start` 同一条教训，N-1）：
+      // `record_android` 的 `PermissionManager.hasPermission()` 第一句就是
+      // `if (activity == null) { onResult(false); return }`，而本方法**只**
+      // 运行在 `flutter_background_service` 的引擎隔离里 —— 那里没有 Activity，
+      // 于是该判定**恒为 false**，与系统实际授权无关。
+      //
+      // 后果与 C-1 完全同形：**本地定时「录音取证」在这条路径上恒失败**
+      // （永远写 `failed · 无麦克风权限`、永不产出文件），而使用者看到的只是
+      // "到点了没录上"，UI 并不区分"权限真的没给"和"这个判定在不该用的上下文里"。
+      //
+      // 现在改为**直接尝试开始录制**：权限真的没给，`start` 会抛，
+      // 异常文本就是真实原因（比一句编造的"无麦克风权限"有用得多）。
       final dir = await getApplicationDocumentsDirectory();
       final path =
           '${dir.path}/evidence_${DateTime.now().millisecondsSinceEpoch}.evidence.m4a';
@@ -390,9 +469,18 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'success',
           taskId: task.id,
           durationMs: seconds * 1000,
-          message: 'sha256=$sha256Hex path=$path');
-      await NotificationService.instance
-          .showEvent(title: '声盾 · 取证完成', body: '已保存到应用私有目录（含完整性哈希）');
+          // ⚠️ 哈希为空必须**写进审计文本**：只留 `sha256= ` 会被读成
+          // "哈希就算出来了，只是空" —— 完整性校验其实没做到。
+          message: sha256Hex.isEmpty
+              ? 'sha256=（文件不可读，未生成完整性哈希）path=$path'
+              : 'sha256=$sha256Hex path=$path');
+      await NotificationService.instance.showEvent(
+        title: '声盾 · 取证完成',
+        // 同理：**承诺了哈希才说含哈希** —— 没算出来就说没算出来。
+        body: sha256Hex.isEmpty
+            ? '已保存到应用私有目录（文件不可读，完整性哈希未生成）'
+            : '已保存到应用私有目录（含完整性哈希）',
+      );
     } catch (e) {
       await logs.append(
           source: source,
@@ -442,13 +530,32 @@ Future<void> _engineBody(ServiceInstance service) async {
           return true;
         }
         try {
-          await native.invokeMethod('vibrate', {'pattern': v.patternMs});
-          await logs.append(
-              source: source,
-              action: 'vibrate',
-              status: 'success',
-              taskId: task.id,
-              occurrenceId: occurrenceId);
+          // ⚠️ 必须**检查回执**，不能只看"有没有抛异常"。
+          //
+          // Android 侧 `result.success(true)`；而 iOS 侧既没有 `vibrate` 分支、
+          // 也不会回复 —— `invokeMethod` 返回 **null 而不抛**。旧代码据此写下
+          // `status: 'success'`：审计里躺着一条**成功的振动**，而机器抖都没抖。
+          // 这正是项目红线"静默假成功"的又一形态（与 C-3 `volume.set`、
+          // `playHandler` 空转同族）。
+          final ack = await native.invokeMethod('vibrate', {'pattern': v.patternMs});
+          if (ack == true) {
+            await logs.append(
+                source: source,
+                action: 'vibrate',
+                status: 'success',
+                taskId: task.id,
+                occurrenceId: occurrenceId);
+          } else {
+            // 不写成 failed：命令本身没错，是**这个平台没实现这条通道**。
+            // 如实标注"平台未确认"，并保留原生回执值以便诊断。
+            await logs.append(
+                source: source,
+                action: 'vibrate',
+                status: 'skipped',
+                taskId: task.id,
+                occurrenceId: occurrenceId,
+                message: '平台未确认振动（原生回执=$ack）：本平台可能未实现该通道');
+          }
         } on Object {
           await logs.append(
               source: source,
@@ -522,7 +629,11 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
   }
 
-  Future<void> broadcast() async {
+  /// 回投引擎状态。
+  ///
+  /// [running] 默认 true（从引擎内部广播时它当然在跑），但**停止路径必须
+  /// 显式传 false** —— 见 `service.on('stop')`。
+  Future<void> broadcast({bool running = true}) async {
     final now = DateTime.now();
     final pending = await occs.pendingCountAfter(now);
     final next = await occs.pendingWithin(now, now.add(const Duration(days: 7)),
@@ -530,187 +641,260 @@ Future<void> _engineBody(ServiceInstance service) async {
     service.invoke(
         'state',
         EngineState(
-          running: true,
+          running: running,
           pendingCount: pending,
           nextFireAt: next.isEmpty ? null : next.first.fireAt,
           lastAction: lastAction,
           guardActive: guard.isRunning,
+          guardError: guardError,
         ).toMap());
   }
 
+  /// 排布通道B（原生精确闹钟）。
+  ///
+  /// ⚠️ 旧实现是空 `catch`：排布失败**零痕迹**。后果是
+  /// "进程被杀之后定时任务不再触发"这件事用户永远发现不了 —— 界面上
+  /// 计划照常列出、引擎照常显示运行中，只有真机长时间灭屏后才漏出洞。
+  /// 现在区分两种不可排布：**原生明确抛错**（failed）与**平台未回执**
+  /// （skipped，iOS/桌面没有这条通道），都写审计。
   Future<void> pushExactAlarms(List<int> times) async {
     try {
-      await native.invokeMethod('setExactAlarms', {'times': times});
-    } on Object {
-      // 桌面/测试降级：仅通道A生效
+      final n = await native.invokeMethod('setExactAlarms', {'times': times});
+      if (n == null) {
+        await logs.append(
+            source: 'schedule',
+            action: 'alarms',
+            status: 'skipped',
+            message: '原生未回执精确闹钟排布：本平台可能未实现该通道，'
+                '进程被杀后不再补触发（仅通道A生效）');
+      }
+    } on Object catch (e) {
+      await logs.append(
+          source: 'schedule',
+          action: 'alarms',
+          status: 'failed',
+          message: '精确闹钟排布失败（仅通道A生效）：$e');
     }
   }
 
+  /// 清除全部原生精确闹钟。
+  ///
+  /// 与 [pushExactAlarms] 对称：清理失败会留下**过期闹钟**，
+  /// 表现为"任务删了 / 引擎关了，到点还是会唤醒一次"。
   Future<void> clearAllAlarms() async {
     try {
       await native.invokeMethod('clearAlarms');
-    } on Object {
-      // 同上
+    } on Object catch (e) {
+      await logs.append(
+          source: 'schedule',
+          action: 'alarms',
+          status: 'failed',
+          message: '清除精确闹钟失败（可能残留过期闹钟）：$e');
     }
   }
 
   /// 计划续算：物化未来 horizon，幂等提交，并排布原生精确闹钟（通道B）。
+  ///
+  /// 重入守卫（A2-P0-2）：见 [replanning] 的说明。
   Future<void> replan() async {
-    final now = DateTime.now();
-    final all = await tasksRepo.listAll(enabledOnly: true);
-    // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
-    // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
-    // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
-    final window = normalizeQuietWindow(
-      prefs.getInt(PrefsKeys.quietStartHour),
-      prefs.getInt(PrefsKeys.quietEndHour),
-    );
-    // 夜间独立豁免主开关（v1.9，docs/20 §8.1）：**每轮重读**，不用服务启动时的快照。
-    // 用户在引擎运行期间改设置后，下一轮物化即生效（无需重启服务）。
-    // 读的是 `SharedPreferences`（与本项目其它用户级设置同一存储）。
-    final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
-    if (!allowExempt) {
-      // 授权被撤销 ⇒ **立刻清除**已落库的豁免计划。
-      // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
-      // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
-      // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
-      final purged = await occs.deletePendingQuietExempt();
-      if (purged > 0) {
-        await logs.append(
-            source: 'schedule',
-            action: 'quietExempt',
-            status: 'skipped',
-            message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划');
-      }
-    }
-    final engine = ScheduleEngine(
-      quietStartHour: window.start,
-      quietEndHour: window.end,
-      allowQuietExempt: allowExempt,
-    );
-    final newEntries = <PlannedEntry>[];
-    for (final t in all) {
-      if (t.triggerType == TriggerType.soundTriggered) continue;
-      newEntries.addAll(engine.materialize(t, now));
-    }
-    if (newEntries.isEmpty) {
-      await clearAllAlarms();
-      await broadcast();
+    // 与 executeDue 的守卫同形；同样在任何 await 之前同步置位。
+    if (replanning) {
+      // ignore: avoid_print
+      print('[sonic_shield][engine] replan 重入被拒：上一轮续算尚未完成，跳过本次触发');
       return;
     }
-    await occs.commitAll([
-      for (final e in newEntries)
-        PlannedOccurrence(
-          id: e.occurrenceId,
-          taskId: e.taskId,
-          fireAt: e.fireAt,
-          status: OccurrenceStatus.pending,
-          volume: e.volume,
-          durationMs: e.durationMs,
-          quietExempt: e.quietExempted,
-        ),
-    ]);
-    final alarmTimes = newEntries
-        .take(SchedulerConfig.maxNativeAlarmsPerTask)
-        .map((e) => e.fireAt.millisecondsSinceEpoch)
-        .toList();
-    await pushExactAlarms(alarmTimes);
-    lastAction = 'replan(${newEntries.length} 条计划)';
-    await broadcast();
+    replanning = true;
+    try {
+      final now = DateTime.now();
+      final all = await tasksRepo.listAll(enabledOnly: true);
+      // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
+      // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
+      // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
+      final window = normalizeQuietWindow(
+        prefs.getInt(PrefsKeys.quietStartHour),
+        prefs.getInt(PrefsKeys.quietEndHour),
+      );
+      // 夜间独立豁免主开关（v1.9，docs/20 §8.1）：**每轮重读**，不用服务启动时的快照。
+      // 用户在引擎运行期间改设置后，下一轮物化即生效（无需重启服务）。
+      // 读的是 `SharedPreferences`（与本项目其它用户级设置同一存储）。
+      final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
+      if (!allowExempt) {
+        // 授权被撤销 ⇒ **立刻清除**已落库的豁免计划。
+        // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
+        // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
+        // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
+        final purged = await occs.deletePendingQuietExempt();
+        if (purged > 0) {
+          await logs.append(
+              source: 'schedule',
+              action: 'quietExempt',
+              status: 'skipped',
+              message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划');
+        }
+      }
+      final engine = ScheduleEngine(
+        quietStartHour: window.start,
+        quietEndHour: window.end,
+        allowQuietExempt: allowExempt,
+      );
+      final newEntries = <PlannedEntry>[];
+      for (final t in all) {
+        if (t.triggerType == TriggerType.soundTriggered) continue;
+        newEntries.addAll(engine.materialize(t, now));
+      }
+      if (newEntries.isEmpty) {
+        await clearAllAlarms();
+        await broadcast();
+        return;
+      }
+      await occs.commitAll([
+        for (final e in newEntries)
+          PlannedOccurrence(
+            id: e.occurrenceId,
+            taskId: e.taskId,
+            fireAt: e.fireAt,
+            status: OccurrenceStatus.pending,
+            volume: e.volume,
+            durationMs: e.durationMs,
+            quietExempt: e.quietExempted,
+          ),
+      ]);
+      final alarmTimes = newEntries
+          .take(SchedulerConfig.maxNativeAlarmsPerTask)
+          .map((e) => e.fireAt.millisecondsSinceEpoch)
+          .toList();
+      await pushExactAlarms(alarmTimes);
+      lastAction = 'replan(${newEntries.length} 条计划)';
+      await broadcast();
+    } finally {
+      replanning = false;
+    }
   }
 
   /// 执行所有到期计划（幂等；带补执行上限与陈旧丢弃）。
+  ///
+  /// 重入守卫（A2-P0-2）：见 [executing] 的说明。
   Future<void> executeDue() async {
-    final now = DateTime.now();
-    final due = await occs.due(now, limit: SchedulerConfig.catchUpLimit);
-    // 本轮环境快照：**首次需要时**读一次，轮内所有到期任务复用。
-    // 惰性 → 若所有计划都在下面的"过期丢弃"分支被跳过，则一次平台读取都不会发生。
-    final env = RoundConditionEnv(read: readConditionEnv);
-    for (final o in due) {
-      if (now.difference(o.fireAt) > const Duration(minutes: 10)) {
-        await occs.markStatus(o.id, OccurrenceStatus.skipped);
-        await logs.append(
-            source: 'schedule',
-            action: 'skip-stale',
-            status: 'skipped',
-            taskId: o.taskId,
-            occurrenceId: o.id);
-        continue;
-      }
-      final task = await tasksRepo.get(o.taskId);
-      if (task == null || !task.enabled) {
-        await occs.markStatus(o.id, OccurrenceStatus.skipped);
-        continue;
-      }
-      // 条件层（v1.3）：不满足则跳过并审计。
-      final condFail = conditionFailedIn(task, await env.value);
-      if (condFail != null) {
-        await occs.markStatus(o.id, OccurrenceStatus.skipped);
-        await logs.append(
-            source: 'schedule',
-            action: 'condition',
-            status: 'skipped',
-            taskId: task.id,
-            occurrenceId: o.id,
-            message: condFail);
-        continue;
-      }
-      // 概率门（v1.8）：确定性条件通过后再掷随机门。
-      final gateFail = probabilityGateMissed(task);
-      if (gateFail != null) {
-        await occs.markStatus(o.id, OccurrenceStatus.skipped);
-        await logs.append(
-            source: 'schedule',
-            action: 'probability',
-            status: 'skipped',
-            taskId: task.id,
-            occurrenceId: o.id,
-            message: gateFail);
-        continue;
-      }
-      final ok = await runAction(
-          task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule',
-          occurrenceId: o.id);
-      await occs.markStatus(
-          o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
-      // 夜间独立豁免审计（v1.9，docs/20 §8.2 约束 2）：**不得静默生效**。
-      // 读的是**计划条目上持久化的标记**（而非任务当前配置）——
-      // 任务配置可能在计划生成后被改掉，标记才代表"这条计划当时为何被放行"。
-      if (o.quietExempt) {
-        await logs.append(
-            source: 'schedule',
-            action: 'quietExempt',
-            status: ok ? 'success' : 'failed',
-            taskId: task.id,
-            occurrenceId: o.id,
-            message: '用户豁免免打扰（任务级）');
-      }
+    // 必须在**任何 await 之前**同步置位 —— Dart 单线程，同步置位对同 isolate
+    // 的一切重入是原子的（这是守卫成立的前提，不是风格）。
+    if (executing) {
+      // 不静默吞掉：留 logcat 痕迹（与 `runZonedGuarded` 的自愈日志同渠道）。
+      // 刻意**不写审计**：长动作（最长 1800s）期间每 15s 会被拒一次，写审计会把
+      // 用户的执行日志刷爆；而本条计划并未失败（首轮仍在跑，由它自己落终态审计），
+      // 无任何用户可见降级。
+      // ignore: avoid_print
+      print('[sonic_shield][engine] executeDue 重入被拒：上一轮仍在执行，跳过本次触发');
+      return;
     }
-    if (due.isNotEmpty) await broadcast();
+    executing = true;
+    try {
+      final now = DateTime.now();
+      final due = await occs.due(now, limit: SchedulerConfig.catchUpLimit);
+      // 本轮环境快照：**首次需要时**读一次，轮内所有到期任务复用。
+      // 惰性 → 若所有计划都在下面的"过期丢弃"分支被跳过，则一次平台读取都不会发生。
+      final env = RoundConditionEnv(read: readConditionEnv);
+      for (final o in due) {
+        if (now.difference(o.fireAt) > const Duration(minutes: 10)) {
+          await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          await logs.append(
+              source: 'schedule',
+              action: 'skip-stale',
+              status: 'skipped',
+              taskId: o.taskId,
+              occurrenceId: o.id);
+          continue;
+        }
+        final task = await tasksRepo.get(o.taskId);
+        if (task == null || !task.enabled) {
+          await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          continue;
+        }
+        // 条件层（v1.3）：不满足则跳过并审计。
+        final condFail = conditionFailedIn(task, await env.value);
+        if (condFail != null) {
+          await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          await logs.append(
+              source: 'schedule',
+              action: 'condition',
+              status: 'skipped',
+              taskId: task.id,
+              occurrenceId: o.id,
+              message: condFail);
+          continue;
+        }
+        // 概率门（v1.8）：确定性条件通过后再掷随机门。
+        final gateFail = probabilityGateMissed(task);
+        if (gateFail != null) {
+          await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          await logs.append(
+              source: 'schedule',
+              action: 'probability',
+              status: 'skipped',
+              taskId: task.id,
+              occurrenceId: o.id,
+              message: gateFail);
+          continue;
+        }
+        // 乐观置状态（A2-P0-2 第二道防线）：`due()` 只筛 `status='pending'`，
+        // 而 `runAction` 可阻塞至 1800s。若等它返回再落状态，跨 isolate
+        // （原生闹钟唤醒的第二份服务）或守卫失效后的第二次 `due()` 仍会把它
+        // 再次取出。因此在执行**之前**先把它标成 `failed`（等价于"已被本次执行
+        // 取走"），使并发取出必然落空；执行结束后再按真实结果覆盖为 done/failed。
+        //
+        // 不引入新状态值：`OccurrenceStatus` 仍是 pending/done/skipped/failed
+        // （`task.dart:146`），`fromRow` 的 `values.byName` 与既有断言/持久化完全
+        // 兼容；正向语义不变 —— 正常路径下这一行紧接着就被下面那行覆盖。
+        await occs.markStatus(o.id, OccurrenceStatus.failed);
+        final ok = await runAction(
+            task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule',
+            occurrenceId: o.id);
+        await occs.markStatus(
+            o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+        // 夜间独立豁免审计（v1.9，docs/20 §8.2 约束 2）：**不得静默生效**。
+        // 读的是**计划条目上持久化的标记**（而非任务当前配置）——
+        // 任务配置可能在计划生成后被改掉，标记才代表"这条计划当时为何被放行"。
+        if (o.quietExempt) {
+          await logs.append(
+              source: 'schedule',
+              action: 'quietExempt',
+              status: ok ? 'success' : 'failed',
+              taskId: task.id,
+              occurrenceId: o.id,
+              message: '用户豁免免打扰（任务级）');
+        }
+      }
+      if (due.isNotEmpty) await broadcast();
+    } finally {
+      // 无论如何都要复位：否则一次异常就会把守卫永久卡死，引擎从此不再执行任何
+      // 计划（比原缺陷更糟）。这是「反向断言」锁住的那一点。
+      executing = false;
+    }
   }
 
-  /// 声音事件 -> 执行所有启用的声音触发任务。
-  Future<void> onSoundEvent(DateTime at, double peakDb) async {
+  /// 读取守卫编排配置（v1.10）。
+  ///
+  /// 存 `kv` 而**不是**给 `sound_profiles` 加列：加列要走 DB 迁移
+  /// （`lib/data/db/app_database.dart`），而 kv 是既有的通用键值表 ——
+  /// 不动 schema 就不会引入"老库缺列"那一类事故。
+  /// 每轮重读（不缓存）：用户在引擎运行期间改配置，下一次事件即生效。
+  Future<GuardOrchestration> loadGuardOrchestration() async =>
+      GuardOrchestration.decode(await db.kvGet(guardOrchestrationKey));
+
+  /// 执行一次守卫计划（立即路径与延时路径**共用**，避免两条实现漂移）。
+  Future<void> runGuardPlan(GuardPlan plan, DateTime at) async {
     final all = await tasksRepo.listAll(enabledOnly: true);
-    // 本轮环境快照：本次声音事件会遍历**所有**声音触发任务，
-    // 同样只读一次平台状态（与 executeDue 同理）。
-    final env = RoundConditionEnv(read: readConditionEnv);
-    for (final t
-        in all.where((t) => t.triggerType == TriggerType.soundTriggered)) {
-      final cfg = t.trigger as SoundTrigger;
-      final last = await occs.lastDoneFor(t.id);
-      final cooldown =
-          Duration(seconds: math.max(cfg.cooldownSec, t.cooldownSec));
-      if (last != null && at.difference(last) < cooldown) continue;
-      // 条件层（v1.3）：声音触发同样受前置条件约束。
-      final condFail = conditionFailedIn(t, await env.value);
-      if (condFail != null) {
+    // 计划里的 id 可能已被删除/停用：**跳过并留痕**，不拿别的任务顶上
+    // （与 BUG-059「点名了就必须满足」同一判据）。
+    final byId = {for (final t in all) t.id: t};
+    for (final id in plan.taskIds) {
+      final t = byId[id];
+      if (t == null) {
         await logs.append(
             source: 'sound',
-            action: 'condition',
+            action: 'guardPlan',
             status: 'skipped',
-            taskId: t.id,
-            message: condFail);
+            taskId: id,
+            message: '计划中的任务已不存在或已停用，已跳过（不改播其它任务）');
         continue;
       }
       await runAction(t, 0.8, 0, 'sound');
@@ -726,7 +910,112 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   }
 
+  /// 声音事件 -> 执行守卫计划。
+  ///
+  /// v1.10 编排增强（`GuardOrchestration`）只补三件事：
+  /// **候选子集 / N 选一随机 / 延时执行**；动作内容仍完全由任务自己的动作层
+  /// （`assetIds` 多音频随机、`ActionSetAction` 多动作加权随机、概率门）决定。
+  Future<void> onSoundEvent(DateTime at, double peakDb) async {
+    final all = await tasksRepo.listAll(enabledOnly: true);
+    // 本轮环境快照：本次声音事件会遍历**所有**声音触发任务，
+    // 同样只读一次平台状态（与 executeDue 同理）。
+    final env = RoundConditionEnv(read: readConditionEnv);
+
+    // 第一步：先算出**真正够格**的候选（冷却 + 条件都通过），
+    // 再交给编排决策 —— 否则"随机挑一个"可能挑中一个本来会被跳过的任务。
+    final ready = <String>[];
+    for (final t
+        in all.where((t) => t.triggerType == TriggerType.soundTriggered)) {
+      final cfg = t.trigger as SoundTrigger;
+      final last = await occs.lastDoneFor(t.id);
+      final cooldown =
+          Duration(seconds: math.max(cfg.cooldownSec, t.cooldownSec));
+      if (last != null && at.difference(last) < cooldown) continue;
+      final condFail = conditionFailedIn(t, await env.value);
+      if (condFail != null) {
+        await logs.append(
+            source: 'sound',
+            action: 'condition',
+            status: 'skipped',
+            taskId: t.id,
+            message: condFail);
+        continue;
+      }
+      ready.add(t.id);
+    }
+
+    final config = await loadGuardOrchestration();
+    final plan = resolveGuardPlan(
+      candidateIds: ready,
+      config: config,
+      rng: math.Random(),
+    );
+
+    // 点名了却一个都不在候选里 ⇒ 明确留痕，不静默（BUG-059 判据）。
+    if (plan.isEmpty && config.taskIds.isNotEmpty) {
+      await logs.append(
+          source: 'sound',
+          action: 'guardPlan',
+          status: 'skipped',
+          message: '编排点名的 ${config.taskIds.length} 个任务都不在本次候选中'
+              '（已删除/停用/冷却中/条件不满足），本次不执行任何动作');
+      await broadcast();
+      return;
+    }
+    if (plan.isEmpty) {
+      await broadcast();
+      return;
+    }
+
+    // 随机决策必须可回溯："为什么这次响的是它"。
+    if (config.pick == GuardPickMode.randomOne) {
+      await logs.append(
+          source: 'sound',
+          action: 'guardPlan',
+          status: 'success',
+          taskId: plan.taskIds.first,
+          message: '候选 ${ready.length} 个 → 随机选中 ${plan.taskIds.first}');
+    }
+
+    // 延时执行：先留痕，再排定一个**可取消**的定时器。
+    if (plan.delayMs > 0) {
+      await logs.append(
+          source: 'sound',
+          action: 'guardDelay',
+          status: 'success',
+          message: '检测到声音事件（${peakDb.toStringAsFixed(1)} dBFS），'
+              '${plan.delayMs ~/ 1000}s 后执行 ${plan.taskIds.length} 项');
+      guardDelayTimer?.cancel();
+      guardDelayTimer = Timer(Duration(milliseconds: plan.delayMs), () {
+        guardDelayTimer = null;
+        // 延时窗口内守卫可能已被关闭（`service.on('guard')` 会取消本定时器）；
+        // 这里再查一次 `guardEnabled` 做双保险，绝不在用户说"关"之后出声。
+        if (!guardEnabled) return;
+        unawaited(runGuardPlan(plan, DateTime.now()));
+      });
+      await broadcast();
+      return;
+    }
+
+    await runGuardPlan(plan, at);
+  }
+
   // ==================== UI -> 服务 消息 ====================
+
+  /// 守卫采流异常（麦克风被抢占 / 录音器崩溃）：**写审计 + 回投原因**。
+  ///
+  /// 守卫端已把 `isRunning` 置 false（停止方向走安全侧，没有"还在采"的风险），
+  /// 缺的只是"为什么"。不在这里做任何自愈重试：重试一个刚失败的录音器
+  /// 只会让用户在不知情的情况下反复经历"守卫开了又关"。
+  Future<void> onGuardStreamError(Object e) async {
+    guardError = '守卫已停止：采流异常（$e）';
+    await logs.append(
+        source: 'guard',
+        action: 'stream',
+        status: 'failed',
+        message: '采流中断，守卫已停止：$e');
+    await broadcast();
+  }
 
   service.on('replan').listen((_) => unawaited(replan()));
   service.on('tick').listen((_) => unawaited(executeDue()));
@@ -749,26 +1038,56 @@ Future<void> _engineBody(ServiceInstance service) async {
                   ((profiles.first['only_while_charging'] as int?) ?? 0) == 1,
             );
       final started = await guard.start(cfg);
-      if (started) {
+      guardError = started.message;
+      if (started.ok) {
         await guardSub?.cancel();
         guardSub = guard.events
             .listen((e) => unawaited(onSoundEvent(e.detectedAt, e.peakDb)));
+        await guardErrSub?.cancel();
+        guardErrSub = guard.errors.listen((e) {
+          unawaited(onGuardStreamError(e));
+        });
       }
       await logs.append(
           source: 'guard',
           action: 'start',
-          status: started ? 'success' : 'failed',
-          message: started ? null : '麦克风权限被拒');
+          status: started.ok ? 'success' : 'failed',
+          // ⚠️ 失败原因**原样**入库：UI 也要拿到同一条文本（经 `guardError`），
+          // 两侧文案同源，避免"日志里写着权限、界面说引擎无响应"。
+          message: started.message);
     } else {
+      guardError = null;
+      // 先撤延时计划：用户说"关"，就不能再有任何已排定的声音。
+      guardDelayTimer?.cancel();
+      guardDelayTimer = null;
       await guardSub?.cancel();
+      guardSub = null;
+      await guardErrSub?.cancel();
+      guardErrSub = null;
       await guard.stop();
+      // 关闭也要留痕（对称）：否则"关了但没关掉"在日志里完全无迹可寻。
+      await logs.append(
+          source: 'guard', action: 'stop', status: 'success');
     }
     await broadcast();
   });
   service.on('stop').listen((_) async {
+    guardDelayTimer?.cancel();
+    guardDelayTimer = null;
     await guardSub?.cancel();
+    guardSub = null;
+    await guardErrSub?.cancel();
+    guardErrSub = null;
     await guard.stop();
     await playback.stop();
+    // ⚠️ **必须在 `stopSelf()` 之前回投 `running:false`**。
+    // 旧实现从不回投停止状态，且 `broadcast()` 把 `running` 写死成 `true` ⇒
+    // UI 的 `isRunning` 永远停在 true（引擎已经死了，再没人能广播），
+    // 表现为"引擎开关**开了关不掉**"（真机 MI MAX 2 / API 25，BUG-B）。
+    await broadcast(running: false);
+    // `invoke` 只是把消息交给平台通道：给它一次事件循环的机会送出去，
+    // 再杀自己。不加这一句，最后一条状态可能随 isolate 一起消失。
+    await Future<void>.delayed(const Duration(milliseconds: 150));
     await service.stopSelf();
   });
 
@@ -803,7 +1122,22 @@ Future<void> _engineBody(ServiceInstance service) async {
   service.on('runNow').listen((m) async {
     final taskId = m?['taskId'] as String?;
     final reqId = m?['reqId'] as String? ?? '';
-    if (taskId == null || taskId.isEmpty) return;
+    if (taskId == null || taskId.isEmpty) {
+      // ⚠️ 缺参数也必须回执：直接 `return` 会让发送端一直等到超时，
+      // 只得到一句"引擎执行超时"，而真实原因是"这条命令没带任务 id"。
+      await logs.append(
+          source: 'remote',
+          action: 'runNow',
+          status: 'failed',
+          message: '远程立即执行缺少 taskId，已拒绝');
+      service.invoke('rcRunResult', {
+        'reqId': reqId,
+        'taskId': taskId ?? '',
+        'ok': false,
+        'message': '缺少 taskId：引擎无法执行',
+      });
+      return;
+    }
     var ok = false;
     var message = '';
     try {
@@ -842,6 +1176,14 @@ Future<void> _engineBody(ServiceInstance service) async {
       }
     } on Object catch (e) {
       message = e.toString();
+      // 远程路径的异常也要落本机审计：`rcRunResult` 只回给发送端一次，
+      // 本机日志里没痕迹的话，"远程点了一下没反应"事后完全无法排查。
+      await logs.append(
+          source: 'remote',
+          action: 'runNow',
+          status: 'failed',
+          taskId: taskId,
+          message: '远程立即执行异常：$e');
     }
     service.invoke('rcRunResult', {
       'reqId': reqId,
@@ -905,18 +1247,28 @@ Future<void> _engineBody(ServiceInstance service) async {
   // ==================== 通道A：引擎主循环 ====================
 
   Timer.periodic(SchedulerConfig.engineTick, (_) {
-    unawaited(executeDue());
+    unawaited(stepGuarded('executeDue(tick)', executeDue));
     unawaited(() async {
       final pending = await occs.pendingCountAfter(DateTime.now());
       if (pending < SchedulerConfig.planExtendThreshold.inHours) {
-        await replan();
+        await stepGuarded('replan(tick)', replan);
       }
     }());
   });
 
   // 启动即补执行 + 续算（通道B 唤醒后同样走这里）。
-  await executeDue();
-  await replan();
+  //
+  // ⚠️ **每一步都必须独立兜底**，因为它们串在同一个 async 体里：
+  // 任何一步抛出去，它**下面**的代码就再也不会执行 —— 而 UI 的"引擎在跑"
+  // 完全依赖本函数末尾那一次 `broadcast()`。
+  //
+  // 真机实证（Mi 14 Pro / Android 16，logcat `[sonic_shield][engine] unhandled:`）：
+  // 老库缺列 `occurrences.quiet_exempt` ⇒ `replan()` 抛
+  // `DatabaseException(no such column: quiet_exempt)` ⇒ 整个 body 中断 ⇒
+  // **引擎永远不广播状态** ⇒ UI 的 `isRunning` 恒为 false ⇒
+  // 「守护」页引擎开关与「守卫」页守卫开关**都打不开**，且页面零解释（BUG-A）。
+  await stepGuarded('executeDue', executeDue);
+  await stepGuarded('replan', replan);
   if (guardEnabled) {
     service.invoke('guard', {'enabled': true}); // 守卫自恢复
   }

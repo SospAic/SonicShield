@@ -18,6 +18,22 @@ class SoundEvent {
   final int durationMs;
 }
 
+/// 守卫启动结果。
+///
+/// ⚠️ 为什么不再是 `bool`：`bool` 只能表达"成/败"，而失败时**必须能说清为什么**
+/// （BUG-061 判据：要失败，但不要静默失败）。引擎把它**原样**回投给 UI
+/// （`EngineState.guardError`），于是用户看到的不是笼统的"引擎无响应"，
+/// 而是麦克风侧的真实原因。
+class GuardStartResult {
+  const GuardStartResult.ok() : message = null;
+  const GuardStartResult.failed(this.message);
+
+  /// null = 成功；非 null = 失败原因（直接给用户看）。
+  final String? message;
+
+  bool get ok => message == null;
+}
+
 /// 声音守卫：麦克风采流 -> 滑动 RMS -> dBFS 阈值判定。
 ///
 /// v1 为纯能量阈值检测（零依赖、低功耗、可解释）；
@@ -35,6 +51,16 @@ class SoundGuardService {
   final _events = StreamController<SoundEvent>.broadcast();
   final _levels = StreamController<double>.broadcast();
 
+  /// 采流异常（麦克风被抢占 / 录音器崩溃）的广播流。
+  ///
+  /// 为什么要**单独一条流**：`events` 的消费者只处理"检测到声音"，把错误
+  /// 混进去会让"出错"被当成"一次声音事件"，反而触发一堆动作。
+  /// 此前这里只把 `_running` 置 false —— 流一断守卫就**悄悄停了**：
+  /// UI 下次刷新只看到 `guardActive:false`，既没有原因也没有审计
+  /// （"失败不可见"，BUG-061 判据）。现在由引擎订阅本流写审计并回投原因。
+  final _errors = StreamController<Object>.broadcast();
+  Stream<Object> get errors => _errors.stream;
+
   /// 实时电平（dBFS，供 UI 电平表）。
   Stream<double> get levels => _levels.stream;
   Stream<SoundEvent> get events => _events.stream;
@@ -43,18 +69,42 @@ class SoundGuardService {
   bool get isRunning => _running;
 
   /// 启动守卫。必须在前台/带麦克风前台服务的上下文中调用。
-  Future<bool> start(SoundTrigger cfg) async {
-    if (_running) return true;
-    if (!await _recorder.hasPermission()) return false;
-    _running = true;
+  ///
+  /// ⚠️ **不再用 `_recorder.hasPermission()` 做准入判定**（真机取证结论）：
+  /// `record_android` 的 `PermissionManager.hasPermission()` 第一句就是
+  /// `if (activity == null) { resultCallback.onResult(false); return }`
+  /// （`record_android-2.2.0/.../permission/PermissionManager.kt:33-36`）。
+  /// 本方法**只**运行在 `flutter_background_service` 的引擎隔离里 —— 那里
+  /// 没有 Activity，于是该判定**恒为 false**，与系统实际授权无关。
+  ///
+  /// 实证（MI MAX 2 / API 25，`RECORD_AUDIO: granted=true`）：
+  /// 审计表里留下 `guard · start · failed · 麦克风权限被拒` —— 用户点了开关、
+  /// 系统权限也是开着的，守卫却起不来，且 UI 只报"引擎无响应"。
+  ///
+  /// 现在改为**直接尝试取流**：权限真的没给，`startStream` 会抛，异常文本
+  /// 就是真实原因（比一句编造的"权限被拒"有用）。这也让 `_running` 的语义
+  /// 变成"**确实拿到流了**"，而不是"我们打算开始"。
+  Future<GuardStartResult> start(SoundTrigger cfg) async {
+    if (_running) return const GuardStartResult.ok();
 
     // 16kHz 单声道 PCM16 足够做能量检测且功耗低。
-    final stream = await _recorder.startStream(const RecordConfig(
-      encoder: AudioEncoder.pcm16bits,
-      sampleRate: 16000,
-      numChannels: 1,
-      androidConfig: AndroidRecordConfig(audioSource: AndroidAudioSource.mic),
-    ));
+    final Stream<Uint8List> stream;
+    try {
+      stream = await _recorder.startStream(const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+        androidConfig: AndroidRecordConfig(audioSource: AndroidAudioSource.mic),
+      ));
+    } on Object catch (e) {
+      // ⚠️ 失败时 `_running` 必须是 false。旧实现先置 `true` 再取流，
+      // 取流抛异常后 `_running` 停在 true ⇒ `guard.isRunning` 为真、
+      // 引擎回投 `guardActive:true` ⇒ **UI 报"守卫运行中"，实际一个字节都没采**
+      // （"成功不得被误报"，BUG-073 同类）。
+      _running = false;
+      return GuardStartResult.failed('麦克风启动失败：$e');
+    }
+    _running = true;
 
     var loudSince = DateTime.now();
     var peak = -120.0;
@@ -89,19 +139,38 @@ class SoundGuardService {
       }
     }, onError: (Object e) {
       _running = false;
+      if (!_errors.isClosed) _errors.add(e);
     });
-    return true;
+    return const GuardStartResult.ok();
   }
 
+  /// 停止守卫。
+  ///
+  /// ⚠️ **`_running = false` 必须是本方法的第一个语句** —— 顺序在这里是**语义**，
+  /// 不是风格。旧实现把它放在 `await _recorder.stop()` **之后**：
+  /// `record` 插件的 `stop()` 在部分机型/版本上不回调（真机 MI MAX 2 / API 25
+  /// 表现为守卫**开了关不掉**），于是 `_running` 永远停在 true ⇒
+  /// `guard.isRunning` 为真 ⇒ 引擎回投 `guardActive:true` ⇒ UI 等
+  /// `guardActive:false` 3 秒超时 ⇒ 用户看到"引擎无响应"、开关弹回。
+  ///
+  /// 现在分三层保证"停止"这件事一定完成：
+  /// 1. 先落 `_running = false`（同步，不可能被打断）；
+  /// 2. 取消订阅（纯 Dart，不依赖插件）；
+  /// 3. 再去动录音器，且**每一步都带超时** —— 插件不回调也不会拖住调用方。
+  /// 清理失败不改变"已停止"这一事实：宁可留一个需要 GC 的原生句柄，
+  /// 也不能让 UI 永远卡在"运行中"。
   Future<void> stop() async {
-    await _sub?.cancel();
-    _sub = null;
-    try {
-      if (await _recorder.isRecording()) await _recorder.stop();
-    } on Object {
-      // 状态自愈
-    }
     _running = false;
+    final sub = _sub;
+    _sub = null;
+    await sub?.cancel();
+    try {
+      if (await _recorder.isRecording().timeout(const Duration(seconds: 2))) {
+        await _recorder.stop().timeout(const Duration(seconds: 2));
+      }
+    } on Object {
+      // 状态自愈：超时 / 插件异常都不影响"已停止"。
+    }
   }
 
   /// 静态公开以便宿主机单测（纯函数，无平台依赖）。
@@ -125,5 +194,6 @@ class SoundGuardService {
     await stop();
     await _events.close();
     await _levels.close();
+    await _errors.close();
   }
 }

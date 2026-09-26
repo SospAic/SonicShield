@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -45,11 +48,39 @@ android {
         // **不要**在这里收窄 abiFilters。
     }
 
+    // ---------- 可选的正式签名配置（向后兼容） ----------
+    // 若 android/key.properties 存在且其 storeFile 指向的 keystore 文件存在，
+    // release 构建改用正式签名；否则回退 debug 签名（保持原有行为不变）。
+    // ⚠️ 正式发布前必须换成真 keystore：keytool -genkeypair -v -keystore release.keystore
+    //    key.properties 内容：storeFile / storePassword / keyAlias / keyPassword
+    val keystoreProps = Properties().apply {
+        val f = rootProject.file("key.properties")
+        if (f.exists()) FileInputStream(f).use { load(it) }
+    }
+    val keystorePath = keystoreProps.getProperty("storeFile") ?: ""
+    val keystoreFile = if (keystorePath.isNotEmpty()) file(keystorePath) else null
+    val hasReleaseKeystore = keystoreFile != null && keystoreFile.exists()
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 无真 keystore 时回退 debug 签名，保证 `flutter build apk --release` 可用。
+            // ⚠️ 正式发布前必须换成真 keystore（见上方注释）。
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

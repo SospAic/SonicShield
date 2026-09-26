@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:just_audio/just_audio.dart';
 
 import '../domain/models/action.dart';
@@ -21,6 +22,23 @@ class PlayResult {
 /// - 播放前设置目标音量（随机落点由调度引擎物化期决定）；
 /// - [maxDurationMs] 到点淡出停止，实现“随机时长”；
 /// - 播放结束释放解码器与唤醒（just_audio 内部持有 wakelock 到停止）。
+/// ATTR-02 单出口：`AudioSessionConfiguration`（含 `AndroidAudioAttributes`）
+/// 只允许在这里构造一次；`play` 与 `playSoundscape` 两条路都走它
+/// （`android_compat_lock_test` ATTR-02 锁定构造出口唯一，防两条路漂移）。
+AudioSessionConfiguration audioSessionConfigFor(AudioChannel channel) =>
+    AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playback,
+      androidAudioAttributes: AndroidAudioAttributes(
+        contentType: AndroidAudioContentType.music,
+        usage: channel == AudioChannel.alarm
+            ? AndroidAudioUsage.alarm
+            : AndroidAudioUsage.media,
+      ),
+      // 焦点类型按通道区分，见 focusGainFor() 的说明。
+      androidAudioFocusGainType: PlaybackService.focusGainFor(channel),
+      androidWillPauseWhenDucked: true,
+    );
+
 class PlaybackService {
   PlaybackService();
 
@@ -42,6 +60,50 @@ class PlaybackService {
   AudioPlayer? _player;
   bool _mixStopped = false;
 
+  /// [stop] 已被请求；正在 [_waitPlayWindow] 里等待的 [play] 据此**提前收尾，
+  /// 并把结果如实标成失败**（不是"播完了"）。
+  bool _stopRequested = false;
+
+  /// **正在播放**的实例登记表。
+  ///
+  /// 为什么必须是**静态**表：远程「停止指令组」要在**拿不到实例引用**的前提下
+  /// 立刻掐断出声的播放 —— 端点侧的 `playHandler` 是装配期注入的闭包，
+  /// 执行器只握有那个闭包（见 `lib/remote/script_executor.dart` 的 `mediaStopper`）。
+  static final Set<PlaybackService> _playing = <PlaybackService>{};
+
+  /// 停止全部正在播放的实例；返回**实际发出停止请求**的实例数。
+  ///
+  /// ⚠️ 语义是"端点静音"而非"停掉某一项任务"：用户按下「停止指令组」时
+  /// 要的是**立刻不再出声**，因此不区分这段声音来自哪一次调度。
+  static Future<int> stopAllPlaying() async {
+    final snapshot = _playing.toList(growable: false);
+    for (final p in snapshot) {
+      await p.stop();
+    }
+    return snapshot.length;
+  }
+
+  /// 测试缝：清空 [_playing] 登记表。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// [_playing] 是**静态**表（远程「停止指令组」要在拿不到实例引用的前提下
+  /// 掐断出声的播放，见上文），因此它**跨用例存活**：一条用例里 `play()`
+  /// 登记进来的实例，会污染下一条用例对 [stopAllPlaying] 计数与
+  /// "登记表是否已归零"的断言 —— 第 34 轮实测形状就是
+  /// **PB07 期望 1 实得 2 / PB08 期望 0 实得 2**（`play()` 的 `finally`
+  /// 还没跑到，用例就结束了），三条用例相互级联假红、最终被删除
+  /// （`docs/17 §61.5-3`）。没有这条缝，任何"登记表"相关的行为锁都写不稳。
+  ///
+  /// ## 边界（刻意只做一件事）
+  ///
+  /// **只清表**：不调 `stop()`、不 dispose、不碰任何实例、不改任何标志 ——
+  /// 它**不可能**改变生产路径的行为，也**不能**让"播放真的跑起来"。
+  /// 生产代码从不调用（`@visibleForTesting` 由 `analysis_options.yaml` 的
+  /// `invalid_use_of_visible_for_testing_member: error` 强制）。
+  @visibleForTesting
+  static void resetRegistryForTest() => _playing.clear();
+
   Future<PlayResult> play({
     required String path,
     required AudioChannel channel,
@@ -53,23 +115,14 @@ class PlaybackService {
     bool loopFill = false, // 短音效循环填充到目标时长
   }) async {
     final player = _player ??= AudioPlayer();
+    _stopRequested = false; // 上一次 stop() 不得影响这一次播放
+    _playing.add(this);
     final sw = Stopwatch()..start();
     try {
       // 1) 申请音频会话/焦点：alarm 通道在 Android 上映射 USAGE_ALARM，
       //    可穿透勿扰与媒体静音（合规约束见 docs/08）。
       final session = await AudioSession.instance;
-      await session.configure(AudioSessionConfiguration(
-        avAudioSessionCategory: AVAudioSessionCategory.playback,
-        androidAudioAttributes: AndroidAudioAttributes(
-          contentType: AndroidAudioContentType.music,
-          usage: channel == AudioChannel.alarm
-              ? AndroidAudioUsage.alarm
-              : AndroidAudioUsage.media,
-        ),
-        // 焦点类型按通道区分，见 focusGainFor() 的说明。
-        androidAudioFocusGainType: focusGainFor(channel),
-        androidWillPauseWhenDucked: true,
-      ));
+      await session.configure(audioSessionConfigFor(channel));
 
       // 2) 载入并播放。渐强唤醒优先于普通淡入。
       await player.setFilePath(path);
@@ -95,7 +148,17 @@ class PlaybackService {
               ? maxDurationMs
               : fileMs);
       if (target > 0) {
-        await Future<void>.delayed(Duration(milliseconds: target));
+        await _waitPlayWindow(Duration(milliseconds: target));
+      }
+      if (_stopRequested) {
+        // 收到停止：**立刻静音**（不做淡出 —— 用户要的就是停），并把结果
+        // 如实标成失败。报成功会让控制端以为"这段声音已经正常播完了"。
+        await player.stop();
+        await player.setLoopMode(LoopMode.off);
+        return PlayResult(
+            ok: false,
+            playedMs: sw.elapsedMilliseconds,
+            message: '已终止（收到停止请求）');
       }
       if (fadeOutMs > 0) {
         await _fadeOut(player, fadeOutMs);
@@ -106,6 +169,25 @@ class PlaybackService {
     } catch (e) {
       return PlayResult(
           ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
+    } finally {
+      _playing.remove(this);
+    }
+  }
+
+  /// 等待播放窗口；期间收到 [stop]（[_stopRequested]）立即返回。
+  ///
+  /// 50ms 一轮 ⇒ 终止的延迟上界 = 一个 tick，CPU 代价可忽略
+  /// （对照 `playSoundscape` 的 250ms 轮询）。
+  /// 旧实现是裸 `await Future.delayed(maxDurationMs)`：`stop()` 只是把播放器
+  /// 停了，等待方仍要傻等到时长耗尽才返回 —— 端点因此"点了停却继续出声"。
+  Future<void> _waitPlayWindow(Duration total) async {
+    const tick = Duration(milliseconds: 50);
+    var left = total;
+    while (left > Duration.zero) {
+      if (_stopRequested) return;
+      final step = left < tick ? left : tick;
+      await Future<void>.delayed(step);
+      left -= step;
     }
   }
 
@@ -113,6 +195,11 @@ class PlaybackService {
   void stopSoundscape() => _mixStopped = true;
 
   Future<void> stop() async {
+    // ⚠️ **先落标志再停播放器**：正在 [_waitPlayWindow] 里等待的 play() 会在
+    // 下一个 tick 退出并如实报失败。顺序在这里是语义不是风格 —— 只停播放器
+    // 而不通知等待方，play() 仍会等满 maxDurationMs（远程「停止指令组」
+    // 在端点侧"点了停却继续出声"的根因之一）。
+    _stopRequested = true;
     try {
       await _player?.stop();
     } on Object {
@@ -145,9 +232,28 @@ class PlaybackService {
     }
   }
 
+  /// 释放播放器（**吞异常 + 无条件清空字段**，与 [stop] 同一处置）。
+  ///
+  /// 两条理由都来自真实调用点 `lib/features/sounds/sound_library_screen.dart`
+  /// 的 `State.dispose()`，那里写的是 `_previewPlayer.dispose();` —— **没有 await**：
+  ///
+  /// 1. fire-and-forget ⇒ `dispose()` 一旦抛，就升级成**未处理的异步错误**
+  ///    （页面退出时冒一条谁都读不懂的栈，且没人能 catch）。
+  /// 2. `_player = null` 原本排在 `await` **之后** ⇒ 一次释放异常就把它跳过，
+  ///    **已销毁的播放器被留在字段里**；后续 `play()` 的 `_player ??=` 会复用
+  ///    它，表现为播放静默失效。`finally` 保证清空**无条件**发生。
+  ///
+  /// 行为锁：`test/playback_dispose_lock_test.dart`（PB09）。该失败分支在宿主上
+  /// **结构不可达**（`_player` 私有、唯一赋值点在 `play()` 内、无注入缝），
+  /// 故用源码锁 + 变异证伪，而不是写一个覆写 `dispose()` 的替身（那是恒真断言）。
   Future<void> dispose() async {
-    await _player?.dispose();
-    _player = null;
+    try {
+      await _player?.dispose();
+    } on Object {
+      // 忽略释放异常：状态自愈（与 stop() 同一处置）。
+    } finally {
+      _player = null;
+    }
   }
 }
 
@@ -175,19 +281,7 @@ extension PlaybackSoundscape on PlaybackService {
       return const PlayResult(ok: false, message: '声景无轨道');
     }
     final session = await AudioSession.instance;
-    await session.configure(AudioSessionConfiguration(
-      avAudioSessionCategory: AVAudioSessionCategory.playback,
-      androidAudioAttributes: AndroidAudioAttributes(
-        contentType: AndroidAudioContentType.music,
-        usage: channel == AudioChannel.alarm
-            ? AndroidAudioUsage.alarm
-            : AndroidAudioUsage.media,
-      ),
-      // 同单轨播放：media 通道用 mayDuck，避免打断使用者正在听的音乐。
-      // （扩展内引用静态成员必须带类型名限定。）
-      androidAudioFocusGainType: PlaybackService.focusGainFor(channel),
-      androidWillPauseWhenDucked: true,
-    ));
+    await session.configure(audioSessionConfigFor(channel));
 
     final players = <AudioPlayer>[];
     try {

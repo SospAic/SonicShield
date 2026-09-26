@@ -323,11 +323,23 @@ void main() {
         RcCmd.taskGet,
         RcCmd.assetList,
         RcCmd.presetList,
-        RcCmd.logsRecent,
       ]) {
         expect(RcAssistHost.requiredPerm(c), isNull, reason: '$c 应为只读');
         expect(RcAssistHost.allows(AssistPerms.none, c), isTrue);
       }
+    });
+
+    test('AH-20b logs.recent 必须授权：默认全拒下不可读（P2-1 回归锁）', () {
+      // 审计日志会回传端点操作轨迹 —— 曾经它与 ping/status 同列"免授权"，
+      // 未放行任何权限的对端即可读取，与"默认全拒"矛盾。
+      expect(RcAssistHost.requiredPerm(RcCmd.logsRecent), 'audit');
+      expect(RcAssistHost.allows(AssistPerms.none, RcCmd.logsRecent), isFalse,
+          reason: '默认全拒下必须拒绝 logs.recent');
+      // 只有 audit 位能放行它；script 位**不能**顶替（互不越权）。
+      expect(RcAssistHost.allows(const AssistPerms(script: true),
+          RcCmd.logsRecent), isFalse);
+      expect(RcAssistHost.allows(const AssistPerms(audit: true),
+          RcCmd.logsRecent), isTrue);
     });
 
     test('AH-21 动作命令默认全拒，授权后放行', () {
@@ -595,6 +607,58 @@ void main() {
       expect(bus.published.length, published);
     });
   });
+
+  // ---------------- AH-5x 生命周期顺序与守卫（P0-1） ----------------
+
+  group('AH 生命周期顺序与守卫（P0-1）', () {
+    test('AH-50 start()：审计抛异常不得阻断会话建立与广播（根因 b）', () async {
+      // 真实 sqflite insert 会抛（磁盘满 / 锁表）。
+      host.audit = (a, s, m) async => throw StateError('audit boom');
+      final seen = <AssistSession?>[];
+      final sub = host.changes.listen(seen.add);
+
+      final s = await host.start();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(host.session, isNotNull, reason: '审计失败不得阻断会话创建');
+      // 若 _emit() 在 audit 之后，这里不会出现 s —— 即"看不到码"的原始形状。
+      expect(seen, contains(s), reason: '_emit 必须发生在 audit 之前');
+      await sub.cancel();
+    });
+
+    test('AH-51 start()：订阅抛异常不得阻断会话建立（码仍可见）', () async {
+      final t = _FakeTransport()..failSubscribe = true;
+      final h = RcAssistHost()..bind(t);
+      try {
+        final s = await h.start();
+        expect(h.session, isNotNull);
+        expect(RcAssist.isValidCode(s.code), isTrue);
+      } finally {
+        await h.close(silent: true);
+      }
+    });
+
+    test('AH-52 close()：审计抛异常不得留下"僵尸会话"（根因 b 同类）', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      host.audit = (a, st, m) async => throw StateError('audit boom');
+
+      await host.close();
+
+      expect(host.session, isNull, reason: 'close 后 _session 必须为 null');
+      expect(host.keys, isNull);
+      // 且必须还能立刻生成新会话（不被僵尸状态卡住）。
+      host.audit = (a, st, m) async {};
+      final again = await host.start();
+      expect(again.code, isNot(s.code));
+    });
+
+    test('AH-53 模块未开启（未绑定传输）→ start() 明确拒绝，不生成死码', () async {
+      final offline = RcAssistHost();
+      await expectLater(offline.start(), throwsA(isA<StateError>()));
+      expect(offline.session, isNull, reason: '被拒绝时不得留下任何会话');
+    });
+  });
 }
 
 /// 记录所有收发动作的假传输（不碰网络，便于确定性断言）。
@@ -603,8 +667,14 @@ class _FakeTransport implements AssistTransport {
   final unsubscribed = <String>[];
   final published = <({String topic, String wire})>[];
 
+  /// 置 true 时 [subscribe] 抛异常（模拟 broker 不可达）。
+  bool failSubscribe = false;
+
   @override
-  Future<void> subscribe(String topic) async => subscribed.add(topic);
+  Future<void> subscribe(String topic) async {
+    if (failSubscribe) throw StateError('broker down');
+    subscribed.add(topic);
+  }
 
   @override
   Future<void> unsubscribe(String topic) async => unsubscribed.add(topic);

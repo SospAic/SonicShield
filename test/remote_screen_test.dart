@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_screen.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
+
+import 'support/permission_stub.dart';
 
 /// 远程中心 · 设置页（`/remote/settings`）的宿主测试。
 ///
@@ -44,6 +48,63 @@ Future<RemoteStore> _pump(
 
   await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: RemoteScreen())));
+  await tester.pumpAndSettle();
+  return store;
+}
+
+/// 带 **GoRouter** 的宿主：`RemoteScreen` 里有两个 `context.push(...)`
+/// （扫码配对 / 指令组装器），用普通 `MaterialApp(home:)` 会直接抛
+/// "No GoRouter found" ⇒ 这两条跳转路径必须靠路由壳才能真实执行。
+///
+/// [visited] 记录**实际被 push 的 location**，用于断言"跳到了正确的地址"
+/// （只断言"有 IconButton"是恒真的，等于没测）。
+Future<RemoteStore> _pumpRouted(
+  WidgetTester tester, {
+  List<PairedEndpoint> endpoints = const [],
+  required List<String> visited,
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final store = RemoteStore(await SharedPreferences.getInstance());
+  for (final e in endpoints) {
+    await store.addPaired(e);
+  }
+
+  final router = GoRouter(
+    initialLocation: '/',
+    routes: [
+      GoRoute(path: '/', builder: (_, __) => const RemoteScreen()),
+      GoRoute(
+        path: '/remote/pair-qr',
+        builder: (ctx, __) {
+          visited.add('/remote/pair-qr');
+          return Scaffold(
+            appBar: AppBar(title: const Text('扫码配对页')),
+            body: FilledButton(
+              onPressed: () => Navigator.of(ctx).maybePop(),
+              child: const Text('返回'),
+            ),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/remote/script-builder/:id',
+        builder: (_, s) {
+          final id = s.pathParameters['id']!;
+          visited.add('/remote/script-builder/$id');
+          return Scaffold(
+              appBar: AppBar(title: const Text('指令组装器页')),
+              body: Text(id));
+        },
+      ),
+    ],
+  );
+
+  tester.view.physicalSize = const Size(1200, 4000);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+
+  await tester.pumpWidget(
+      ProviderScope(child: MaterialApp.router(routerConfig: router)));
   await tester.pumpAndSettle();
   return store;
 }
@@ -206,6 +267,131 @@ void main() {
       await _pump(tester);
 
       expect(find.byTooltip('扫码配对'), findsOneWidget);
+    });
+
+    // ---------------- 以下为第三十二轮补齐：此前 68 行未覆盖中的"可补块" ----------------
+
+    testWidgets('RRS-15 取消配对 → 真正落库移除（不是只把卡片藏起来）', (tester) async {
+      final store = await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+      expect(find.text('已配对端点（1）'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('取消配对'));
+      await tester.pumpAndSettle();
+
+      expect(store.paired(), isEmpty,
+          reason: '删了卡片但没删库 ⇒ 重启后又冒出来，这是"假删除"');
+      expect(find.text('已配对端点（0）'), findsOneWidget);
+      expect(find.textContaining('尚未配对端点'), findsOneWidget);
+    });
+
+    testWidgets('RRS-16 TURN 对话框"取消" → 不落库', (tester) async {
+      final store = await _pump(tester, turnUrl: 'turn:keep.me:3478');
+
+      await tester.tap(find.text('TURN 中继（可选）'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+          find.byType(TextField).at(0), 'turn:discard.me:3478');
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+
+      expect(store.turnUrl, 'turn:keep.me:3478',
+          reason: 'TURN 取消必须和 broker 取消一样真的不写');
+    });
+
+    testWidgets('RRS-17 扫码配对 → 跳 /remote/pair-qr，返回后刷新列表', (tester) async {
+      final visited = <String>[];
+      await _pumpRouted(tester, visited: visited);
+
+      await tester.tap(find.byTooltip('扫码配对'));
+      await tester.pumpAndSettle();
+
+      expect(visited, ['/remote/pair-qr'],
+          reason: '必须真的跳到扫码页，而不是原地弹个 toast');
+
+      // 返回后 `_load()` 要被 await —— 扫码配对成功回来的端点必须立刻可见。
+      await tester.tap(find.text('返回'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('已配对端点（0）'), findsOneWidget);
+    });
+
+    testWidgets('RRS-18 指令组装器 → 带上该端点的 deviceId 跳转', (tester) async {
+      final visited = <String>[];
+      await _pumpRouted(tester,
+          endpoints: [_ep('0123456789abcdef', '客厅平板')], visited: visited);
+
+      await tester.tap(find.byTooltip('指令组装器'));
+      await tester.pumpAndSettle();
+
+      expect(visited, ['/remote/script-builder/0123456789abcdef'],
+          reason: '组装器必须知道对谁发 —— 传错 id 等于把指令发到别的设备');
+    });
+
+    testWidgets('RRS-19 对讲机：麦克风已授权 → 打开对讲面板', (tester) async {
+      stubPermissions({Permission.microphone: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+
+      await tester.tap(find.byTooltip('对讲机'));
+      await tester.pumpAndSettle();
+
+      // 面板必须**指明对谁说**，否则用户按下去不知道发给谁。
+      expect(find.text('对讲机 → 客厅平板'), findsOneWidget);
+      expect(find.text('按住下方按钮开始说话'), findsOneWidget);
+      expect(find.byIcon(Icons.mic), findsWidgets);
+    });
+
+    testWidgets('RRS-20 对讲机：麦克风被拒 → 明确提示且不打开面板', (tester) async {
+      final requested = stubPermissions(
+          {Permission.microphone: PermissionStatus.denied});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+
+      await tester.tap(find.byTooltip('对讲机'));
+      await tester.pumpAndSettle();
+
+      expect(requested.single, [Permission.microphone],
+          reason: '必须真的申请了麦克风权限');
+      expect(find.text('需要麦克风权限才能对讲'), findsOneWidget);
+      expect(find.text('对讲机 → 客厅平板'), findsNothing,
+          reason: '没权限还弹出面板 ⇒ 用户说完才发现没录上（静默失败）');
+    });
+
+    testWidgets('RRS-21 手输配对"取消" → 对话框关闭且不入库', (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(find.widgetWithText(FilledButton, '手输'));
+      await tester.pumpAndSettle();
+      expect(find.text('配对新端点'), findsOneWidget);
+
+      // 填了合法内容再取消 —— 才验得出"取消"是真的拦住了写入，
+      // 而不是"因为内容不合法所以没写"。
+      await tester.enterText(find.byType(TextField).at(0), '0123456789abcdef');
+      await tester.enterText(find.byType(TextField).at(1), '不该被保存');
+      await tester.enterText(find.byType(TextField).at(2), 'AB2CD5EF');
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('配对新端点'), findsNothing);
+      expect(store.paired(), isEmpty);
+      expect(find.text('已配对端点（0）'), findsOneWidget);
+    });
+
+    // ---------------- 以下为 R-9 配套：控制台「去开启」的落点必须可用 ----------------
+
+    testWidgets('RRS-22 控制台「去开启」的落点就是本页：开关真的可交互（不是死入口）',
+        (tester) async {
+      // R-9：控制台在本机远程模块未开启时提示「命令不会补发」并给出「去开启」
+      // 入口，落点即 `/remote/settings`（本页）。若这里的开关本身不可点，
+      // 那个入口就是**死路** —— 用户知道原因却无处可去。
+      await _pump(tester);
+
+      final sw = tester.widget<SwitchListTile>(find.byType(SwitchListTile));
+      expect(sw.value, isFalse, reason: '默认必须是关闭态（合规：远程遥控默认关）');
+      expect(sw.onChanged, isNotNull,
+          reason: '关闭态必须能点开，否则「去开启」入口指向一个不可交互的页面');
     });
   });
 }

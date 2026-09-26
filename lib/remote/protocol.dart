@@ -5,7 +5,9 @@ import 'package:cryptography/cryptography.dart';
 
 /// 声盾远程遥控协议 v1（docs/14）。
 ///
-/// 传输：MQTT（TLS），主题命名空间 `sonicshield/v1/{deviceId}/cmd|evt`。
+/// 传输：MQTT over **TLS 8883**（证书链强校验，不提供忽略证书的回调；
+/// 见 `RcEndpointService._connect` 与 `RemoteStore.defaultBrokerPort`）。
+/// 主题命名空间 `sonicshield/v1/{deviceId}/cmd|evt`。
 /// 安全：配对秘密 → HKDF-SHA256 → AES-256-GCM 端到端加密；
 /// 代理（MQTT broker）只见密文。AAD 绑定主题与设备 ID 防跨主题重放。
 ///
@@ -13,6 +15,21 @@ import 'package:cryptography/cryptography.dart';
 /// {v:1, id, ts, type, payload}
 ///  - ts 单调毫秒；接收端拒绝 |now-ts| > 90s（防重放窗口）
 ///  - id 每消息随机，接收端缓存去重（防窗口内重放）
+/// 远程遥控 broker 端口：**TLS 8883**（C-13 P0）。
+///
+/// ## 为什么这个常量放在本文件，而不是 `remote_store.dart`
+///
+/// `protocol.dart` **不依赖 Flutter**（只 import `dart:*` 与 `cryptography`）；
+/// 而 `tool/rc_probe.dart`、`tool/rc_e2e_controller.dart` 是**纯 Dart 命令行
+/// 工具**（`dart run tool/...`）。它们若去 import `remote_store.dart`，就会把
+/// `shared_preferences`（→ Flutter）拖进依赖树，在 `dart run` 下直接编译不过。
+/// 端到端工具是"修完还能验证"的前提，因此真源必须落在无 Flutter 依赖的一侧。
+///
+/// ⚠️ **明文 1883 已被封禁**：`lib/` + `tool/` + `integration_test/` 全量扫描
+/// （剥注释后）不得再出现该端口，且每个 MQTT 构造点都必须 `secure = true` ——
+/// 见 `test/rc_transport_lock_test.dart`。
+const int rcBrokerPort = 8883;
+
 class RcMessage {
   const RcMessage({
     required this.id,
@@ -79,8 +96,34 @@ Map<String, dynamic> rcPayloadOf(Map<String, dynamic> envelope) {
 // ---------------- 命令类型（控制器 → 端点） ----------------
 
 abstract final class RcCmd {
-  static const ping = 'ping'; // → pong {latencyHint}
-  static const statusGet = 'status.get'; // → status {engine,battery,tasks,next}
+  /// 配对**双向化**（v2.0，R-2）：控制端扫码/手输成功后，主动把**自己**登记到
+  /// 端点侧，使配对成为"双向"而非"单方落盘"。
+  ///
+  /// payload（**必须携带这三项**）：
+  /// `{deviceId: 控制端 16 位 ID, name: 控制端显示名, code: 控制端 8 位配对码}`
+  ///
+  /// ⚠️ **`code` 不是可选装饰**：端点回执的密钥是
+  /// `deriveKey(控制端配对码, '{控制端ID}|evt')`（见 `endpoint_service._send`）。
+  /// 不携带它，端点就没有可用密钥 → 回执永远发不出去 → 控制端只能等到超时。
+  /// 这正是"端点执行了却毫无回音"的根因。
+  ///
+  /// 安全边界（`msg.from` 不可信，一切以 payload 为准）：
+  /// - **能解密即证明对方持有本机配对码**（密钥按接收方身份派生，见类文档），
+  ///   因此本命令不需要额外的口令校验；
+  /// - 但**绝不允许覆盖已配对控制端的 secret** —— 同 deviceId 且配对码不符
+  ///   必须**拒绝**，否则任一已配对控制器都能顶掉另一台的配对记录，
+  ///   从而**劫持**发给它的全部回执（提权面）；
+  /// - 协助会话下**一律拒绝**：`RcPermGate.requiredPerm` 未登记 → `denyAll`
+  ///   （协助对端**未配对**，不得借它把自己变成已配对设备）。
+  ///
+  /// 回执：`rc.ack {ok, for, data}`。
+  static const pairRequest = 'pair.request';
+
+  // ⚠️ 回执载荷以**端点实现**为准（`RcEndpointService` 的对应 case）；
+  // 这里的注释曾长期与实现不符（C-9 文档漂移），已按实测改正。
+  static const ping = 'ping'; // → rc.pong {device, at}
+  static const statusGet =
+      'status.get'; // → rc.status {engine, pendingCount, nextFireAt, version}
   static const soundPlay =
       'sound.play'; // {preset|assetId|category, volume, durationSec, loop}
   static const taskList = 'task.list'; // → tasks [...]
@@ -110,12 +153,22 @@ abstract final class RcCmd {
   static const callEnd = 'call.end';
 
   /// 设备完全控制（v1.6，仅限已配对设备，docs/16 §9）：
-  /// device.status → rc.device；camera.snap → rc.photo；
-  /// location.get → rc.location；volume.set {media, alarm}
+  /// device.status → rc.device {for, deviceName, batteryLevel, charging,
+  ///                             version, pendingCount, nextFireAt}；
+  /// camera.snap   → **恒** rc.ack{ok:false}（插件不兼容，v1.6 降级，
+  ///                  **不产生** rc.photo，docs/16 §9 注记 / docs/22 §3 C-5）；
+  /// location.get  → rc.location {for, lat, lng, acc}｜失败时
+  ///                  {for, lat:null, lng:null, error:true}（C-1）；
+  /// volume.set    → rc.ack
   static const deviceStatus = 'device.status';
   static const cameraSnap = 'camera.snap';
   static const locationGet = 'location.get';
   static const volumeSet = 'volume.set';
+
+  /// `device.alert` → rc.ack。找回场景（Q9-B）：屏幕点亮 + 最大音量提示 + 通知横幅。
+  /// payload：`message?`（锁屏提示文案，缺省用端点名）。需端点前台服务在跑；
+  /// 原生未实现/被拒时如实 `ok=false`（不假成功）。
+  static const deviceAlert = 'device.alert';
 
   // ---- v1.7：远程任务 CRUD（与本机「自动化 → 任务」完整对齐，docs/14 §2.1）----
 
@@ -165,9 +218,11 @@ abstract final class RcEvt {
   static const pttAck = 'rc.ptt'; // {voiceId, ok, playedMs}
   static const callState =
       'rc.call'; // 通话状态镜像 {callId, state: ringing|connected|ended}
-  static const device = 'rc.device'; // 设备状态快照
-  static const photo = 'rc.photo'; // 拍照回传 {photoB64}
-  static const location = 'rc.location'; // 定位回传 {lat,lng,acc}
+  static const device = 'rc.device'; // 设备状态快照（载荷见 deviceStatus）
+  static const photo =
+      'rc.photo'; // 拍照回传 {photoB64} —— **当前无发射方**（camera.snap 恒降级，C-5）
+  static const location =
+      'rc.location'; // 定位回传 {for, lat, lng, acc}｜失败 {for, error:true}
   static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
 
   // ---- v1.7：远程任务 CRUD 回执 ----
@@ -183,15 +238,49 @@ final class RcCodec {
   RcCodec._();
 
   static final Hkdf _alg = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+
+  /// v2 前置拉伸（Q1.B）：PBKDF2-HMAC-SHA256，`cryptography` 包默认实例
+  /// 纯 Dart 实现（VM/移动端可用；Argon2id 虽在 `DartCryptography` 中存在，
+  /// 但 PBKDF2 成本可预期且与本仓库 `ExportCrypto` 同族，选 PBKDF2）。
+  static final Pbkdf2 _stretch = Pbkdf2(
+    macAlgorithm: Hmac.sha256(),
+    iterations: 120000,
+    bits: 256,
+  );
   static final AesGcm _aes = AesGcm.with256bits();
 
   /// 由配对秘密派生消息密钥。
   /// [context]：`{endpointId}|cmd` 或 `{endpointId}|evt`——端点与控制器
   /// 双方都能派生同方向密钥（每个配对、每个方向独立密钥）。
-  static Future<List<int>> deriveKey(String secret, String context) async {
+  ///
+  /// [salt]：每设备随机盐（Q1.B）。**兼容铁律**：
+  /// - 无盐（null 或空）→ 原始 v1 路径（纯 HKDF），已配对端点继续可用；
+  /// - 有盐 → 先 PBKDF2 前置拉伸，再把盐并入 HKDF salt 参数（v2）。
+  /// 双方必须持有同一份盐：端点在配对登记时生成下发，控制端在配对成功
+  /// 事件时落盘（见 `KdfSaltStore`）。
+  static Future<List<int>> deriveKey(
+    String secret,
+    String context, {
+    List<int>? salt,
+  }) async {
+    List<int> ikm = utf8.encode(secret);
+    List<int> hkdfSalt = utf8.encode('sonicshield-rc-v1|$context');
+    if (salt != null && salt.isNotEmpty) {
+      final stretched = await _stretch.deriveKey(
+        secretKey: SecretKey(utf8.encode(secret)),
+        nonce: salt,
+      );
+      ikm = await stretched.extractBytes();
+      // ⚠️ `utf8.encode` 返回**不可变** Uint8List，不能 `..addAll`（运行时炸
+      // "Cannot add to a fixed-length list"）—— 必须新建可增长列表拼接。
+      hkdfSalt = <int>[
+        ...utf8.encode('sonicshield-rc-v2|$context'),
+        ...salt,
+      ];
+    }
     final sk = await _alg.deriveKey(
-      secretKey: SecretKey(utf8.encode(secret)),
-      nonce: utf8.encode('sonicshield-rc-v1|$context'),
+      secretKey: SecretKey(ikm),
+      nonce: hkdfSalt,
       info: utf8.encode('sonicshield'),
     );
     return sk.extractBytes();
@@ -258,6 +347,30 @@ final class RcCodec {
     final raw = List.generate(8, (_) => chars[r.nextInt(chars.length)]).join();
     return '${raw.substring(0, 4)}-${raw.substring(4)}';
   }
+
+  /// 配对码轮换（Q1.B）：生成与 [current] 同格式、**不与旧码相同**的新配对码。
+  /// 纯函数：不做落盘/网络操作；持久化与 UI 入口由调用方负责。
+  /// 比较时剥除 `-` 分隔符，杜绝新旧码仅分隔符位置不同的假轮换。
+  static String rotatedPairingCode(String current) {
+    const chars = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+    final r = Random.secure();
+    String gen() {
+      final raw =
+          List.generate(8, (_) => chars[r.nextInt(chars.length)]).join();
+      return '${raw.substring(0, 4)}-${raw.substring(4)}';
+    }
+
+    final old = current.replaceAll('-', '');
+    var next = gen();
+    while (next.replaceAll('-', '') == old) {
+      next = gen();
+    }
+    return next;
+  }
+
+  /// 生成 32 字节每设备随机盐（Q1.B）。Base64 落盘由 `KdfSaltStore` 负责。
+  static List<int> newSalt() =>
+      List.generate(32, (_) => Random.secure().nextInt(256));
 
   /// 设备 ID：16 位小写十六进制。
   static String generateDeviceId() =>

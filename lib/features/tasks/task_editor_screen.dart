@@ -212,6 +212,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     _probeEnv();
   }
 
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
   /// 读取本机振动能力（v1.9，docs/20 §5.2 / FR-38）+ 夜间豁免主开关状态。
   ///
   /// ## ⚠️ 为什么这两件事**不能**放进 `_load()`
@@ -268,7 +274,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     }
     final repo = await ref.read(taskRepoProvider.future);
     final t = await repo.get(widget.taskId!);
-    if (t == null) return;
+    if (t == null) {
+      // 任务已被删除（或 id 失效）：必须置 `_loaded`，否则页面**永远停在
+      // 加载圈**，"点了没反应"（此处已在 await 之后，必须走 setState）。
+      if (mounted) setState(() => _loaded = true);
+      return;
+    }
     setState(() {
       _editing = t;
       _nameCtrl.text = t.name;
@@ -1318,9 +1329,16 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       return;
     }
 
-    final repo = await ref.read(taskRepoProvider.future);
-    await repo.upsert(task);
-    await BackgroundServiceManager.instance.replan();
+    try {
+      final repo = await ref.read(taskRepoProvider.future);
+      await repo.upsert(task);
+      await BackgroundServiceManager.instance.replan();
+    } on Object catch (e) {
+      // 失败必须可见：不能让异常穿透 onChanged 变成未处理错误，
+      // 也不能不 pop 让用户误以为"没保存成功"却不知原因。
+      if (mounted) _toast(context, '保存失败：$e');
+      return;
+    }
     if (mounted) Navigator.of(context).pop();
   }
 

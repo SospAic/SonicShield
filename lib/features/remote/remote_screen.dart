@@ -11,6 +11,7 @@ import '../../remote/controller_service.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import 'pair_qr_screen.dart' show notifyPeerOfPairing;
 
 /// 远程遥控总览：模块开关 / 设备身份 / broker / 配对端点管理 /
 /// 指令组装器入口 / 对讲机 / 快捷命令（播放/状态/守卫）。
@@ -30,6 +31,9 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   String _deviceId = '';
   String _deviceName = '';
   String _broker = RemoteStore.defaultBroker;
+  String _brokerHost = '';
+  int? _brokerPort;
+  String _brokerUser = '';
   String _turnUrl = '';
   List<PairedEndpoint> _endpoints = const [];
 
@@ -48,6 +52,9 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
       _deviceId = store.deviceId;
       _deviceName = store.deviceName;
       _broker = store.broker;
+      _brokerHost = store.brokerHost;
+      _brokerPort = store.brokerPort;
+      _brokerUser = store.brokerUsername;
       _turnUrl = store.turnUrl;
       _endpoints = store.paired();
     });
@@ -87,6 +94,40 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
     if (v == null) return;
     await store.setTurn(url: v.url, user: v.user, cred: v.cred);
     await _load();
+  }
+
+  /// 编辑自定义 MQTT 代理（Q2.B，高级可选）。
+  ///
+  /// 连接侧接线不在本页做：本页只落盘四个字段（host/port/用户名/密码），
+  /// 远程模块在下一次启动时读取并重连 —— 因此界面上写明
+  /// 「保存后重启远程模块生效」，避免用户以为保存即已切换。
+  ///
+  /// controller 的释放时机与 [_TurnDialog] 同理（BUG-064）：交给对话框
+  /// widget 自己 dispose，调用方不估延时。
+  Future<void> _editBrokerAdvanced() async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+
+    // 跨 await 后必须复查 mounted 才能用 context（use_build_context_synchronously）。
+    if (!mounted) return;
+
+    final v = await showDialog<
+        ({String host, int? port, String user, String pass})>(
+      context: context,
+      builder: (_) => _BrokerAdvancedDialog(
+        host: store.brokerHost,
+        port: store.brokerPort,
+        user: store.brokerUsername,
+        pass: store.brokerPassword,
+      ),
+    );
+    if (v == null) return;
+    await store.setBrokerAdvanced(
+        host: v.host, port: v.port, username: v.user, password: v.pass);
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已保存：重启远程模块后生效')));
   }
 
   Future<void> _toggleEnabled(bool v) async {
@@ -158,19 +199,31 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
     }
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
-    await store.addPaired(PairedEndpoint(
+    final endpoint = PairedEndpoint(
       deviceId: idCtrl.text.trim(),
       name: nameCtrl.text.trim().isEmpty ? '未命名端点' : nameCtrl.text.trim(),
       secret: secret,
       pairedAt: DateTime.now(),
-    ));
+    );
+    await store.addPaired(endpoint);
     // 立即订阅新对端的 evt 主题（否则收不到其回执，BUG-013）。
     await RcEndpointService.instance.refreshSubscriptions();
     await _load();
-    if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('配对完成，可发送指令组')));
-    }
+    if (!mounted) return;
+    // R-2：只做"本机落盘"是不够的 —— 对端表里没有本机时，它**执行了却发不出
+    // 回执**。这里立刻通知对端，并把结果如实告诉用户（8 秒没有回音也算结果，
+    // 且必须说出来：否则用户会以为配对失败而反复重试）。
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+        const SnackBar(content: Text('配对完成，正在通知对端确认…')));
+    final outcome = await notifyPeerOfPairing(endpoint, store);
+    // 用 hide + show 而不是排队：排队会让两条"配对完成…"同时挂在屏幕上，
+    // 用户看到的是两条互相矛盾的消息。
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+        content: Text('配对完成：${outcome.message}'),
+        duration: Duration(seconds: outcome.confirmed ? 4 : 10)));
+    await _load();
   }
 
   Future<void> _pttSheet(PairedEndpoint endpoint) async {
@@ -283,6 +336,25 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
           const SizedBox(height: 10),
           Card(
             child: ListTile(
+              leading: const Icon(Icons.lan),
+              title: const Text('MQTT 代理（高级，可选）'),
+              subtitle: Text(
+                _brokerHost.isEmpty
+                    ? '未配置：使用默认公共节点。自建 EMQX/Mosquitto 可在此接管'
+                    : '$_brokerHost:'
+                        '${_brokerPort ?? RemoteStore.defaultBrokerPort}'
+                        '${_brokerUser.isEmpty ? '' : ' · 用户名 $_brokerUser'}'
+                        '（保存后重启远程模块生效）',
+                style: const TextStyle(fontSize: 12),
+              ),
+              isThreeLine: _brokerHost.isEmpty,
+              trailing: const Icon(Icons.edit, size: 18),
+              onTap: _editBrokerAdvanced,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            child: ListTile(
               leading: const Icon(Icons.swap_horiz),
               title: const Text('TURN 中继（可选）'),
               subtitle: Text(
@@ -350,6 +422,9 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
                       onPressed: () async {
                         final prefs = await SharedPreferences.getInstance();
                         await RemoteStore(prefs).removePaired(e.deviceId);
+                        // P1：同「我的设备」页 —— 撤销后立刻清掉该端点在跑的
+                        // 在途指令组/通话（顺序：先出配对表，再清在途）。
+                        await RcEndpointService.instance.onPeerRevoked(e.deviceId);
                         await _load();
                       },
                     ),
@@ -460,6 +535,112 @@ class _TurnDialogState extends State<_TurnDialog> {
             user: _user.text.trim(),
             cred: _cred.text,
           )),
+          child: const Text('保存'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 自定义 MQTT 代理配置对话框（Q2.B）。
+///
+/// 单独做成 StatefulWidget 的理由与 [_TurnDialog] 相同（BUG-064）：
+/// controller 由本 widget 在 `dispose()` 中释放，时机由框架保证。
+///
+/// 返回值：保存时回传四项配置（port 为 null = 用默认 TLS 8883）；
+/// 取消时回传 null（[Navigator.pop] 无参）。
+class _BrokerAdvancedDialog extends StatefulWidget {
+  const _BrokerAdvancedDialog({
+    required this.host,
+    required this.port,
+    required this.user,
+    required this.pass,
+  });
+
+  final String host;
+  final int? port;
+  final String user;
+  final String pass;
+
+  @override
+  State<_BrokerAdvancedDialog> createState() => _BrokerAdvancedDialogState();
+}
+
+class _BrokerAdvancedDialogState extends State<_BrokerAdvancedDialog> {
+  late final TextEditingController _host =
+      TextEditingController(text: widget.host);
+  late final TextEditingController _port =
+      TextEditingController(text: widget.port?.toString() ?? '');
+  late final TextEditingController _user =
+      TextEditingController(text: widget.user);
+  late final TextEditingController _pass =
+      TextEditingController(text: widget.pass);
+
+  @override
+  void dispose() {
+    _host.dispose();
+    _port.dispose();
+    _user.dispose();
+    _pass.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('MQTT 代理（高级，可选）'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '自建 EMQX/Mosquitto 时填写。自定义主机留空即用默认公共节点；'
+              '无论连哪个代理，传输都固定走 TLS（不支持明文端口）。'
+              '保存后重启远程模块生效。',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _host,
+              decoration: const InputDecoration(
+                labelText: '自定义主机（空 = 默认公共）',
+                hintText: 'mqtt.example.com',
+              ),
+            ),
+            TextField(
+              controller: _port,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                labelText: '端口（默认 ${RemoteStore.defaultBrokerPort}，TLS）',
+                hintText: '${RemoteStore.defaultBrokerPort}',
+              ),
+            ),
+            TextField(
+              controller: _user,
+              decoration: const InputDecoration(labelText: '用户名（可选）'),
+            ),
+            TextField(
+              controller: _pass,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: '密码（可选）'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(
+          onPressed: () {
+            final portText = _port.text.trim();
+            Navigator.pop(context, (
+              host: _host.text.trim(),
+              port: portText.isEmpty ? null : int.tryParse(portText),
+              user: _user.text.trim(),
+              pass: _pass.text,
+            ));
+          },
           child: const Text('保存'),
         ),
       ],

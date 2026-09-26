@@ -256,7 +256,10 @@ Future<void> main(List<String> args) async {
     selfCode: selfCode,
   );
 
-  final client = MqttServerClient.withPort(broker, selfId, 1883)
+  // 控制端侧必须与端点同档传输（C-13）：端点只认 TLS 8883。
+  final client = MqttServerClient.withPort(broker, selfId, rcBrokerPort)
+    ..port = rcBrokerPort
+    ..secure = true
     ..keepAlivePeriod = 30
     ..logging(on: false);
   client.connectionMessage = MqttConnectMessage()

@@ -3,9 +3,358 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
-## [1.9.0-alpha] - 2026-09-22
+## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
-### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20）
+#### 第三十七轮（2026-09-27）· 修掉「挂死整轮」的守卫页测试 + 全文档基线同步
+
+> 本轮由**自动化续作**（`dccb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/l10.txt`。
+
+**Fixed（修复）**
+- 🔴 **P0：`test/guard_screen_test.dart` 让整个功能层永久挂死**（该文件 2026-09-26 23:17
+  新建，**从未被验证** —— 上一轮触发它的中继作业被计划任务单槽静默吞掉、无产物，
+  于是无人发现）。根因是本项目**已被写进测试文档**的那条硬约束：
+  `databaseFactoryFfi` 把 SQLite 放**后台 isolate**，往返是真实异步，而
+  `testWidgets` 用例体跑在 `FakeAsync` 里 ⇒ 用例体内直接 `await` 库操作**永不返回**
+  （`pumpAndSettle` 要等 **10 分钟**默认超时才吐错）。
+  实测证据（`_pt/l7.txt`，有界单跑 + expanded reporter）：
+  ```
+  00:00 +0: loading E:/SonicShield/test/guard_screen_test.dart
+  00:00 +0: GS-01 …改阈值 → 文案随真实状态变化，并防抖落库
+  TEST_RC=124        ← `--timeout 30s` 都没能打断（卡在 fake-async 区），硬超时 240s 才终止
+  ```
+  **后果不是"红"而是"挂死"** —— 门禁既不给 RC=1 也不给 RC=0，整条交付链停摆。
+  修法：按 `test/task_list_screen_test.dart` / `settings_screen_test.dart` 的既有范式重写 ——
+  开库放 `setUp`、**用例体里所有 DB 操作包 `tester.runAsync`**、用有界 `waitFor(cond)`
+  代替 `pumpAndSettle`、每个用例 `timeout: 90s`、收尾推掉 SnackBar 计时。
+  另三处**实测踩出来的**细节（写进文件注释）：① 引擎状态流必须用
+  `StreamController.broadcast()`（`Stream.value` 是单订阅流，而 `_onToggleGuard` 会
+  `ref.invalidate` ⇒ 重新订阅抛 `Bad state: Stream has already been listened to`）；
+  ② 事件必须在**订阅建立之后**再 `add`（先 `add` 后 `pumpWidget` 时状态卡停在
+  `LinearProgressIndicator` ⇒ 两条 GS-03 断言**假红**）；③ 长 `ListView` 必须放大视口
+  （默认 800×600 下编排区落在折叠区，`tester.tap` 落空）。
+  修复过程三段实测：**首版 240s+ 硬超时被杀 → 第一版修复 93s / `+6 -4` → 终版 3s / `+10`**。
+
+**Changed（覆盖率 ratchet 上调，三处同步）**
+- `COVERAGE_MIN` **82.2 → 83.0**、`MIN_COVERED` **7867 → 7943**
+  （实测可测面 **83.13%（7949/9562）**；分子下限 = 实测 − 6 行抖动余量）。
+  三处：`scripts/gates.sh` 就地注释 / `scripts/gates.ps1`（BOM 保留 + AST 解析 `PARSE_ERROR_COUNT=0`）/
+  本文件「已知限制」段。双向留痕见 `docs/12 §71`。
+
+**Verified（本轮实测，非"应该没问题"）**
+- 门禁 4 步全绿 `GATES_RC=0`：analyze `No issues found!`（10.5s）/ 功能层 **1717**
+  （1707 → 1717，**+10**）/ 压测 **24** / 覆盖率 ratchet PASS。
+- 覆盖率：门禁口径（可测面）**83.13%（7949/9562）**；对外诚实数字（全局）
+  **79.10%（7951/10052）**。**真实进度 +74 行**（7877 → 7951）。
+- `lib/features/guard/guard_screen.dart` 未覆盖 **87 → 13 行**（LF=158，LH=145）。
+- 设备层：`adb devices` **为空** ⇒ 设备侧一切**未执行**（不是失败）。
+- **零生产代码改动**（本轮只改测试 + 文档 + 门禁阈值 + `_pt/` 工具产物）。
+
+#### 第三十六轮（2026-09-26 追加）· 打包与 Kotlin 编译验证 + `dispose()` 失败路径闭环
+
+> ⚠️ **本节起初写成了 `## [Unreleased]`，被 `test/version_consistency_test.dart` 判红** ——
+> 该锁要求「CHANGELOG 顶部 `## [x.y.z]` 必须等于 `pubspec.yaml` 的版本」。
+> 也就是说**改文档同样能让门禁红**；这是"改生产行为要顺带扫哪些既有锁会变红"的又一例。
+
+本轮为**自恢复续作**（自动化 `5cdd20bf`）。`bash scripts/gates.sh`（4 步）**RC=0** ×4
+（gateBE / gateBF / gateBH / gateBI）：analyze `No issues found` / 功能层 **1587 → 1595**
+（+8 = PB09 1 例 + SR 7 例）/ 压测 **24** / 覆盖率 **74.14%（7448/10046）**。
+**阈值 ratchet 上调**：`COVERAGE_MIN` 74.0 → **74.1**、`MIN_COVERED` 7438 → **7443**。详见 `docs/12 §63`。
+
+**Added（新增）**
+- **`test/playback_dispose_lock_test.dart`（PB09）**：`PlaybackService.dispose()` 失败路径的
+  **源码锁**，附**两例变异证伪**（去掉 `try/catch/finally` → 红；`_player = null` 移出 `finally` → 红）。
+  该分支在宿主上结构不可达（`_player` 私有、无注入缝），故用源码锁而非覆写替身（后者恒真）。
+- **`test/salt_reuse_lock_test.dart`（SR-01…SR-07，7 例）**：每设备 KDF 盐的
+  **「复用优先」行为锁** + 反例样本。附**对生产源码的变异证伪**（把 `ensureSaltForDevice`
+  改成"每次重新生成" ⇒ SR-03 / SR-04 实测跑红，均为断言失败）。
+- **`test/gate_entrypoint_consistency_test.dart`（GEC-01…GEC-05，5 例）**：
+  门禁**两条入口**（`scripts/gates.sh` ↔ `scripts/gates.ps1`）的阈值一致性机器锁，
+  含反例样本。防的是"改一个入口忘了改另一个"这类静默通道（已发生两次）。
+
+**Fixed（修复）**
+- **`PlaybackService.dispose()` 失败路径**：原实现 `await _player?.dispose(); _player = null;`
+  有两个缺陷 —— ① 真实调用点 `sound_library_screen.dart:321` 是
+  `_previewPlayer.dispose();`（**无 `await`**）⇒ 释放异常会升级成**未处理的异步错误**；
+  ② `_player = null` 排在 `await` 之后 ⇒ 异常时被跳过，**已销毁的播放器留在字段里**，
+  后续 `play()` 会复用它而静默失效。
+  改为 `try { … } on Object { … } finally { _player = null; }`（与既有 `stop()` 同一处置）。
+- **盐的「复用优先」语义从源码锁升级为行为锁**：新增顶层函数 `ensureSaltForDevice`
+  （`_ensureSalt` 退化为一行转发），并**删除零调用点的死缝** `injectSaltStore`
+  （`RcEndpointService` 私有构造、宿主无法实例化 ⇒ 该缝永远不可能被测试用上）
+  及其连带失效的 `foundation.dart` import。
+- **门禁两条入口判据不一致**（`scripts/gates.ps1`）：阈值停在 **72.5**（第 33 轮的值，
+  比 `gates.sh` 松 1.6pt），且**完全没有 `MIN_COVERED`** ⇒ 第 34 轮给 `gates.sh` 加的
+  "分母被安全必需代码稀释"防线在 `.ps1` 上**不存在** —— 走 `.ps1` 的人拿到的是**更松的门**
+  （本项目第 2 次同类漂移；第 1 次是整个第 4 步缺失）。
+  已对齐为 **74.1 / 7443** 并把 `--min-covered=` **真的传给工具**；语法用 PowerShell
+  AST 解析器验证（`PARSE_ERROR_COUNT=0`）。防复发锁见上方 GEC。
+
+**Changed（阈值 ratchet 上调）**
+- `COVERAGE_MIN` **74.0 → 74.1**、`MIN_COVERED` **7438 → 7443**
+  （实测 74.14% / 7448 / 10046；分子 +5 来自新测试覆盖顶层盐函数，分母 −1 来自删除死缝 ⇒
+  **净收益**，非分母稀释）。双向留痕：`scripts/gates.sh` + 本段 + `docs/12 §63.9`。
+
+**Verified（本轮实测验证，非"应该没问题"）**
+- **Kotlin 编译**：`SelfHealNotice`（第 35 轮新建）/ `AlarmWatchdogReceiver` / `BootReceiver`
+  三者均在 2026-09-26 03:20 的 **release 构建**中编译通过
+  （第 35 轮遗留的"Kotlin 改动零验证"推进到**编译级**）。
+  ⚠️ **运行期行为仍未验证**，需真机 `dumpsys`。
+- **F-2（移除 `dataSync`）**：合并后的 release 清单里 `dataSync` 类型位与
+  `FOREGROUND_SERVICE_DATA_SYNC` 权限**均已消失**；应用自身主 service 只声明 `mediaPlayback`。
+- **产物**：`app-release.apk` 129,580,547 B（123.6MB）· 2026-09-26 03:47:40 ·
+  md5 `eea37ebc2bea5f99226cd9c133bf2220` —— 与门禁全绿的最终修订版一致。
+  ⚠️ 本行原写「03:29:24 / md5 `c34d5842…`」，是**最终重打包之前**的快照；
+  第 36 轮续二实测当前产物为 03:47:40 / `eea37ebc…`（字节数相同、内容不同），已按实测更正。
+
+**Not done（明确未执行，不要读成"应该没问题"）**
+- **真机安装**：`adb devices` 为空（三台设备离线）⇒ **未执行**。
+- 设备端用例、`dumpsys` 运行期 FGS 复核 ⇒ **未执行**。
+
+#### 第三十六轮（2026-09-26 续二）· A11：源码契约锁的「剥注释」收敛到唯一真源
+
+- **A11 系统性项收敛**：仓内曾散落 **16 份** `stripComments` 实现（**10 份逐字相同** +
+  6 份退化版：不认字符串字面量 / 只认单引号 / 行级粗糙版）。新增
+  `test/support/source_text.dart` 作为**唯一真源**（`stripComments` / `methodBody` /
+  `balancedSlice` / `balancedSliceAfter`），**16 个测试文件全部改为 import 它**
+  （`_stripComments` 的 4 个调用点一并改名）。收敛前是「修一处漏十五处」——
+  第 34/35 轮两次加固都只覆盖了被点名的那几个文件。
+- **关闭第 35 轮审计点名的最后一个开口（ASE-03 / ASE-04）**：`task_editor_action_set_test.dart`
+  此前在**未剥注释**的文本上断言 —— 注释里写一句 `// 例如 PlayAudioAction()` 就能喂绿
+  存在性断言，写一句 `// 不要写 _ =>` 反而**假红**（逼人删掉最有价值的"为什么"）。
+  现改为先 `stripComments` 再切片，并新增 4 条反面样本（ASE-90a…90d，
+  含**真实 BUG-058 形态**对照：证明「不剥」会放行存在性断言）。
+- **新工具自锁**：`test/support_source_text_test.dart`（STX-01…STX-14 + STX-90a…90c，**17 例**），
+  含与**退化版实现的正面对照**（同一输入上结论必须不同，否则本工具就是恒真装饰品）。
+- **Tested**：功能层 **1600 → 1621**（+21）；压测 **24/24**；analyze 干净；
+  覆盖率 **74.14%（7448/10046）**（本轮**零生产代码改动** ⇒ 阈值与 ratchet 未动，
+  `COVERAGE_MIN=74.1` / `MIN_COVERED=7443` 保持不变）。
+- **变异证伪（真实执行，非推断）**：
+  - **M1**（复现 BUG-058 形态：登记全搬进注释 + `_ => RcStepKind.play` 兜底）
+    ⇒ **4 例跑红**：ASE-01 `Expected: RcStepKind.tts / Actual: play`、
+    ASE-02 `Expected: null / Actual: play`（这两条是**用户可见后果**：
+    TTS/复合动作被静默当成"播放音频"）、ASE-03、ASE-04。
+  - **M2**（`action.dart` 追加**注释版** `class GhostAction extends ActionConfig`）
+    ⇒ **仍绿**（注释不污染「权威子类集」，不再逼人登记不存在的类）。
+  - **M3**（switch 体内插入「不许写 `_ =>`」说明注释）⇒ **仍绿**（不再逼人删注释）。
+  - 三次变异后 `md5` 全部还原为原值（`INTEGRITY=OK`）。
+- **登记未做（诚实边界）**：`methodBody` 仍有 **18 份**副本（其中"朴素 `indexOf('{')`"
+  与"具名参数表感知"是**两种语义**），统一需逐调用点语义复核 ⇒ 明确留给下一轮
+  （见 `docs/17 §63`、`docs/12 §64.6`）。
+
+#### 第三十六轮（2026-09-26 续三）· 中断自恢复：修复被上一会话脚本损坏的 4 个测试文件 + `methodBody` 18 份副本收敛
+
+> ⚠️ **本节是"自动化续作撞上上一轮中断"的实战记录。** 上一会话在 04:27–04:42 用一个
+> **正则有缺陷**的迁移脚本改动 `test/`，随后**没有跑门禁**就被中断 —— 仓库停在一个
+> **门禁红**的状态（`flutter analyze` **36 issues**）。本轮的**第一优先级是先取证、再修复**，
+> 而不是接着往前冲。
+
+**① 开场实测（先证伪"上一轮已完成"）**
+
+| 项 | 实测 |
+|---|---|
+| `adb devices` | **空**（三台真机全离线）⇒ 设备层一切**未执行** |
+| `bash scripts/gates.sh`（4 步） | **RC=1** —— 1/4 analyze **36 issues**；2/4 功能层 1621；3/4 压测 24；4/4 覆盖率 74.14% |
+| 破损文件 | `assist_step_perm_test.dart` / `engine_reentrancy_test.dart` / `remote_label_perm_coverage_test.dart` / `support_source_text_test.dart` |
+
+**② 根因（不是"手误"，是脚本的差一 + 正则太松）**
+
+上一会话的 `_pt/migrate_mb.py` 有两处缺陷，本轮在**影子树**上逐字复现：
+
+1. ★ **删除起点差一**：`k = len(lines)`，而 `work[:start].split('\n')` 的最后一个元素
+   恒为 `""`（def 行紧跟换行）⇒ ① 紧邻的 `///` 文档块**从不被删除**；
+   ② `doc_start = start + 1` ⇒ 删完留下 def 的**第一个字符**。顶层定义就是 `'S'`
+   ⇒ `Expected to find ';'` / `Undefined class 'S'`。
+   （影子树实测：19 个文件**全部** `doc_start_delta=+1`，逐字复现出孤立 `S`。）
+2. ★ **正则太松**：`String \w+(String \w+, String \w+)` 不止命中 `methodBody` 家族，
+   还命中 `functionBlock` / `_switchBody` / `_bodyOf` / `groupBody` 这四个
+   **语义完全不同**的抽取器 ⇒ 定义被删、**调用点没改名** ⇒ `Undefined name`。
+
+**③ 修复（4 个文件，全部按原文档契约重建，无备份可回滚 ⇒ 只能按契约重建）**
+
+- `assist_step_perm_test.dart` → 恢复 `_switchBody`。**刻意不用**共享 `methodBody`：
+  `requiredStepPerm` 是**表达式体** `=> switch (kind) {`，而 `methodBody` 对表达式体
+  显式抛错（契约只服务块体）。返回前过共享真源的 `stripComments`。
+- `engine_reentrancy_test.dart` → 恢复 `functionBlock`（契约：**返回空串**而非抛错，
+  `REENT-00` 依赖这一点）；并**移除**被误加的未使用 import。
+- `remote_label_perm_coverage_test.dart` → 恢复 `_bodyOf`。判据
+  `RegExp(r'\n\s*\};')` 取自第 35 轮审计 `_pt/audit/W5-testquality.md` 的**原文引用**，
+  不是猜测；返回前过 `stripComments`。
+- `support_source_text_test.dart` → 恢复 `naiveFromStart`（STX-20 的**退化版对照**样本）。
+
+**④ `methodBody` 18 份副本收敛（A11 后半段，本轮闭环）**
+
+- 修正版脚本 `_pt/migrate_mb_v2.py`（修两处缺陷 + **只按名字白名单**
+  `methodBody`/`_methodBody`/`methodBodyOf` 命中，**绝不按形状**）先在**影子树**上验证，
+  再对真实树执行：18 个文件删定义 + 改名调用 + 补 import。
+- **76 个真实调用点对照探针**（`_pt/_mbprobe_test.dart.txt`：把被删的 18 份实现逐字内嵌为
+  `mbv0..mbv17`）：`compared=76 window_mismatches=0 brace_contract_diffs=1 notfound=0`。
+  唯一 1 处契约差异是 `playback_dispose_lock_test.dart`（旧实现返回**不含**大括号、
+  失败返回 `''`；共享真源返回**含**大括号、失败抛错）—— 其断言全是**存在性**判据
+  ⇒ 迁移后仍全绿。
+
+**⑤ 新增机器锁 `test/method_body_single_source_test.dart`（MBS-01 / MBS-02）**
+
+- **MBS-01**：`test/` 下**不得再定义**本地 `methodBody` 家族副本（唯一真源
+  = `support/source_text.dart`）。判据**按名字白名单**，先 `stripComments`。
+- **MBS-02**：检测器**自证非恒真** —— 4 个合成样本（违规 / 只在注释里 / 只是调用点 /
+  异名抽取器）+ 1 个反向哨兵（真源自己的定义必须被认出来）。
+- **变异证伪（真实执行）**：新建 `test/_mbsmut_test.dart`（内含本地 `String methodBody(`）
+  ⇒ MBS-01 **实测判红** `Expected: empty / Actual: ['test\\_mbsmut_test.dart -> methodBody']`；
+  删除后 ⇒ **+2 全绿**。**零残留**（变异体是新建临时文件，不触碰任何既有/生产文件）。
+- ★ **本锁第一次运行时抓到了它自己**：`reason` 里写了那个名字的**字面量**，而
+  `stripComments` **只剥注释、保留字符串字面量** ⇒ MBS-01 把
+  `method_body_single_source_test.dart` 判成违规。修法：样本一律用 `_mbNames` 插值拼出，
+  并把这条规则写进文件内注释。
+
+**门禁实测（最终，`bash scripts/gates.sh` 4 步）**
+
+| 步 | 实测 |
+|---|---|
+| 1/4 analyze | **`No issues found!`**（修复前是 **36 issues**） |
+| 2/4 功能层 | **1621 → 1629** 全绿（+8 = MBS 2 例 + 被修复文件恢复的用例） |
+| 3/4 压测层 | **24/24** |
+| 4/4 覆盖率 ratchet | **74.14%（7448 / 10046）** ≥ `COVERAGE_MIN=74.1` 且 ≥ `MIN_COVERED=7443` |
+| **总** | **`GATES_RC=0`** ✅ |
+
+**Added（新增）**
+- `test/method_body_single_source_test.dart`（MBS-01 / MBS-02）：抽取器"唯一真源"的机器锁，
+  含 4 个合成样本 + 1 个反向哨兵，并**实测变异证伪**。
+- `_pt/migrate_mb_v2.py`（修正版迁移脚本）、`_pt/fix_imports.py`（import 区块空行归一）。
+
+**Fixed（修复）**
+- **4 个测试文件被上一会话的脚本损坏**（孤立 `S` / 未定义函数），全部按原文档契约重建：
+  修复后 analyze **36 issues → 0**。
+- **`methodBody` 18 份副本**（A11 后半段，`docs/17 §63.2-2`）收敛到
+  `test/support/source_text.dart`；`methodBodyOf` / `_methodBody` 调用点一并改名。
+
+**Changed（工程）**
+- **新增约定**：读 `lib/` 源码文本的回归锁，抽取器**只能**来自
+  `test/support/source_text.dart`；**删副本的脚本必须按名字白名单命中，不得按形状**
+  （按形状会误删 `functionBlock` / `_bodyOf` / `groupBody` 等异名抽取器）。
+
+
+
+本轮为**全量功能点核查 + 并行修复**（详见 `docs/21-全功能点测试与缺陷修复报告.md`）。
+
+#### 第三十六轮（2026-09-26 续六）· 覆盖率冲刺：`_dispatch` 剩余 20 条分支宿主驱动（真实进度 +234 行）
+
+**开场实测（不照抄文档）**：`adb devices` **空**（设备层**未执行**）；中继槽位空闲。
+基线取自 22:44 值守门禁：功能层 **1677** / 压测 **24** / 全局 **76.03%（7643/10052）** /
+可测面 **79.91%（7641/9562）**，`GATES_RC=0`。
+
+**做了什么（零生产代码改动，只加测试）**
+- 新建 `test/deep_endpoint_dispatch2_test.dart`（**30 例**），沿用 `debugBind` + `debugDispatch`
+  接缝，驱动 `_dispatch` **此前从未被触达的 20 条分支**：`ping` / `status.get` /
+  `task.list`（轻量 + full）/ `task.get`（命中·未命中·缺参）/ `task.upsert`（新建·更新·非法）/
+  `task.delete`（命中·未命中）/ `task.runNow`（缺参·未命中·命中）/ `asset.list` / `preset.list` /
+  `task.skipNext` / `guard.set` / `volume.set` / `device.status` / `location.get`（三态）/
+  `script.run`（空·超步数）/ `sound.play` / `vibrate.stop`。
+- **定位缺口的方法**：新写 `_pt/covgap.py` 解析 `coverage/lcov.info`，按「文件 → 连续未覆盖块」
+  降序排序 —— 一眼看出 **39% 的缺口集中在一个文件**（`endpoint_service.dart` 756 行），
+  从而把力气用在刀刃上，而不是平均分配。
+
+**实测门禁（`_pt/l3.txt`，4 步全绿 `GATES_RC=0`）**
+
+| 项 | 续五基线 | 续六实测 |
+|---|---|---|
+| 1/4 analyze | 干净 | `No issues found!` |
+| 2/4 功能层 | 1677 | **1707**（+30） |
+| 3/4 压测层 | 24 | **24** |
+| 4/4 覆盖率 ratchet | 79.91% / 76.03% | **可测面 82.36%（7875/9562）** ／ **全局 78.36%（7877/10052）** |
+| 文档锁单跑 | — | **33/33 PASS** |
+
+- **真实进度 +234 行**（7643 → 7877）；`endpoint_service.dart` 未覆盖 **756 → 528 行**。
+- **阈值 ratchet 已同步抬高**：`COVERAGE_MIN` 79.8 → **82.2**、`MIN_COVERED` 7637 → **7867**
+  （三处同步：`scripts/gates.sh` + `scripts/gates.ps1` + `CHANGELOG.md` 已知限制段）。
+  ⚠️ 顺带修掉一处**既有漂移**：`CHANGELOG` 里残留的 `78.4 / 7494` 与脚本的 `79.8 / 7637`
+  不一致，由 `doc_gate_consistency_test` **判红抓出**（本轮开场门禁因此是红的）。
+
+**★ 本轮新踩的坑**
+- **`flutter_background_service` 在非 Android/iOS 是「平台 getter 直接抛」** —— 异常发生在
+  任何 MethodChannel **之前**，打桩通道**无效**；必须用 `BackgroundServiceManager.invokeHook`
+  短路。（而 `NativeBridge` 自身已 catch `PlatformException`/`MissingPluginException`，宿主安全。）
+- **宿主可观测性判据**：无 broker 时 `_send`/`_ack` 是安全 no-op，只在 `exec_logs` 留
+  `status='skipped'` + 「出站消息未发出」⇒ 对"只回执不落库"的分支，**这条 drop 审计就是
+  "分支确实走到了"的证据**。
+- **改阈值必须三处同步**，否则 `doc_gate_consistency_test` / `gate_entrypoint_consistency_test` 判红。
+
+**未闭环（按优先级）**
+1. 🔴 真机安装 + 运行期 `dumpsys` FGS 复核（`adb devices` 连续多轮为空 ⇒ **未执行**）。
+2. 🟡 `endpoint_service.dart` 仍剩 **528 行**未覆盖（MQTT 连接、salt、文件、PTT 等平台路径）。
+3. 🟡 `guard_screen` / `multi_video_screen` **尚无专属测试文件**（87 + 117 行）。
+4. 🟡 `call_service` 132 / `multi_call_service` 117 / `playback_service` 76 —— WebRTC 与音频，宿主难达。
+5. 🟡 A10/A12–A15、F-3 保活待拍板、`rotatedPairingCode` 无 UI 入口。
+
+### Added（新增）
+- **配对双向化**：新增 `RcCmd.pairRequest`（`'pair.request'`）—— 扫码/填表配对后
+  控制端向对端发起双向握手（payload 携带控制端 `deviceId/name/code`，**不携带 code 则回执永远发不出去**）；
+  端点校验配对码后写入配对表并**定向回执**。8s 未确认 ⇒ 明确提示"请在对端也扫一次本机二维码"；
+  配对码错误新增**限频审计**（`decode.fail`，同主题 10s 一条，此前完全静默）。
+- **离线 outbox 补发真正接线**：`flushOutbox` 此前**零调用点**（命令永不补发而 UI 承诺补发）。
+  新增 `flushAllOutbox()`，在 `_connect`/首连/心跳三处冲刷；`drainOutbox` 取走即删 + 90s 时间窗的问题
+  由 `prepareOutboxReplay`（换新 ts+id 重加密）与"成功后删"解决。
+- **通话能力**：主叫 connecting 界面（黑底 + "连接中…/对方振铃中…" + 挂断入口）、
+  免提扬声器（`setSpeakerphoneOn`，此前全库无调用 ⇒ 声音走听筒）、
+  ICE candidate 早到缓存与重放、发起前权限前置（`CallStartBlock` 六类文案）。
+- **多路视频**：未接超时（复用 `waitLimitMs/timedOutMeansMissed`）、发起前相机/麦克风权限。
+- **协助会话**：「我的设备」Tab 顶部**带文字**入口（此前仅 4 个无文字图标，用户找不到）；
+  新增 `audit` 权限位（`logs.recent` 移出免授权，审计日志对未配对临时对端不应默认可读）；
+  协助下"任务"Tab 显式说明不可用原因（此前静默空白）。
+- **守卫声音编排**（用户新需求）：新增 `lib/features/guard/guard_orchestration.dart`
+  —— 支持**多音频多选**、**随机播放**、**立即/延时播放**，与现有指令组能力打通。
+- 新增 **20+ 个测试文件**（均带变异证伪）。
+
+### Fixed（修复）
+- **BUG-A/B 守卫开关**：`background_engine.dart` 的 `EngineState.running` 曾**硬编码 `true`**
+  且 `service.on('stop')` **从不回投状态** ⇒ 引擎开关**一旦打开永远关不掉**。
+  改为 `broadcast(running: false)` 并在 `stopSelf()` 之前回投。
+- **BUG-C 扫码配对**：单向 ⇒ 双向（见 Added）。
+- **BUG-D 通话无效**：四个真因全部修掉 ——
+  ① `pushNamed('/remote/call/in-call')` **路由不存在**（主叫点按钮后界面零反馈）；
+  ② 早到 ICE candidate **被静默丢弃**；③ 信令发送失败**被当成功**；④ 无免提。
+- **被控端 15 项**：`guard.set` no-op 却回 `ack(true)`；协助会话步骤级权限**登记了但从未执行**
+  （`script` 位 = 事实全能力位，可借 `script.run` 录音取证）；`scriptStop` 不匹配回成功；
+  `ptt.voice` 三条失败路径静默；`record` 步失败静默；`location.get` 失败不留痕；
+  `task.toggle/skipNext` 缺 id 静默；`status.get` 的 `engine:true` 硬编码；`_dispatch` 无 `default`；
+  回执广播泄露给其他控制器（改为按 `msg.from` 定向）。
+- **控制端 5 项**：遥控台 7 个按钮失败完全静默（新增 8s 超时 + `_pendingAcks` 泄漏修复）；
+  事件消费不按 `peerId` 过滤导致跨设备串台（3 处）；指令组拒绝不可见；拍照死分支标注；outbox 文案分原因。
+
+### Changed（变更）
+- 终态 `rc.script` 载荷**恒带 `skipped: List<String>`**（未执行步骤），控制端可展示"其中 N 步未执行"。
+- 端点 `_send` 改为可定向投递（响应式回执只投给 `msg.from`；广播型事件保持广播）。
+- 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
+
+### 已知限制
+- **覆盖率 83.13%（7949/9562）**（门禁口径＝**可测面**）／**全局（对外诚实数字）79.10%（7951/10052）**（2026-09-27 **第三十七轮**实测）
+  —— 未达 95% 目标（⚠️ 本行 2026-09-27 **第三十七轮**实测更新；
+  此前「82.36%（7875/9562）」是第 36 轮续六值、「79.91%（7641/9562）」是续五值、
+  「78.47%（7499/9556）」是续四值；**以当前实测值为准**）。
+  ⚠️ 2026-09-27 **第三十七轮（单人会话，主 Agent）**：本轮**零生产代码改动**，
+  修掉一个**挂死整轮**的测试文件后重跑全部门禁 **RC=0 / 全绿** ——
+  analyze `No issues found!` / 功能层 **1717**（+10）/ 压测 **24** /
+  覆盖率 ratchet 通过（可测面 **83.13%** ≥ 83.0 且 **7949** ≥ 7943）。
+  **真实进度 +74 行**（7877 → 7951）；`lib/features/guard/guard_screen.dart`
+  未覆盖 **87 → 13 行**。**未被任何文档记载的 P0**：`test/guard_screen_test.dart`
+  首版（2026-09-26 23:17 新建、**从未被验证**）在 `FakeAsync` 内直接 `await`
+  后台 isolate 的 SQLite ⇒ 功能层**永久挂死**（实测硬超时 240s 才被杀），
+  门禁既不是绿也不是红。详见 `docs/12 §71`。
+  ⚠️ 「78.36%（7877/10052）」是第 36 轮续六值；更早的 09-26 巡检 78.40%（7497/9562）、
+  续四 74.67%（7501/10046）、第 35 轮 74.08%（7443/10047）均为**历史值**。
+  ⚠️ **两个口径自第三十六轮续四起不再相等**：设备层豁免
+  （`lib/services/background_engine.dart` 454 行 + `lib/main.dart` 36 行 = **490 行**，
+  均为宿主物理不可达的代码；证据由 `test/device_exemption_lock_test.dart` 机器绑定）。
+  **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
+  缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
+  与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=83.0` **且** 绝对覆盖行 `MIN_COVERED=7943`
+  —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
+  （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
+  74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；
+  79.8 → 82.2 见 `docs/12 §70`；**82.2 → 83.0 见 `docs/12 §71`**）。
+
+### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20，2026-09-22 轮次）
 
 - **随机振动** `RandomVibrateAction`：一次触发内产生**随机脉冲串** ——
   总时长、单脉冲时长、脉冲间隔、强度各自在区间内随机；
@@ -250,6 +599,38 @@
   ③ `rootBundle` 是全局单例、缓存**跨用例存活** ⇒ `setUp` 必须 `rootBundle.clear()`；
   ④ `debugPrint` 的节流 Timer 会留在 fake zone → 打印全丢，**探针一律用 `print`**。
 
+### Changed（工程）· 第三十二轮补记（2026-09-23）：桶 D 缺口冲刺 + 消除重复配对解析器
+
+> 承接第三十一轮的裁决（「覆盖率 100%」不可达，因 ~1857 行依赖真实平台能力）。
+> 本轮把**能补的桶 D** 补掉，并顺手修掉一处**真缺陷**。
+
+**新增测试 22 例**（`994/994` 全绿）：
+
+| 文件 | 新增 | 覆盖提升 |
+|---|---|---|
+| `test/remote_screen_test.dart` | RRS-15…21（7 例） | `remote_screen` 68 → **22** 行未覆盖（73.1% → **91.3%**） |
+| `test/ptt_tab_test.dart`（新建） | PTT-01…07（7 例） | `ptt_tab` 56 → **31** 行未覆盖（40.4% → **67.0%**） |
+| `test/pair_qr_screen_test.dart`（新建） | PQR-01…08（8 例） | `pair_qr_screen` 36 → 24 行未覆盖（57.1% → **68.4%**；可执行行 84 → 76，因删掉重复的解析器） |
+
+**新增两个可复用通道桩**（`test/support/`）：
+- `permission_stub.dart` —— `permission_handler` 的 `com.baseflow` 通道桩。
+  生产代码里 7 处 `Permission.*.request()`，**此前宿主测试一处都没走到过**。
+  通道名/方法名/编解码全部照抄插件真实实现，不硬编码 `microphone=7`/`granted=1`。
+- `record_stub.dart` —— `record` 的 `com.llfbandit.record/messages` 通道桩。
+  默认让平台侧**拒绝录音权限**，从而避开 `Directory.systemTemp.createTemp`（真实 dart:io，
+  在 `FakeAsync` 里不会完成），同时覆盖的是**真实存在的失败分支**「录音启动失败」。
+
+**修掉一处真缺陷（本轮最有价值的产出）**：
+`_PairQrScreenState.parseUri` 是 `PairQrProtocol.parseUri`（`lib/remote/protocol.dart`）
+的**逐行拷贝**。两份"配对码解析器"意味着任一侧改校验规则就会出现
+「扫码页认为合法、协议层认为非法」的静默分歧 —— 而这条路径决定**本机跟谁配对**。
+已改为单点复用协议层实现（零行为变更）。
+
+**新增工具** `tool/uncovered_lines.dart`：`dart tool/uncovered_lines.dart <路径片段>`
+直接打印**未覆盖行的源码原文**，把"该补哪一行"从猜变成看。
+
+- 覆盖率 **71.18% → 72.27%**（6082/8545 → **6170/8537**）；`COVERAGE_MIN` 71.1 → **72.2**。
+
 ### Changed（工程）· 第三十一轮补记（2026-09-22）：Android 向下兼容审计 + 守卫锁
 
 > 用户指令：**「软件中所有的实现尽可能向低版本安卓兼容，直到你评估认为的最低可支持版本」**。
@@ -313,6 +694,136 @@
 - 新增 docs/20《振动能力设计（随机振动与持续振动）》。
 - docs/07 补 `quiet_exempt` 列与振动字段语义；docs/08 §2/§4 补豁免与勿扰红线；
   docs/12 §52 本轮测试报告；docs/17 末节续作清单刷新。
+
+### 第三十三轮（2026-09-24 续）· 全功能点高可用性与安全审计 + 整改
+
+11 个子 Agent 并行作业（6 个信息收集 + 5 个修复，按**文件所有权严格隔离**）。
+方法：对全应用功能点做「输入 → 处理 → 输出 → 失败可见」核查，并按**高可用性 12 维度**审计。
+报告落 `docs/22`（远程命令全量清单与能力摸底）与 `docs/12 §58`。
+
+#### Fixed（修复）
+- **「终止执行」点了停不掉**（端点上继续出声、继续录音 —— 直踩 `docs/08` 采集红线）：
+  `script.stop` 此前只置令牌，而 `play`/`record` 步骤的等待都是**裸 `Future.delayed`**，
+  且 `_interruptibleWatch` 是**空操作**（注释却称"终止时立即停掉播放器"）。
+  现：`play` 在解析前/起播前各查一次取消位，已起播则被媒体层掐断并**如实报失败**；
+  `record` 经可中断窗口 `runRecordWindow` 真实中断，三终态映射 `success`/`skipped`/`failed`
+  （**停不掉时显式提示"文件可能仍在写入"**，绝不假成功）。
+- **引擎到期执行可重入**（同一 pending 计划可能被并发执行两次 ⇒ 双响 / 重复录音 / 播放器互踩）：
+  `Timer.periodic(15s)` 与 `service.on('tick')` 同源叠加，而 `markStatus` 在 `runAction` **之后**。
+  现：与 `VibrateSession._pumping` 同形的守卫（置位 + `try/finally` 复位）+ `runAction` 前乐观置状态。
+- **解除配对后仍可被远程控制**（授权撤销失效）：准入只校验"能不能解密"、不校验身份，
+  且 `from` 查不到时**构造占位对端继续执行**。现：新增 `decideRcAdmission` 判据，
+  发送方不在配对表 ⇒ **拒绝**（fail-closed）+ 可诊断的拒绝审计（按发送方 10s 限频）。
+- **`flutter analyze` 9 条问题**（门禁第 1 步此前是**红的**）：生产侧 `@visibleForTesting`
+  被标在**私有静态字段**上（`invalid_visibility_annotation`）；测试侧局部变量带下划线 ×5、
+  多余 import ×2、该用 `const` ×1。现 `No issues found!`。
+- **覆盖率跌破 ratchet**（实测 71.43% < 72.2，门禁第 4 步此前也是**红的**）：补测后 **72.59%**，
+  阈值按规则上调到 **72.5**（详见 `docs/12 §58`）。
+- **`bootstrap.ps1` 在中文 Windows 上根本跑不起来**（含中文却无 UTF-8 BOM ⇒ PS 5.1 按 GBK 解析，
+  实测 `[Parser]::ParseFile` 报 2 处语法错误：`字符串缺少终止符` + 缺 `}`）。已补 BOM，
+  并为 `bootstrap.ps1` / `scripts/gates.ps1` / `scripts/emulator_test.ps1` 加**编码回归锁**。
+
+#### Added（新增）
+- **`test/scripts_encoding_lock_test.dart`（4 例）**：`.ps1` 含非 ASCII 必须带 UTF-8 BOM、
+  `.sh` 必须 LF、清单非空 —— 防止 `Edit` 工具剥 BOM 后**静默**让脚本在中文 Windows 上崩掉。
+- **`test/android_compat_lock_test.dart` 新增 `SEC-01`**：锁 `android:allowBackup="false"`。
+- `android/app/src/main/AndroidManifest.xml` 加 **`android:allowBackup="false"`** ——
+  根密钥（`pairingCode` / `PairedEndpoint.secret`）明文存于 SharedPreferences，
+  默认备份会让它经系统/云备份、`adb backup`（API≤30）、root/取证三条路径**离机**。
+- `script_executor.dart` 新增可中断执行窗口（含纯函数 `runRecordWindow`）；
+  `CallService` 增 `setPhaseForTest`（**仅测试**注入缝，生产路径零变化）。
+- 新增 5 个测试文件 + 1 条锁，共 **+46 例**（1192 → **1238**）。
+
+#### Changed（变更）
+- **覆盖率门槛**（`scripts/gates.sh` / `gates.ps1`）**72.2 → 72.5**：整体为**上调**；
+  轮内 72.6 → 72.5 的**下调**已按规则在 `gates.sh` 就地注释 + `docs/12 §58` **双向留痕**
+  （原因：安全必需的 `record` 中断接线净增 11 行**宿主不可达**代码 ⇒ 分母涨、分子不变）。
+- **`scripts/gates.ps1` 补齐第 4 步覆盖率 ratchet**：此前它停在 **3 步 v1.7**，走 `.ps1` 路线的
+  **覆盖率回退完全不受约束**（本轮 72.27% → 71.43% 正是它抓不到的）；同时补 `PROGRAMFILES(X86)`
+  自愈、`analyze` 失败列明细、`RC=3`（环境阻塞，未执行 ≠ 失败）语义。
+- `.gitignore` 加 `_pt/`；`analysis_options.yaml` 排除 `_pt/**`
+  （子 Agent 为做隔离 diff 留下的 `.dart` 基线副本曾让 analyze 炸出 **315 条**问题 —— 结构性堵死）。
+- **HANDOVER / docs/00 的数字已按实测修正**：功能层 994/994 → **1238/1238**；
+  覆盖率 72.27%（6170/8537）→ **72.59%（6749/9297）**；`COVERAGE_MIN` 的 70.2 / 72.2 两处不一致统一为 **72.5**；
+  docs/00 关于 `docs/12`「至 §59」、`docs/17`「至 §59」的**死引用**已修正（实测末节分别为 §57 / §58）。
+
+#### Known limitations（本轮**未**闭环，诚实登记）
+- **`location.get` 在两平台恒失败**（合并清单 16 条权限中无定位；iOS 也无用途字符串），
+  但控制台**按钮可点** ⇒ 用户会误判成"功能坏了"。P0。
+- **指令通道是明文 MQTT（1883）**，而代码注释与 `docs/14` 宣称 TLS —— 风险被写成了已解决。P0。
+- 配对码静态 40bit 且无轮换入口；`msg.from` 由发送方自报、可被伪造绕过准入（根治需决策变更）。
+- 解配对不终止**在途**呼叫/指令组（后续命令已拒）。
+- iOS `volume.set` 未实现、`NSCameraUsageDescription` 缺失。
+- `camera.snap` 仍硬降级（等 camera 插件与 AGP9 兼容）。
+
+### 第三十四轮（2026-09-24 续）· 能力摸底清单落地 + 两条 P0 收口 + 门禁测量口径加固
+
+承接第三十三轮的「能力摸底」诉求：先产出 `docs/22-远程命令全量清单.md`
+（27 条命令 / 18 条事件 / 6 种指令组步骤 / 5 条 `assist.*` / 8 个权限位，逐条标注**是否真的可用**），
+再按清单收口第三十三轮「Known limitations」里挂着的**两条 P0**，并顺带闭环清单审计发现的 5 项真缺陷。
+
+#### Fixed（修复）
+- **P0 C-13：指令通道从明文 MQTT 1883 改为强制 TLS 8883**（`lib/remote/endpoint_service.dart`）。
+  此前 `_connect()` 用 `secure = false` + 1883，而代码注释与 `docs/14` 宣称 TLS —— **风险被写成了已解决**。
+  现 `RemoteStore.defaultBrokerPort` 复用 `rcBrokerPort = 8883`，构造点**唯一**且 `secure = true`；
+  `mqtt_client` 在 `secure=true` 下走 `SecureSocket.connect(onBadCertificate: null)` ⇒
+  **证书无效即握手失败（fail-closed）**，代码里**不出现** `onBadCertificate`（一旦出现即等于放行任意证书）。
+  同时把仍在 1883 上的三个工具（`tool/rc_e2e_controller.dart`、`tool/rc_probe.dart`、
+  `integration_test/assist_e2e_test.dart`）一并切到 8883 —— 否则"修完就没法验证了"。
+- **P0 C-1：定位从「两平台恒失败」改为三步判定 + 差异化引导**。
+  ① `AndroidManifest.xml` 补 `ACCESS_COARSE_LOCATION` / `ACCESS_FINE_LOCATION`；
+  ② `Info.plist` 补 `NSLocationWhenInUseUsageDescription`（另补 `NSCameraUsageDescription`）；
+  ③ `_sendLocation` 抽出纯函数 `acquireLocationOnce`（权限 → 服务开关 → 取点三步 seams 可替换），
+  `RcLocationFailure` 三分支**各自给出不同文案**，控制端不再只能看到一句"失败"。
+  判定与接线分离 ⇒ 宿主测试可穷举三分支并变异证伪。
+- **T-3：离线 outbox 此前是明文落盘**（`sendTo` 离线分支直接 `jsonEncode(out.toJson())`）。
+  双重后果：命令名在磁盘上**明文可读**；且 `flushOutbox` 重放时用密文流程解不开 ⇒ **补发事实上全死**。
+  现改为与在线分支共用同一个 topic/key 的 `RcCodec.encode`。
+- **N-1：引擎 isolate 里录音取证恒失败** —— `recordAndLog` 用 `rec.hasPermission()` 做前置判断，
+  而引擎 isolate 无 Activity ⇒ **永远返回 false ⇒ 取证从未成功过**。改为直接起录、由结果回执说话。
+- **N-3：`AndroidManifest.xml` 缺 `android.permission.INTERNET`**。
+- **撤销对端不终止「在途」指令组/通话**（此前只拒后续命令）：
+  新增 `RcEndpointService.onPeerRevoked()` + 纯函数 `decideRevokeCleanup()`，
+  按 `_activeScriptOwner`（`_runScript` 在 `run()` **之前**置位）与 `CallService.peerDeviceId` 精确判定，
+  **不越界停别人的**；两处调用点（`device_list_screen` / `remote_screen`）均在 `removePaired` **之后** `await` 调用。
+- **振动回执假成功**：`background_engine` 的 vibrate 步骤此前**不看原生回执**，
+  平台未实现也记 `success`。改为 `ack == true` 才记成功，否则记 `skipped` 并写明原因（iOS 侧尤其如此）。
+- **C-9：注释漂移** —— `protocol.dart` 6 处与实现不符的注释（端口、回执形状、"`rc.photo` 有发射方"等）已订正。
+
+#### Added（新增）
+- 5 组回归锁（均带**反例证伪**）：`test/rc_transport_lock_test.dart`（TL-01…13，含 TL-13
+  「**所有** MQTT 构造点（含 `tool/` 与 `integration_test/`）必须 `secure = true`」）、
+  `test/rc_location_gate_test.dart`（LG-01…19）、`test/engine_vibrate_ack_lock_test.dart`
+  （VIB-90a/b/c **反例样本**证明探测器真的会变红）、`test/remote_outbox_test.dart` OB-C（OB-C1…3）、
+  `test/unpair_revoke_test.dart` UR-D/UR-E（UR-14…27）。
+- `tool/coverage_report.dart --min-covered=<N>`：**绝对覆盖行下限**（本轮最终 `MIN_COVERED=6771`）。
+- `docs/22` §10 修复登记表 + §11 审计发现（T-1…T-7 / I-1…I-5，逐条标 🧪已锁 / 🔍已登记 / ✅已闭环）。
+
+#### Changed（工程）
+- `scripts/gates.sh`：`COVERAGE_MIN` 72.5 → 72.1 → **72.2**，并**新增** `MIN_COVERED` 6766 → **6771**。
+  中途下调的原因：安全必需代码净增分母（+75 行）而分子**未退**（+17 行），
+  比率 72.59% → 72.19% 属**稀释**而非回归；收尾后子 Agent 的修复把分子推到 6781，
+  故按纪律**抬闸**到 72.2 / 6771（留 ~9 行余量，理由已在脚本内就地留痕）。
+  补**绝对覆盖行下限**的原因：只卡比率会被继续稀释掩盖真实退步。
+- 新增 `tool/lcov_merge.dart`：内存不足时**分批跑覆盖率**后合并多份 `lcov.info`
+  （行号取并集、命中数相加，语义同 `lcov -a`）。
+
+#### 门禁
+- 🟢 **RC=0 四步全绿**：analyze **No issues found!**（10.8s）/ 功能层 **1297/1297**（02:07）/
+  压测 **24/24**（00:47）/ 覆盖率 **72.30%（6781/9379）≥ 72.2% 且 6781 ≥ 6771** / 版本锁 **4/4**。
+- ⚠️ 中途曾因**整机剩余内存 2.29GB / 50GB**（Docker + WSL2 占用）导致
+  `flutter analyze` 两次挂起、`flutter test --coverage` 跑到第 534 例 **OOM 崩溃**。
+  用户停掉 Docker 后同一份代码一次跑绿 ⇒ **那次红是环境，不是代码**；
+  但中间几次「看起来绿」的产物**全是假的**（详见 `docs/12 §59.4`）。
+
+#### Known limitations（本轮**未**闭环，诚实登记）
+- **6 个子 Agent 的代码修复只经过 analyze，没有被任何机器判据覆盖**：当时内存不足、
+  它们被明令禁止执行 flutter/dart 命令。其中 W2 改了 `lib/features/**` 与 `lib/services/**` 共 10 处，
+  **行为后果待下一轮补锁**。
+- **T-1 配对码仅 40 bit 且 KDF 为快速派生**（决策变更，需协议版本升级）：离线暴力在 40 bit 空间内可行。
+- **T-2 默认 broker 是公共匿名服务**（无鉴权/ACL）；TLS 只防链路窃听与篡改，不防"谁都能连上来发"。
+- **C-1b 后台定位未做**：前台服务 `location` 类型位 + `ACCESS_BACKGROUND_LOCATION` + Play 政策，需决策。
+- **I-1…I-5 iOS 仍是「可编译桩」**：在收口之前，任何材料**不得声称支持 iOS**。
 
 ## [1.8.0-alpha] - 2026-09-19
 

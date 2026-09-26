@@ -22,14 +22,22 @@ import '../../remote/assist_host.dart';
 /// - 权限开关**默认全关**，逐项显式开启（C5）；
 /// - 倒计时到期自动终止，凭据只存内存不落盘（C4）。
 class AssistHostScreen extends StatefulWidget {
-  const AssistHostScreen({super.key});
+  const AssistHostScreen({super.key, this.host});
+
+  /// 会话托管；null = 生产单例。
+  ///
+  /// 与 [AssistJoinScreen.client] 同样的注入缝：单测需要**互不干扰**的实例
+  /// （会话状态是纯内存的，共享单例会让用例之间互相污染），也才能分别构造
+  /// "已绑定传输"（正常生成）与"未绑定传输"（模块未开启）两种场景 ——
+  /// 后者正是 P0-1 守卫的回归锁所必需的。
+  final RcAssistHost? host;
 
   @override
   State<AssistHostScreen> createState() => _AssistHostScreenState();
 }
 
 class _AssistHostScreenState extends State<AssistHostScreen> {
-  final _host = RcAssistHost.instance;
+  late final RcAssistHost _host = widget.host ?? RcAssistHost.instance;
 
   @override
   Widget build(BuildContext context) {
@@ -312,6 +320,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
         'video' => const Text('摄像头视频通话与拍照（敏感）', style: TextStyle(fontSize: 12)),
         'script' =>
           const Text('执行指令组、增删改任务与守卫开关', style: TextStyle(fontSize: 12)),
+        'audit' => const Text('读取本机审计日志（敏感）', style: TextStyle(fontSize: 12)),
         _ => null,
       };
 }

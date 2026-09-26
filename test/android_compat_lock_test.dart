@@ -195,8 +195,8 @@ void main() {
     return out.toString();
   }
 
-  final _guardRe = RegExp(r'SDK_INT\s*(>=|<)\s*([A-Za-z0-9_.]+)');
-  final _funBoundaryRe = RegExp(r'^\s*(?:@\w+\s*)?(?:private\s+|internal\s+'
+  final guardRe = RegExp(r'SDK_INT\s*(>=|<)\s*([A-Za-z0-9_.]+)');
+  final funBoundaryRe = RegExp(r'^\s*(?:@\w+\s*)?(?:private\s+|internal\s+'
       r'|public\s+|protected\s+)?(?:override\s+)?(?:fun|class|object)\s');
 
   /// 找 [line] 所在**函数体内**、向上最近的一条 `SDK_INT <op> LEVEL`。
@@ -208,8 +208,8 @@ void main() {
   ({int level, String op, int line})? nearestGuard(
       List<String> lines, int line) {
     for (var i = line; i >= 0; i--) {
-      if (i != line && _funBoundaryRe.hasMatch(lines[i])) return null;
-      final m = _guardRe.firstMatch(lines[i]);
+      if (i != line && funBoundaryRe.hasMatch(lines[i])) return null;
+      final m = guardRe.firstMatch(lines[i]);
       if (m == null) continue;
       // BootReceiver 用的是**全限定名** `android.os.Build.VERSION_CODES.O`，
       // 这里统一剥掉包前缀再查表 —— 否则会漏判成"未登记常量"。
@@ -612,6 +612,26 @@ void main() {
       final app = read(appManifest);
       expect(app, contains('android.permission.SCHEDULE_EXACT_ALARM'));
       expect(app, contains('android.permission.FOREGROUND_SERVICE'));
+    });
+
+    test('SEC-01 关闭系统备份（E2EE 根密钥不得随备份离机）', () {
+      final app = read(appManifest);
+      // 空转自检：读不到清单内容时下面两条都会"看起来通过"（isNot contains 恒真）。
+      expect(app, contains('<application'),
+          reason: '清单没读到内容 ⇒ 本锁是空转假绿，必须先修读取路径。');
+      expect(
+        app,
+        contains('android:allowBackup="false"'),
+        reason: '根密钥（RemoteStore.pairingCode / PairedEndpoint.secret）明文存于 '
+            'SharedPreferences；allowBackup 默认 true 时它会随 ①系统/云备份恢复 '
+            '②adb backup(API<=30) ③root/取证 三条路径离机 —— 拿到即等于拿到端点控制权。'
+            '这是 A3/A4 审计的 P0-4，不要删。',
+      );
+      expect(
+        app,
+        isNot(contains('android:allowBackup="true"')),
+        reason: '不得存在显式开启备份的声明（防止变体清单或第二段 <application> 回退）。',
+      );
     });
   });
 

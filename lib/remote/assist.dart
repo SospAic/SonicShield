@@ -161,6 +161,7 @@ class AssistPerms {
     this.location = false,
     this.video = false,
     this.script = false,
+    this.audit = false,
   });
 
   /// 音效播放（sound.play / 指令组 play 步骤）。
@@ -184,6 +185,13 @@ class AssistPerms {
   /// 指令组（宏）执行。
   final bool script;
 
+  /// 读取本机审计日志（`logs.recent`）。
+  ///
+  /// 单独成位而非复用 `script`：审计日志会回传端点的操作轨迹（谁在何时做了什么），
+  /// 是**敏感只读**数据。若把它留在"免授权"清单里，一个未放行任何权限的对端
+  /// 就能读取端点审计历史 —— 与"默认全拒"的承诺矛盾。
+  final bool audit;
+
   static const none = AssistPerms();
 
   AssistPerms copyWith({
@@ -194,6 +202,7 @@ class AssistPerms {
     bool? location,
     bool? video,
     bool? script,
+    bool? audit,
   }) =>
       AssistPerms(
         media: media ?? this.media,
@@ -203,6 +212,7 @@ class AssistPerms {
         location: location ?? this.location,
         video: video ?? this.video,
         script: script ?? this.script,
+        audit: audit ?? this.audit,
       );
 
   Map<String, dynamic> toJson() => {
@@ -213,6 +223,7 @@ class AssistPerms {
         'location': location,
         'video': video,
         'script': script,
+        'audit': audit,
       };
 
   static AssistPerms fromJson(Map<String, dynamic> j) => AssistPerms(
@@ -223,6 +234,7 @@ class AssistPerms {
         location: j['location'] as bool? ?? false,
         video: j['video'] as bool? ?? false,
         script: j['script'] as bool? ?? false,
+        audit: j['audit'] as bool? ?? false,
       );
 
   /// 人类可读（UI 展示）。
@@ -234,6 +246,7 @@ class AssistPerms {
     'location': '获取定位',
     'video': '视频通话',
     'script': '执行指令组',
+    'audit': '查看审计日志',
   };
 
   /// 按位名读取（键名同 [labels]）。
@@ -248,6 +261,7 @@ class AssistPerms {
         'location' => copyWith(location: value),
         'video' => copyWith(video: value),
         'script' => copyWith(script: value),
+        'audit' => copyWith(audit: value),
         _ => this,
       };
 }
@@ -305,7 +319,10 @@ abstract final class RcAssistCmd {
   static const reject = 'assist.reject'; // 端点 → 控制端
   static const perm = 'assist.perm'; // 端点 → 控制端（权限位变更）
   static const close = 'assist.close'; // 双向
-  static const state = 'rc.assist'; // 状态镜像事件
+  // 注：曾经这里有一个「会话状态镜像」常量（rc.assist）。全仓除定义外只有
+  // 一条测试断言其字面量，**没有任何生产侧发出/消费** —— 一个从不发出的常量
+  // 比没有更糟：它让人以为"状态镜像已实现"。已删除；若日后要真正做状态镜像，
+  // 应连同控制端的消费方一起提交，而不是先放一个常量。
 
   /// 是否为**会话控制类**消息（`assist.*`）。
   ///
@@ -339,12 +356,18 @@ abstract final class RcPermGate {
         RcCmd.taskList ||
         RcCmd.taskGet ||
         RcCmd.assetList ||
-        RcCmd.presetList ||
-        RcCmd.logsRecent =>
+        RcCmd.presetList =>
           null,
+        // 审计日志读取：会回传端点的操作轨迹（谁在何时做了什么），是敏感只读面。
+        // 此前它与 ping/status 同列"免授权"，等于未放行任何权限的对端也能读审计 ——
+        // 与"默认全拒"直接矛盾（P2-1）。现要求独立的 `audit` 位。
+        RcCmd.logsRecent => 'audit',
         // 出声 / 改音量
         RcCmd.soundPlay || RcCmd.pttVoice => 'media',
         RcCmd.volumeSet => 'volume',
+        // 找回告警（Q9-B）：会点亮屏幕 + 最大音量提示，与"出声"同级敏感，
+        // 要求 media 位 —— 能让端点出声的对端才能点亮屏幕喊话。
+        RcCmd.deviceAlert => 'media',
         // v1.9：停止振动只会**减弱**端点正在做的事，但仍要求 `vibrate` 位 ——
         // 本工具是自我保护用途，让没有振动权限的对端停掉用户自己的报警振动
         // 同样是不可接受的。能震的才能停。
@@ -380,6 +403,7 @@ abstract final class RcPermGate {
         'location' => p.location,
         'video' => p.video,
         'script' => p.script,
+        'audit' => p.audit,
         _ => false, // 含 [denyAll]
       };
 

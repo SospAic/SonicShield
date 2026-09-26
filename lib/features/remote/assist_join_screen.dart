@@ -189,7 +189,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
   Widget _console(AssistJoinInfo info) {
     final scheme = Theme.of(context).colorScheme;
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: Text('协助会话 · ${info.epName}'),
@@ -234,6 +234,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
               tabs: [
                 Tab(text: '控制台', icon: Icon(Icons.terminal, size: 18)),
                 Tab(text: '指令组', icon: Icon(Icons.bolt, size: 18)),
+                Tab(text: '任务', icon: Icon(Icons.checklist, size: 18)),
               ],
             ),
             Expanded(
@@ -241,6 +242,10 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                 children: [
                   RemoteConsoleTab(channel: AssistChannel(_client)),
                   RemoteScriptsTab(channel: AssistChannel(_client)),
+                  // 「任务」Tab 在协助会话下**显式说明不可用**（P2-2）：
+                  // 任务页（remote_tasks_tab）建立在"已配对设备"之上，协助会话
+                  // 没有配对表 ⇒ 若直接复用会静默空白，使用者会以为"设备丢了"。
+                  const _AssistTasksUnavailable(),
                 ],
               ),
             ),
@@ -345,6 +350,41 @@ class _AuditSheet extends StatelessWidget {
   static String _hms(DateTime t) => '${t.hour.toString().padLeft(2, '0')}:'
       '${t.minute.toString().padLeft(2, '0')}:'
       '${t.second.toString().padLeft(2, '0')}';
+}
+
+/// 协助会话下的「任务」Tab 占位（P2-2）。
+///
+/// 为什么不能直接复用 [RemoteTasksTab]：它的 `_load()` 读取**配对表**
+/// （`RemoteStore.paired()`），而协助会话是一次性临时接入、没有配对记录 ——
+/// 复用只会得到一张空列表，使用者会以为"设备丢了/功能坏了"。
+/// 这里给出**明确原因 + 替代路径**，把"静默不可用"变成"已知的边界"。
+class _AssistTasksUnavailable extends StatelessWidget {
+  const _AssistTasksUnavailable();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Icon(Icons.checklist, size: 48, color: scheme.outline),
+        const SizedBox(height: 12),
+        Text(
+          '协助会话暂不支持管理远端任务',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '任务列表依赖"已配对设备"，而协助会话是一次性临时接入，没有配对记录。\n'
+          '如需管理对方的任务，请让对端与你完成一次正式配对（扫码）后再操作；'
+          '协助会话目前覆盖「控制台」与「指令组」。',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 13, color: scheme.outline),
+        ),
+      ],
+    );
+  }
 }
 
 /// 协助会话的权限摘要（供「远程 → 设备」页在接入后展示）。

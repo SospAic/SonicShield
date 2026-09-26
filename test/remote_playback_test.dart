@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/remote/remote_playback.dart';
 
+import 'support/source_text.dart';
+
 /// 假音源库：记录**每一次**解析调用，从而能断言"查了什么"，
 /// 也能断言**没查什么** —— 后者才是 BUG-048 的关键
 /// （点名未命中时**不得**回落到"任意一条"）。
@@ -42,22 +44,6 @@ class _Lib {
   }
 }
 
-/// 取出某个方法的方法体（大括号配对；字符串里的 `${…}` 自平衡，够用）。
-String _methodBody(String src, String signature) {
-  final start = src.indexOf(signature);
-  expect(start, greaterThanOrEqualTo(0), reason: '源码里找不到「$signature」');
-  final open = src.indexOf('{', start);
-  var depth = 0;
-  for (var i = open; i < src.length; i++) {
-    final c = src[i];
-    if (c == '{') depth++;
-    if (c == '}') {
-      depth--;
-      if (depth == 0) return src.substring(open, i + 1);
-    }
-  }
-  fail('「$signature」的大括号不配对');
-}
 
 void main() {
   group('PlaybackSelector 解析', () {
@@ -289,7 +275,7 @@ void main() {
     final src = File('lib/remote/endpoint_service.dart').readAsStringSync();
 
     test('_playRemote 走 performRemotePlay 并注入 byId/byTag/any/play', () {
-      final body = _methodBody(src, 'Future<void> _playRemote(');
+      final body = methodBody(src, 'Future<void> _playRemote(');
 
       expect(body, contains('performRemotePlay('));
       expect(body, contains('byId: _assetPathById'),
@@ -300,7 +286,7 @@ void main() {
     });
 
     test('_playRemote 不得再出现 BUG-048 的旧写法', () {
-      final body = _methodBody(src, 'Future<void> _playRemote(');
+      final body = methodBody(src, 'Future<void> _playRemote(');
 
       expect(body, isNot(contains("payload['category']")),
           reason: '旧写法：只读 category → assetId/preset 被静默忽略');
@@ -309,7 +295,7 @@ void main() {
     });
 
     test('_assetPathById 按主键精确查询（不是模糊匹配）', () {
-      final body = _methodBody(src, 'Future<String?> _assetPathById(');
+      final body = methodBody(src, 'Future<String?> _assetPathById(');
 
       expect(body, contains('audio_assets'));
       expect(body, contains("where: 'id = ?'"));

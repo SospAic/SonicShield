@@ -61,7 +61,7 @@ Future<void> main(List<String> argv) async {
   final broker = _arg(argv, '--broker', dflt: 'broker.emqx.io');
 
   stdout.writeln('=== 声盾远程遥控 端到端实测 ===');
-  stdout.writeln('broker      : $broker:1883');
+  stdout.writeln('broker      : $broker:$rcBrokerPort (TLS)');
   stdout.writeln('端点(E)     : $eid  code=$ecode');
   stdout.writeln('控制器(C)   : $cid  code=$ccode');
   stdout.writeln('');
@@ -73,8 +73,11 @@ Future<void> main(List<String> argv) async {
   final evtTopic = 'sonicshield/v1/$eid/evt';
 
   // ---------------- MQTT ----------------
-  final client = MqttServerClient.withPort(broker, cid, 1883)
-    ..port = 1883
+  // 控制端侧同样是 MQTT 客户端，**必须**与端点用同一档传输（C-13）：
+  // 端点只认 TLS 8883，工具若还写明文 1883 就会连不上 —— "修完反而测不了"。
+  final client = MqttServerClient.withPort(broker, cid, rcBrokerPort)
+    ..port = rcBrokerPort
+    ..secure = true
     ..keepAlivePeriod = 30
     ..autoReconnect = true
     ..logging(on: false)

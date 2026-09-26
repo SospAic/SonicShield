@@ -312,6 +312,26 @@ void main() {
     });
   });
 
+  // ---------------- JW-3x 任务 Tab 说明（P2-2） ----------------
+
+  group('JW 任务 Tab 说明', () {
+    testWidgets('JW-30 协助会话下「任务」Tab 显式说明不可用（避免误以为设备丢了）',
+        (tester) async {
+      final s = await host.start();
+      await mount(tester);
+      await handshake(tester, s);
+
+      await tester.tap(find.widgetWithText(Tab, '任务'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('协助会话暂不支持管理远端任务'), findsOneWidget,
+          reason: '任务页依赖配对表；协助会话无配对记录，必须说明而非静默空白');
+
+      await cleanup(tester);
+    });
+  });
+
   // ---------------- JW-2x 会话审计面板（S4） ----------------
 
   group('JW 会话审计面板', () {

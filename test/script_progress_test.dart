@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sonic_shield/remote/script_progress.dart';
 
+import 'support/source_text.dart';
+
 /// `rc.script`（`RcEvt.scriptState`）**主叫侧进度**的宿主侧回归锁。
 ///
 /// ## 为什么要有这个文件
@@ -24,52 +26,6 @@ void main() {
         return i < 0 ? l : l.substring(0, i);
       }).join('\n');
 
-  /// 大括号配对抽方法体，让断言限定在**单个方法**内
-  /// （文件级 `contains` 会被同文件其它方法误伤）。
-  ///
-  /// ⚠️ 两个坑都真实踩过，且都会让断言**静默失效**：
-  /// 1. 不能取"签名后的第一个 `{`" —— Dart 的**具名参数**也用大括号
-  ///    （`String f(int a, {int? b}) { ... }`），会抽到参数列表；
-  /// 2. 不能取"后一个前面是 `)` 的 `{`" —— `) async {` 的 `{` 前面是 `async`。
-  ///
-  /// 正确做法：先按括号配对**跳过整个参数表**，再取其后第一个 `{`。
-  /// 自检见本文件 SP-11。
-  String methodBody(String src, String signature) {
-    final i = src.indexOf(signature);
-    if (i < 0) throw StateError('找不到 `$signature`');
-    // 1) 跳过参数表（具名参数的 `{}` 也一并配对掉）
-    var depth = 0;
-    var k = src.indexOf('(', i + signature.length - 1);
-    if (k < 0) throw StateError('`$signature` 后面找不到 `(`');
-    for (; k < src.length; k++) {
-      final c = src[k];
-      if (c == '(' || c == '[' || c == '{') {
-        depth++;
-      } else if (c == ')' || c == ']' || c == '}') {
-        depth--;
-        if (depth == 0) break;
-      }
-    }
-    if (depth != 0) throw StateError('`$signature` 的参数表未闭合');
-    // 2) 参数表之后的第一个 `{` 即方法体
-    final open = src.indexOf('{', k);
-    if (open < 0) throw StateError('`$signature` 没有函数体');
-    if (src.substring(k, open).contains('=>')) {
-      throw StateError('`$signature` 是表达式体（`=>`），本工具只支持块体');
-    }
-    // 3) 大括号配对
-    var d = 0;
-    for (var j = open; j < src.length; j++) {
-      final c = src[j];
-      if (c == '{') {
-        d++;
-      } else if (c == '}') {
-        d--;
-        if (d == 0) return src.substring(open, j + 1);
-      }
-    }
-    throw StateError('`$signature` 的函数体未闭合');
-  }
 
   group('SP 进度解析（纯逻辑）', () {
     test('SP-01 running 带 0-based stepIndex → 显示为 1-based「第 n/N 步」', () {

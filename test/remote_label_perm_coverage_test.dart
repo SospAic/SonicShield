@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'support/source_text.dart';
+
 /// 「展示/说明类查表」的**覆盖锁**（与 BUG-058 同源：表漏登记 → 静默降级）。
 ///
 /// 这类表有三个共同点：① 输入是 String 或 sealed 类型；② 漏登记**不编译报错**
@@ -15,15 +17,25 @@ const _assist = 'lib/remote/assist.dart';
 const _action = 'lib/domain/models/action.dart';
 const _permHintSrc = 'lib/features/remote/assist_host_screen.dart';
 
+// **剥掉注释**再做文本扫描 —— 本锁能被信任的前提。
+//
+// 不剥的话：`kindToType.contains("'composite' =>")` 这类存在性判据
+// 会被注释里的示例喂绿（假绿）；`/* */` 与 `//` 都要处理，
+// 字符串字面量整段保留。
+//
+// 实现见 `test/support/source_text.dart`（第 36 轮收敛到唯一真源）。
+
 /// 取 `marker` 之后到第一个 `\n…};` 的 switch 体。
 ///
 /// ⚠️ 不能取"签名后第一个 `{`"：Dart 具名参数也用大括号（项目既有教训）。
+/// ⚠️ 返回前必须**剥注释**（W5 P1）：注释里出现的 `'xxx' =>` 不是登记，
+/// 存在性判据只认代码行。
 String _bodyOf(String src, String marker) {
   final i = src.indexOf(marker);
-  if (i < 0) throw StateError('找不到 $marker —— 是不是改名或挪走了？');
-  final m = RegExp(r'\n\s*\};').allMatches(src, i).firstOrNull;
-  if (m == null) throw StateError('$marker 的 switch 体没有闭合');
-  return src.substring(i, m.start);
+  if (i < 0) throw StateError('找不到 marker：$marker');
+  final m = RegExp(r'\n\s*\};').firstMatch(src.substring(i));
+  if (m == null) throw StateError('`$marker` 之后找不到 switch 的收尾 `\n…};`');
+  return stripComments(src.substring(i, i + m.start));
 }
 
 void main() {

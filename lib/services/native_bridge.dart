@@ -176,6 +176,18 @@ class NativeBridge {
     });
     return r ?? false;
   }
+
+  /// 找回动作（Q9.B）：远端触发设备本地提醒。
+  ///
+  /// 原生侧执行：点亮屏幕 → 高优先级全屏通知横幅显示 [message] →
+  /// 媒体音量置最大并播放约 3 秒提示音（响铃振动沿用既有动作另行下发）。
+  ///
+  /// 返回 false = 平台拒绝或桥不可用（**调用方必须留痕**，不得静默）——
+  /// 与 [setVolume] 的 ack 语义一致。
+  static Future<bool> alert({required String message}) async {
+    final r = await _invoke<bool>('alert', {'message': message});
+    return r ?? false;
+  }
 }
 
 /// 避免与 services 包内其它 Channels 常量冲突的私有命名空间。

@@ -151,3 +151,29 @@ class PttSendResult {
   final bool ok;
   final String message;
 }
+
+// ---------------- 音量模块（v1.9 Y1：纯判定函数，不依赖任何实例） ----------------
+//
+// 判定与接线分离：payload 形状、文案、档位都收在这里，控制台只负责接线。
+// 端点侧形状已核实（`endpoint_service._setVolumes`：读 `media`/`alarm`
+// 两个 0..1 的 num，经 `NativeBridge.setVolume` 走原生桥 `volume.set`，
+// 仅 Android 生效）——键名与取值范围不得另造。
+
+/// 0–100 整数 → `volume.set` 端点 payload（`{'media': 0.0..1.0}`）。
+///
+/// 越界在**控制端钳制**：端点对 `media` 不做范围校验（`as num?` 后直接
+/// 透传原生），发 1.2 这类值等于把边界契约留给没人负责的地方。
+/// 只调媒体流，不触碰闹钟/铃声。
+Map<String, Object?> volumePayloadForPercent(int percent) {
+  final p = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+  return {'media': p / 100.0};
+}
+
+/// 音量文案：0 显示「静音」——比"媒体音量 0%"更快被识别为"无声"。
+String volumeLabelForPercent(int percent) {
+  final p = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+  return p == 0 ? '静音' : '媒体音量 $p%';
+}
+
+/// 快捷档位（0 = 静音）。
+List<int> volumeQuickSteps() => const [0, 25, 50, 75, 100];

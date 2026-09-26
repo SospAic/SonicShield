@@ -33,40 +33,49 @@ class _LogScreenState extends ConsumerState<LogScreen> {
   }
 
   Future<void> _exportCsv() async {
-    final repo = await ref.read(logRepoProvider.future);
-    final rows = await repo.recent(limit: 5000);
-    if (rows.isEmpty) {
+    try {
+      final repo = await ref.read(logRepoProvider.future);
+      final rows = await repo.recent(limit: 5000);
+      if (rows.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('暂无日志可导出')));
+        }
+        return;
+      }
+      final df = DateFormat('yyyy-MM-dd HH:mm:ss');
+      final buf = StringBuffer(
+          'time,source,action,status,task_id,occurrence_id,volume,duration_ms,message\n');
+      for (final r in rows) {
+        final ts = DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int);
+        String esc(Object? v) =>
+            '"${(v ?? '').toString().replaceAll('"', '""')}"';
+        buf.writeln([
+          df.format(ts),
+          esc(r['source']),
+          esc(r['action']),
+          esc(r['status']),
+          esc(r['task_id']),
+          esc(r['occurrence_id']),
+          r['volume'] ?? '',
+          r['duration_ms'] ?? '',
+          esc(r['message']),
+        ].join(','));
+      }
+      final dir = await getTemporaryDirectory();
+      final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final path = '${dir.path}/sonic_shield_logs_$stamp.csv';
+      await File(path).writeAsString(buf.toString(), flush: true);
+      if (mounted) {
+        await Share.shareXFiles([XFile(path)], subject: '声盾执行日志（审计导出）');
+      }
+    } catch (e) {
+      // 失败可见：写盘/分享失败（磁盘满、临时目录不可用等）不能静默吞掉，
+      // 否则用户以为导出成功、审计链实际断了。
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('暂无日志可导出')));
+            .showSnackBar(SnackBar(content: Text('导出失败：$e')));
       }
-      return;
-    }
-    final df = DateFormat('yyyy-MM-dd HH:mm:ss');
-    final buf = StringBuffer(
-        'time,source,action,status,task_id,occurrence_id,volume,duration_ms,message\n');
-    for (final r in rows) {
-      final ts = DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int);
-      String esc(Object? v) =>
-          '"${(v ?? '').toString().replaceAll('"', '""')}"';
-      buf.writeln([
-        df.format(ts),
-        esc(r['source']),
-        esc(r['action']),
-        esc(r['status']),
-        esc(r['task_id']),
-        esc(r['occurrence_id']),
-        r['volume'] ?? '',
-        r['duration_ms'] ?? '',
-        esc(r['message']),
-      ].join(','));
-    }
-    final dir = await getTemporaryDirectory();
-    final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-    final path = '${dir.path}/sonic_shield_logs_$stamp.csv';
-    await File(path).writeAsString(buf.toString(), flush: true);
-    if (mounted) {
-      await Share.shareXFiles([XFile(path)], subject: '声盾执行日志（审计导出）');
     }
   }
 
@@ -108,6 +117,13 @@ class _LogScreenState extends ConsumerState<LogScreen> {
               data: (rows) {
                 final filtered = _applyFilter(rows);
                 if (filtered.isEmpty) {
+                  // 区分「真的没有日志」与「有日志但当前筛选无结果」：
+                  // 两者共用一句"暂无日志"会让用户误以为执行记录丢了。
+                  if (rows.isNotEmpty) {
+                    return Center(
+                        child: Text(
+                            '当前筛选（${_filter.name}）无匹配日志，可切换到「全部」'));
+                  }
                   return const Center(
                       child: Text('暂无日志。开启守护并添加任务后，这里会记录每一次执行。'));
                 }

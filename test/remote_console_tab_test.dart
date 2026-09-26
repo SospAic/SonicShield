@@ -556,8 +556,16 @@ void main() {
     expect(ch.lastOfType(RcCmd.guardSet).payload['enabled'], isFalse,
         reason: '「守卫 关」必须发 false —— 发成 true 是静默的反向操作');
 
-    await _tapOutlined(tester, '音量 80%');
-    expect(ch.lastOfType(RcCmd.volumeSet).payload['media'], 0.8);
+    // 音量模块（Y1）：写死的「音量 80%」按钮已替换为滑杆 + 快捷档位。
+    // 点 50% 档：payload 必须是 {'media': 0.5} —— 端点对 media 不做范围校验，
+    // 控制端 `volumePayloadForPercent` 的钳制是唯一边界。
+    await _tapOutlined(tester, '50%');
+    expect(ch.lastOfType(RcCmd.volumeSet).payload['media'], 0.5,
+        reason: '快捷档位 50% 必须映射 0.5（端点侧不校验范围，控制端钳制是唯一边界）');
+
+    await _tapOutlined(tester, '静音');
+    expect(ch.lastOfType(RcCmd.volumeSet).payload['media'], 0.0,
+        reason: '0 档 = 静音，必须发 0.0 而不是不发');
 
     await _tapOutlined(tester, '停止指令组');
     expect(ch.lastOfType(RcCmd.scriptStop).type, RcCmd.scriptStop);

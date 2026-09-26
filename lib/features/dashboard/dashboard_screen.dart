@@ -143,12 +143,20 @@ class _EngineCard extends ConsumerWidget {
           if (v) {
             await requestAllPermissions(ref);
             await NativeBridge.setServiceShouldRun(true);
-            await mgr.start();
+            // ⚠️ `start()` 的返回值**必须看**：后台服务启动失败时
+            // `_svc.startService()` 返回 false 且不抛，旧实现直接忽略它 ——
+            // 用户看到的是"开关弹回、零提示"（与守卫开关 BUG-061 同形）。
+            final ok = await mgr.start();
+            if (!ok && context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('守护启动失败：后台服务未响应'
+                      '（请检查电池优化白名单与厂商自启动设置）')));
+            }
           } else {
             await NativeBridge.setServiceShouldRun(false);
             await mgr.stop();
           }
-          ref.invalidate(engineStateProvider);
+          if (context.mounted) ref.invalidate(engineStateProvider);
         },
       ),
     );

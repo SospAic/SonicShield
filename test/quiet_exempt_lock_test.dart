@@ -15,6 +15,8 @@ import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
 import 'package:sonic_shield/remote/task_wire.dart';
 
+import 'support/source_text.dart';
+
 /// 夜间独立豁免锁（v1.9，docs/20 §8）。
 ///
 /// ## 为什么这个文件必须存在
@@ -166,7 +168,7 @@ void main() {
     });
 
     test('QE-12 源码扫描：task_wire 代码中不读取入站 quietExempt', () {
-      final code = _stripComments(_read('lib/remote/task_wire.dart'));
+      final code = stripComments(_read('lib/remote/task_wire.dart'));
       expect(code.contains("j['quietExempt']"), isFalse,
           reason: '入站解析不得引用该键 —— 即使"读出来再强制置 false"也不允许，'
               '因为下一个改动者很容易把那个 false 改成变量');
@@ -177,7 +179,7 @@ void main() {
 
     test('QE-13 源码扫描：远程侧不得出现主开关的**写入口**', () {
       for (final f in _dartFiles('lib/remote')) {
-        final code = _stripComments(_read(f));
+        final code = stripComments(_read(f));
         // 读是允许的（`_rematerialize` 必须知道本地是否已授权，
         // 否则远程改一次任务就会把已豁免的计划静默清掉）；**写**绝不允许。
         expect(code.contains('setBool(PrefsKeys.quietExemptMaster'),
@@ -185,7 +187,7 @@ void main() {
             reason: '$f 出现主开关写入口 —— 远程不得开启夜间豁免（docs/20 §8.2）');
       }
       for (final f in _dartFiles('lib/features/remote')) {
-        final code = _stripComments(_read(f));
+        final code = stripComments(_read(f));
         expect(code.contains('setBool(PrefsKeys.quietExemptMaster'),
             isFalse,
             reason: '$f 是**控制端**界面；在控制端放主开关等于给对端开护栏后门');
@@ -195,7 +197,7 @@ void main() {
     test('QE-14 源码扫描：主开关写入口只允许出现在设置页', () {
       final writers = <String>[];
       for (final f in _dartFiles('lib')) {
-        final code = _stripComments(_read(f));
+        final code = stripComments(_read(f));
         if (code.contains('setBool(PrefsKeys.quietExemptMaster')) {
           writers.add(p.basename(f));
         }
@@ -206,7 +208,7 @@ void main() {
 
     test('QE-15 源码扫描：任务备份导出/导入不携带 quietExempt', () {
       final code =
-          _stripComments(_read('lib/features/settings/settings_screen.dart'));
+          stripComments(_read('lib/features/settings/settings_screen.dart'));
       // ⚠️ 只扫**导出/导入两个函数体**，不能扫整份文件 ——
       // 设置页本来就含主开关（`_quietExemptMaster`），扫全文必然误报。
       // 先确认标记存在，否则 indexOf 返回 -1 会让切片变成空串而"静默通过"。
@@ -498,13 +500,7 @@ List<String> _dartFiles(String relDir) {
 /// 源码扫描锁必须**排除注释**：本仓库的注释里大量引用被禁止的写法
 /// （例如 `task_wire.dart` 的注记里就写着"绝不读 `j['quietExempt']`"）。
 /// 不剥注释的扫描会把"解释为什么不能这么做"误判成"正在这么做"。
-String _stripComments(String src) {
-  final noBlock = src.replaceAll(RegExp(r'/\*[\s\S]*?\*/'), '');
-  final buf = StringBuffer();
-  for (final line in noBlock.split('\n')) {
-    if (line.trimLeft().startsWith('//')) continue;
-    final i = line.indexOf('//');
-    buf.writeln(i >= 0 ? line.substring(0, i) : line);
-  }
-  return buf.toString();
-}
+///
+/// 实现见 `test/support/source_text.dart`（第 36 轮收敛到唯一真源）。
+/// ⚠️ 此前本文件用的是**行级粗糙版**（`split('//').first` 家族）——
+/// 它会把 `'mqtt://...'` 这类字符串字面量从 `//` 起截断；收敛后整段保留。

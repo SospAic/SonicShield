@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -62,6 +63,14 @@ class CallService {
   String? get failureReason => _failureReason;
   String? _failureReason;
 
+  /// 最近一次**发起呼叫被拦下**的原因（null = 未被拦下）。
+  ///
+  /// BUG-D：原先 `startCall` 只返回 `null`，调用方拿不到"为什么"，
+  /// 只能显示一句"权限或离线"的兜底 —— 用户无从下手。原因判定在
+  /// [callStartBlockFor] / [CallStartBlock]（纯逻辑、宿主机可断言）。
+  CallStartBlock? get lastStartBlock => _lastStartBlock;
+  CallStartBlock? _lastStartBlock;
+
   final _failureCtrl = StreamController<String>.broadcast();
   Stream<String> get failures => _failureCtrl.stream;
 
@@ -73,11 +82,57 @@ class CallService {
   bool _video = true;
   CallPhase _phase = CallPhase.idle;
 
+  /// 本端是否已成功 `setRemoteDescription`。
+  ///
+  /// ICE candidate **必须**在它之后才能喂给 PeerConnection（WebRTC 硬要求），
+  /// 因此早到的候选要先缓存（见 [onCandidate] 与 `_pendingCandidates`）。
+  bool _remoteDescSet = false;
+
+  /// 早到的 ICE candidate 缓存（BUG-D）。
+  ///
+  /// 修之前这些候选被**静默丢弃**：被叫手动接听时 `_pc` 尚未创建，
+  /// 振铃期间到达的候选全部丢掉；而主叫的 gathering 早已结束、不会补发
+  /// ⇒ ICE 永不完成 ⇒ "接通了但没画面没声音"。
+  /// 上限见 [maxBufferedCandidates]。
+  final _pendingCandidates = <RTCIceCandidate>[];
+
   final _phaseCtrl = StreamController<CallPhase>.broadcast();
   Stream<CallPhase> get phase => _phaseCtrl.stream;
   CallPhase get currentPhase => _phase;
   String? get callId => _callId;
+
+  /// 本次通话**对端**的 deviceId（未在通话中时为 null）。
+  ///
+  /// P1 撤销清场用：`RcEndpointService.onPeerRevoked` 靠它判断"这通电话是不是
+  /// 那台已被解除配对的设备打来的/打给它的"。之所以不在这里另存一份状态：
+  /// [_peer] 会在**唯一的**收尾路径（`_teardown` 一带，`_peer = null`）里被清掉，
+  /// 天然不会漂移。
+  String? get peerDeviceId => _peer?.deviceId;
+
   bool get inCall => _phase != CallPhase.idle && _phase != CallPhase.ended;
+
+  /// 测试缝（与 `BackgroundServiceManager.stateForTest` / `lastForTest` 同形）：
+  /// 把会话相位推到指定值，并像生产一样广播到 [phase]。
+  ///
+  /// ## 为什么需要它
+  ///
+  /// `CallOverlayHost` 的渲染**只由相位决定**（`showCall = 非 idle/ended`），
+  /// 而真实相位只能由**真实媒体协商**推动：`connecting` 需要
+  /// `getUserMedia` + `createOffer`（相机/麦克风），`connected` 需要
+  /// `RTCPeerConnection` 真的连上（对端 + ICE）。宿主机两样都没有，
+  /// 于是整块覆盖层（`call_incoming_overlay.dart`，93 行）长期 0 覆盖 ——
+  /// 而它恰恰是被叫**唯一**的接听入口（BUG-056）。
+  ///
+  /// 这条缝只改**状态**：不发信令、不建媒体、不碰权限，
+  /// 因此既不能让"通话跑起来"，也改变不了任何判定结果 —— 它驱动的是
+  /// "相位 → 界面"这段映射，正是宿主可断言的那一段。
+  ///
+  /// ⚠️ 生产路径**从不**调用（`@visibleForTesting` 由分析器强制：
+  /// 见 `analysis_options.yaml` 的 `invalid_use_of_visible_for_testing_member: error`）。
+  /// 生产相位只由 [startCall] / [onIncomingCall] / [acceptIncoming] /
+  /// [hangUp] / [onAnswer] / `_teardown` 驱动。
+  @visibleForTesting
+  void setPhaseForTest(CallPhase p) => _setPhase(p);
 
   /// 本次通话是否为本机发起。
   ///
@@ -239,9 +294,20 @@ class CallService {
   // ---------------- 主叫 ----------------
 
   /// 发起呼叫。返回 callId；连接失败返回 null。
+  ///
+  /// ⚠️ 失败时**必须**同时设置 [lastStartBlock]：调用方（`CallScreen`）
+  /// 依赖它给出可执行的失败原因。返回 null 却不说明原因，就是
+  /// BUG-D 里"点了按钮什么都没发生"的一半。
   Future<String?> startCall(PairedEndpoint endpoint, RemoteStore store,
       {bool video = true}) async {
-    if (inCall) return null;
+    _lastStartBlock = null;
+    if (inCall) {
+      _lastStartBlock = CallStartBlock.alreadyInCall;
+      return null;
+    }
+    // 新会话起点：候选缓存必须是空的（上一通若有残留，`_teardown` 已清）。
+    _pendingCandidates.clear();
+    _remoteDescSet = false;
     _isCaller = true; // 主叫标记（onAnswer 守卫用）
     _video = video;
     _peer = endpoint;
@@ -250,6 +316,7 @@ class CallService {
 
     final ok = await _ensureMedia(video: video);
     if (!ok) {
+      _lastStartBlock = CallStartBlock.mediaFailed;
       await _teardown();
       return null;
     }
@@ -259,25 +326,36 @@ class CallService {
       final offer = await _pc!.createOffer();
       await _pc!.setLocalDescription(offer);
     } on Object {
+      _lastStartBlock = CallStartBlock.offerFailed;
       await _teardown();
       return null;
     }
 
     final desc = await _pc!.getLocalDescription();
+    final sdp = desc?.sdp ?? '';
+    if (sdp.isEmpty) {
+      // ⚠️ 空 SDP 的 invite 是"看起来发出去了"的**假成功**：对端一定协商失败，
+      // 而且主叫会为此白等满 45s 才报"对方无应答"。宁可在本地当场判失败。
+      _lastStartBlock = CallStartBlock.offerFailed;
+      await _teardown();
+      return null;
+    }
     final sent = await RcEndpointService.instance.sendTo(
       endpoint,
       RcMessage.now(RcCmd.callInvite, {
         'callId': _callId,
         'video': video,
-        'sdp': desc?.sdp ?? '',
+        'sdp': sdp,
         'type': desc?.type ?? 'offer',
         'fromName': store.deviceName,
       }),
       store,
     );
     if (!sent) {
+      // 端点离线（outbox 不适用于实时通话）。
+      _lastStartBlock = CallStartBlock.endpointOffline;
       await _teardown();
-      return null; // 端点离线（outbox 不适用于实时通话）
+      return null;
     }
     // invite 已发出 → 开始"等待应答"计时。
     // 修 BUG-050 前这里什么都没有：被叫未开自动接通、或 invite 被静默丢弃时，
@@ -313,6 +391,10 @@ class CallService {
     _peer = peer;
     _callId = payload['callId'] as String;
     _video = payload['video'] as bool? ?? true;
+    // 新会话起点：候选缓存必须是空的（`_createPc` 要等到用户点「接听」
+    // 才会跑，而候选在振铃期间就会进缓存 —— 两者不能互相清）。
+    _pendingCandidates.clear();
+    _remoteDescSet = false;
     _setPhase(CallPhase.ringing);
 
     // ⚠️ 用**穷尽 switch 表达式**：将来给 [CalleeAction] 加一个值会**编译报错**，
@@ -364,9 +446,11 @@ class CallService {
         payload['sdp'] as String,
         payload['type'] as String? ?? 'offer',
       ));
+      // 远端描述就位 → 之后到达的候选可以直接喂；此前缓存的在下面统一重放。
+      _remoteDescSet = true;
       final answer = await _pc!.createAnswer();
       await _pc!.setLocalDescription(answer);
-      await _sendCallMsg(
+      final sent = await _sendCallMsg(
           RcCmd.callAnswer,
           {
             'callId': _callId,
@@ -375,6 +459,16 @@ class CallService {
           },
           peer,
           store);
+      if (!sent) {
+        // ⚠️ 应答**发不出去**时绝不能假装接通：主叫会一路等到 45s 后
+        // 报"对方无应答"（把"网络坏了"误报成"没人接"）。这里当场收场，
+        // 让本端使用者知道真实原因（`failed` → '连接失败'）。
+        await _teardown(reason: CallEndReason.failed);
+        return false;
+      }
+      // answer 已送出 → 把**振铃期间**缓存的候选补喂上（BUG-D）：
+      // 不重放的话，主叫的 gathering 早已结束，ICE 永远凑不齐。
+      await _flushPendingCandidates();
       return true;
     } on Object {
       await _teardown(reason: CallEndReason.failed);
@@ -431,23 +525,74 @@ class CallService {
         payload['sdp'] as String,
         payload['type'] as String? ?? 'answer',
       ));
+      _remoteDescSet = true;
+      // 被叫的候选在 answer **之前**就发出了（`setLocalDescription(answer)`
+      // 先于发信令）⇒ 它们会早于远端描述到达，必须在这里补喂（BUG-D）。
+      await _flushPendingCandidates();
     } on Object {
       await _teardown(reason: CallEndReason.failed);
     }
   }
 
   /// 双向 ICE candidate。
+  ///
+  /// ⚠️ **早到的候选必须缓存、稍后重放，绝不丢弃**（BUG-D）。判定与理由见
+  /// [candidateDeliverable]。旧实现是 `if (callId 不符 || _pc == null) return;`
+  /// —— 被叫手动接听时 `_pc` 尚未创建，振铃期间到达的候选被**全部丢掉**，
+  /// 等用户接听时主叫的 gathering 已经结束 ⇒ ICE 永不完成 ⇒ "接通了但
+  /// 没画面没声音"。
   Future<void> onCandidate(Map<String, dynamic> payload) async {
-    if (payload['callId'] != _callId || _pc == null) return;
+    if (payload['callId'] != _callId) return; // 不是本次通话的候选
+    final raw = payload['candidate'];
+    if (raw is! Map) return; // 远端数据不可信：形状不对就忽略
+    final c = raw.cast<String, dynamic>();
+    final sdp = c['candidate'];
+    if (sdp is! String || sdp.isEmpty) return;
+    final candidate = RTCIceCandidate(
+      sdp,
+      c['sdpMid'] as String?,
+      (c['sdpMLineIndex'] as num?)?.toInt() ?? 0,
+    );
+    if (!candidateDeliverable(
+      pcReady: _pc != null,
+      remoteDescriptionSet: _remoteDescSet,
+    )) {
+      _bufferCandidate(candidate);
+      return;
+    }
+    await _addCandidate(candidate);
+  }
+
+  /// 缓存一条早到的候选（上限见 [maxBufferedCandidates]）。
+  ///
+  /// 超限时丢**最旧**的：host 候选最先产出、也最可能直连成功，要留下。
+  /// 丢弃本身不改变"是否静默"的性质 —— 若最终所有候选都不可用，
+  /// 会话级失败由 `onConnectionState=failed` → [failureHint] 报出。
+  void _bufferCandidate(RTCIceCandidate c) {
+    if (_pendingCandidates.length >= maxBufferedCandidates) {
+      _pendingCandidates.removeAt(0);
+    }
+    _pendingCandidates.add(c);
+  }
+
+  Future<void> _addCandidate(RTCIceCandidate c) async {
     try {
-      final c = (payload['candidate'] as Map).cast<String, dynamic>();
-      await _pc!.addCandidate(RTCIceCandidate(
-        c['candidate'] as String?,
-        c['sdpMid'] as String?,
-        (c['sdpMLineIndex'] as num?)?.toInt() ?? 0,
-      ));
+      await _pc?.addCandidate(c);
     } on Object {
-      // 忽略无效 candidate
+      // 单条候选失败不影响整路：ICE 会继续尝试其它候选；
+      // 若全部失败，会话级失败由 onConnectionState 报出（不静默）。
+    }
+  }
+
+  /// 把早到的候选一次性补喂给 PeerConnection。
+  ///
+  /// 只能在 `setRemoteDescription` **成功之后**调用（WebRTC 硬要求）。
+  Future<void> _flushPendingCandidates() async {
+    if (_pc == null || !_remoteDescSet) return;
+    final pending = List.of(_pendingCandidates);
+    _pendingCandidates.clear();
+    for (final c in pending) {
+      await _addCandidate(c);
     }
   }
 
@@ -482,13 +627,36 @@ class CallService {
         'video':
             video ? {'facingMode': 'user', 'width': 640, 'height': 480} : false,
       });
+      // 免提（hands-free）：不切扬声器时 Android 会把通话声音送**听筒**，
+      // 视频通话里表现为"能看到画面但听不清/听不到对方" —— 这是"无效果"
+      // 最容易被误判成"功能坏了"的一种。本模块的产品形态就是免提通话，
+      // 因此默认走扬声器（docs/16 §6 家人守护场景）。
+      await _setSpeakerphone(true);
       return true;
     } on Object {
       return false;
     }
   }
 
+  /// 切换免提扬声器。
+  ///
+  /// 平台不支持时**静默忽略**：它不是通话能否建立的必要条件，
+  /// 报错反而会挡住通话本身（这与"失败必须可见"不矛盾 ——
+  /// 这里失败的是音频路由偏好，不是用户要求的那件事）。
+  Future<void> _setSpeakerphone(bool on) async {
+    try {
+      await Helper.setSpeakerphoneOn(on);
+    } on Object {
+      // 平台不支持 → 忽略。
+    }
+  }
+
   Future<void> _createPc() async {
+    // ⚠️ 只复位"远端描述"标记，**绝不能**在这里清候选缓存：
+    // 被叫的 `_pc` 是在用户点「接听」时才创建的，而候选早在**振铃期间**
+    // 就已到达并进了缓存 —— 在这里清掉就等于把 BUG-D 原样复现。
+    // 缓存的生命周期是**一次会话**，由 `_teardown` / 会话起点负责清空。
+    _remoteDescSet = false;
     final pc = _pc = await createPeerConnection({
       'iceServers': await iceServers(),
       'sdpSemantics': 'unified-plan',
@@ -519,25 +687,34 @@ class CallService {
       }
     };
     pc.onIceCandidate = (c) {
-      if (c.candidate != null && _peer != null && _callId != null) {
-        _storeRef
-            ?.call()
-            .then((store) => _sendCallMsg(
-                  RcCmd.callCandidate,
-                  {
-                    'callId': _callId,
-                    'candidate': {
-                      'candidate': c.candidate,
-                      'sdpMid': c.sdpMid,
-                      'sdpMLineIndex': c.sdpMLineIndex,
-                    },
-                  },
-                  _peer!,
-                  store,
-                ))
-            .catchError((Object _) {});
-      }
+      if (c.candidate == null) return;
+      // ⚠️ 不能用 `.then(...).catchError((_) {})`：`_sendCallMsg` 现在返回
+      // `Future<bool>`，`catchError` 的处理器必须返回 bool，否则**出错时**
+      // 会再抛一个 TypeError（把"发候选失败"变成"崩在错误处理器里"）。
+      unawaited(_sendLocalCandidate(c));
     };
+  }
+
+  /// 发出本端的一条 ICE candidate（尽力而为：失败由会话级状态兜底上报）。
+  Future<void> _sendLocalCandidate(RTCIceCandidate c) async {
+    final peer = _peer;
+    final callId = _callId;
+    if (peer == null || callId == null) return;
+    final store = await _storeRef?.call();
+    if (store == null) return;
+    await _sendCallMsg(
+      RcCmd.callCandidate,
+      {
+        'callId': callId,
+        'candidate': {
+          'candidate': c.candidate,
+          'sdpMid': c.sdpMid,
+          'sdpMLineIndex': c.sdpMLineIndex,
+        },
+      },
+      peer,
+      store,
+    );
   }
 
   /// store 提供者（由 UI/引擎注入，避免服务层直接依赖插件初始化时序）。
@@ -552,11 +729,22 @@ class CallService {
     if (!_failureCtrl.isClosed) _failureCtrl.add(hint);
   }
 
-  Future<void> _sendCallMsg(String type, Map<String, dynamic> payload,
+  /// 发出通话信令。
+  ///
+  /// ⚠️ 返回 **bool**：实时通话的信令**不能**走 outbox 补发，所以"发失败"
+  /// 必须由调用方看见并决定怎么收场。修 BUG-D 之前这里把返回值丢掉 ——
+  /// 于是 `call.answer` 发不出去时被叫照样"接通成功"，主叫却一路等到 45s
+  /// 报"对方无应答"（把网络故障误报成没人接）。
+  Future<bool> _sendCallMsg(String type, Map<String, dynamic> payload,
       PairedEndpoint peer, RemoteStore store) async {
-    await RcEndpointService.instance.sendTo(
-        peer, RcMessage.now(type, payload), store,
-        enqueueOnFail: false);
+    try {
+      return await RcEndpointService.instance.sendTo(
+          peer, RcMessage.now(type, payload), store,
+          enqueueOnFail: false);
+    } on Object {
+      // 编码/密钥/通道异常 → 如实报失败，不吞掉。
+      return false;
+    }
   }
 
   void _setPhase(CallPhase p) {
@@ -574,6 +762,12 @@ class CallService {
   Future<void> _teardown({CallEndReason? reason}) async {
     _cancelWaitTimer();
     _answered = false;
+    // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
+    // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。
+    _pendingCandidates.clear();
+    _remoteDescSet = false;
+    // 免提归位：不关掉的话，通话结束后整个应用的媒体播放仍走扬声器。
+    await _setSpeakerphone(false);
     try {
       await _pc?.close();
       await _pc?.dispose();

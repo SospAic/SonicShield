@@ -1,21 +1,29 @@
 package com.sonicshield.native_bridge
 
 import android.app.AlarmManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -40,7 +48,7 @@ private const val API_BAKLAVA = 36
  *
  * 通道：sonic_shield/native
  * 能力：精确闹钟（通道B 看门狗）/ 精确闹钟权限引导 / 电池白名单 /
- *       厂商自启动深链 / 震动 / 音量设置 / 麦克风前台服务 / 开机自启标志。
+ *       厂商自启动深链 / 震动 / 音量设置 / 找回提示（device.alert）/ 麦克风前台服务 / 开机自启标志。
  */
 class NativeBridgePlugin : FlutterPlugin {
 
@@ -52,6 +60,7 @@ class NativeBridgePlugin : FlutterPlugin {
         private const val PREFS = "sonic_shield_native"
         private const val KEY_SHOULD_RUN = "should_run"
         private const val KEY_ALARMS = "alarm_times"
+        private const val TAG = "NativeBridge"
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -147,6 +156,11 @@ class NativeBridgePlugin : FlutterPlugin {
                             val media = (call.argument<Number>("media"))?.toFloat()
                             val alarm = (call.argument<Number>("alarm"))?.toFloat()
                             result.success(setVolumes(ctx, media, alarm))
+                        }
+                        // ---- 找回动作（Q9.B，device.alert）----
+                        "alert" -> {
+                            val msg = call.argument<String>("message") ?: ""
+                            result.success(deviceAlert(ctx, msg))
                         }
                         "startMicService" -> {
                             startMicService(ctx)
@@ -437,14 +451,21 @@ class NativeBridgePlugin : FlutterPlugin {
      * 两条路都从这里取属性，改一处即两处生效。
      */
     private fun vibrationAttributes(useAlarm: Boolean): AudioAttributes =
+        audioAttributes(
+            if (useAlarm) {
+                AudioAttributes.USAGE_ALARM
+            } else {
+                AudioAttributes.USAGE_NOTIFICATION
+            }
+        )
+
+    /**
+     * `AudioAttributes` 的**唯一构造出口**（ATTR-02 锁定）：振动与找回告警的
+     * 提示音都从这里取属性，改一处即两处生效，不可能漂移。
+     */
+    private fun audioAttributes(usage: Int): AudioAttributes =
         AudioAttributes.Builder()
-            .setUsage(
-                if (useAlarm) {
-                    AudioAttributes.USAGE_ALARM
-                } else {
-                    AudioAttributes.USAGE_NOTIFICATION
-                }
-            )
+            .setUsage(usage)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
 
@@ -628,6 +649,139 @@ class NativeBridgePlugin : FlutterPlugin {
             )
             ok = true
         }
+        return ok
+    }
+
+    // ---------- 找回动作（Q9.B，device.alert） ----------
+
+    /**
+     * 找回动作：点亮屏幕 → 高优先级通知横幅显示 [message] →
+     * 媒体音量置最大并播放约 3 秒提示音。
+     *
+     * ⚠️ 任何异常都【不得】抛回 Dart 侧：每个子步骤独立 try/catch，
+     * 单步失败不影响其余步骤；有任一步成功即返回 true，全部失败返回 false
+     * （Log.w 留痕），调用方按 false 走降级链。这与 handler 外层的
+     * `catch → result.error` 不同 —— 本方法自己兜底，绝不让原生异常
+     * 变成 Dart 侧的 PlatformException。
+     *
+     * API 等级说明（minSdk 24）：
+     * - `SCREEN_BRIGHT_WAKE_LOCK` 自 API 1 可用（API 13 起标记废弃但
+     *   功能保留），比 `setTurnScreenOn`（API 27）覆盖面更广，故选它；
+     *   需要 WAKE_LOCK 权限（Manifest 已声明）。
+     * - `NotificationChannel` 是 API 26 起，按 SDK 分支；API 24/25 走
+     *   旧 `Notification.Builder(ctx)` + `setPriority(MAX)`（已废弃，同上 suppress）。
+     * - `MediaPlayer.setAudioAttributes` 自 API 21 可用，无版本分支。
+     */
+    private fun deviceAlert(ctx: Context, message: String): Boolean {
+        var ok = false
+
+        // 1. 点亮屏幕：SCREEN_BRIGHT_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP，
+        //    8 秒后自动释放（超时释放是 acquire(long) 的既有语义）。
+        try {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (pm != null) {
+                @Suppress("DEPRECATION")
+                val wl = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "sonic_shield:device_alert",
+                )
+                wl.acquire(8000L)
+                ok = true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "deviceAlert: wake screen failed", e)
+        }
+
+        // 2. 高优先级通知横幅（带全屏 intent，无权限时系统自动降级为横幅）。
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (nm != null) {
+                val chId = "sonic_shield_alert"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    nm.createNotificationChannel(
+                        NotificationChannel(
+                            chId,
+                            "设备找回提示",
+                            NotificationManager.IMPORTANCE_HIGH,
+                        ),
+                    )
+                }
+                val openIntent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
+                val pi = if (openIntent != null) {
+                    PendingIntent.getActivity(
+                        ctx, 9001, openIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    )
+                } else {
+                    null
+                }
+                val notif: Notification
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val b = Notification.Builder(ctx, chId)
+                        .setContentTitle("设备找回")
+                        .setContentText(message)
+                        .setStyle(Notification.BigTextStyle().bigText(message))
+                        .setSmallIcon(ctx.applicationInfo.icon)
+                        .setCategory(Notification.CATEGORY_ALARM)
+                        .setVisibility(Notification.VISIBILITY_PUBLIC)
+                        .setAutoCancel(true)
+                    if (pi != null) b.setFullScreenIntent(pi, true)
+                    notif = b.build()
+                } else {
+                    @Suppress("DEPRECATION")
+                    val b = Notification.Builder(ctx)
+                        .setContentTitle("设备找回")
+                        .setContentText(message)
+                        .setStyle(Notification.BigTextStyle().bigText(message))
+                        .setSmallIcon(ctx.applicationInfo.icon)
+                        .setPriority(Notification.PRIORITY_MAX)
+                        .setCategory(Notification.CATEGORY_ALARM)
+                        .setVisibility(Notification.VISIBILITY_PUBLIC)
+                        .setAutoCancel(true)
+                    if (pi != null) b.setFullScreenIntent(pi, true)
+                    notif = b.build()
+                }
+                nm.notify(9001, notif)
+                ok = true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "deviceAlert: notification failed", e)
+        }
+
+        // 3. 媒体音量置最大 + 短提示音（跟随媒体流，确保可闻）。
+        try {
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (am != null) {
+                am.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+                    0,
+                )
+            }
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            if (uri != null) {
+                val player = MediaPlayer()
+                player.setAudioAttributes(audioAttributes(AudioAttributes.USAGE_MEDIA))
+                player.setDataSource(ctx, uri)
+                player.prepare()
+                player.start()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        player.stop()
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        player.release()
+                    } catch (_: Exception) {
+                    }
+                }, 3000L)
+                ok = true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "deviceAlert: alert tone failed", e)
+        }
+
         return ok
     }
 

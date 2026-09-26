@@ -350,6 +350,7 @@ void main() {
   Future<void> pumpLib(
     WidgetTester tester, {
     bool embedded = false,
+    bool confirmDelete = false,
     List<AudioAsset>? seed,
   }) async {
     if (seed != null) repo.items.addAll(seed);
@@ -359,7 +360,10 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [assetRepoProvider.overrideWith((ref) async => repo)],
       child: MaterialApp(
-        home: SoundLibraryScreen(embedded: embedded, previewPlayer: player),
+        home: SoundLibraryScreen(
+              embedded: embedded,
+              previewPlayer: player,
+              confirmDelete: confirmDelete),
       ),
     ));
     // 第一帧：FutureBuilder 还没拿到仓储 → 空态；
@@ -829,6 +833,7 @@ void main() {
     await pumpLib(tester, seed: [a, asset(id: 'b', name: 'B')]);
     expect(find.text('A'), findsOneWidget);
 
+    // `confirmDelete` 已由 pumpLib 注入为 false —— 无对话框，直接走删除链。
     await runReal(tester, deleteCallback(tester));
 
     expect(repo.deletedIds, ['a']);
@@ -842,6 +847,7 @@ void main() {
     final a = asset(id: 'a', name: 'A', path: '${tmp.path}/never_existed.wav');
     await pumpLib(tester, seed: [a]);
 
+    // `confirmDelete` 默认 false —— 无对话框，直接走删除链（孤儿文件容错）。
     await runReal(tester, deleteCallback(tester));
 
     expect(tester.takeException(), isNull);
@@ -852,6 +858,24 @@ void main() {
   // ══════════════════════════════════════════════════════════════════════
   // SLB-F · 生命周期
   // ══════════════════════════════════════════════════════════════════════
+
+  testWidgets('SLB-22 删除确认对话框：出现、可取消、取消后记录还在', (tester) async {
+    final a = asset(id: 'a', name: 'A', path: '${tmp.path}/audio_a.wav');
+    File(a.path).writeAsBytesSync(List<int>.filled(4, 1));
+    await pumpLib(tester, seed: [a], confirmDelete: true);
+
+    // ⚠️ 确认场景**不能**用 runReal：链停在「等对话框结果」会 zone 死锁。
+    // 直接启动链，对话框落地后点「取消」，链自然走完（无真实 IO）。
+    unawaited(deleteCallback(tester)());
+    await tester.pump(); // 对话框路由落地
+    expect(find.textContaining('删除「'), findsOneWidget,
+        reason: 'QR3：删除必须先确认（误删音源会让引用它的任务失效）');
+
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(repo.deletedIds, isEmpty, reason: '取消 ⇒ 不删');
+    expect(find.text('A'), findsOneWidget);
+  }, timeout: _timeout);
 
   testWidgets('SLB-21 卸载时释放试听播放器（否则解码器与唤醒锁会漏）',
       (tester) async {

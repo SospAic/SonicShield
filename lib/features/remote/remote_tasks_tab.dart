@@ -100,6 +100,14 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
 
   void _onEvent(Map<String, dynamic> m) {
     if (!mounted) return;
+    // ---- R-5：只消费**当前选中端点**的事件 ----
+    //
+    // 本页对 `rc.tasks` 是**直接赋值**（`_tasks = ...`）。多端点场景下切目标后，
+    // 另一台端点回传的列表会**整片覆盖**本页 —— 用户看着 A 的名字、列表却是 B 的，
+    // 接下来的启停 / 编辑 / 删除会**静默落在错误的对象上**（删除会把 B 的任务删掉）。
+    // 协助会话的事件不带 `peerId` ⇒ 天然放行。
+    final pid = m['peerId'] as String? ?? '';
+    if (pid.isNotEmpty && pid != _selectedId) return;
     final type = m['type'] as String? ?? '';
     final payload = rcPayloadOf(m);
     switch (type) {
@@ -153,7 +161,12 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   /// 发送命令，不等待回执（启停/跳过这类幂等即时操作）。
   Future<void> _send(String type, Map<String, dynamic> payload) async {
     final ep = _endpoint;
-    if (ep == null) return;
+    if (ep == null) {
+      // R-9：静默 return 会让"命令根本没发出去"完全不可见 ——
+      // 用户以为点了就生效了（选中端点被解配对时尤其容易发生）。
+      _snack('未选择目标端点（可能已解配对），命令未发出');
+      return;
+    }
     final ch = widget.channel;
     final store = ch == null ? await _store() : null;
     setState(() => _awaiting = true);
@@ -164,7 +177,12 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
     if (!mounted) return;
     if (!ok) {
       setState(() => _awaiting = false);
-      _snack('端点离线：命令已入队，上线后自动执行');
+      // R-9：`sendTo` 返回 false 的原因不同，提示必须跟着原因走 ——
+      // 本机远程模块**没开**时命令不会补发，说成"上线后自动执行"是误导
+      // （用户会一直等一个永远等不到的补发）。
+      _snack(_enabled
+          ? '端点离线：命令已入队，上线后自动执行'
+          : '本机远程模块未开启，命令不会补发（请先在「远程设置」开启）');
     }
   }
 
@@ -212,7 +230,11 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   /// 新建 / 编辑：直接复用本机任务编辑器（远程目标模式）。
   Future<void> _openEditor({Map<String, dynamic>? wire}) async {
     final ep = _endpoint;
-    if (ep == null) return;
+    if (ep == null) {
+      // 没有选中端点时静默 return ⇒ 点「编辑/新建」毫无反应（失败不可见）。
+      _snack('请先选择端点');
+      return;
+    }
     final initial = wire == null ? null : TaskWire.fromWire(wire);
     if (wire != null && initial == null) {
       _snack('端点返回的任务定义无法解析（协议版本可能不一致）');

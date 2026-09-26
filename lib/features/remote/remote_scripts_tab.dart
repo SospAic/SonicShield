@@ -50,8 +50,20 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
   /// scriptId → 最新进度（消费 `RcEvt.scriptState`）。
   final _progress = <String, ScriptProgress>{};
 
+  /// scriptId → **未执行**的步骤说明（R-4②：`state:done` 随带 `skipped`）。
+  ///
+  /// 为什么必须单独存：`state:done` 只说明"跑完了"，不说明"每一步都做了"。
+  /// 端点跳过 3 步与全部做完，在控制端**看起来完全一样** —— 这正是
+  /// "成功被误报"的同一形状（端点在 `_runScript` 里把权限拒绝 / 无处理器 /
+  /// 无音源等步骤累积进 `skipped`）。
+  final _skipped = <String, List<String>>{};
+
   StreamSubscription<Map<String, dynamic>>? _evtSub;
   StreamSubscription<void>? _updSub;
+
+  /// scriptRun 已发出但端点 8 秒内无 ack 也无进度的兜底（与配对回执同超时）。
+  /// 收到 ack / scriptState 即取消；触发则明确告知"发出 ≠ 被执行"。
+  Timer? _runWatchdog;
 
   RcCommandChannel? get _ch => widget.channel;
 
@@ -76,20 +88,74 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
 
   @override
   void dispose() {
+    _runWatchdog?.cancel();
     unawaited(_evtSub?.cancel());
     unawaited(_updSub?.cancel());
     super.dispose();
   }
 
-  /// 端点侧指令组进度（`rc.script`）。
+  /// 端点侧指令组进度（`rc.script`）与**被拒回执**（`rc.ack`）。
   ///
   /// 未知状态一律不猜：`shouldApplyProgress` 为假时**什么都不做**，
   /// 进度保持上一次的已知状态（BUG-050 判据）。
   void _onEvent(Map<String, dynamic> m) {
     if (!mounted) return;
-    if ((m['type'] as String?) != RcEvt.scriptState) return;
-    final p = parseScriptProgress(rcPayloadOf(m));
+    final type = m['type'] as String? ?? '';
+    final payload = rcPayloadOf(m);
+
+    // ---- R-5 同类（同一缺陷，本页同样中招）----
+    //
+    // `rc.script` 是端点**广播**的事件（`_send` 不带 targetPeerId），控制器侧
+    // 由 `_handlePeerEvent` 附上 `peerId`。多端点场景下，另一台端点正在跑的
+    // 指令组进度会混进本页 —— 列表副标题会张冠李戴（A 的模板显示 B 的进度）。
+    // 协助会话的事件不带 `peerId` ⇒ 天然放行。
+    final pid = m['peerId'] as String? ?? '';
+    if (pid.isNotEmpty && pid != _selectedId) return;
+
+    // ---- R-4①：端点校验失败会回 `rc.ack{forType:'script.run', ok:false}` ----
+    //
+    // 此前本页**只**处理 `rc.script`，这条 ack 没有任何消费者 ⇒ 用户点完
+    // 「执行」看到的是"已发送，进度见下方"，而端点**压根没开始跑**
+    // （例如"已有指令组在执行"）—— 典型的静默失败：发出去 ≠ 被执行。
+    if (type == RcEvt.ack) {
+      if (payload['forType'] == RcCmd.scriptRun) {
+        // 端点已回应 → 兜底计时器完成使命。
+        _runWatchdog?.cancel();
+        if (payload['ok'] == false) {
+          final why = payload['data']?.toString() ?? '';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content:
+                  Text('端点未执行指令组：${why.isEmpty ? '被端点拒绝' : why}')));
+        }
+      }
+      return;
+    }
+
+    if (type != RcEvt.scriptState) return;
+    _runWatchdog?.cancel();
+    final p = parseScriptProgress(payload);
     if (!shouldApplyProgress(p)) return;
+    // ---- R-4②：终态恒带 `skipped`（未执行步骤说明）----
+    // 终态有两个（done / stopped），端点**两者都会**带上 `skipped`，
+    // 因此这里按 `isTerminal` 处理 —— 只认 done 会让"被终止时跳过的那几步"
+    // 无声消失，与"成功被误报"是同一形状。
+    if (p.isTerminal) {
+      final sk = (payload['skipped'] as List?)
+              ?.whereType<String>()
+              .toList() ??
+          const <String>[];
+      if (sk.isEmpty) {
+        _skipped.remove(p.scriptId);
+      } else {
+        _skipped[p.scriptId] = sk;
+        // 必须**主动**说出来：进度卡在终止态后就不再显示（`_active` 为 null），
+        // 只靠列表副标题的话，"模板已不在本机"的场景就完全看不到。
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('指令组'
+                '${p.state == ScriptState.done ? '跑完' : '被终止'}，'
+                '其中 ${sk.length} 步未执行：${sk.join('；')}')));
+      }
+    }
     setState(() => _progress[p.scriptId] = p);
   }
 
@@ -112,11 +178,18 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
   }
 
   /// 某条收藏模板的进度文案；从未跑过则返回 null。
+  ///
+  /// R-4②：终态若带 `skipped`，把"其中 N 步未执行 + 原因"接在后面 ——
+  /// 否则「跑完了」与「跑完了但 3 步没做」在界面上完全无法区分。
   String? _progressText(SavedScript s) {
-    final p = _progress[s.payload['scriptId']];
+    final id = s.payload['scriptId'];
+    final p = _progress[id];
     if (p == null) return null;
-    return describeScriptProgress(p,
+    final base = describeScriptProgress(p,
         totalSteps: (s.payload['steps'] as List?)?.length);
+    final sk = _skipped[id];
+    if (!p.isTerminal || sk == null || sk.isEmpty) return base;
+    return '$base · 其中 ${sk.length} 步未执行：${sk.join('；')}';
   }
 
   /// 列表项的副标题：基础信息 + （若有）执行进度。
@@ -175,6 +248,19 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
           content: Text(ok
               ? '「${s.name}」已发送，进度见下方（端点通知栏可终止）'
               : (ch != null ? '协助会话未激活：未发送' : '端点离线：已入队，上线后自动补发'))));
+    }
+    // 已发出 ≠ 已被执行：8 秒内没有 ack 也没有进度，就把这个事实说出来
+    //（此前 UI 停在"进度见下方"，端点若从未回应就永远是"点了没反应"）。
+    // 入队场景（ok == false）不计时 —— 那条路有自己的补发提示。
+    if (ok) {
+      _runWatchdog?.cancel();
+      _runWatchdog = Timer(const Duration(seconds: 8), () {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                '「${s.name}」发出 8 秒未收到端点回应（未确认也未开始执行），'
+                '请检查端点是否在线')));
+      });
     }
   }
 
@@ -275,9 +361,20 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
                     IconButton(
                         icon: const Icon(Icons.delete_outline),
                         onPressed: () async {
-                          final prefs = await SharedPreferences.getInstance();
-                          await RemoteStore(prefs).deleteScript(s.id);
-                          await _load();
+                          try {
+                            final prefs =
+                                await SharedPreferences.getInstance();
+                            await RemoteStore(prefs).deleteScript(s.id);
+                            await _load();
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('已删除')));
+                          } on Object catch (e) {
+                            // 删除失败不能无声无息 —— 列表还在会让人以为没点上。
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('删除失败：$e')));
+                          }
                         }),
                   ],
                 ),

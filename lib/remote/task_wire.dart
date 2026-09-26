@@ -104,6 +104,57 @@ abstract final class TaskWire {
   /// （后者在夹紧后同样是 `true`，不构成下放）。
   static bool _wantsNoDnd(Object? v) => v == false;
 
+  // ---------------- D-7：任务动作 → 所需权限位（纯判定） ----------------
+
+  /// 由**动作定义 JSON**递归推导协助会话下执行该动作所需的权限位集合。
+  ///
+  /// 判定与接线分离（docs/22 §10 纪律）：本函数是纯函数，不依赖任何实例与
+  /// IO；接线在 `assist_host._onBusiness`（命令级门控之后、分发之前）。
+  ///
+  /// - `record`（录音取证）⇒ 需要 `record` 位。当前权限位模型里**没有**这一位
+  ///   （docs/18 §10、docs/22 §9 采集红线），任何 [AssistPerms] 都放行不了 ⇒
+  ///   协助会话下实质一律拒绝；将来若引入独立的 `record` 位，本判定无需改动
+  ///   即可放行显式授权的对端。
+  /// - `composite` / `randomFrom` 能**嵌套动作**，必须递归 —— 只看顶层 kind
+  ///   会漏掉 `composite.primary = record` 这类变形（BUG-072 同款教训）。
+  /// - 其余动作（播放/TTS/通知/振动族/声景）不在此加码：命令级门控已要求
+  ///   `script` 位，这里只补「动作级才暴露的敏感能力」，保持最小改动。
+  static Set<String> requiredPermBitsForTaskAction(Object? rawAction) {
+    final m = _asMap(rawAction);
+    if (m == null) return const {};
+    switch (m['kind']) {
+      case 'record':
+        return const {'record'};
+      case 'composite':
+        return {
+          ...requiredPermBitsForTaskAction(m['primary']),
+          if (m['prefixNotify'] != null)
+            ...requiredPermBitsForTaskAction(m['prefixNotify']),
+        };
+      case 'randomFrom':
+        final raw = m['candidates'];
+        if (raw is! List) return const {};
+        return {
+          for (final c in raw)
+            ...requiredPermBitsForTaskAction(c is Map ? c['action'] : null),
+        };
+      default:
+        return const {};
+    }
+  }
+
+  /// 所需权限位集合里**第一个未放行**的位名；全部放行返回 null。
+  ///
+  /// `granted` 由接线方注入（端点用 `RcPermGate.hasPerm`，测试可注入任意
+  /// 授权模型，例如模拟"将来引入 record 位后已显式授权"的情形）。
+  static String? firstMissingPermBit(
+      Set<String> required, bool Function(String bit) granted) {
+    for (final bit in required) {
+      if (!granted(bit)) return bit;
+    }
+    return null;
+  }
+
   // ---------------- 出站 ----------------
 
   static Map<String, dynamic> toWire(Task t) => {

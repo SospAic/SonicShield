@@ -18,9 +18,18 @@ class BackgroundServiceManager {
   final FlutterBackgroundService _svc = FlutterBackgroundService();
 
   final _stateCtrl = StreamController<EngineState>.broadcast();
-  Stream<EngineState> get state => _stateCtrl.stream;
+  // 测试缝：注入 state 流以驱动 `engineStateProvider` 的 data/error 分支；
+  // 生产代码不设置，走真实 `_stateCtrl.stream`。
+  static Stream<EngineState>? _stateOverride;
+  @visibleForTesting
+  static set stateForTest(Stream<EngineState>? s) => _stateOverride = s;
+  Stream<EngineState> get state => _stateOverride ?? _stateCtrl.stream;
   EngineState? _last;
   EngineState? get last => _last;
+  // 测试缝：注入 `last` 以驱动依赖它的 UI（下一触发倒计时 / 守卫态渲染）；
+  // 生产代码不设置，走真实 `_last`。
+  @visibleForTesting
+  static set lastForTest(EngineState? s) => instance._last = s;
 
   /// 远程「立即执行」的待决请求（reqId → 完成器）。
   ///
@@ -42,9 +51,18 @@ class BackgroundServiceManager {
         // 不含 microphone：Android 14+ while-in-use 限制下，后台复活的
         // 服务携带 microphone 类型会被拒绝。麦克风访问由本地插件的
         // MicGuardService 在用户前台交互时独立持有（docs/05 §1.4）。
+        //
+        // 不含 dataSync（F-2，SEC1 第 35 轮）：Android 15+ 对 dataSync 型
+        // 前台服务有「24 小时内累计 6 小时」上限，到点系统回调
+        // Service.onTimeout；而插件 flutter_background_service_android 6.3.1
+        // 的 BackgroundService.java **全文件 0 处 onTimeout**（Config.java:81
+        // 只读本处写下的类型位，不与清单求并；BackgroundService.java:169-173
+        // 把它算成 startForeground 的 type 位）⇒ 到点即抛
+        // android.app.RemoteServiceException 杀进程（Fatal）。本引擎是
+        // 7×24 常驻 ⇒ 必然命中。mediaPlayback **不在**该上限清单内，且本工程
+        // 后台确为「本地调度 + 定时播放」，语义成立。
         foregroundServiceTypes: const [
           AndroidForegroundType.mediaPlayback,
-          AndroidForegroundType.dataSync,
         ],
       ),
       iosConfiguration: IosConfiguration(
@@ -63,6 +81,7 @@ class BackgroundServiceManager {
             : DateTime.fromMillisecondsSinceEpoch(data['nextFireAt'] as int),
         lastAction: data['lastAction'] as String?,
         guardActive: data['guardActive'] as bool? ?? false,
+        guardError: data['guardError'] as String?,
       );
       _stateCtrl.add(_last!);
     });
@@ -78,10 +97,18 @@ class BackgroundServiceManager {
   }
 
   Future<bool> start() async {
+    final hook = startHook;
+    if (hook != null) return hook();
     final ok = await _svc.startService();
     await Future<void>.delayed(const Duration(milliseconds: 800));
     return ok;
   }
+
+  /// 测试缝（与 [invokeHook] 同形）：widget 测试中 `_svc.startService()` 会
+  /// 触碰 `FlutterBackgroundService` 平台实例，非 Android/iOS 直接抛
+  /// `UnsupportedError`。测试注入本钩子短路；生产代码不设置，走真实启动。
+  @visibleForTesting
+  static Future<bool> Function()? startHook;
 
   Future<void> stop() => _invoke('stop');
 
@@ -122,7 +149,21 @@ class BackgroundServiceManager {
     await _invoke('replan');
   }
 
-  Future<void> setGuard(bool enabled) => _invoke('guard', {'enabled': enabled});
+  /// 开关守卫。
+  ///
+  /// [micGranted]：**主 isolate 的权威授权结论**（UI 刚 `request()` 出来的）。
+  ///
+  /// ⚠️ 为什么必须由 UI 传下来、而不是让引擎自己查：引擎跑在
+  /// `flutter_background_service` 的隔离里，**没有 Activity**，而
+  /// `record` 插件的 `hasPermission()` 在 `activity == null` 时**直接返回 false**
+  /// （`record_android-2.2.0/.../PermissionManager.kt:33-36`）——
+  /// 与系统实际授权无关。真机实证：`RECORD_AUDIO: granted=true` 的设备上，
+  /// 审计里仍然写着"麦克风权限被拒"（BUG-A）。所以授权与否**只能**由
+  /// 有能力询问系统的那一侧（主 isolate）回答。
+  Future<void> setGuard(bool enabled, {bool? micGranted}) => _invoke('guard', {
+        'enabled': enabled,
+        if (micGranted != null) 'micGranted': micGranted,
+      });
   Future<void> setPowerMode(String mode) => _invoke('powerMode', {'mode': mode});
 
   /// 远程 `vibrate.stop`（v1.9）：停止全部进行中的振动。
@@ -190,6 +231,13 @@ class BackgroundServiceManager {
   bool get isRunning => _last?.running ?? false;
   bool get guardActive => _last?.guardActive ?? false;
 
+  /// 引擎自报的**守卫启动失败原因**（成功时为 null）。
+  ///
+  /// 存在的意义（BUG-061 判据的加强）：`waitForGuardActive(true)` 超时只能
+  /// 说"没等到"，说不出"为什么没等到"。有了它，UI 就能把麦克风侧的真实
+  /// 原因原样转达给用户，而不是一律归咎于"引擎无响应"。
+  String? get guardError => _last?.guardError;
+
   /// 等待引擎回投状态，直到 `guardActive == expected` 或超时。
   ///
   /// 存在意义（BUG-061）：`setGuard()` 是 **fire-and-forget** 的 `invoke`，
@@ -208,7 +256,15 @@ class BackgroundServiceManager {
     final c = Completer<bool>();
     StreamSubscription<EngineState>? sub;
     sub = state.listen((s) {
-      if (s.guardActive == expected && !c.isCompleted) c.complete(true);
+      if (c.isCompleted) return;
+      if (s.guardActive == expected) {
+        c.complete(true);
+      } else if (expected && s.guardError != null) {
+        // 引擎已**明确**报出启动失败原因（如"麦克风启动失败：…"）：
+        // 这时不可能再等到 `guardActive:true`，立刻结束等待把原因交给 UI，
+        // 不必白等满 3 秒再报一句含糊的"引擎无响应"。
+        c.complete(false);
+      }
     });
     try {
       return await c.future.timeout(timeout, onTimeout: () => false);

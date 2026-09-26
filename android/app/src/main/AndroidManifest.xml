@@ -3,17 +3,73 @@
 
     <!-- ===== 声盾 SonicShield 权限声明（最小必要原则，见 docs/03/08） ===== -->
 
-    <!-- 前台服务与类型（Android 14+ 要求逐类型声明对应权限） -->
+    <!-- 前台服务与类型（Android 14+ 要求逐类型声明对应权限）
+         ⚠️ 第 35 轮 F-2：FOREGROUND_SERVICE_DATA_SYNC 已随 dataSync 类型位一并移除
+         （Android 15+ 的 6h/24h 上限 + 插件无 onTimeout，见 service 节点注释）。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- 麦克风：守卫模式声音检测 / 录音取证 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+      网络：**必须显式声明**（N-3，第三十四轮补齐）。
+
+      此前源码清单里**没有**这一条 —— release 之所以能联网，是靠传递依赖
+      `mobile_scanner → ML Kit → transport-backend-cct` **巧合**带进来的
+      （见 `build/**/manifest-merger-blame-release-report.txt`）。
+      也就是：网络的可用性由一个与本项目毫无关系的依赖决定 ——
+      哪天更新/替换扫码库，release 会**静默断网**（MQTT 连不上、无任何报错路径），
+      而 debug/profile 因为自带 INTERNET 清单**照常工作**，差别只在发布后暴露。
+
+      与 C-1 同一族形状：**看起来能用、实际依赖偶然**。
+      唯一差别是这次的"偶然"来自依赖树而不是权限声明。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      网络状态（normal 权限：安装即授予、无运行时弹窗）。
+
+      用途（两处，均有源码证据，非"以防万一"）：
+        · 条件层「仅 Wi-Fi 下执行」读取传输类型 ——
+          `NativeBridgePlugin.kt:277-285`（ConnectivityManager.activeNetwork）；
+        · WebRTC 建连需要网络变化回调 —— `flutter_webrtc` README 要求项。
+
+      ⚠️ 与 N-3（INTERNET）同形状：此前这条**只**声明在本地插件清单
+      `packages/native_bridge/android/src/main/AndroidManifest.xml:13` 里，
+      主清单没有 —— 靠"插件恰好声明了"来保证可用。合并清单里确实存在，
+      但主清单才是本项目对外承诺权限面的地方（docs/03 §5）：显式写出来，
+      免得哪天插件清单被清理/重构，功能静默降级。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- 摄像头：视频通话（v1.4，自动接通合规见 docs/16） -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      定位：远程「定位回传」`location.get`（C-1 P0 修复，docs/22 §3）。
+
+      ## 为什么此前这两条是缺失的（"看起来能用、实际恒失败"）
+      命令、UI 按钮、回执事件、文档全都在，但清单里**没有**声明定位权限，
+      于是 `Geolocator.getCurrentPosition` 必抛 `PermissionDeniedException` ——
+      该命令**永远**只回 `error:true`，而端点上只留一句笼统的"定位失败"。
+
+      ## 只声明"使用中"（前台），**不**声明后台定位
+      两条都是**危险权限**，仍由端点上的人在系统弹窗里显式允许（见
+      `RcEndpointService._sendLocation` 的运行时申请）。刻意**不加**
+      `ACCESS_BACKGROUND_LOCATION` / `FOREGROUND_SERVICE_LOCATION`：
+        · 后台定位需要把前台服务的类型位加上 `location`（会改动
+          `flutter_background_service` 的类型声明，见下方 service 与
+          docs/05 §1.4 的既有裁决），并触发 Play「始终允许」政策流程；
+        · 那是独立的产品/合规决策，不夹带在本轮 P0 修复里。
+      后果（**如实记录、不假装**）：Android 14+ 上若命令到达时应用处于后台，
+      系统会拒绝这次定位 —— 端点回 `error:true` 并写明原因（docs/22 §3 C-1b）。
+
+      回归锁：test/rc_location_gate_test.dart
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- 通知（Android 13+ 运行时申请） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -41,10 +97,23 @@
         </intent>
     </queries>
 
+    <!--
+      ⚠️ android:allowBackup="false" —— 安全必需，不要删（A3/A4 审计 P0-4）。
+      本应用把**端到端加密根密钥**存在 SharedPreferences 里：
+        · RemoteStore.pairingCode    （配对共享秘密，remote_store.dart:193-203）
+        · PairedEndpoint.secret      （remote_store.dart:21,39）
+      Android 默认 allowBackup=true 时，这两个文件会随
+        ①系统/云备份恢复 ②adb backup（API≤30）③root/取证
+      三条路径**离机**；拿到即等于拿到端点控制权（= 未授权控制的可达路径）。
+      本工具没有跨设备迁移诉求，因此直接整体关闭备份，
+      而不是用 dataExtractionRules 逐项排除（少一处遗漏面）。
+      回归锁：test/android_compat_lock_test.dart「SEC-01」。
+    -->
     <application
         android:label="@string/app_name"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
         android:enableOnBackInvokedCallback="true">
 
         <activity
@@ -66,15 +135,22 @@
         </activity>
 
         <!--
-          flutter_background_service 的前台服务：mediaPlayback（定时播放）+
-          dataSync（计划维护）。注意【不含 microphone】：Android 14+ 的
-          while-in-use 语义下，服务被看门狗闹钟从后台复活时携带 microphone
-          类型会被拒绝（SecurityException）。麦克风访问由本地插件的
-          MicGuardService 在用户前台交互时独立持有（docs/05 §1.4）。
+          flutter_background_service 的前台服务：只声明 mediaPlayback（定时播放）。
+          ⚠️ 第 35 轮 F-2：**已移除 dataSync**。Android 15+ 对 dataSync 型前台服务
+          有「24 小时内累计 6 小时」上限，到点系统回调 Service.onTimeout；而
+          flutter_background_service_android 6.3.1 的 BackgroundService.java
+          全文件 0 处 onTimeout ⇒ 到点抛 RemoteServiceException 直接杀进程。
+          本引擎是 7×24 常驻，必然命中。mediaPlayback 不在该上限清单内，
+          且本工程后台确为「本地调度 + 定时播放」，语义成立。
+          证据见 _pt/audit/E1-silent-fix.md 与 docs/05。
+          注意【不含 microphone】：Android 14+ 的 while-in-use 语义下，服务被
+          看门狗闹钟从后台复活时携带 microphone 类型会被拒绝（SecurityException）。
+          麦克风访问由本地插件的 MicGuardService 在用户前台交互时独立持有
+          （docs/05 §1.4）。
         -->
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
-            android:foregroundServiceType="mediaPlayback|dataSync"
+            android:foregroundServiceType="mediaPlayback"
             tools:replace="android:foregroundServiceType" />
 
         <!-- 通道B：精确闹钟看门狗接收器已迁移至本地插件

@@ -44,7 +44,41 @@ import 'dart:io';
 /// 纯逻辑（模型、协议编解码、状态机）**一律不收**，必须写宿主测试。
 ///
 /// 判定方法：先跑一遍 `--top`，逐个人工看未覆盖行到底是什么。
-const Map<String, String> _deviceOnly = <String, String>{};
+///
+/// ⚠️ **收录时必须在 `reason` 里同时给出"结构证据"**，格式见
+/// `test/device_exemption_lock_test.dart`（DEX 系列）：
+/// 每条豁免都绑一个**必须真实存在于该文件里的字面量标记**
+/// （例如引擎 isolate 的 `@pragma('vm:entry-point')`）。
+/// 一旦有人把这个文件改成纯逻辑，标记消失 → 锁立刻判红，
+/// 豁免就无法继续赖在白名单里。这保证了白名单**藏不住**退化的代码。
+const Map<String, String> _deviceOnly = <String, String>{
+  // ── 引擎 isolate 本体 ────────────────────────────────────────────────
+  // 未覆盖 452/454 行。**唯一**的顶层入口是
+  // `@pragma('vm:entry-point') engineEntryPoint(ServiceInstance service)`，
+  // 它只在 `flutter_background_service` 拉起的**独立 isolate** 里被调用；
+  // 函数体第一步就是 `DartPluginRegistrant.ensureInitialized()`，随后
+  // 全部依赖真实平台能力：Battery 插件读电量、AppDatabase 开库、
+  // PlaybackService 出声、NativeBridge 振动。宿主测试**无法**构造
+  // `ServiceInstance`，也拿不到那条 isolate。
+  // 由谁覆盖：真机/模拟器上的后台引擎集成测试（docs/12 §63.4）。
+  'lib/services/background_engine.dart':
+      '引擎 isolate 本体：入口 @pragma(\'vm:entry-point\') engineEntryPoint'
+          '(ServiceInstance) 只在 flutter_background_service 拉起的独立 isolate '
+          '里执行，函数体首句即 DartPluginRegistrant.ensureInitialized()，'
+          '后续依赖 Battery/AppDatabase/PlaybackService/NativeBridge 等真实平台能力；'
+          '宿主测试无法构造 ServiceInstance。覆盖方：真机后台引擎集成测试。',
+
+  // ── 应用装配入口 ──────────────────────────────────────────────────────
+  // 未覆盖 36/36 行。`main()` 是 `runApp` 之前的**原生插件装配链**：
+  // NotificationService.createServiceChannel（本地通知插件）、
+  // BackgroundServiceManager.init（后台服务插件）、FlutterTts 构造，
+  // 且以 `runApp` 收尾 —— 在宿主测试里调用它等于把整个 App 真的跑起来。
+  // 由谁覆盖：真机冷启动冒烟（docs/12 §63.4）。
+  'lib/main.dart':
+      '应用装配入口：main() 是 runApp 之前的原生插件装配链（本地通知渠道、'
+          '后台服务 init、FlutterTts），并以 runApp(const ProviderScope(...)) 收尾；'
+          '宿主测试调用它等于把整个 App 真正跑起来。覆盖方：真机冷启动冒烟。',
+};
 
 /// 声明式数据文件白名单：**整文件只有 `static const` 声明，没有可执行语句**。
 ///
@@ -107,6 +141,11 @@ void main(List<String> args) {
   final asJson = args.contains('--json');
   final gateArg = args.firstWhere((a) => a.startsWith('--gate='), orElse: () => '');
   final gate = gateArg.isEmpty ? null : double.tryParse(gateArg.split('=')[1]);
+  // 分子硬下限（第三十四轮新增）。理由见文件末尾 `_minCoveredRationale`。
+  final minCovArg = args
+      .firstWhere((a) => a.startsWith('--min-covered='), orElse: () => '');
+  final minCovered =
+      minCovArg.isEmpty ? null : int.tryParse(minCovArg.split('=')[1]);
 
   final lcovFile = File('coverage/lcov.info');
   if (!lcovFile.existsSync()) {
@@ -236,5 +275,26 @@ void main(List<String> args) {
       exit(1);
     }
     print('✅ 门禁通过：可测面 ${testablePct.toStringAsFixed(2)}% ≥ $gate%');
+  }
+
+  // ── 分子硬下限 ────────────────────────────────────────────────────────
+  //
+  // 为什么百分比之外**还要**一个绝对数下限：分母不是常数。
+  // 每当我们**合规地**新增"宿主不可达但安全/正确性必需"的代码（平台插件
+  // 胶水、MQTT 连接、原生桥调用），分母就会变大，百分比被**稀释** ——
+  // 于是"什么都不做"反而比"老实加防护"更好看。这个指标会奖励错误的行为。
+  //
+  // [tLh]（可测面已覆盖行数）才是**真实进度**：它不随分母波动，
+  // 而且"给新代码补测试"会直接抬高它。所以百分比守住"密度"，
+  // 绝对数守住"总量不许倒退"。
+  if (minCovered != null) {
+    if (tLh < minCovered) {
+      print('❌ 门禁未过：可测面已覆盖行数 $tLh < $minCovered'
+          '（分母 $tLf；百分比 ${testablePct.toStringAsFixed(2)}%）');
+      print('   绝对数倒退说明**已覆盖的行被删/被改掉了**（或新代码没配测试），'
+          '不是"分母变大"能解释的。');
+      exit(1);
+    }
+    print('✅ 分子下限通过：已覆盖 $tLh ≥ $minCovered（分母 $tLf）');
   }
 }

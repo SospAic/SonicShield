@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -182,9 +183,9 @@ void main() {
       expect(back.vibrate, isFalse);
     });
 
-    test('AS-16 权限位含全部 7 项且有中文标签', () {
+    test('AS-16 权限位含全部 8 项且有中文标签', () {
       final keys = AssistPerms.none.toJson().keys.toSet();
-      expect(keys.length, 7);
+      expect(keys.length, 8);
       for (final k in keys) {
         expect(AssistPerms.labels.containsKey(k), isTrue,
             reason: '权限位 $k 缺少 UI 标签');
@@ -240,7 +241,15 @@ void main() {
       expect(RcAssistCmd.reject, 'assist.reject');
       expect(RcAssistCmd.perm, 'assist.perm');
       expect(RcAssistCmd.close, 'assist.close');
-      expect(RcAssistCmd.state, 'rc.assist');
+    });
+
+    test('AS-20b 不得保留"从不发出"的 rc.assist 死常量（P1-1 回归锁）', () {
+      // 该常量全仓除定义外只有一条字面量断言，无任何生产侧发出/消费 ——
+      // 保留它比删除更糟（让人以为"状态镜像已实现"）。若日后要真正做状态镜像，
+      // 必须连同控制端的消费方一起提交。
+      final src = File('lib/remote/assist.dart').readAsStringSync();
+      expect(src.contains("'rc.assist'"), isFalse,
+          reason: 'RcAssistCmd.state 已被删除，不得复活');
     });
   });
 }

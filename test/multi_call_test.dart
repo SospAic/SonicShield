@@ -13,24 +13,59 @@ void main() {
   group('MCS 事件路由（与 CallService 的隔离边界）', () {
     final owned = {'c1', 'c2'};
 
+    // ⚠️ 事件信封形状：业务字段在 `payload` 内（`protocol.dart` 的 `RcMessage.toJson`
+    // 只把 `type`/`id`/`ts`/`from` 留在顶层）。
+    // 旧断言按顶层取 `callId` —— 那正是"多路视频永不接通"的根因（已修）；
+    // 锁必须按**真实信封形状**断言，否则回归时会再次假绿。
     test('MCS-01 自己的 callId -> 返回它', () {
-      expect(ownedCallIdOf({'callId': 'c2'}, owned), 'c2');
+      expect(
+          ownedCallIdOf({
+            'type': 'call.answer',
+            'payload': {'callId': 'c2'},
+          }, owned),
+          'c2');
     });
 
     test('MCS-02 别人的 callId -> null（不抢信令）', () {
       // 来电 / 单会话通话的 callId 不在本服务名下，必须放过。
-      expect(ownedCallIdOf({'callId': 'other'}, owned), isNull);
+      expect(
+          ownedCallIdOf({
+            'type': 'call.answer',
+            'payload': {'callId': 'other'},
+          }, owned),
+          isNull);
     });
 
     test('MCS-03 没有 callId -> null', () {
       expect(ownedCallIdOf({'type': 'ping'}, owned), isNull);
       expect(ownedCallIdOf({}, owned), isNull);
-      expect(ownedCallIdOf({'callId': null}, owned), isNull);
+      expect(
+          ownedCallIdOf({
+            'type': 'call.answer',
+            'payload': {'callId': null},
+          }, owned),
+          isNull);
     });
 
     test('MCS-04 callId 类型异常不崩（远端数据不可信）', () {
-      expect(ownedCallIdOf({'callId': 123}, owned), isNull);
-      expect(ownedCallIdOf({'callId': ''}, owned), isNull);
+      expect(
+          ownedCallIdOf({
+            'type': 'call.answer',
+            'payload': {'callId': 123},
+          }, owned),
+          isNull);
+      expect(
+          ownedCallIdOf({
+            'type': 'call.answer',
+            'payload': {'callId': ''},
+          }, owned),
+          isNull);
+    });
+
+    test('MCS-04b 顶层字段形状不得命中（防退回旧缺陷）', () {
+      // 若有人把取值改回 `m['callId']`，本例必须变红。
+      expect(
+          ownedCallIdOf({'type': 'call.answer', 'callId': 'c2'}, owned), isNull);
     });
   });
 

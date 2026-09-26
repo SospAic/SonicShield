@@ -138,6 +138,103 @@ bool canAcceptNow(bool ringing) => ringing;
 String incomingCallText({required String fromName, required bool video}) =>
     '来自 $fromName（${video ? '视频' : '语音'}）';
 
+// ---------------- 发起呼叫的失败原因（BUG-D：点了按钮"什么都没发生"） ----------------
+
+/// 发起呼叫被拦下的原因。
+///
+/// ## 为什么要有这个枚举（BUG-D）
+///
+/// 修之前 `CallScreen._call` 只做两件事：调 `startCall`，然后
+/// **push 一个不存在的路由**。`startCall` 返回 null 时界面给的是
+/// 一句话兜底："呼叫失败：请检查摄像头/麦克风权限或端点离线" ——
+/// 把"已在通话中""权限被拒""相机被占用""端点离线"四种**下一步动作完全不同**
+/// 的原因，压成了一句不可执行的话（与 BUG-062 同形状：失败必须可诊断）。
+///
+/// 更糟的是它只覆盖了 `startCall` 的失败；成功那条路上没有任何界面
+/// （见 [CallStartBlock] 的调用方 `call_screen.dart`）。
+enum CallStartBlock {
+  /// 本机已在通话中（含振铃/连接中）。
+  alreadyInCall,
+
+  /// 麦克风未授予 —— 接起来也没有声音，等于假成功。
+  micDenied,
+
+  /// 视频呼叫但相机未授予。
+  cameraDenied,
+
+  /// 打不开摄像头/麦克风（被其它应用占用、硬件不可用…）。
+  mediaFailed,
+
+  /// SDP（Offer）生成失败或为空 —— 这种 invite 发出去也一定协商失败。
+  offerFailed,
+
+  /// 端点离线 / 本机网络不可用：实时信令**不能**走 outbox 补发。
+  endpointOffline,
+}
+
+/// 失败文案。
+///
+/// ⚠️ 用 **switch 表达式**（必须穷尽）：新增一个 `CallStartBlock` 而忘了补文案
+/// 会**编译报错**；写成带 `default` 的 switch 语句则会静默给出兜底文案
+/// —— 那正是本项目反复出现的"静默降级"。
+String callStartBlockText(CallStartBlock b) => switch (b) {
+      CallStartBlock.alreadyInCall => '正在通话中：请先挂断当前通话再发起',
+      CallStartBlock.micDenied => '需要麦克风权限才能通话（否则对方听不到你）',
+      CallStartBlock.cameraDenied => '需要相机权限才能发起视频通话',
+      CallStartBlock.mediaFailed =>
+        '打不开摄像头/麦克风：可能被其它应用占用，请关闭后重试',
+      CallStartBlock.offerFailed => '无法生成通话协商信息（SDP），请重试',
+      CallStartBlock.endpointOffline =>
+        '端点离线或本机网络不可用：请确认「远程遥控」已开启、对端在线',
+    };
+
+/// 发起前的权限判定：返回 null 表示**放行**。
+///
+/// 麦克风优先：没有麦克风的话视频再好也没有意义，先报最根本的那个
+/// （与 `call_permission.dart` 的 `autoAnswerBlockFor` 同一优先级约定）。
+///
+/// ⚠️ 语音呼叫（`video == false`）**不得**因为相机被拒而拦下 ——
+/// 那会把"能用"的功能报成不能用（成功被误报的反面：可用被误报为不可用）。
+CallStartBlock? callStartBlockFor({
+  required bool micGranted,
+  required bool cameraGranted,
+  required bool video,
+}) {
+  if (!micGranted) return CallStartBlock.micDenied;
+  if (video && !cameraGranted) return CallStartBlock.cameraDenied;
+  return null;
+}
+
+// ---------------- ICE candidate 的到达时序（BUG-D：候选被丢弃） ----------------
+
+/// 收到的 ICE candidate 是否**可以立刻**喂给 PeerConnection。
+///
+/// ## 为什么要有这个判定（BUG-D 的核心真因之一）
+///
+/// WebRTC 的硬要求：`addCandidate` 必须在 `setRemoteDescription` **之后**。
+/// 修之前 `onCandidate` 的守卫是 `if (payload['callId'] != _callId || _pc == null) return;`
+/// —— 于是**凡是早到的候选一律被静默丢弃**，而"早到"在两条路径上都是常态：
+///
+/// - **被叫（手动接听）**：`_pc` 要到用户点「接听」时才创建。主叫的候选在
+///   **振铃期间**就已经到达 ⇒ 全部被丢。而 ICE gathering 通常几秒内就结束，
+///   等用户接听时**不会再有候选补发** ⇒ ICE 永远凑不齐 ⇒ 表现为
+///   "接通了但没画面、没声音"（用户口中的"无效果"）。
+/// - **主叫**：被叫的候选在 `call.answer` 之前发出（`setLocalDescription(answer)`
+///   先于发信令），因此也会早于 remote description 到达。
+///
+/// 规则：**能喂则喂；不能喂就先缓存、稍后重放 —— 绝不丢弃。**
+bool candidateDeliverable({
+  required bool pcReady,
+  required bool remoteDescriptionSet,
+}) =>
+    pcReady && remoteDescriptionSet;
+
+/// 早到候选的缓存上限。
+///
+/// 取 64：正常机型一次 gathering 通常 <20 条，留足余量；上限的意义只是
+/// 防止对端异常刷屏把内存顶爆（**不是**正常路径）。
+const int maxBufferedCandidates = 64;
+
 // ---------------- 结束原因（用户可见文案的唯一来源） ----------------
 
 /// 通话结束原因。
