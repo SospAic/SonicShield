@@ -403,6 +403,196 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // 第四十三轮：**扫描态回调与相机错误面**。
+  //
+  // 此前（第三十九/四十/四十一轮）这部分被登记为"宿主物理不可达"，理由是
+  // 相机帧流只有真插件才会推。该判断**只对"经由插件运行期触发"成立**：
+  // `MobileScanner` 的 `onDetect` / `errorBuilder` 都是**公开 final 字段**
+  // （mobile_scanner-6.0.11/lib/src/mobile_scanner.dart:47/56/68），
+  // 可以在宿主上取出**同一个闭包**并用真实形状的参数驱动。
+  //
+  // 这不是伪造用例：被调用的是生产代码里那个回调**本身**，参数是真实的
+  // `BarcodeCapture` / `MobileScannerException`（不是"为了过覆盖率硬塞的"）。
+  // 判据升级：**"插件不推" ≠ "回调不可执行"**。
+  // ---------------------------------------------------------------------------
+  group('PQR 扫描态回调与相机错误面（第四十三轮）', () {
+    /// 进入扫描态（授权桩 + 点扫描入口 + 推完 controller 构建）。
+    Future<void> enterScanning(WidgetTester tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    /// 取扫描子树里那个真实的 `MobileScanner` widget（拿它的公开回调）。
+    MobileScanner scannerOf(WidgetTester tester) =>
+        tester.widget<MobileScanner>(find.byType(MobileScanner));
+
+    void detect(WidgetTester tester, String? raw, BarcodeFormat format) {
+      scannerOf(tester).onDetect!(BarcodeCapture(
+        barcodes: [Barcode(rawValue: raw, format: format)],
+      ));
+    }
+
+    testWidgets('PQR-28 扫到别家二维码 → 就地一次性提示，且**不停扫描**', (tester) async {
+      await enterScanning(tester);
+      expect(find.text('取消扫码'), findsOneWidget, reason: '前置：必须已在扫描态');
+
+      detect(tester, 'weixin://wxpay/bizpayurl?pr=abc', BarcodeFormat.qrCode);
+      await tester.pump();
+
+      expect(find.text('这不是声盾配对码，请扫描对方的声盾配对二维码'), findsOneWidget,
+          reason: 'P0-4：别家二维码必须给出可读反馈，不能静默忽略');
+      expect(find.text('取消扫码'), findsOneWidget,
+          reason: '提示必须**不停扫描** —— 停掉用户就无法换角度重扫，等于真卡死');
+      expect(find.byType(QrImageView), findsNothing,
+          reason: '提示是就地渲染，不得把扫描态顶掉');
+
+      // 连续帧重复读到同一个 raw：节流短路，不得再抛、也不得多渲染一份。
+      // ⚠️ "重复帧不重复提示"在 UI 上**不可观测**（同一个 bool 渲染同一个 Text），
+      // 严格口径由源码锁 PQR-20（`_handledCode` 复用）承担；这里只锁"不炸"。
+      detect(tester, 'weixin://wxpay/bizpayurl?pr=abc', BarcodeFormat.qrCode);
+      await tester.pump();
+      expect(find.text('这不是声盾配对码，请扫描对方的声盾配对二维码'), findsOneWidget);
+    });
+
+    testWidgets('PQR-29 商品一维条码 / 空码 → 不打扰（ignore 分支）', (tester) async {
+      await enterScanning(tester);
+
+      detect(tester, '4006381333931', BarcodeFormat.ean13);
+      await tester.pump();
+      expect(find.textContaining('这不是声盾配对码'), findsNothing,
+          reason: '商品条码不该弹"这不是声盾配对码" —— 会打扰正在扫商品的人');
+
+      detect(tester, null, BarcodeFormat.qrCode);
+      await tester.pump();
+      expect(find.textContaining('这不是声盾配对码'), findsNothing);
+      expect(find.text('取消扫码'), findsOneWidget, reason: 'ignore 不得改变扫描态');
+    });
+
+    testWidgets('PQR-30 扫到声盾码 → 走与手输**同一条**落盘路径并停扫描', (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      final store = await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.paired(), isEmpty, reason: '前置：本机配对表必须是空的');
+
+      detect(tester,
+          'sonicshield://pair/0123456789abcdef/%E5%AE%A2%E5%8E%85/ab2c-d5ef',
+          BarcodeFormat.qrCode);
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      final paired = store.paired();
+      expect(paired, hasLength(1),
+          reason: '扫码必须与手输共用同一条 "落盘 → 补订 → 通知对端" 路径');
+      expect(paired.single.deviceId, '0123456789abcdef');
+      expect(paired.single.name, '客厅');
+      expect(paired.single.secret, 'AB2CD5EF', reason: '码必须归一化后落盘');
+      expect(find.textContaining('已配对'), findsOneWidget);
+      expect(find.text('取消扫码'), findsNothing,
+          reason: '识别到声盾码必须停扫描并释放相机（否则 MIUI 下次开相机直接失败）');
+    });
+
+    testWidgets('PQR-31 前缀对但字段不全的码 → 明确"不是有效配对码"，不落盘',
+        (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      final store = await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      // ID 只有 4 位 ⇒ 协议层 parseUri 判 null（分类器只看前缀，会放进配对路径）。
+      detect(tester, 'sonicshield://pair/0123/x/AB2CD5EF', BarcodeFormat.qrCode);
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(store.paired(), isEmpty,
+          reason: '解析失败绝不能落盘 —— 落盘决定"跟谁配对"，配错即安全事故');
+      expect(find.textContaining('二维码不是有效的声盾配对码'), findsOneWidget);
+    });
+
+    testWidgets('PQR-32 相机打开失败（errorBuilder）→ 可见错误卡 + 重试 + 手输出口',
+        (tester) async {
+      await enterScanning(tester);
+
+      final ctx = tester.element(find.byType(MobileScanner));
+      final card = scannerOf(tester).errorBuilder!(
+        ctx,
+        const MobileScannerException(
+            errorCode: MobileScannerErrorCode.permissionDenied),
+        null,
+      );
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: card)));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('相机权限被系统拒绝'), findsOneWidget,
+          reason: '系统层拒绝要给"去系统设置"的路径，不能只报"启动失败"');
+      expect(find.textContaining('系统设置'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+      expect(find.text('改用手动输入配对码'), findsOneWidget,
+          reason: '相机起不来同样是"扫不了码"，绝不让用户卡死在本页');
+    });
+
+    testWidgets('PQR-33 其它错误码 → MIUI 占用的可读文案（不是同一句笼统话术）',
+        (tester) async {
+      await enterScanning(tester);
+
+      final ctx = tester.element(find.byType(MobileScanner));
+      final card = scannerOf(tester).errorBuilder!(
+        ctx,
+        const MobileScannerException(
+            errorCode: MobileScannerErrorCode.controllerUninitialized),
+        null,
+      );
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: card)));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('相机启动失败'), findsOneWidget);
+      expect(find.textContaining('相机权限被系统拒绝'), findsNothing,
+          reason: '两类失败必须是**两句话**，否则用户按错误的方向去改权限');
+    });
+
+    testWidgets('PQR-34 手电筒按钮：controller 在位时可点、不炸（相机未初始化）',
+        (tester) async {
+      await enterScanning(tester);
+
+      final torch = find.byTooltip('打开手电筒');
+      expect(torch, findsOneWidget, reason: '暗光环境扫不了码的最小成本解');
+      await tester.tap(torch);
+      await tester.pump();
+
+      expect(tester.takeException(), isNull,
+          reason: 'toggleTorch 的异常进 Future 而不是同步抛出，必须被就地接住');
+      expect(find.text('取消扫码'), findsOneWidget, reason: '点手电筒不得退出扫描态');
+    });
+
+    testWidgets('PQR-35 手输对话框「取消」→ 关掉对话框且**绝不落盘**', (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(find.text('扫不了码？手动输入'));
+      await tester.pumpAndSettle();
+      expect(find.text('手动输入配对码'), findsOneWidget);
+
+      // 故意填**完全合法**的字段 —— 这样"没落盘"只可能是取消生效，而不是校验拦下。
+      await tester.enterText(find.byType(TextField).at(0), '0123456789abcdef');
+      await tester.enterText(find.byType(TextField).at(1), 'AB2CD5EF');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('手动输入配对码'), findsNothing, reason: '取消必须关掉对话框');
+      expect(store.paired(), isEmpty,
+          reason: '取消必须**什么都不写** —— 否则用户以为没配上，实际已经授权了对方');
+      expect(find.textContaining('已配对'), findsNothing);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // 红线源码锁（docs/25 §4）：手输与扫码必须共用同一条提交路径 + 解析器单点复用。
   // ---------------------------------------------------------------------------
   group('红线：手输与扫码共用同一条提交路径（源码锁）', () {

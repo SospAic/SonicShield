@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/features/remote/assist_host_screen.dart';
 import 'package:sonic_shield/remote/assist.dart';
@@ -238,6 +239,71 @@ void main() {
         reason: '与 join() 的"远程模块未开启，无法接入"口径对称：显式拒绝');
     // 仍停留在"无会话"态，使用者可重试。
     expect(find.text('生成临时码'), findsOneWidget);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 第四十三轮：等待接入卡的两个「从未被驱动过」的交互 ——
+  // ① 防爆破告警行（`s.failures > 0` 时才构建）；② 「复制临时码 + 密码」。
+  //
+  // 两者此前都是 4~5 行的**整块分支**，且**宿主完全可达**（不需要真机、
+  // 不需要 broker）：告警行只依赖会话的失败计数；复制只需要一个通道桩。
+  // ---------------------------------------------------------------------------
+  testWidgets('AHW-13 握手被爆破 → 等待卡必须显示"已拒绝 N 次"（不能静默）',
+      (tester) async {
+    final s = await host.start();
+    // 密码错误的密文（与 assist_host_test.dart AH-10 同一构造，非伪造输入）。
+    final wrong = await RcAssist.ctlKey(s.code, 'ZZZZZZZZ');
+    await host.onWire(await RcCodec.encode(
+        RcMessage.now(RcAssistCmd.hello, {'ctrlName': '攻击者'}),
+        wrong,
+        s.topic));
+    expect(s.failures, 1, reason: '前置：必须真的计了一次失败');
+
+    await pump(tester);
+
+    expect(find.textContaining('已拒绝 1 次密码错误的接入尝试'), findsOneWidget,
+        reason: '有人在试密码却什么都不显示 ⇒ 使用者无从判断是否该终止会话');
+    expect(find.textContaining('连续 ${RcAssist.maxFailures} 次将作废本场会话'),
+        findsOneWidget,
+        reason: '必须说清"还剩几次"，否则这个数字对使用者没有行动含义');
+    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    // 失败之后仍未接入 ⇒ 权限开关依然不得出现（C5 默认全拒的可见证据）。
+    expect(find.byType(SwitchListTile), findsNothing);
+
+    await finish(tester);
+  });
+
+  testWidgets('AHW-14 「复制临时码 + 密码」→ 剪贴板拿到"码 空格 密码"，并给出回执',
+      (tester) async {
+    // 剪贴板走 `SystemChannels.platform`；显式打桩而不是靠框架默认实现，
+    // 保证断言的是"页面送出去的那串内容"本身。
+    final copied = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied.add((call.arguments as Map)['text'] as String);
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+
+    final s = await host.start();
+    await pump(tester);
+
+    await tester.ensureVisible(find.text('复制临时码 + 密码'));
+    await tester.tap(find.text('复制临时码 + 密码'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(copied, hasLength(1), reason: '按钮必须真的把值写进剪贴板');
+    expect(copied.single, '${s.code} ${s.password}',
+        reason: '复制出去的是"码 空格 密码" —— 顺序写反使用者就得自己拆，'
+            '而这两个值是要口述给对方的');
+    expect(find.text('已复制'), findsOneWidget,
+        reason: '必须有可见回执：剪贴板操作在手机上没有系统反馈');
+
+    await finish(tester);
   });
 }
 

@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_scripts_tab.dart';
 import 'package:sonic_shield/remote/command_channel.dart';
 import 'package:sonic_shield/remote/protocol.dart';
+import 'package:sonic_shield/remote/remote_store.dart';
 
 /// 假命令通道（协助会话侧）：捕获"发了什么" + 回灌"收到什么"。
 ///
@@ -245,5 +246,112 @@ void main() {
 
     expect(find.textContaining('执行中 · 第 2/3 步'), findsWidgets,
         reason: '若事件仍只从 RcEndpointService 取，协助会话下进度永远不出现');
+  });
+
+  // ---------------------------------------------------------------------------
+  // 第四十三轮：**配对通道**下的四个"从未被驱动过"的分支。
+  //
+  // 此前本文件所有用例都在**协助会话**（`pumpCh`，注入假通道）下跑 ——
+  // 于是 `ch == null` 那一整条真路径（没有协助会话时的默认形态！）从没执行：
+  // 目标端点下拉框、未选目标即点执行、经 `RcEndpointService.sendTo` 投递、
+  // 删除指令组、以及"未配对时点新建"的拦截。
+  // ---------------------------------------------------------------------------
+  group('RS 配对通道默认形态（第四十三轮）', () {
+    /// 在 prefs 里预置一个已配对端点后挂载（不注入通道 ⇒ 走 ch == null 路径）。
+    Future<void> pumpPaired(WidgetTester tester,
+        {String endpointId = 'a1b2c3d4e5f60718', String name = '客厅手机'}) async {
+      final store = RemoteStore(await SharedPreferences.getInstance());
+      await store.addPaired(PairedEndpoint(
+        deviceId: endpointId,
+        name: name,
+        secret: 'AB2CD5EF',
+        pairedAt: DateTime(2026, 1, 1),
+      ));
+      await pump(tester);
+    }
+
+    testWidgets('RS-09 未选目标端点就点「执行」→ 明确拦下并说明原因', (tester) async {
+      // 不预置端点 ⇒ `_selectedId` 为空。
+      await pump(tester);
+      await tester.tap(find.widgetWithText(FilledButton, '执行').first);
+      await frames(tester, 6);
+
+      expect(find.text('请先选择目标端点'), findsOneWidget,
+          reason: '静默不发会让使用者以为"点了没反应"，而原因是没选目标');
+    });
+
+    testWidgets('RS-10 选中端点但端点离线 → 发 `sendTo` 落 outbox 并如实说"已入队"',
+        (tester) async {
+      await pumpPaired(tester);
+      expect(find.text('发送目标端点'), findsOneWidget,
+          reason: '有已配对端点时必须出现目标选择器（否则无从指定发给谁）');
+
+      await tester.tap(find.widgetWithText(FilledButton, '执行').first);
+      await frames(tester, 8);
+
+      expect(find.textContaining('端点离线：已入队，上线后自动补发'), findsOneWidget,
+          reason: '`sendTo` 在无连接时返回 false —— 必须如实说"已入队"，'
+              '而不是"已发送，进度见下方"（后者会让使用者一直等一个不会来的进度）');
+    });
+
+    testWidgets('RS-11 切换目标端点 → 选择真的落进 prefs（跨页共享的同一份选择）',
+        (tester) async {
+      // ⚠️ 两个端点必须在**首次挂载之前**就写进 prefs：同类型 widget 二次
+      // `pumpWidget` 会复用同一个 `State`（`initState` 不再跑）⇒ `_load()`
+      // 不会重读，下拉里只会有第一次那一个 item。
+      final store = RemoteStore(await SharedPreferences.getInstance());
+      await store.addPaired(PairedEndpoint(
+        deviceId: 'a1b2c3d4e5f60718',
+        name: '客厅手机',
+        secret: 'AB2CD5EF',
+        pairedAt: DateTime(2026, 1, 1),
+      ));
+      await store.addPaired(PairedEndpoint(
+        deviceId: 'ffffffffffffffff',
+        name: '卧室平板',
+        secret: 'AB2CD5EF',
+        pairedAt: DateTime(2026, 1, 1),
+      ));
+      await pump(tester);
+
+      final dd = tester.widget<DropdownButtonFormField<String>>(
+          find.byType(DropdownButtonFormField<String>));
+      dd.onChanged!('ffffffffffffffff');
+      await frames(tester, 6);
+
+      expect(store.selectedEndpointId, 'ffffffffffffffff',
+          reason: '选择必须落 prefs —— 与「我的设备」共享同一份选择，'
+              '不落盘就会出现"设置页选过了、本页还是旧的"');
+      expect(dd.initialValue, 'a1b2c3d4e5f60718',
+          reason: '首次挂载时应自动落到配对表第一台（未持久化选择时）');
+    });
+
+    testWidgets('RS-12 删除指令组 → 真的从 prefs 移除，并给出可见回执', (tester) async {
+      await pump(tester);
+      expect(find.text('回家提醒'), findsOneWidget, reason: '前置：模板应已列出');
+
+      await tester.tap(find.byIcon(Icons.delete_outline).first);
+      await frames(tester, 10);
+
+      final store = RemoteStore(await SharedPreferences.getInstance());
+      expect(store.savedScripts(), isEmpty,
+          reason: '删除必须真的写盘 —— 只从界面移除的话，重进本页模板又回来了');
+      expect(find.text('已删除'), findsOneWidget,
+          reason: '删除在手机上没有系统反馈，必须有可见回执');
+    });
+
+    testWidgets('RS-13 未配对端点就点「新建指令组」→ 说明原因而不是跳进死路由',
+        (tester) async {
+      await pump(tester);
+      expect(find.text('新建指令组'), findsOneWidget,
+          reason: '配对通道下必须给组装器入口');
+
+      await tester.tap(find.text('新建指令组'));
+      await frames(tester, 6);
+
+      expect(find.text('请先完成端点配对'), findsOneWidget,
+          reason: '组装器路由需要已配对端点 id；直接跳会报错，'
+              '而错误页不会告诉使用者"先去配对"');
+    });
   });
 }

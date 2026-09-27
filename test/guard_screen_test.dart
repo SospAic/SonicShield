@@ -335,4 +335,97 @@ void main() {
       await waitForText(tester, '麦克风被占用');
     }, timeout: perTest);
   });
+
+  // ---------------------------------------------------------------------------
+  // 第四十三轮：三条「有测试文件但从没被执行过」的守卫页分支。
+  // ---------------------------------------------------------------------------
+  group('GS-04 库态恢复与守卫热更新（第四十三轮）', () {
+    testWidgets('GS-04 库里已有生效的守卫配置 → 进页即恢复阈值/时长/冷却',
+        (tester) async {
+      // 关键：本页此前只被"空库"驱动过 ⇒ `rows.isNotEmpty` 那一段
+      // （L60-62，把库里的三项参数写回 UI 状态）**从未执行**。
+      // 后果是"用户改过的灵敏度下次进来又变回默认"这类缺陷查不出来。
+      await tester.runAsync(() => db.db.insert(
+            'sound_profiles',
+            {
+              'id': 'default',
+              'name': '默认守卫',
+              'threshold_db': -42.0,
+              'min_duration_ms': 1500,
+              'cooldown_sec': 300,
+              'only_while_charging': 0,
+              'enabled': 1,
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          ));
+
+      await pumpGuard(tester);
+      await waitForText(tester, '阈值 -42 dBFS');
+
+      expect(find.textContaining('阈值 -42 dBFS'), findsOneWidget,
+          reason: '库里的阈值必须被恢复 —— 否则用户调过的灵敏度每次都白调');
+      expect(find.textContaining('最小持续时间：1500ms'), findsOneWidget);
+      expect(find.textContaining('触发冷却：300s'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('GS-05 守卫**正在跑**时改参数 → 必须先停后起（热更新）',
+        (tester) async {
+      await pumpGuard(tester, state: active);
+      await waitForText(tester, '正在监听声音事件');
+
+      final invoked = <String, Object?>{};
+      final guards = <Map<String, Object?>>[];
+      BackgroundServiceManager.invokeHook = (m, a) async {
+        if (m == 'guard') guards.add(a ?? const <String, Object?>{});
+        invoked[m] = a;
+      };
+
+      await driveSliderAt(tester, 0, -30);
+
+      expect(guards.length, greaterThanOrEqualTo(2),
+          reason: '守卫开着时改阈值必须重启守卫 —— 只落库不重启 ⇒ '
+              '界面显示新值、引擎仍按旧阈值判断（静默失效）');
+      expect(guards.first['enabled'], false, reason: '必须先停');
+      expect(guards.last['enabled'], true, reason: '再起');
+      expect(guards.last['micGranted'], true,
+          reason: '重启时要把权威授权结论一并下发，引擎不必再问一遍');
+    }, timeout: perTest);
+
+    testWidgets('GS-06 引擎在跑 + 麦克风已授权 → 开守卫真的走到'
+        '「申请麦克风前台服务」这一段', (tester) async {
+      // 本页此前只测了 **失败** 路径（引擎没跑）。成功路径的中段
+      // ——`await NativeBridge.startMicService(); await requestAllPermissions(ref);`
+      // —— 是"守卫能在后台合法用麦克风"的唯一保证，却从没执行过。
+      const running = EngineState(running: true, pendingCount: 0);
+      final asked = stubPermissions({
+        Permission.microphone: PermissionStatus.granted,
+        Permission.notification: PermissionStatus.granted,
+      });
+      addTearDown(clearPermissionStub);
+
+      final invoked = <String>[];
+      BackgroundServiceManager.invokeHook = (m, a) async => invoked.add(m);
+
+      await pumpGuard(tester, state: running);
+      await tester.ensureVisible(find.byType(SwitchListTile));
+      await tester.tap(find.byType(SwitchListTile));
+      await drainAsync(tester);
+      // `waitForGuardActive(true)` 有 3s 超时（fake Timer）——推过它，
+      // 让 `_onToggleGuard` 走完并把失败原因告诉用户。
+      await tester.pump(const Duration(seconds: 4));
+      await drainAsync(tester);
+
+      // 判据落在**可观测的副作用**上：`requestAllPermissions` 会依次申请
+      // 通知与麦克风 —— 只有 `startMicService` 那一段真的跑了才会发生。
+      expect(asked.map((e) => e.single), containsAll(<Permission>[
+        Permission.notification,
+        Permission.microphone,
+      ]), reason: 'startMicService 必须带上 requestAllPermissions（前台服务通行证）');
+      expect(invoked, contains('guard'), reason: '必须真的把开启意图下发给引擎');
+      // 引擎在本测试里永远不会确认 ⇒ 必须显式告知，不许把开关静默弹回。
+      expect(find.byType(SnackBar), findsOneWidget,
+          reason: '引擎无响应时必须说出来（BUG-061）');
+      await retireSnackBars(tester);
+    }, timeout: perTest);
+  });
 }
