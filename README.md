@@ -39,7 +39,7 @@ record · flutter_background_service · flutter_local_notifications · TFLite �
 # 3) 运行
 flutter run              # 连接模拟器或真机
 # 4) 测试（必须分层：混跑会因压测 CPU 争用假红）
-flutter test --exclude-tags perf          # 功能层 1814 例
+flutter test --exclude-tags perf          # 功能层 1848 例
 flutter test --tags perf --concurrency=1  # 压测层 24 例
 flutter analyze          # 0 error / 0 warning
 # 5) 构建
@@ -88,12 +88,12 @@ docs/                全套工程文档（立项/需求/架构/保活/合规/测
 | [22 远程命令全量清单](docs/22-远程命令全量清单.md) | 远程协议面穷举：27 命令 / 18 事件 / 6 步骤 / 8 权限位 |
 | [HANDOVER](HANDOVER.md) | 交接文档：环境地图/已验证记录/下一步工作 |
 
-> **当前门禁基线**（2026-09-28 第四十三轮，产物 `_pt/s5gate.txt`，RC=0 全绿）：
-> analyze `No issues found` / 功能层 **1814** / 压测 **24** /
-> 覆盖率 门禁口径（可测面）**89.13%（8542/9584）**、对外诚实数字（全局）**84.81%（8544/10074）**；
-> 双指标 ratchet：`COVERAGE_MIN=88.9` **且** `MIN_COVERED=8536`。
+> **当前门禁基线**（2026-09-28 第四十四轮，产物 `_pt/t7gate.txt`，RC=0 全绿）：
+> analyze `No issues found` / 功能层 **1848** / 压测 **24** /
+> 覆盖率 门禁口径（可测面）**90.63%（8686/9584）**、对外诚实数字（全局）**86.24%（8688/10074）**；
+> 双指标 ratchet：`COVERAGE_MIN=90.4` **且** `MIN_COVERED=8680`。
 > ⚠️ 覆盖率**未达 95%**：宿主物理不可达路径（引擎 isolate / WebRTC / MQTT-TLS / 音频 / 平台通道）
-> 与设备层豁免 490 行使 100% 在宿主门禁内**不可达**，量化裁决见 `docs/12 §76.6`。
+> 与设备层豁免 490 行使 100% 在宿主门禁内**不可达**，量化裁决见 `docs/12 §77.6`。
 
 ## 许可与责任
 

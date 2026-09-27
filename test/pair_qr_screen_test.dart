@@ -590,6 +590,33 @@ void main() {
           reason: '取消必须**什么都不写** —— 否则用户以为没配上，实际已经授权了对方');
       expect(find.textContaining('已配对'), findsNothing);
     });
+
+    testWidgets('PQR-36 识别流异常回调（onDetectError）已接线且宿主可直接驱动',
+        (tester) async {
+      await enterScanning(tester);
+      expect(find.text('取消扫码'), findsOneWidget, reason: '前置：必须已在扫描态');
+
+      // 判据第四代：`onDetectError` 是 `MobileScanner` 的**公开**回调参数，
+      // 宿主上可以取出**同一个闭包**直接调用 —— 插件不推回调 ≠ 回调不可执行。
+      // ⚠️ 实测修正（第四十四轮）：`mobile_scanner 6.0.11` 里它是**非空**参数
+      // （不是可空字段）⇒ 多写一个 `!` 会被 analyze 判
+      // `unnecessary_non_null_assertion`。接线本身由构造函数强制，所以这里锁的
+      // 是两件真事：① 驱动它不炸；② **报错不得让识别管线失聪**。
+      scannerOf(tester).onDetectError(StateError('相机帧流断了'), StackTrace.empty);
+      await tester.pump();
+
+      expect(find.text('取消扫码'), findsOneWidget,
+          reason: '识别流报错不得把扫描态顶掉（用户还得能换角度重扫或取消）');
+      expect(find.byType(QrImageView), findsNothing,
+          reason: '仍处于扫描态：不得切回"展示本机二维码"');
+
+      // ② 报错之后识别管线必须仍然工作。
+      detect(tester, 'weixin://wxpay/bizpayurl?pr=abc', BarcodeFormat.qrCode);
+      await tester.pump();
+
+      expect(find.text('这不是声盾配对码，请扫描对方的声盾配对二维码'), findsOneWidget,
+          reason: '一次识别流异常不得让后续帧失聪 —— 那才是真正的"扫不上"');
+    }, timeout: const Timeout(Duration(seconds: 90)));
   });
 
   // ---------------------------------------------------------------------------

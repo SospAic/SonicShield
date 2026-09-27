@@ -636,4 +636,70 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('✗ 停止端点指令组'), findsOneWidget);
   });
+
+  // ---------------- E · 音量滑杆与「最后成功值」（第四十四轮） ----------------
+
+  testWidgets('RCT-12 音量滑杆：拖动过程只改界面，松手才发命令；回执 ok 才记住该值',
+      (tester) async {
+    final ch = await _pump(tester);
+
+    // 滑杆是本页唯一的 Slider（快捷档位是 OutlinedButton）。
+    final slider = tester
+        .widgetList<Slider>(find.byType(Slider))
+        .firstWhere((s) => s.max == 100 && s.divisions == 100);
+
+    await tester.ensureVisible(find.byType(Slider));
+    slider.onChanged!(42);
+    await tester.pump();
+    expect(find.text('42%'), findsOneWidget, reason: '拖动过程必须实时反映到界面');
+    expect(ch.sent.where((m) => m.type == RcCmd.volumeSet), isEmpty,
+        reason: '拖动过程发命令 = 刷屏（每个像素一条 MQTT），必须只在松手时发');
+
+    slider.onChangeEnd!(42);
+    await tester.pumpAndSettle();
+
+    final cmd = ch.lastOfType(RcCmd.volumeSet);
+    expect(cmd.payload['media'], closeTo(0.42, 1e-9),
+        reason: '42% → 0.42（端点侧不校验范围，控制端钳制是唯一边界）');
+
+    // 落盘点：**回执 ok 之后**才写「最后成功设置的音量」。
+    final prefs = await SharedPreferences.getInstance();
+    final volKeys =
+        prefs.getKeys().where((k) => k.startsWith('rc:volume:')).toList();
+    expect(volKeys, isEmpty, reason: '命令只是发出去了 —— 还没成功，不能先记账');
+
+    ch.emit(RcEvt.ack, {'ok': true, 'for': cmd.id, 'data': ''});
+    await tester.pumpAndSettle();
+    // 回执提示用的是命令描述（`volumeLabelForPercent`）而不是命令名。
+    expect(find.textContaining('✓ 媒体音量 42%'), findsOneWidget);
+
+    expect(prefs.getKeys().where((k) => k.startsWith('rc:volume:')).toList(),
+        isNotEmpty,
+        reason: '回执 ok 必须把该值落盘 —— 否则下次进页又回到 80%，用户的重设白做');
+    expect(prefs.getInt(volKeys.isEmpty ? 'rc:volume:assist' : volKeys.first), 42);
+
+    // 收尾推掉 SnackBar 计时，避免 pending timer。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  }, timeout: const Timeout(Duration(seconds: 90)));
+
+  testWidgets('RCT-13 音量回执 ok=false → 不记账（端点拒绝的值不得当成已生效）',
+      (tester) async {
+    final ch = await _pump(tester);
+
+    await _tapOutlined(tester, '50%');
+    final cmd = ch.lastOfType(RcCmd.volumeSet);
+
+    ch.emit(RcEvt.ack, {'ok': false, 'for': cmd.id, 'data': 'iOS 不支持调节音量'});
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('iOS 不支持调节音量'), findsOneWidget,
+        reason: '失败原因必须显示 —— 只说 ✗ 等于让用户自己猜');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getKeys().where((k) => k.startsWith('rc:volume:')), isEmpty,
+        reason: '"发送即记忆"会把端点拒掉的值记成已生效（假成功）');
+
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  }, timeout: const Timeout(Duration(seconds: 90)));
 }

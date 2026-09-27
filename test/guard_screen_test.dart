@@ -306,6 +306,34 @@ void main() {
       final kv = await inAsync(tester, () => db.kvGet(guardOrchestrationKey));
       expect(kv, isNotNull);
     }, timeout: perTest);
+    testWidgets('GS-07 候选任务**取消勾选** → 从配置里移除（不是只加不减）', (tester) async {
+      await tester.runAsync(() => seedSoundTask('st1'));
+      await pumpGuard(tester);
+      await waitFor(
+        tester,
+        () => find.byType(CheckboxListTile).evaluate().isNotEmpty,
+        reason: 'seed 的声音触发任务应渲染成候选勾选框',
+      );
+
+      // 先勾上（此前已覆盖的 `v == true` 分支）……
+      tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).onChanged!(true);
+      await tester.pump();
+      await drainAsync(tester);
+      expect(await inAsync(tester, () => db.kvGet(guardOrchestrationKey)),
+          contains('st1'));
+
+      // ……再取消勾选（此前从未被驱动：编排配置只会变多、不会变少）。
+      tester
+          .widget<CheckboxListTile>(find.byType(CheckboxListTile))
+          .onChanged!(false);
+      await tester.pump();
+      await drainAsync(tester);
+
+      final kv = await inAsync(tester, () => db.kvGet(guardOrchestrationKey));
+      expect(kv, isNotNull);
+      expect(kv, isNot(contains('st1')),
+          reason: '取消勾选必须真的从 taskIds 里移除 —— 否则"不选 = 全部触发"的语义被破坏');
+    }, timeout: perTest);
   });
 
   group('GS-03 守卫开关与引擎状态卡', () {
@@ -333,6 +361,35 @@ void main() {
         (tester) async {
       await pumpGuard(tester, state: active);
       await waitForText(tester, '麦克风被占用');
+    }, timeout: perTest);
+
+    testWidgets('GS-08 引擎状态流报错 → 状态卡直说"状态获取失败"（不停留在加载态）',
+        (tester) async {
+      // 第三条状态：`data` / `loading` 都已有用例，`error` 从未被驱动 ——
+      // 而它正是"引擎查询炸了却只看到转圈"的那条（用户无从判断该不该重启）。
+      final ctrl = StreamController<EngineState>.broadcast();
+      addTearDown(() async => ctrl.close());
+      BackgroundServiceManager.lastForTest = idle;
+      BackgroundServiceManager.stateForTest = ctrl.stream;
+
+      tester.view.physicalSize = const Size(1200, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [databaseProvider.overrideWith((ref) async => db)],
+        child: const MaterialApp(home: GuardScreen()),
+      ));
+      await drainAsync(tester);
+      expect(find.byType(LinearProgressIndicator), findsOneWidget,
+          reason: '前置：错误事件到达前应处于加载态');
+
+      ctrl.addError(StateError('engine 查询失败'));
+
+      await waitForText(tester, '状态获取失败');
+      expect(find.textContaining('engine 查询失败'), findsOneWidget,
+          reason: '原始原因要带出来，否则用户只能看到一句笼统的失败');
+      await drainAsync(tester);
     }, timeout: perTest);
   });
 

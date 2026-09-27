@@ -5,6 +5,68 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第四十四轮（2026-09-28）· 「源码锁是绿的 ≠ 业务路径被执行过」+ 抬阈值至 **90.4 / 8680**
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/t1gate.txt`（pre-ratchet）与
+> `_pt/t6gate.txt`（post-ratchet 终验）。
+> **生产代码 0 行改动**；**分母 9584 / 10074 一字未动**；真实进度 **8544 → 8688（+144 行）**。
+
+**Added（新增测试，34 例）**
+- 🟢 **新建 `test/endpoint_script_run_test.dart`（12 例，ESR-01…12）** —— 这是本轮最大一块。
+  `lib/remote/endpoint_service.dart` 未覆盖 **527 → 435**，但更关键的是**性质变化**：
+  `_runScript`（指令组主链路：`delay` / `play` / `tts` / `vibrate` 四类步骤、
+  一次一组互斥、`script.stop` 终止、`occurrenceId` 分段审计）**此前只有契约级覆盖**
+  （12 个测试文件全都只锁 wire 形状与方法签名），**从没有一条指令组真的从头跑到尾**。
+  驱动方式沿用并推广 `RcEndpointService.debugBind` + `debugDispatch`（`@visibleForTesting` 注入缝）
+  —— 缝不变、不新增生产方法，用注入的 `resolvePresetHandler` / `playHandler` /
+  `legacyHandler` / `actionHandler` 观测**真实副作用**：音量被夹到 `[0,1]`、
+  时长 3000ms、`loop=false`、随机振动拿不到参数化引擎时**不静默降级**（报
+  `未接线参数化振动`）、第二组指令在跑时**必须被拒**（`已有指令组在执行`）且
+  第一组**仍能跑完**、`script.stop` 后**一次都不再振动**且留下成功审计。
+- 🟢 **`test/assist_host_test.dart` 扩 7 例（AH-60…66）** —— `assist_host.dart`
+  未覆盖 **22 → 0（满覆盖）**。★ 整块 D-7（**任务载荷裁决**）此前**只有源码文本锁**
+  （`methodBody` 里断言出现 `未放行` / `任务动作需要权限`），**没有任何用例真的发过一条带
+  `action` 的任务** ⇒ 本轮用真实 wire 发 `task.upsert`：`{'task':{'action':{'kind':'record'}}}`
+  在权限未放行时须在**载荷层**就被拒（ack `ok=false` + `data` 含 `未放行` +
+  审计 `assist.deny/任务动作需要权限`，且**只发布一次**）；`kind='notify'` 须放行到
+  `onCommand`；`{'task':'not-a-map'}` 须走 `TaskWire` 兜底而**不是**崩；
+  `onCommand` 抛异常须落审计 `failed/处理器异常` 且 ack 带回**原始异常文本**
+  （`db locked`）到**会合主题**；`tick()` 心跳在健康/自取消两种相位下的广播差异；
+  以及 `maxSeenWires` 去重窗口真的能挡回放。
+- 🟡 **`test/rc_script_executor_test.dart` 扩 10 例（4 组）** —— `script_executor.dart`
+  未覆盖 **14 → 0（满覆盖）**：`RcCancel.sleep` 的**自然到点 vs 令牌唤醒**两种语义（前者**不得**
+  被当成取消）、`runRecordWindow` 带令牌自然到点 → `ok=true/aborted=false`（v2 分流）、
+  `activeCancel` 未运行时为 `null`、`ScriptDraft.toPayload` 往返 wire、
+  `RcStep.describe` 对 vibration 步的固定文案、`worstCaseMs` 的 record 计时口径（缺省 30s）、
+  `fromJsonString` 与 `fromJson(JSON.decode(...))` **等价**、
+  ★ `registerStopHandler` 用**真实 `didReceiveNotificationResponse` 平台调用**
+  （`handlePlatformMessage` 投递）验证"**只有** `actionId=rc_script_stop` 触发终止、
+  其它按钮不误触发"。
+- 🟢 **`test/guard_screen_test.dart` 扩 2 例（GS-07/08）** —— `guard_screen.dart`
+  未覆盖 **2 → 0（满覆盖）**：候选设备**取消勾选**须真的从 `guardOrchestrationKey`
+  的持久化集合里移除（否则"改主意了"下次进来又生效）；引擎状态流
+  `addError` 时须显式落到 `状态获取失败` + `engine 查询失败` 文案，**而不是**永远转圈。
+- 🟡 **`test/remote_console_tab_test.dart` 扩 2 例（RCT-12/13）** —— `remote_console_tab.dart`
+  未覆盖 **8 → 2**：★ 音量滑杆**拖动中不得下发指令**、只有 `onChangeEnd` 才发
+  （此前只测过点击路径）；ack 失败（`iOS 不支持调节音量`）须显示**原因**且
+  **不写 `rc:volume:` 偏好**（旧实现"先写偏好后收 ack"会让 UI 与对端状态不一致）。
+- 🟢 **`test/pair_qr_screen_test.dart` 扩 1 例（PQR-36）** —— `pair_qr_screen.dart`
+  未覆盖 **7 → 5**：`MobileScanner.onDetectError` 触发后**必须仍在扫码**
+  （不许出现 `QrImageView` 之类"卡死"形态），且随后的别家二维码**仍给一次性提示**
+  —— 相机帧流断一次不等于会话结束。
+- 🟡 `lib/remote/rc_script.dart` 未覆盖 **6 → 0（满覆盖）**（由上面 `RcScript` 组顺带拿下）。
+
+**Changed（测试口径与工具）**
+- 🔧 **阈值 ratchet 三处同步**：`COVERAGE_MIN` 88.9 → **90.4**、
+  `MIN_COVERED` 8536 → **8680**（可测面分子 8686 − 6 行抖动余量），
+  同步于 `scripts/gates.sh` + `scripts/gates.ps1`（BOM `ef bb bf` 保留 + `PARSE_ERROR_COUNT=0`）
+  + 本文件「已知限制」段。双向留痕见 `docs/12 §77`。
+- 📌 **判据换代（第五代）**：目标选择从"缺口有多大"改为"**这份源码锁是绿的吗、它锁住了执行吗**"。
+  `grep methodBody` 之类的**文本锁为绿只证明源码里有这几行字**，
+  不证明任何路径跑过它。本轮四块（D-7 / `script_executor` / `_runScript` / 滑杆）全部是
+  **"文本锁绿、执行路径零次"** 的典型。清单见 `docs/17 §74.3`。
+
 #### 第四十三轮（2026-09-28）· 「插件不推回调 ≠ 回调不可执行」+ 抬阈值至 **88.9 / 8536**
 
 > 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
@@ -603,13 +665,36 @@
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **覆盖率 89.13%（8542/9584）**（门禁口径＝**可测面**）／**全局（对外诚实数字）84.81%（8544/10074）**（2026-09-28 **第四十三轮**实测）
-  —— 未达 95% 目标（⚠️ 本行 2026-09-28 **第四十三轮**实测更新；
-  此前「88.13%（8446/9584）」是第四十一轮值、「86.83%（8315/9576）」是第四十轮值、
+- **覆盖率 90.63%（8686/9584）**（门禁口径＝**可测面**）／**全局（对外诚实数字）86.24%（8688/10074）**（2026-09-28 **第四十四轮**实测）
+  —— 未达 95% 目标（⚠️ 本行 2026-09-28 **第四十四轮**实测更新；
+  此前「89.13%（8542/9584）」是第四十三轮值、「88.13%（8446/9584）」是第四十一轮值、
+  「86.83%（8315/9576）」是第四十轮值、
   「85.69%（8206/9576）」是第三十九轮值、
   「84.49%（8091/9576）」是第三十八轮值、
   「83.13%（7949/9562）」是第三十七轮值、「82.36%（7875/9562）」是第 36 轮续六值、
   「79.91%（7641/9562）」是续五值、「78.47%（7499/9556）」是续四值；**以当前实测值为准**）。
+  ⚠️ 2026-09-28 **第四十四轮（自动化续作，单人会话）**：本轮判据推至**第五代** ——
+  **「源码锁是绿的」≠「那条业务路径被执行过」**。`assist_host.dart` 的
+  `task.upsert` 载荷裁决（D-7）此前**只有 `methodBody` 文本锁**（断言源码里出现
+  `未放行` / `任务动作需要权限` 字样），**没有任何用例真的发过一条带 `action` 的任务** ⇒
+  整块 22 行未覆盖；同理 `script_executor.dart` 的 14 行（`RcCancel` /
+  `runRecordWindow` / `ScriptDraft` 组装器 / `registerStopHandler`）只有契约层被锁、
+  引擎从没被驱动过。**生产代码 0 行改动、分母 9584 / 10074 一字未动**，补五块：
+  `script_executor` **14 → 0（满覆盖）** / `assist_host` **22 → 0（满覆盖）** /
+  `guard_screen` **2 → 0（满覆盖）** / `rc_script` **6 → 0（满覆盖）** /
+  `remote_console_tab` **8 → 2** / `pair_qr_screen` **7 → 5** /
+  `endpoint_service` **527 → 435**（新驱动 `_runScript` 全链路，
+  ★ 该文件首次获得**行为级**覆盖：此前 12 个测试文件全都只锁契约）。
+  新增 **34 例**（功能层 1814 → **1848**）。门禁 **RC=0 / 全绿**：analyze `No issues found!` /
+  压测 **24** / 覆盖率 ratchet 通过（可测面 **90.63%** ≥ 90.4 且 **8686** ≥ 8680）。
+  **真实进度 +144 行**（8544 → 8688）。
+  ⚠️ 本轮记下的**陷阱**：`mobile_scanner` 的 `onDetectError` 是**非空参数**
+  （与 `onDetect` / `errorBuilder` 那两个 **public final 字段**不同）⇒
+  `scannerOf(tester).onDetectError!(...)` 会被 `flutter analyze` 判
+  `unnecessary_non_null_assertion`。**同一个插件里"可达性"不统一，逐个查签名，不要类推。**
+  第二处：`registerStopHandler` 的平台桩里 `initialize` 被插件声明为**非空 `bool`**
+  ⇒ 桩返回 `null` 会在 `platform_flutter_local_notifications.dart:143` 抛
+  `type 'Null' is not a subtype of type 'FutureOr<bool>'`（要 `... ? true : null`）。
   ⚠️ 2026-09-28 **第四十三轮（自动化续作，单人会话）**：本轮判据再推一格 ——
   **「插件不推回调」≠「回调不可执行」**。前三轮把 `pair_qr_screen` 的 `onDetect` /
   `errorBuilder` 登记为"宿主物理不可达"，那条判断**只对"经由插件运行期触发"成立**：
@@ -734,13 +819,13 @@
   **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
   缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
   与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
-  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=88.9` **且** 绝对覆盖行 `MIN_COVERED=8536`
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=90.4` **且** 绝对覆盖行 `MIN_COVERED=8680`
   —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
   （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
   74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；
   79.8 → 82.2 见 `docs/12 §70`；82.2 → 83.0 见 `docs/12 §71`；83.0 → 84.3 见 `docs/12 §72`；
   84.3 → 85.5 见 `docs/12 §73`；85.5 → 86.6 见 `docs/12 §74`；86.6 → 87.9 见 `docs/12 §75`；
-  **87.9 → 88.9 见 `docs/12 §76`**）。
+  87.9 → 88.9 见 `docs/12 §76`；**88.9 → 90.4 见 `docs/12 §77`**）。
 
 ### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20，2026-09-22 轮次）
 

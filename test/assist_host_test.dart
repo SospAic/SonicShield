@@ -608,6 +608,175 @@ void main() {
     });
   });
 
+  // ---------------- AH-6x D-7 载荷级裁决 + 执行层异常兜底 ----------------
+
+  /// D-7（docs/22 §9）与 BUG-051 同源面：
+  ///
+  /// - **命令级门控只认命令类型** —— `task.upsert` 只需 `script` 位，
+  ///   若不在载荷层再看一眼动作类型，只放行 `script` 的对端即可塞进
+  ///   `actionType:'recordEvidence'` 的任务绕开步骤级 `denyAll`；
+  /// - **执行层抛异常必须变成"审计 + 显式回执"** —— 否则控制端只看到
+  ///   "点了没反应"，与权限拒绝无法区分（BUG-051 的形状）。
+  group('AH D-7 任务载荷裁决与执行层异常兜底', () {
+    const allOn = AssistPerms(
+      media: true,
+      tts: true,
+      vibrate: true,
+      volume: true,
+      location: true,
+      video: true,
+      script: true,
+      audit: true,
+    );
+
+    /// 以控制端身份向会话发送一条业务命令。
+    Future<void> business(AssistSession s, String type,
+        {Map<String, dynamic> payload = const {}}) async {
+      final ctlKey = await RcAssist.ctlKey(s.code, s.password);
+      await host.onWire(
+          await RcCodec.encode(RcMessage.now(type, payload), ctlKey, s.topic));
+    }
+
+    test('AH-60 task.upsert 载荷含 record 动作 → 载荷级裁决拒绝（D-7 回归锁）', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      await host.grant(allOn);
+      final seen = <String>[];
+      host.onCommand = (m) async => seen.add(m.type);
+      final before = bus.published.length;
+
+      await business(s, RcCmd.taskUpsert, payload: {
+        'task': {'name': '取证', 'action': {'kind': 'record'}},
+      });
+
+      expect(seen, isEmpty,
+          reason: '命令级只有 script 位 —— 不看载荷就会让 record 动作绕过步骤级 denyAll');
+      final ack = await openLast(await RcAssist.epKey(s.code, s.password));
+      expect(ack!.type, RcEvt.ack);
+      expect(ack.payload['ok'], isFalse);
+      expect(ack.payload['forType'], RcCmd.taskUpsert);
+      expect(ack.payload['data'], contains('未放行'));
+      expect(audits.last.action, 'assist.deny');
+      expect(audits.last.message, contains('任务动作需要权限'));
+      expect(bus.published.length, before + 1, reason: '拒绝必须只发一条回执');
+    });
+
+    test('AH-61 task.upsert 载荷无可拒绝动作 → 放行到执行层', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      await host.grant(allOn);
+      final seen = <String>[];
+      host.onCommand = (m) async => seen.add(m.type);
+
+      await business(s, RcCmd.taskUpsert, payload: {
+        'task': {'name': '提示', 'action': {'kind': 'notify'}},
+      });
+
+      expect(seen, [RcCmd.taskUpsert], reason: '无危险动作不得被误拒');
+    });
+
+    test('AH-62 task.upsert 的 task 字段结构非法 → 本层不拒，交 TaskWire 兜底', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      await host.grant(allOn);
+      final seen = <String>[];
+      host.onCommand = (m) async => seen.add(m.type);
+
+      await business(s, RcCmd.taskUpsert, payload: {'task': 'not-a-map'});
+
+      expect(seen, [RcCmd.taskUpsert], reason: '结构非法由 TaskWire.fromWire 兜底拒绝');
+    });
+
+    test('AH-63 执行层抛异常 → 审计 failed + 显式回执拒绝（BUG-051 同源）', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      await host.grant(allOn);
+      host.onCommand = (m) async => throw StateError('db locked');
+
+      await business(s, RcCmd.soundPlay, payload: {'assetId': 'a1'});
+
+      expect(audits.last.action, RcCmd.soundPlay);
+      expect(audits.last.status, 'failed');
+      expect(audits.last.message, contains('处理器异常'));
+
+      final ack = await openLast(await RcAssist.epKey(s.code, s.password));
+      expect(ack!.type, RcEvt.ack);
+      expect(ack.payload['ok'], isFalse);
+      expect(ack.payload['data'], contains('处理器异常'));
+      expect(ack.payload['data'], contains('db locked'),
+          reason: '真实原因必须回传，否则只剩下"20 秒超时"');
+      expect(bus.published.last.topic, s.topic, reason: '回执必须走会合主题');
+    });
+
+    test('AH-64 tick()：会话健康时广播一次，驱动 UI 倒计时', () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      final seen = <AssistSession?>[];
+      final sub = host.changes.listen(seen.add);
+      await Future<void>.delayed(Duration.zero); // 广播控制器是异步投递
+
+      host.tick();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen, isNotEmpty);
+      expect(seen.last, same(s));
+      await sub.cancel();
+    });
+
+    test('AH-65 tick()：失败超限后 phase=closed 但 _session 未清 → 自停计时器不广播',
+        () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+
+      // 生产侧同形窗口：`_onHandshakeFailure` 先 `registerFailure()`
+      // （锁定时把 phase 置 closed），再 `await audit` —— 这段时间里
+      // `_session` 仍非空。此时周期 tick 必须自停而不是继续广播。
+      for (var i = 0; i < RcAssist.maxFailures; i++) {
+        s.registerFailure();
+      }
+      expect(s.phase, AssistPhase.closed);
+      expect(host.session, isNotNull, reason: 'close() 尚未走到，会话对象还在');
+
+      final seen = <AssistSession?>[];
+      final sub = host.changes.listen(seen.add);
+      await Future<void>.delayed(Duration.zero);
+
+      host.tick();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen, isEmpty, reason: '会话已判决关闭 ⇒ 不应再驱动倒计时');
+      await sub.cancel();
+    });
+
+    test('AH-66 密文去重窗口超限后按插入序淘汰最旧（窗口有界 + ID 去重不被破坏）',
+        () async {
+      final s = await host.start();
+      await host.onWire(await helloWire(s));
+      final calls = <String>[];
+      host.onCommand = (m) async => calls.add(m.id);
+
+      final ctlKey = await RcAssist.ctlKey(s.code, s.password);
+      final wires = <String>[];
+      for (var i = 0; i < RcAssistHost.maxSeenWires + 3; i++) {
+        wires.add(await RcCodec.encode(
+            RcMessage.now(RcCmd.ping, {'i': i}), ctlKey, s.topic));
+      }
+      for (final w in wires) {
+        await host.onWire(w);
+      }
+
+      expect(calls.length, RcAssistHost.maxSeenWires + 3,
+          reason: '每条都是不同密文 ⇒ 全部应被执行');
+
+      // 最旧的 3 条已被淘汰出"密文窗口"，重放它们会再次进入 _rememberWire，
+      // 但 ID 去重必须仍然生效 —— 否则重放等于可重复执行。
+      await host.onWire(wires.first);
+      await host.onWire(wires.last);
+      expect(calls.length, RcAssistHost.maxSeenWires + 3,
+          reason: '淘汰密文窗口不得破坏 ±90s 的 ID 去重');
+    });
+  });
+
   // ---------------- AH-5x 生命周期顺序与守卫（P0-1） ----------------
 
   group('AH 生命周期顺序与守卫（P0-1）', () {
