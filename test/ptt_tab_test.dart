@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/ptt_tab.dart';
+import 'package:sonic_shield/remote/controller_service.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 import 'support/permission_stub.dart';
@@ -16,8 +17,14 @@ import 'support/record_stub.dart';
 /// 这是**真实 dart:io**，在 `testWidgets` 的 `FakeAsync` 里不会完成。
 /// 因此**录音真正开始的后续**（`Timer.periodic` 计时 / 松开发送 / 分包加密）
 /// 不在宿主层测；本文件覆盖的是**它之前与之后的全部判断**：
-/// 未选端点、权限被拒、录音启动失败、端点选择落库、松手时未录音的早退。
-/// 剩下的由设备层/集成测试补。
+/// 未选端点、权限被拒、录音启动失败、端点选择落库、松手时未录音的早退，
+/// 以及（第四十一轮新增 PTT-08）**按住后滑出手势取消 → `_cancel()` →
+/// `pttCancel()` 真的把录音通道关掉**。剩下的由设备层/集成测试补。
+///
+/// ⚠️ 第四十一轮还踩到一个**跨用例的单例坑**（见 `main()` 头注与
+/// `support/record_stub.dart` 第二层）：`RcControllerService` 的
+/// `AudioRecorder` 只在首次构造时 `create()` 一次，用 method channel 桩时
+/// 它的完成时机**跨用例即失效** ⇒ 之后所有录音调用**永久挂起**。
 ///
 /// `rc.pttAck` 回执渲染（BUG-046）**不在本文件**：
 /// `RcEndpointService` 的事件 `StreamController` 是库内私有字段，
@@ -54,6 +61,23 @@ Finder get _micButton => find.ancestor(
     of: find.byIcon(Icons.mic), matching: find.byType(GestureDetector));
 
 void main() {
+  // ⚠️ **必须用「平台层」桩，且必须在 setUp 里预热**（第四十一轮实测换来）：
+  // `RcControllerService` 是**进程内单例**，`AudioRecorder` 只在首次构造时
+  // 发起一次 `create()`，而 `_safeCall` 每次调用都先 `await _createFuture`。
+  // 实测（`_pt/q5_probe_raw.txt`）：用 method channel 桩时，`create()` 的往返
+  // **跨用例后不再推进** ⇒ `_createFuture` 永久不完成 ⇒ 之后同一进程内
+  // **任何** `start()/stop()/hasPermission()` 都**永久挂起**（不是抛错）。
+  // 完整说明见 `support/record_stub.dart` 第二层。
+  late FakeRecordPlatform rec;
+  setUp(() async {
+    rec = installFakeRecordPlatform();
+    // ★ `setUp` 跑在**真实 zone**（见 guard_screen_test 的同类做法）⇒
+    // 这里的一次调用能把 `_createFuture` 真正推完成，之后所有用例都安全。
+    await RcControllerService.instance.pttCancel();
+    rec.calls.clear();
+  });
+  tearDown(restoreRecordPlatform);
+
   group('PTT 对讲机整页', () {
     testWidgets('PTT-01 未配对 → 明确引导"先完成扫码配对"（不是空白页）', (tester) async {
       await _pump(tester);
@@ -97,9 +121,7 @@ void main() {
       final asked = stubPermissions(
           {Permission.microphone: PermissionStatus.granted});
       addTearDown(clearPermissionStub);
-      // 平台侧拒绝录音（见 record_stub 头注：避开真实 dart:io 建目录）。
-      final recCalls = stubRecord(hasPermission: false);
-      addTearDown(clearRecordStub);
+      // 平台层桩由顶层 setUp 装好并已预热（见 main() 头注）。
 
       await _pump(tester,
           endpoints: [_ep('0123456789abcdef', '客厅平板')],
@@ -108,18 +130,32 @@ void main() {
       // 选中态要显示在下拉框上，而不是"我以为选了其实没选"。
       expect(find.text('客厅平板'), findsWidgets);
 
-      await tester.tap(_micButton);
+      // ★ 必须整条手势跑在 `runAsync` 里（第四十一轮实测换来）：
+      // `pttStart()` 会 `await RcControllerService` 单例里那个
+      // `AudioRecorder`，而它的 `_createFuture` 是 `late final`、
+      // **只在首次构造时建一次**（`record-7.1.1/lib/src/record.dart:25,32-41`），
+      // 本文件顶层 `setUp` 已在**真实 zone** 预热过它 ⇒ 那个 Future 的完成
+      // 回调只会在真实 zone 里被调度。fake-async 里 `await` 它 = 永久挂起
+      // （症状是"没调用过 hasPermission"，不是抛错）。
+      // 同时 100ms `didExceedDeadline` 也是 `Timer`（`tap.dart:308-311`），
+      // 真实 zone 下按才拿得到真实计时器。
+      await tester.runAsync(() async {
+        final g = await tester.startGesture(tester.getCenter(_micButton));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await g.up();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      });
       await tester.pumpAndSettle();
 
       expect(asked.single, [Permission.microphone]);
-      expect(recCalls, contains('hasPermission'),
+      expect(rec.calls, contains('hasPermission'),
           reason: '必须真的问过录音权限，而不是直接说"失败"');
       expect(find.text('录音启动失败'), findsOneWidget);
       expect(find.text('按住麦克风开始对讲'), findsOneWidget,
           reason: '启动失败必须留在待机态');
       expect(find.text('请先选择目标端点'), findsNothing,
           reason: '已选端点不该再报"未选"');
-    });
+    }, timeout: const Timeout(Duration(seconds: 90)));
 
     testWidgets('PTT-05 有多个端点时渲染对讲目标下拉框（不是让用户盲按）', (tester) async {
       // ⚠️ 本用例**刻意不按住麦克风**：`RcControllerService` 是进程内单例，
@@ -153,6 +189,41 @@ void main() {
       expect(store.selectedEndpointId, 'fedcba9876543210',
           reason: '选了不落库 ⇒ 下次进来又回到旧目标（BUG-063 同形态）');
     });
+
+    testWidgets('PTT-08 按住后滑出手势取消 → 真的释放录音通道（不是只改界面）',
+        (tester) async {
+      stubPermissions({Permission.microphone: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      // record 桩由顶层 `setUp` 装好（见 main() 头注：单例构造时机决定成败）。
+
+      await _pump(tester,
+          endpoints: [_ep('0123456789abcdef', '客厅平板')],
+          selectedEndpointId: '0123456789abcdef');
+
+      // down 之后**不抬手**、直接 cancel ⇒ 触发 onTapCancel → `_cancel()`。
+      // ★ 整条手势在 `runAsync` 里（理由同 PTT-04：单例 `_createFuture` 属真实 zone）。
+      // ⚠️ 必须等过 `kPressTimeout`（100ms）：取消时 arena 还没 sweep ⇒
+      // `_wonArenaForPrimaryPointer` 为 false，没有"补发 down"的机会，
+      // `onTapCancel` 完全依赖 `didExceedDeadline()` 把 `_sentTapDown` 置真
+      // （`packages/flutter/lib/src/gestures/tap.dart:315-319` / `:308-311`）。
+      // 而 `didExceedDeadline` 由 `Timer` 驱动 ⇒ 必须是**真实**计时器，
+      // `pump(150ms)` 推 fake 时钟推不动它。
+      await tester.runAsync(() async {
+        final g = await tester.startGesture(tester.getCenter(_micButton));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await g.cancel();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      });
+      await tester.pumpAndSettle();
+
+      expect(rec.calls, contains('stop'),
+          reason: '滑出取消必须真的把录音通道关掉（`pttCancel()` → `_rec.stop()`）——'
+              '只把界面改回待机是假释放，麦克风会被一直占着');
+      expect(find.text('按住麦克风开始对讲'), findsOneWidget,
+          reason: '取消后必须回到待机文案');
+      expect(find.textContaining('录音中'), findsNothing);
+      expect(tester.takeException(), isNull);
+    }, timeout: const Timeout(Duration(seconds: 90)));
 
     testWidgets('PTT-07 松手时并未在录音 → 直接早退（不报错、不发空包）', (tester) async {
       stubPermissions({Permission.microphone: PermissionStatus.denied});

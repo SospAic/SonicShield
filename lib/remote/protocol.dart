@@ -384,11 +384,22 @@ abstract final class PairQrProtocol {
   static const prefix = 'sonicshield://pair/';
 
   /// 解析对端配对二维码；格式不符（ID/码长度、前缀）返回 null。
+  ///
+  /// ⚠️ **BUG-075（第四十轮修）**：`deviceId` 与 `code` **都必须归一化到小写**。
+  /// 此前只归一化了码（剥连字符 + 转大写），ID 原样保留 —— 而
+  /// `_hex16` 明确接受大写、手输框的提示语又写"0-9 与 a-f"，
+  /// 于是用户手抄成大写时：本机落盘成功、二维码/结果卡片都说"已配对"，
+  /// 但 `deviceId` 是 **MQTT 主题段**（`sonicshield/v1/{deviceId}/cmd`，
+  /// 大小写敏感）且是密钥派生的输入（`deriveKey(code, '{deviceId}|cmd')`）——
+  /// 对端实际主题是小写（`generateDeviceId()` 恒小写，见上），
+  /// 结果就是**命令永远发不出去、回执永远解不开**，且全程无任何报错。
+  /// 归一化放在协议层（项目既定的"归一化只有协议层一处实现"），
+  /// 使扫码与手输两条路径同时受益。
   static ({String deviceId, String name, String code})? parseUri(String uri) {
     if (!uri.startsWith(prefix)) return null;
     final parts = uri.substring(prefix.length).split('/');
     if (parts.length < 3) return null;
-    final id = parts[0];
+    final id = parts[0].toLowerCase();
     final name = Uri.decodeComponent(parts[1]);
     final code = parts[2].replaceAll('-', '').toUpperCase();
     if (id.length != 16 || code.length != 8) return null;

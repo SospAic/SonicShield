@@ -5,8 +5,234 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第四十一轮（2026-09-27）· 按「测试文件覆盖的是哪一层」补两块 + 抬阈值至 **87.9 / 8440**
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/q10gate.txt`（pre-ratchet）
+
+**Added（新增测试，18 例）**
+- 🟡 **新建 `test/permission_flow_test.dart`（5 例，PFL-01…05）** ——
+  `lib/services/permission_flow.dart` 未覆盖 **13 → 4 行**，且是该文件**首个专属测试文件**。
+  选靶理由：它是**全项目唯一"缺口比高 + 零专属测试"且完全宿主可达**的文件
+  （另一候选 `playback_service.dart` 76 行缺口偏音频链路、`multi_call_service.dart` 100 行
+  需真实 WebRTC）。锁的是：合规门**两条出口**（同意 / 拒绝都必须**显式落库** ——
+  `key = false` 与 `key 缺失` 是两条不同事实）、已同意后**一次都不再打扰**、
+  一站式权限申请（通知 + 麦克风）、
+  ★ **「电池未加白 → 真的 `requestIgnoreBatteryOptimizations()`」**——
+  此前唯一经由 Dashboard 触达它的路径把 `isIgnoringBatteryOptimizations` 桩成 `true`，
+  这条**真实分支从未执行**（无条件弹系统框 = 每次开引擎都弹一次，用户只能反复点掉）、
+  保活引导三个入口的**逐键载荷**与 `vendor` 必须来自识别结果（写死品牌 ⇒ 小米用户被丢进三星设置页）。
+  ⚠️ 厂商指引分支（`L98` + `L164-165/L168`，共 4 行）**主动放弃**并量化登记：
+  需 `AndroidDeviceInfo.fromMap` 的 **24 个键**（`device_info_plus-10.1.2/src/model/android_device_info.dart:144-170`）
+  才能造出来，且会把测试**绑死在插件模型内部**（插件加键即红而应用行为没变）。
+- 🟡 **`test/call_screen_test.dart` 扩 7 例（CSP-04…10）** —— `call_screen.dart` 未覆盖
+  **45 → 0 行**（**已满覆盖**）。此前只测过"未配对 / 无端点"两条静态分支，本轮补：
+  双权限失败文案（麦克风被拒 / 相机被拒各一条）、★ **语音通话不得被"相机被拒"误拦**
+  （`callStartBlockFor` 的核心判断：相机被拒只挡视频，语音必须放行 ——
+  误拦＝"可用"被报成"不可用"，比漏拦更隐蔽）、`连接中` 相位与挂断入口可见性（BUG-D 回归锁）、
+  对端振铃事件把文案从「连接中…」切到「对方振铃中…」。
+- 🟡 **`test/remote_screen_test.dart` 扩 5 例（RRS-23…27）** —— `remote_screen.dart`
+  未覆盖 **74 → 11 行**：高级代理对话框四项落库 + `取消` 一项都不写 + 非数字端口被
+  `inputFormatters` 过滤/留空落 `null`（走默认 TLS，不能写成 `0`）、
+  对讲面板**按住松手**与★**滑出手势取消必须真的走到 `RcControllerService.pttCancel()`**。
+- 🟡 **`test/ptt_tab_test.dart` 扩 1 例（PTT-08）** —— `ptt_tab.dart` 未覆盖 **31 → 22 行**，
+  同上锁"滑出取消真的释放录音通道（`_rec.stop()`）"。
+- 🔧 **测试基建：`test/support/record_stub.dart` 新增第二层「平台层假实现」**
+  `FakeRecordPlatform` + `installFakeRecordPlatform()` / `restoreRecordPlatform()`
+  （替换公开可写的 `RecordPlatform.instance`，插件架构本身提供的扩展点，无 token 校验）。
+  **为什么通道桩不够**（探针实测 `_pt/q5_probe_raw.txt`）：`RcControllerService` 是进程内单例，
+  其 `AudioRecorder._createFuture` 是 `late final`、**只在首次构造时建一次**
+  （`record-7.1.1/lib/src/record.dart:25,32-41`）；用 method channel 桩时该 Future 的完成
+  **跨用例即失效** ⇒ 之后同一进程内**任何** `start/stop/hasPermission` 都**永久挂起**
+  （**不是抛错**，症状是"断言找不到某段文本"）。配套纪律：用例里凡触碰录音插件的交互，
+  **整条手势 + 真实计时器都必须跑在 `tester.runAsync` 里**。
+
+**Changed（测试口径与工具）**
+- 🔧 **阈值 ratchet 三处同步**：`COVERAGE_MIN` 86.6 → **87.9**、
+  `MIN_COVERED` 8309 → **8440**（可测面分子 8446 − 6 行抖动余量），
+  同步于 `scripts/gates.sh` + `scripts/gates.ps1` + 本文件「已知限制」段。
+- 🔧 **新增工具 `_pt/lcovdiff2.py`**（两份 lcov 逐行 DA 对比，用于把"某文件 ±N 行"钉到具体行号）
+  与 `_pt/lcovscan.py`（文件集 / LF 分布体检）；**并规定每轮另存 `_pt/lcov_<轮次>.info`**。
+
+**Known issues（如实记录，不掩盖）**
+- ⚠️ **分母 +8 行**（可测面 9576 → **9584**）：Dart 覆盖率只收录**被编译过的行**，
+  `remote_screen.dart` 里从未被 pump 的 `_PttSheet` 分支行原本**不在报告里**
+  （既不计分母也不计分子），本轮驱动起来后才进入分母。**如实计入，非豁免口径变动**。
+- ⚠️ **`pair_qr_screen.dart` −1 行**（未覆盖 49 → 50）：第四十轮产物 `_pt/p7verify.txt`
+  记 `LF:259 / LH:210`，本轮两次独立全量运行均 `LH:209` 且 DA 逐行相同；
+  只跑该文件时为 `LH=208` ⇒ 命中数与同时运行的其它测试文件有关。
+  本轮未改动该文件与其专属测试 ⇒ 判为**跨轮 ±1 行差异**，已计入净数。
+- ⚠️ 设备层 `adb devices` 仍为空 ⇒ **未执行**（不是失败）。
+
+#### 第四十轮（2026-09-27）· 按新判据连补四块「有测试但整块逻辑从没被驱动」+ 抓修 **BUG-075**
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，终验产物 `_pt/p7verify.txt` / `_pt/gate40_verify.txt`。
+
+**Added（新增测试，22 例）**
+- 🟡 **`test/pair_qr_screen_test.dart` 扩 7 例（PQR-21…27）** —— `pair_qr_screen.dart` 未覆盖
+  **112 → 49 行**。此前该页只测过"权限被拒"与"手输**非法**输入"两条分支，本轮补上：
+  **手输合法配对码的完整提交路径**（落盘 → 补订 → 通知对端 → 结果卡片）、
+  权限闸门全档位（`permanentlyDenied` / `restricted` / `limited` / `provisional`，
+  含"打开系统设置"入口）、以及**授权后的扫描态外壳**（`取消扫码` / 手输入口 / 手电筒，
+  并验证取消后 controller 已 dispose —— 否则 MIUI 上下一次开相机直接失败）。
+  ⚠️ **实测修正一条旧判断**：宿主上 `MobileScanner` **并非整块不可达** ——
+  授权后扫描态外壳可以渲染、可以点；真正到不了的只有 `errorBuilder` 与帧回调 `onDetect`。
+- 🟡 **`test/sound_guard_lifecycle_test.dart` 扩 5 例（SGD-01…05）** —— `sound_guard_service.dart`
+  未覆盖 **15 → 0 行**（LF=58 / LH=58）。用注入的假录音器把 PCM 块**真的喂进**
+  `start()` 的 listen 回调，锁死守卫的检测语义：**峰值取事件内最大值**（不是最后一帧）/
+  最短持续未到不发射 / 静音帧复位"在响"状态（不得把两段响声拼成一次事件）/
+  冷却期内的第二次响声必须被吃掉 / 采流异常走**独立 errors 流**且 `isRunning` 立刻落位 /
+  默认构造（不注入录音器）也必须可用。
+- 🟡 **新建 `test/app_database_migration_test.dart`（4 例，MIG-01/02/03/05）** ——
+  `app_database.dart` 未覆盖 **12 → 0 行**（LF=40 / LH=40）。**造 v1 / v2 旧版真库文件**
+  驱动 `AppDatabase._onUpgrade` 的两条 `ALTER TABLE`：此前所有用例都从 `:memory:` 起步、
+  直接建到 v3 ⇒ **老用户升级路径零验证**。锁的是：v1→v3 两条列都补上且
+  老数据不丢、`quiet_exempt` 默认 0（= 未豁免，行为与升级前一致）、
+  v2→v3 **不得重跑 v1→v2**（重跑会抛 `duplicate column name`）、
+  `encodeList`/`decodeList` 往返、`inject` 单例注入生效、不传目录时落默认库目录。
+- 🟡 **`test/native_bridge_test.dart` 扩 6 例（振动与 FGS 入口组）** —— `native_bridge.dart`
+  未覆盖 **20 → 1 行**。该文件的**通道名/降级契约**本来就锁得很扎实（39 例），
+  但 `vibrate` / `vibrateCommand` / `clearAlarms` / `startMicService` / `stopMicService`
+  **一次都没被任何测试调用过** —— 而 `vibrateCommand` 是 v1.9「随机振动 / 持续振动」
+  **唯一**的下发口。锁的是：固定节奏 `vibrate` 的载荷、桥不可用时全部入口**不得抛**、
+  `envelope` 分支发 `points`（逐点 `toMap`）+ `useAlarmUsage`、
+  `waveformAmplitude` 发 `timings` + `amplitudes`、
+  **`waveformOnOff` / `legacy` 在 `amplitudes == null` 时不得下发该键**
+  （下发 null 会被原生当成空振幅 ⇒ 静默不振动）、桥不可用时 `vibrateCommand → false`
+  （调用方必须留痕）。残余 1 行是私有构造 `NativeBridge._()`（**结构性不可达**）。
+
+**Fixed（修缺陷）**
+- 🔴 **BUG-075：`PairQrProtocol.parseUri` 只归一化配对码，不归一化 `deviceId`。**
+  手输框的提示语写着"设备 ID 只能是 **0-9 与 a-f** 的十六进制"，而校验正则 `_hex16`
+  却**接受 A-F** —— 于是用户把对端 16 位 ID 手抄成大写时：**本机配对成功、结果卡片显示"已配对：…"**，
+  但对端**永远收不到命令、回执也永远解不开**，且**全程无任何报错**。
+  根因：`deviceId` 既是 **MQTT 主题段**（`sonicshield/v1/{deviceId}/cmd`，大小写敏感），
+  也是**密钥派生输入**（`deriveKey(code, '{deviceId}|cmd')`），而对端自己的 ID 由
+  `RcCodec.generateDeviceId()` 生成、**恒为小写** —— 大写 ID 与对端真实主题/派生输入**都不一致**，
+  属"两半分别写、从未合拢"（BUG-053 同族形态）。
+  修法 1 行：`final id = parts[0].toLowerCase();`（归一化仍**只在协议层一处**，
+  扫码与手输两条路径同时受益）；新增回归锁 **PQR-27**（含"不得顺手改名字 /
+  不得放宽 16 位长度校验"两条反向自检）。
+  ⚠️ 本条是**源码级**结论（`protocol.dart` + `_hex16` + `sendTo` 三处可复核），
+  **未在真机复现**（`adb devices` 长期为空）；修复把原本静默失效的输入**变成可用**，
+  不改变任何小写输入的行为。
+
+**Verified（本轮实测，非"应该没问题"）**
+- 门禁 4 步全绿 `GATES_RC=0`：analyze `No issues found!`（5.9s）/ 功能层 **1770**
+  （1748 → 1770，**+22**）/ 压测 **24** / 覆盖率 ratchet PASS。
+- 覆盖率：门禁口径（可测面）**86.83%（8315/9576）**；对外诚实数字（全局）
+  **82.62%（8317/10066）**。**真实进度 +109 行**（8208 → 8317）。
+  分母 **9576 / 10066 一字未动** —— 唯一的生产代码改动是改既有行（BUG-075），**不增行**。
+- 逐文件：`pair_qr_screen.dart` 未覆盖 **112 → 49**（LF=259 / LH=210）、
+  `sound_guard_service.dart` **15 → 0**（LF=58 / LH=58）、
+  `app_database.dart` **12 → 0**（LF=40 / LH=40）、
+  `native_bridge.dart` **20 → 1**（LF=57 / LH=56）。
+- **变异测试两处（本轮纪律动作）**：
+  ① `sound_guard_service.dart` 的 `peak = math.max(peak, db);` → `peak = db;`
+  ⇒ **SGD-01 断言判红**（`Expected: a numeric value within <0.5> of <0>, Actual: -6.2265990460758625`）；
+  ② `pair_qr_screen.dart` 的 `_resultWarn = !outcome.confirmed;` → `false;`
+  ⇒ **PQR-24 断言判红**（`Found 0 widgets with icon IconData(U+0E238)`）。
+  两处红的都是**断言**而非 compile/loading 层；均**按字节还原后 md5 逐字相同**
+  （`e828d40972913a8526bb13735505b525` / `38363a89f09067ab5eacb7c77a072993`）、复跑全绿。
+- 设备层：`adb devices` **为空** ⇒ 设备侧一切**未执行**（不是失败）。
+- ⚠️ **阈值 ratchet 三处同步**：`COVERAGE_MIN` 85.5 → **86.6**、
+  `MIN_COVERED` 8200 → **8309**（可测面分子 8315 − 6 行抖动余量），
+  `scripts/gates.sh` + `scripts/gates.ps1`（BOM `ef bb bf` 保留 + AST 解析 0 错）+ 本文件「已知限制」段。
+
+#### 第三十九轮（2026-09-27）· 补两块「从未被 pump 过的写路径」：设备组整块 + 首页快捷指令组卡
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/n7gate.txt`。
+> **本轮零生产代码改动** —— 全部增量来自新增/扩充的测试文件。
+
+**Added（新增）**
+- 🟡 **`test/quick_scripts_card_test.dart`（6 例，全绿 6s）** —— 覆盖
+  `lib/features/dashboard/quick_scripts_card.dart`。该文件 46 行可执行行里 **30 行从未被
+  pump 过**（覆盖率 34.8%），且**全项目唯一一个"既没有专属测试文件、又能被首页直接渲染"
+  的写路径** —— 此前只被 `coverage_sentinel_test.dart` **import** 过（哨兵只查"文件存在"），
+  也就是说「点一下执行」这条**真会往别人设备发命令**的路径此前**零验证**。
+  锁的是：空态不留空壳卡片 / 必须写明"目标是谁" / 未配对时按钮禁用 /
+  离线必须入 outbox 并明确告知（不假装已发送）/ 首页最多 3 条 /
+  **端点在别处被解配对时明确提示（BUG-060 同族）**。
+- 🟡 **`test/device_list_screen_test.dart` 扩充 10 例（DLSW-12…DLSW-21）** ——
+  覆盖「我的设备」页的**设备组**整块（`_createGroup` / `_deleteGroup` / `_groupPing` /
+  `_groupSection` / 勾选互斥）。此前 `device_list_test.dart` 只测了三个**纯函数**
+  （`validateGroupName` / `resolveGroupTargets` / `DeviceGroupStore`），
+  `device_list_screen_test.dart` 只测了卡片/快速连接/备注名/删除 ——
+  **"组"这一整块 91 行从未被 pump 过**，又一次印证「有测试、全绿，测的却只是纯函数」。
+  锁的是：未勾选时建组按钮禁用 / 建组落盘且入组名单**正好**是勾选那台 /
+  组名空白被拒且不落盘 / 取消什么都不做 / 删组**不牵连配对表** /
+  **群发 Ping 失败必须逐行点名**（不许静默）/ 组内成员全部已解配对时**一台都不下发** /
+  勾选不改「当前目标」也不写连接时间。
+
+**Verified（本轮实测，非"应该没问题"）**
+- 门禁 4 步全绿 `GATES_RC=0`：analyze `No issues found!`（16.0s）/ 功能层 **1748**
+  （1732 → 1748，**+16**）/ 压测 **24** / 覆盖率 ratchet PASS。
+- 覆盖率：门禁口径（可测面）**85.69%（8206/9576）**；对外诚实数字（全局）
+  **81.54%（8208/10066）**。**真实进度 +115 行**（8093 → 8208）。
+  分母**一个字没动**（可测面 9576 / 全局 10066）—— 因为本轮**没有新增任何生产代码行**。
+- `lib/features/remote/device_list_screen.dart` 未覆盖 **91 → 5 行**（LF=234 / LH=229）；
+  `lib/features/dashboard/quick_scripts_card.dart` 未覆盖 **30 → 1 行**（LF=46 / LH=45）。
+- **变异测试（本轮纪律动作，产物 `_pt/n6mut.txt`）**：把 `_groupPing` 里的
+  `final targets = resolveGroupTargets(g, store.paired());` 改成 `final targets = <String>[];`
+  ⇒ **DLSW-18 判红**，且红的是**断言**（`TestFailure`："群发汇总对话框必须出现（失败不许静默）"），
+  **不是** loading/compile 层红 ⇒ 证伪有效。按字节还原后 md5 **完全相同**
+  （`0c609fa2f17b94ed4efc2afec4c7f127`，还原前后两次 md5sum 逐字一致）、复跑 **21/21 绿**。
+- 设备层：`adb devices` **为空** ⇒ 设备侧一切**未执行**（不是失败）。
+- ⚠️ **阈值 ratchet 三处同步**：`COVERAGE_MIN` 84.3 → **85.5**、
+  `MIN_COVERED` 8085 → **8200**（可测面分子 8206 − 6 行抖动余量），
+  `scripts/gates.sh` + `scripts/gates.ps1`（BOM 保留 + `PARSE_ERROR_COUNT=0`）+ 本文件「已知限制」段。
+
+**Fixed（本轮实测暴露的一处断言误报）**
+- 群发汇总对话框的断言最初写成 `find.textContaining('客厅手机')` —— **实测假红**：
+  同一字符串也出现在**设备卡片标题**上（`Found 2 widgets`）。已改为
+  `find.descendant(of: find.byType(AlertDialog), …)` 把断言**收窄到对话框内**。
+  ★ 教训：「文字在页面某处出现过」不是这条锁要说的事，**断言必须对准它真正想约束的那个容器**。
+
+#### 第三十八轮（2026-09-27）· 拿下最后一个「零专属测试」的大文件：`multi_video_screen.dart` 未覆盖 117 → 6 行
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/m4.txt`。
+
+**Added（新增）**
+- 🟡 **`test/multi_video_screen_test.dart`（15 例，全绿 2s）** —— 覆盖
+  `lib/features/remote/multi_video_screen.dart`。该文件此前是**全项目唯一仍无专属测试
+  文件的大文件**（`grep -rln "MultiVideoScreen" test/` **零命中**、117 行未覆盖），
+  未覆盖面全部集中在**只在 `sessions` 非空时才构建**的 UI：窗口栅格、`_VideoTile`
+  （约 100 行）、底部指令条。
+  ⚠️ 宿主上它**结构上到不了**：`MultiCallService.connect()` 第一步就是
+  `_ensureLocalStream()` → `navigator.mediaDevices.getUserMedia()`，宿主既没相机也没有
+  另一侧的 `RTCPeerConnection` ⇒ `connect` **恒返回 false** ⇒ `_sessions` 永空。
+- 🔧 **`MultiCallService` 新增宿主测试接缝 `debugSeed` / `debugClear`**（`@visibleForTesting`，
+  照 `RcEndpointService.debugBind` / `CallService.setPhaseForTest` 的先例）。
+  **不改任何既有方法的签名或行为**；`analysis_options.yaml` 已把
+  `invalid_use_of_visible_for_testing_member` 设为 **error**，生产侧误用即门禁第 1 步红。
+  接缝只做「注入会话 + 还原」，**不关闭** `_updates` 控制器（关了后续用例会全部假绿）。
+
+**Verified（本轮实测，非"应该没问题"）**
+- 门禁 4 步全绿 `GATES_RC=0`：analyze `No issues found!`（10.0s）/ 功能层 **1732**
+  （1717 → 1732，**+15**）/ 压测 **24** / 覆盖率 ratchet PASS。
+- 覆盖率：门禁口径（可测面）**84.49%（8091/9576）**；对外诚实数字（全局）
+  **80.40%（8093/10066）**。**真实进度 +140 行**（7951 → 8091）。
+- `lib/features/remote/multi_video_screen.dart` 未覆盖 **117 → 6 行**（LF=151 / LH=145）；
+  `lib/remote/multi_call_service.dart` 未覆盖 **117 → 100 行**（LF 165 → 179）。
+- **变异测试（本轮纪律动作）**：把 `active: s.peer.deviceId == _svc.activeId`
+  改成 `active: true` ⇒ 新文件实测**判红**（正是 MV-02「两路」/ MV-03「点窗口切换」两条，
+  `MUT_TEST_RC=1`），按字节还原后 md5 **完全相同**（`717c244d…5818`）、复跑 **绿**（`_pt/m3.txt`）。
+- ⚠️ **本轮新增 14 行可执行代码计入分母**（可测面 9562 → 9576，即注入缝自身）——
+  如实计入，不用"把新代码算作豁免"美化比率；故 `MIN_COVERED`（分子地板）是本轮真正的防线。
+- 设备层：`adb devices` **为空** ⇒ 设备侧一切**未执行**（不是失败）。
+
+**Fixed（本轮实测暴露的一处文档级误判）**
+- 第一版断言写「空态下指令条的两个按钮**禁用**」——**实测假红**：`sessions.isEmpty` 时
+  `build` 走早返回分支，**`_CommandBar` 整块不构建**。已改为断言"指令条根本不存在"，
+  并**另加一例**用注入缝打到"焦点指向已不存在设备"的防御分支（该分支**仅经注入缝可达**，
+  文件注释里已如实标注，不含糊其辞）。
+
 #### 第三十七轮（2026-09-27）· 修掉「挂死整轮」的守卫页测试 + 全文档基线同步
 
+> ⚠️ **本节为上一轮记录**（其阈值 83.0 / 7943 已被第三十八轮的 84.3 / 8085 取代）。
 > 本轮由**自动化续作**（`dccb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
 > 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/l10.txt`。
 
@@ -327,10 +553,99 @@
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **覆盖率 83.13%（7949/9562）**（门禁口径＝**可测面**）／**全局（对外诚实数字）79.10%（7951/10052）**（2026-09-27 **第三十七轮**实测）
-  —— 未达 95% 目标（⚠️ 本行 2026-09-27 **第三十七轮**实测更新；
-  此前「82.36%（7875/9562）」是第 36 轮续六值、「79.91%（7641/9562）」是续五值、
-  「78.47%（7499/9556）」是续四值；**以当前实测值为准**）。
+- **覆盖率 88.13%（8446/9584）**（门禁口径＝**可测面**）／**全局（对外诚实数字）83.86%（8448/10074）**（2026-09-27 **第四十一轮**实测）
+  —— 未达 95% 目标（⚠️ 本行 2026-09-27 **第四十一轮**实测更新；
+  此前「86.83%（8315/9576）」是第四十轮值、「85.69%（8206/9576）」是第三十九轮值、
+  「84.49%（8091/9576）」是第三十八轮值、
+  「83.13%（7949/9562）」是第三十七轮值、「82.36%（7875/9562）」是第 36 轮续六值、
+  「79.91%（7641/9562）」是续五值、「78.47%（7499/9556）」是续四值；**以当前实测值为准**）。
+  ⚠️ 2026-09-27 **第四十一轮（单人会话，主 Agent）**：本轮判据换成**「有测试」还要问
+  "测试文件覆盖的是哪一层"** —— 于是捞到 `lib/services/permission_flow.dart`
+  （**13 行未覆盖、零专属测试文件**）：当时唯一经由 Dashboard 触达它的路径把
+  `isIgnoringBatteryOptimizations` 桩成 `true` ⇒ **「电池未加白 → 真的请求加白」这条真实分支从未执行**。
+  新建 `test/permission_flow_test.dart`（**PFL-01…05**，5 例，该文件**首个专属测试文件**）
+  ⇒ 未覆盖 **13 → 4 行**；同时补三块「有测试但整块分支从没被驱动」：
+  `call_screen`（45 → **0**，**已满覆盖**：双权限失败文案 + **语音通话不得被"相机被拒"误拦** +
+  `连接中` 相位与挂断入口 + 对端振铃文案）、`ptt_tab`（31 → 22）、
+  `remote_screen`（74 → 11，含高级代理对话框四项落库 / 非数字端口过滤 / 对讲面板
+  **按住松手**与**滑出取消必须真的 `_rec.stop()`**）。
+  新增 **18 例**（功能层 1770 → **1788**）。门禁 **RC=0 / 全绿**：analyze `No issues found!` /
+  压测 **24** / 覆盖率 ratchet 通过（可测面 **88.13%** ≥ 87.9 且 **8446** ≥ 8440）。
+  **真实进度 +131 行**（8317 → 8448）。
+  ⚠️ **本轮分母 +8 行**（可测面 9576 → 9584 / 全局 10066 → 10074），来源**已实测确认**：
+  Dart 覆盖率只收录**被编译过的行** —— `remote_screen.dart` 里 `_PttSheet` 那些
+  **从未被 pump 过**的分支行**原本根本不在报告里**（既不计分母也不计分子），
+  本轮把它们驱动起来后这些行**才进入分母**。属**如实计入**，不是豁免口径变动。
+  ⚠️ **一处如实记录的 −1 行**：`pair_qr_screen.dart` 未覆盖 **49 → 50**。证据：
+  第四十轮终验产物 `_pt/p7verify.txt` 记 `LF:259 / LH:210`；本轮两次独立全量运行
+  均为 `LF:259 / LH:209`（`_pt/lcovA.info` / `_pt/lcovB.info`，DA 记录逐行相同）；
+  而**只跑该文件**时为 LH=208 ⇒ 其命中数与**同时运行的其它测试文件**有关
+  （`L43/L44` 已证只在全量运行时被顺带覆盖）。本轮**未改动该文件与其专属测试**，
+  故判为**跨轮 ±1 行差异**，方向不利，已计入净数（净 +131 是扣掉它之后的数）。
+  ⚠️ 同轮流程补强：**每轮把 `coverage/lcov.info` 另存为 `_pt/lcov_<轮次>.info`**——
+  否则下一轮无法逐行归因（第四十轮的 lcov 就是被同路径覆盖写掉的）。
+  ⚠️ 2026-09-27 **第四十轮（单人会话，主 Agent）**：先复核判据 —— `covhomoscan 10` 显示
+  全库最大连续未覆盖块仍只有 **12 行** ⇒ 同源红利依旧为零，故改按「**有测试但整块逻辑
+  从没被驱动**」× 「缺口比」选靶，四块连补：
+  ① `lib/features/remote/pair_qr_screen.dart` 未覆盖 **112 → 49 行** —— 补手输**合法**
+  配对码的完整提交路径（此前只测过"非法输入"）、权限闸门全档位
+  （`permanentlyDenied` / `restricted` / `limited` / `provisional`）与**授权后的扫描态**
+  （宿主里 `MobileScanner` 落到 `errorBuilder`，可见错误面因此可断言）；
+  ② `lib/services/sound_guard_service.dart` 未覆盖 **15 → 0 行**（LF=58 / LH=58）——
+  用注入的假录音器把 PCM 块**真的喂进** `start()` 的 listen 回调，锁死
+  "阈值 / 最短持续 / 冷却 / **峰值取事件内最大值** / 静音复位 / 采流异常广播"；
+  ③ `lib/data/db/app_database.dart` 未覆盖 **12 → 0 行**（LF=40 / LH=40）——
+  造 **v1 / v2 旧版真库文件**驱动 `_onUpgrade` 的两条 `ALTER TABLE`
+  （此前所有用例都从 `:memory:` 起步直接建到 v3 ⇒ 老用户升级路径零验证）；
+  ④ `lib/services/native_bridge.dart` 未覆盖 **20 → 1 行** —— 补 `vibrate` /
+  `vibrateCommand`（envelope + 三种 waveform 的**逐键载荷**）/ `clearAlarms` /
+  麦克风 FGS 入口；残余 1 行是私有构造 `NativeBridge._()`（**结构性不可达**）。
+  新增 **22 例**（功能层 1748 → **1770**）。门禁 **RC=0 / 全绿**：analyze `No issues found!` /
+  压测 **24** / 覆盖率 ratchet 通过（可测面 **86.83%** ≥ 86.6 且 **8315** ≥ 8309）。
+  **真实进度 +109 行**（8208 → 8317）；分母 **9576 / 10066 一字未动**。
+  **变异测试两处**（产物 `_pt/mut40_peak.txt` / `_pt/mut40_warn.txt`）：
+  ① `peak = math.max(peak, db)` → `peak = db` ⇒ **SGD-01 断言判红**
+  （`Expected: a numeric value within <0.5> of <0>, Actual: -6.2265…`）；
+  ② `_resultWarn = !outcome.confirmed` → `false` ⇒ **PQR-24 断言判红**
+  （`Found 0 widgets with icon IconData(U+0E238)`）。两者均**按字节还原后 md5 逐字相同**、
+  复跑全绿（**不是** compile/loading 层红）。详见 `docs/12 §74`。
+  **Fixed · BUG-075**：`PairQrProtocol.parseUri` 此前只归一化配对码、**不归一化 `deviceId`**
+  —— 而 `deviceId` 是 **MQTT 主题段**（`sonicshield/v1/{deviceId}/cmd`，大小写敏感）
+  与**密钥派生输入**（`deriveKey(code, '{deviceId}|cmd')`），且 `_hex16` 明确接受大写、
+  手输框提示语又写"只能是 0-9 与 a-f"。于是用户把对端 ID 抄成大写时：本机落盘成功、
+  结果卡片显示"已配对"，但对端实际主题是小写 ⇒ **命令永远发不出去、回执永远解不开，
+  且全程无任何报错**（与 BUG-053 同族的"两半分别写、从未合拢"形态）。
+  修法：`final id = parts[0].toLowerCase();` —— 归一化仍**只在协议层一处**
+  （扫码与手输两条路径同时受益），并加回归锁 **PQR-27**（含"不得顺手改动名字与长度校验"的反向自检）。
+  ⚠️ 2026-09-27 **第三十九轮（单人会话，主 Agent）**：**零生产代码改动**，补两块
+  **从未被 pump 过的写路径** —— ① `lib/features/remote/device_list_screen.dart` 的
+  **设备组**整块（建组 / 删组 / 组内群发 Ping：91 行从未被执行，三个纯函数虽被测得很扎实，
+  但"页面上点得到底对不对"从没验证）；② `lib/features/dashboard/quick_scripts_card.dart`
+  （46 行里 30 行未覆盖，且是**全项目唯一"无专属测试文件 + 能被首页直接渲染"的写路径** ——
+  一条真会往别人设备发命令却**零验证**的路径）。
+  新增 `test/quick_scripts_card_test.dart` **6 例** + `device_list_screen_test.dart` 扩 **10 例**。
+  门禁 **RC=0 / 全绿** —— analyze `No issues found!` / 功能层 **1748**（+16）/ 压测 **24** /
+  覆盖率 ratchet 通过（可测面 **85.69%** ≥ 85.5 且 **8206** ≥ 8200）。
+  **真实进度 +115 行**（8093 → 8208）；分母**一个字没动**（无新增生产代码行）。
+  **变异测试**：把 `_groupPing` 的目标解析改成空表 ⇒ **DLSW-18 断言判红**（`TestFailure`，
+  非 compile/loading 红）、按字节还原后 md5 相同且复跑 21/21 绿。详见 `docs/12 §73`。
+  ⚠️ 残留未覆盖仅 **6 行**，**全部宿主物理不可达**（逐行登记于 `docs/12 §73.5`）：
+  需真实 MQTT broker 的"在线成功"分支 4 行（`device_list_screen` L245-247 +
+  `quick_scripts_card` L60）+ 按钮已禁用故结构上点不到的防御守卫 2 行（`device_list_screen` L150-151）。
+  ⚠️ 2026-09-27 **第三十八轮（单人会话，主 Agent）**：拿下**全项目最后一个没有专属测试文件
+  的大文件** `lib/features/remote/multi_video_screen.dart`（未覆盖 **117 → 6 行**）。
+  宿主上它**结构上到不了**：`MultiCallService.connect()` 第一步 `_ensureLocalStream()` →
+  `navigator.mediaDevices.getUserMedia()`，宿主无相机、无对端 `RTCPeerConnection`
+  ⇒ `connect` 恒 false ⇒ `sessions` 永空 ⇒ 窗口栅格 / `_VideoTile` / 指令条一行都构建不出。
+  修法：照 `RcEndpointService.debugBind` 的先例给该服务加 `@visibleForTesting` 会话注入缝
+  `debugSeed` / `debugClear`（**不改任何既有方法签名或行为**，生产误用由
+  `invalid_use_of_visible_for_testing_member: error` 拦下），再写 15 例断言。
+  门禁 **RC=0 / 全绿** —— analyze `No issues found!` / 功能层 **1732**（+15）/ 压测 **24** /
+  覆盖率 ratchet 通过（可测面 **84.49%** ≥ 84.3 且 **8091** ≥ 8085）。
+  **真实进度 +140 行**（7951 → 8091）；**变异测试**：改坏高亮判定 ⇒ 新用例判红、按字节还原
+  后 md5 相同且复跑绿。详见 `docs/12 §72`。
+  ⚠️ **本轮新增 14 行可执行代码（注入缝）如实计入分母**（可测面 9562 → 9576）——
+  不用"把新代码算作豁免"来美化比率；这也是 `MIN_COVERED`（分子绝对地板）存在的理由。
   ⚠️ 2026-09-27 **第三十七轮（单人会话，主 Agent）**：本轮**零生产代码改动**，
   修掉一个**挂死整轮**的测试文件后重跑全部门禁 **RC=0 / 全绿** ——
   analyze `No issues found!` / 功能层 **1717**（+10）/ 压测 **24** /
@@ -348,11 +663,13 @@
   **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
   缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
   与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
-  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=83.0` **且** 绝对覆盖行 `MIN_COVERED=7943`
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=87.9` **且** 绝对覆盖行 `MIN_COVERED=8440`
   —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
   （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
   74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；
-  79.8 → 82.2 见 `docs/12 §70`；**82.2 → 83.0 见 `docs/12 §71`**）。
+  79.8 → 82.2 见 `docs/12 §70`；82.2 → 83.0 见 `docs/12 §71`；83.0 → 84.3 见 `docs/12 §72`；
+  84.3 → 85.5 见 `docs/12 §73`；85.5 → 86.6 见 `docs/12 §74`；
+  **86.6 → 87.9 见 `docs/12 §75`**）。
 
 ### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20，2026-09-22 轮次）
 

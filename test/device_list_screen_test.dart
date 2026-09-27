@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/device_list_screen.dart';
+import 'package:sonic_shield/remote/device_group.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 /// 「我的设备」页的 **widget 层**回归锁。
@@ -50,6 +51,7 @@ void main() {
     List<PairedEndpoint> endpoints = const [],
     String? selected,
     bool embedded = false,
+    List<DeviceGroup> groups = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final store = RemoteStore(await SharedPreferences.getInstance());
@@ -57,6 +59,12 @@ void main() {
       await store.addPaired(e);
     }
     if (selected != null) await store.setSelectedEndpoint(selected);
+    // 组走真实 `DeviceGroupStore`（不 mock）：本页读的就是这份存储，
+    // 换一套假实现就测不出"页面读错了键"这类缺陷。
+    final groupStore = DeviceGroupStore(await SharedPreferences.getInstance());
+    for (final g in groups) {
+      await groupStore.save(g);
+    }
 
     tester.view.physicalSize = const Size(1000, 2000);
     tester.view.devicePixelRatio = 1.0;
@@ -254,5 +262,240 @@ void main() {
 
     expect((await store()).paired().length, 1, reason: '取消不该删掉任何东西');
     expect(find.text('A'), findsOneWidget);
+  });
+
+  // ---------------- 设备组（Q6.B：建组 / 删组 / 组内群发 Ping） ----------------
+  //
+  // 这一块此前**一行都没被 pump 过**。三个纯函数（`validateGroupName` /
+  // `resolveGroupTargets` / `DeviceGroupStore`）在 `device_list_test.dart`
+  // 里测得很扎实，但"页面上点得到底对不对"从没验证 —— 又一次印证
+  // 「有测试、有断言、全绿，测的却只是纯函数」这类缺口只能靠覆盖率榜找出来。
+
+  /// 有界等待。**不用 `pumpAndSettle` 当"等数据"用**：它默认超时 10 分钟，
+  /// 失败形态是"整轮门禁挂死、不留产物"，而不是一条能读的红断言。
+  Future<void> waitFor(WidgetTester tester, bool Function() cond,
+      {String reason = '有界等待超时'}) async {
+    for (var i = 0; i < 200; i++) {
+      if (cond()) return;
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    fail(reason);
+  }
+
+  /// 「建组」按钮：未勾选时禁用（含空态提示里的「建组」字样要排除掉，
+  /// 它不在 TextButton 里）。
+  Finder createGroupBtn() => find.ancestor(
+        of: find.textContaining('建组'),
+        matching: find.byType(TextButton),
+      );
+
+  DeviceGroup dg(String id, String name, List<String> members) =>
+      DeviceGroup(id: id, name: name, memberIds: members);
+
+  testWidgets('DLSW-12 建组入口：未勾选时禁用，勾选后启用并显示已选台数',
+      (tester) async {
+    await pump(tester, endpoints: [ep('ep-1', name: 'A'), ep('ep-2', name: 'B')]);
+
+    expect(createGroupBtn(), findsOneWidget, reason: '未勾选时标签就是「建组」');
+    expect(tester.widget<TextButton>(createGroupBtn()).onPressed, isNull,
+        reason: '一台没勾也能点进建组对话框，用户会在里面白填一遍再被拒');
+
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.text('建组（已选 1 台）'), findsOneWidget,
+        reason: '必须显示"会选几台" —— 多勾一台就多控一台，不能靠用户自己记');
+    expect(tester.widget<TextButton>(createGroupBtn()).onPressed, isNotNull);
+  });
+
+  testWidgets('DLSW-13 建组：勾选 → 命名 → 保存，组落盘、出现在列表、勾选被清空',
+      (tester) async {
+    await pump(tester, endpoints: [ep('ep-1', name: 'A'), ep('ep-2', name: 'B')]);
+
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+    await tester.tap(createGroupBtn());
+    await tester.pumpAndSettle();
+
+    expect(find.text('建组（1 台设备）'), findsOneWidget,
+        reason: '对话框标题要复述"这一组有几台"，避免勾错');
+    await tester.enterText(find.byType(TextField), '一楼展厅');
+    await tester.tap(find.widgetWithText(FilledButton, '保存'));
+    await tester.pumpAndSettle();
+
+    final saved =
+        DeviceGroupStore(await SharedPreferences.getInstance()).groups();
+    expect(saved, hasLength(1), reason: '建了组却没落盘 = 纯装饰');
+    expect(saved.first.name, '一楼展厅');
+    expect(saved.first.memberIds, ['ep-1'],
+        reason: '入组名单必须正好是勾选的那台 —— 串台就是"控错设备"');
+
+    expect(find.text('已创建设备组「一楼展厅」'), findsOneWidget);
+    expect(find.text('一楼展厅'), findsOneWidget, reason: '建完必须立刻出现在组列表里');
+    expect(find.text('1 台设备'), findsOneWidget);
+    expect(find.text('建组'), findsOneWidget,
+        reason: '建完勾选要清空，否则下一次建组会莫名其妙多带几台');
+  });
+
+  testWidgets('DLSW-14 建组：组名空白被拒，且不落盘', (tester) async {
+    await pump(tester, endpoints: [ep('ep-1', name: 'A')]);
+
+    await tester.tap(find.byType(Checkbox));
+    await tester.pump();
+    await tester.tap(createGroupBtn());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '   ');
+    await tester.tap(find.widgetWithText(FilledButton, '保存'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('组名不能为空'), findsOneWidget,
+        reason: '全空格的组名会建出一个看不见名字的组 —— 纯坑');
+    expect(DeviceGroupStore(await SharedPreferences.getInstance()).groups(),
+        isEmpty);
+  });
+
+  testWidgets('DLSW-15 建组：点「取消」什么都不做（勾选保留）', (tester) async {
+    await pump(tester, endpoints: [ep('ep-1', name: 'A')]);
+
+    await tester.tap(find.byType(Checkbox));
+    await tester.pump();
+    await tester.tap(createGroupBtn());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '不该被保存的组名');
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+
+    expect(DeviceGroupStore(await SharedPreferences.getInstance()).groups(),
+        isEmpty,
+        reason: '取消却把组建出来了 —— 这类缺陷不报错，只能靠锁');
+    expect(find.text('建组（已选 1 台）'), findsOneWidget,
+        reason: '取消只是改主意，勾选不该被顺手清掉');
+  });
+
+  testWidgets('DLSW-16 删组：确认后真的删掉、告知用户、列表消失', (tester) async {
+    await pump(tester,
+        endpoints: [ep('ep-1', name: 'A'), ep('ep-2', name: 'B')],
+        groups: [dg('g1', '一楼展厅', ['ep-1', 'ep-2'])]);
+
+    expect(find.text('一楼展厅'), findsOneWidget);
+    expect(find.text('2 台设备'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('删除组'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('删除这个设备组？'), findsOneWidget);
+    expect(find.textContaining('不影响设备本身的配对关系'), findsOneWidget,
+        reason: '必须说清"删组≠解配对"，否则用户不敢点');
+
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+
+    expect(DeviceGroupStore(await SharedPreferences.getInstance()).groups(),
+        isEmpty);
+    expect(find.text('一楼展厅'), findsNothing);
+    expect(find.text('已删除分组「一楼展厅」'), findsOneWidget);
+    expect((await store()).paired(), hasLength(2),
+        reason: '删组**绝不能**牵连配对表 —— 组的生命周期与授权无关');
+  });
+
+  testWidgets('DLSW-17 删组：点「取消」必须保留', (tester) async {
+    await pump(tester,
+        endpoints: [ep('ep-1', name: 'A')],
+        groups: [dg('g1', '一楼展厅', ['ep-1'])]);
+
+    await tester.tap(find.byTooltip('删除组'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+
+    expect(DeviceGroupStore(await SharedPreferences.getInstance()).groups(),
+        hasLength(1));
+    expect(find.text('一楼展厅'), findsOneWidget);
+  });
+
+  testWidgets('DLSW-18 组内群发 Ping：失败必须逐行点名（不许静默）', (tester) async {
+    await pump(tester,
+        endpoints: [
+          ep('ep-1', name: 'MI_MAX_2', alias: '客厅手机'),
+          ep('ep-2', name: '书房平板'),
+        ],
+        groups: [dg('g1', '一楼展厅', ['ep-1', 'ep-2'])]);
+
+    await tester.tap(find.byTooltip('组内群发 Ping'));
+    // 这条路径要真跑 `sendTo`（未连接 ⇒ 入 outbox 并返回 false），
+    // 因此用有界 waitFor 等结果对话框，而不是赌 pumpAndSettle 的时序。
+    await waitFor(tester,
+        () => find.text('「一楼展厅」群发 Ping 汇总').evaluate().isNotEmpty,
+        reason: '群发汇总对话框必须出现（失败不许静默）');
+
+    // ⚠️ 断言必须**收窄到对话框内**：`find.textContaining('客厅手机')` 会同时
+    // 命中设备卡片标题（假红）——"文字在页面某处出现过"不是这条锁要说的事。
+    final dlg = find.byType(AlertDialog);
+    expect(find.descendant(of: dlg, matching: find.textContaining('已发 0 台 / 失败 2 台')),
+        findsOneWidget);
+    expect(
+        find.descendant(of: dlg, matching: find.textContaining('· 客厅手机')),
+        findsOneWidget,
+        reason: '失败必须点名到设备 —— "有 2 台失败"等于没说');
+    expect(
+        find.descendant(of: dlg, matching: find.textContaining('· 书房平板')),
+        findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, '知道了'));
+    await tester.pumpAndSettle();
+    expect(find.text('「一楼展厅」群发 Ping 汇总'), findsNothing);
+  });
+
+  testWidgets('DLSW-19 组内群发 Ping：成员全部已解配对 → 明确告知，不入队',
+      (tester) async {
+    await pump(tester,
+        endpoints: [ep('ep-1', name: 'A')],
+        groups: [dg('g1', '一楼展厅', ['gone-1', 'gone-2'])]);
+
+    await tester.tap(find.byTooltip('组内群发 Ping'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('没有可用设备'), findsOneWidget,
+        reason: '组名单只是收藏，成员可能全被解配对 —— 必须说清楚而不是转圈');
+    expect(find.text('「一楼展厅」群发 Ping 汇总'), findsNothing,
+        reason: '一台目标都没有时不该弹"失败汇总"（那是另一件事）');
+    expect((await store()).outboxFor('gone-1'), isEmpty,
+        reason: '已解配对的设备绝不能被下发（授权真源是配对表，不是组名单）');
+  });
+
+  testWidgets('DLSW-20 勾选只为建组：不改「当前目标」、不写连接时间', (tester) async {
+    await pump(tester,
+        endpoints: [ep('ep-1', name: 'A'), ep('ep-2', name: 'B')],
+        selected: 'ep-1');
+
+    await tester.tap(find.byType(Checkbox).last);
+    await tester.pumpAndSettle();
+
+    final s = await store();
+    expect(s.selectedEndpointId, 'ep-1',
+        reason: '勾选若顺手改了当前目标，用户会在不知情下把命令发给另一台设备');
+    expect(s.paired().firstWhere((e) => e.deviceId == 'ep-2').lastConnectedAt,
+        isNull,
+        reason: '勾选不是"连接"：写了连接时间会让「最近连接」说谎');
+    expect(find.text('当前'), findsOneWidget);
+    expect(find.textContaining('从未连接'), findsNWidgets(2));
+  });
+
+  testWidgets('DLSW-21 取消勾选：回到禁用态，且该设备不会被顺手带进组', (tester) async {
+    await pump(tester, endpoints: [ep('ep-1', name: 'A'), ep('ep-2', name: 'B')]);
+
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+    expect(find.text('建组（已选 1 台）'), findsOneWidget);
+
+    // 再点一次 = 取消勾选。
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+
+    expect(find.text('建组'), findsOneWidget, reason: '取消勾选后按钮必须回到禁用态');
+    expect(tester.widget<TextButton>(createGroupBtn()).onPressed, isNull,
+        reason: '还有 0 台勾选却仍可建组 ⇒ 能建出一个空组');
   });
 }

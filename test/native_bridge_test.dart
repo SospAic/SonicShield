@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/condition.dart';
+import 'package:sonic_shield/domain/scheduling/vibrate_resolve.dart';
 import 'package:sonic_shield/services/native_bridge.dart';
 
 /// `NativeBridge` 的**宿主机契约回归锁**。
@@ -365,6 +366,111 @@ void main() {
       log.clear();
       await NativeBridge.setVolume(media: 0.1, alarm: 0.2);
       expect(log.single.arguments, {'media': 0.1, 'alarm': 0.2});
+    });
+  });
+
+  // ===========================================================================
+  // 7. 振动（v1.9 核心能力）与 FGS 入口 —— 第四十轮补齐。
+  //
+  // 此前 `vibrate` / `vibrateCommand` / `clearAlarms` / `startMicService` /
+  // `stopMicService` **一次都没被任何测试调用过**（逐行覆盖证据：
+  // `_pt/covblocks.py native_bridge 1`）。而 `vibrateCommand` 是
+  // "随机振动 / 持续振动"**唯一**的下发口（docs/20 §7.2）。
+  //
+  // 为什么必须逐键锁而不是只锁"返回 true"：它的两个分支载荷形状**不一样**
+  // （envelope 发 `points`、waveform 发 `timings`/`amplitudes`），
+  // 而原生侧 `when(call.method)` + `arguments.getXxx` 对**键名写错**只会
+  // 静默取到 null —— 表现是"振动功能没反应"，不是报错。
+  // ===========================================================================
+  group('NB-H · 振动与 FGS 入口（第四十轮）', () {
+    test('固定节奏 vibrate → 方法名与节奏数组原样下发', () async {
+      installNative((_) => null);
+      await NativeBridge.vibrate(const [0, 120, 60, 120]);
+      expect(log.single.method, 'vibrate');
+      expect(log.single.arguments, {'pattern': [0, 120, 60, 120]});
+    });
+
+    test('桥不可用时 vibrate / clearAlarms / 麦克风 FGS 入口都不得抛', () async {
+      installNotImplemented();
+      await NativeBridge.vibrate(const [0, 100]);
+      await NativeBridge.clearAlarms();
+      await NativeBridge.startMicService();
+      await NativeBridge.stopMicService();
+      expect(log.map((c) => c.method).toList(),
+          ['vibrate', 'clearAlarms', 'startMicService', 'stopMicService'],
+          reason: '删闹钟与守卫 FGS 都是"必须能调到"的入口；'
+              '宿主/桌面没有原生实现时只能静默降级，不能抛');
+    });
+
+    test('vibrateCommand(envelope) → vibrateEnvelope，控制点逐点展开 + 带 alarm 用法', () async {
+      installNative((_) => true);
+      const cmd = VibrateCommand(
+        mode: VibrateMode.envelope,
+        chunkMs: 4000,
+        useAlarmUsage: true,
+        points: [
+          EnvelopePoint(intensity: 0.2, sharpness: 0, durationMs: 500),
+          EnvelopePoint(intensity: 0.9, sharpness: 0.5, durationMs: 1500),
+          EnvelopePoint(intensity: 0, sharpness: 0, durationMs: 0),
+        ],
+      );
+      expect(await NativeBridge.vibrateCommand(cmd), isTrue);
+      expect(log.single.method, 'vibrateEnvelope');
+      final args = log.single.arguments! as Map;
+      expect(args['useAlarmUsage'], isTrue,
+          reason: 'USAGE_ALARM 是"穿透勿扰"的语义开关，丢了就等于夜间振不醒');
+      expect(args['points'], [
+        {'intensity': 0.2, 'sharpness': 0, 'durationMs': 500},
+        {'intensity': 0.9, 'sharpness': 0.5, 'durationMs': 1500},
+        {'intensity': 0, 'sharpness': 0, 'durationMs': 0},
+      ]);
+      expect(args.containsKey('timings'), isFalse,
+          reason: 'envelope 分支不得夹带 waveform 的键，否则两份载荷会漂移');
+    });
+
+    test('vibrateCommand(waveformAmplitude) → vibrateWaveform，timings 与 amplitudes 一起下发', () async {
+      installNative((_) => true);
+      const cmd = VibrateCommand(
+        mode: VibrateMode.waveformAmplitude,
+        chunkMs: 1000,
+        timings: [0, 200, 100],
+        amplitudes: [0, 255, 0],
+      );
+      expect(await NativeBridge.vibrateCommand(cmd), isTrue);
+      expect(log.single.method, 'vibrateWaveform');
+      expect(log.single.arguments, {
+        'timings': [0, 200, 100],
+        'amplitudes': [0, 255, 0],
+        'repeat': -1,
+        'useAlarmUsage': false,
+      });
+    });
+
+    test('vibrateCommand(waveformOnOff / legacy) 共用同一入口；amplitudes=null 时不得下发该键',
+        () async {
+      installNative((_) => true);
+      for (final mode in [VibrateMode.waveformOnOff, VibrateMode.legacy]) {
+        log.clear();
+        final cmd =
+            VibrateCommand(mode: mode, chunkMs: 500, timings: const [0, 80, 80]);
+        expect(await NativeBridge.vibrateCommand(cmd), isTrue);
+        expect(log.single.method, 'vibrateWaveform',
+            reason: 'legacy(API<26) 由 Kotlin 按 SDK 分支，Dart 侧不该开第二条通道');
+        final args = log.single.arguments! as Map;
+        expect(args['timings'], [0, 80, 80]);
+        expect(args.containsKey('amplitudes'), isFalse,
+            reason: 'on/off 模式没有振幅数组；下发 null 会被原生当成空振幅 ⇒ 静默不振动');
+        expect(args['repeat'], -1);
+      }
+    });
+
+    test('桥不可用时 vibrateCommand → false（调用方必须留痕，不得报成功）', () async {
+      installNotImplemented();
+      const cmd = VibrateCommand(
+          mode: VibrateMode.waveformOnOff, chunkMs: 500);
+      expect(await NativeBridge.vibrateCommand(cmd), isFalse,
+          reason: '契约：返回 false = 平台拒绝或桥不可用，调用方必须写审计');
+      expect(log.single.method, 'vibrateWaveform');
     });
   });
 }

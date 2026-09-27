@@ -251,6 +251,158 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // 第四十轮：权限闸门全档位 + **手输合法提交真的落盘**（此前只测了"非法输入"）。
+  //
+  // 为什么这一组能上宿主：`notifyPeerOfPairing → requestPairing → sendTo` 在
+  // `_client == null`（宿主没有 MQTT 连接）时**同步返回 false**，于是
+  // `_pairFromUri` 的整条「解析 → 落盘 → 补订 → 通知对端 → 结果卡片」路径
+  // 全部可达 —— 而这正是"配对了没有/对端知不知道"的真实分支。
+  // ---------------------------------------------------------------------------
+  group('PQR 权限闸门与提交路径（第四十轮）', () {
+    test('PQR-21 qrGateFromPerm 真值表（restricted/limited 不得被当成 granted）', () {
+      expect(qrGateFromPerm(PermissionStatus.granted), QrScanGate.granted);
+      expect(qrGateFromPerm(PermissionStatus.denied), QrScanGate.denied);
+      expect(qrGateFromPerm(PermissionStatus.permanentlyDenied),
+          QrScanGate.permanentlyDenied);
+      expect(qrGateFromPerm(PermissionStatus.restricted),
+          QrScanGate.permanentlyDenied,
+          reason: 'restricted（家长控制/MDM）无法再弹窗，只能去系统设置');
+      expect(qrGateFromPerm(PermissionStatus.limited), QrScanGate.denied,
+          reason: 'limited 不是 granted，绝不能放行到扫描态');
+      expect(qrGateFromPerm(PermissionStatus.provisional), QrScanGate.denied,
+          reason: 'provisional（iOS 临时授权）同样未获完整授权');
+    });
+
+    testWidgets('PQR-22 相机权限被永久拒绝 → 明确文案 + 系统设置入口 + 手输出口不被顶掉',
+        (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.permanentlyDenied});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('相机权限已被永久拒绝'), findsOneWidget,
+          reason: '永久拒绝必须给"去系统设置"的明确指引，而不是笼统一句未授权');
+      expect(find.text('打开系统设置'), findsOneWidget);
+      // 桩里 openAppSettings 回 true：点一下不能炸（真机上会跳系统页）。
+      await tester.tap(find.text('打开系统设置'));
+      await tester.pumpAndSettle();
+      expect(find.text('改用手动输入配对码'), findsOneWidget,
+          reason: 'P0-2：权限全拒也必须能完成配对');
+      expect(find.byType(QrImageView), findsOneWidget,
+          reason: '没权限不该把"我的二维码"顶掉 —— 对端还等着扫本机');
+    });
+
+    testWidgets('PQR-23 restricted（家长控制/MDM）与永久拒绝同处置', (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.restricted});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('相机权限已被永久拒绝'), findsOneWidget,
+          reason: 'restricted 与永久拒绝都只能去系统设置解');
+      expect(find.text('打开系统设置'), findsOneWidget);
+    });
+
+    testWidgets('PQR-24 手输合法配对码 → 本机落盘，并对"未通知到对端"如实告警',
+        (tester) async {
+      final store = await _pump(tester);
+      expect(store.paired(), isEmpty, reason: '前置：本机配对表必须是空的');
+
+      await tester.tap(find.text('扫不了码？手动输入'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).at(0), '0123456789ABCDEF');
+      await tester.enterText(find.byType(TextField).at(1), 'ab2c-d5ef');
+      await tester.enterText(find.byType(TextField).at(2), '客厅手机');
+      await tester.tap(find.text('配对'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('手动输入配对码'), findsNothing,
+          reason: '校验通过必须关掉对话框');
+
+      final paired = store.paired();
+      expect(paired, hasLength(1), reason: '合法手输必须真的落盘');
+      expect(paired.single.deviceId, '0123456789abcdef',
+          reason: '输入是大写也要落成小写 —— BUG-075：deviceId 是 MQTT 主题段'
+              '（大小写敏感）与密钥派生输入，原样保留大写会让'
+              '"配对成功但命令永远发不出去"且全程无报错');
+      expect(paired.single.name, '客厅手机');
+      expect(paired.single.secret, 'AB2CD5EF',
+          reason: '配对码必须归一化（剥连字符 + 转大写）后落盘 —— 落盘的是密钥原料');
+
+      expect(find.textContaining('已配对'), findsOneWidget,
+          reason: '结果卡片必须出现');
+      expect(find.textContaining('未能通知对端'), findsOneWidget,
+          reason: 'R-2：对端没被通知到必须**说出来**，不能静默画成成功');
+      expect(find.byIcon(Icons.error_outline), findsOneWidget,
+          reason: '未确认的配对不得用成功图标（成功不得被误报）');
+    });
+
+    testWidgets('PQR-25 手输合法但对端名留空 → 仍落盘（名字可选是契约）',
+        (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(find.text('扫不了码？手动输入'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).at(0), '0123456789abcdef');
+      await tester.enterText(find.byType(TextField).at(1), 'AB2CD5EF');
+      await tester.tap(find.text('配对'));
+      await tester.pumpAndSettle();
+
+      expect(store.paired(), hasLength(1),
+          reason: '名字可选 —— 留空不得拦住配对');
+    });
+
+    testWidgets('PQR-26 授权后进入扫描态，取消扫码能干净退出（不得卡死在相机上）',
+        (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester);
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.text('取消扫码'), findsOneWidget,
+          reason: '进入扫描态必须留下退出路径');
+      expect(find.text('扫不了码？手动输入'), findsOneWidget,
+          reason: '扫描中也要留手输出口（换环境/换人再试）');
+      expect(find.byType(QrImageView), findsNothing,
+          reason: '扫描态不该同时渲染"我的二维码"面板');
+
+      await tester.tap(find.text('取消扫码'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('扫描对端二维码'), findsOneWidget,
+          reason: '取消后必须回到静态页；且 controller 必须已 dispose'
+              '（否则 MIUI 上下一次打开相机直接失败）');
+      expect(find.byType(QrImageView), findsOneWidget);
+    });
+
+    test('PQR-27 BUG-075 回归锁：parseUri 把大写设备 ID 归一化到小写', () {
+      final p = PairQrProtocol.parseUri(
+          'sonicshield://pair/0123456789ABCDEF/%E5%AE%A2%E5%8E%85/ab2c-d5ef')!;
+      expect(p.deviceId, '0123456789abcdef',
+          reason: 'deviceId 决定 MQTT 主题（大小写敏感）与密钥派生输入，'
+              '必须与 generateDeviceId()（恒小写）同口径；'
+              '原样保留大写 = 配对"成功"但命令永远发不出去、回执永远解不开');
+      expect(p.name, '客厅', reason: '只归一化 ID/码，不得顺手动名字');
+      expect(p.code, 'AB2CD5EF', reason: '码的归一化口径不变（剥连字符 + 转大写）');
+
+      // 反向自检：长度校验仍按 16 位判定（不得因为加了 toLowerCase 就放宽）。
+      expect(PairQrProtocol.parseUri('sonicshield://pair/0123/x/AB2CD5EF'), isNull);
+      expect(
+          PairQrProtocol.parseUri('sonicshield://pair/0123456789abcdef0/x/AB2CD5EF'),
+          isNull,
+          reason: '17 位 ID 必须判 null');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // 红线源码锁（docs/25 §4）：手输与扫码必须共用同一条提交路径 + 解析器单点复用。
   // ---------------------------------------------------------------------------
   group('红线：手输与扫码共用同一条提交路径（源码锁）', () {

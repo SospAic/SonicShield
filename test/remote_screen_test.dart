@@ -5,9 +5,11 @@ import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_screen.dart';
+import 'package:sonic_shield/remote/controller_service.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 import 'support/permission_stub.dart';
+import 'support/record_stub.dart';
 
 /// 远程中心 · 设置页（`/remote/settings`）的宿主测试。
 ///
@@ -110,6 +112,22 @@ Future<RemoteStore> _pumpRouted(
 }
 
 void main() {
+  // ⚠️ **必须用「平台层」桩，且必须在 setUp 里预热**（第四十一轮实测换来）：
+  // `RcControllerService` 是**进程内单例**，`AudioRecorder` 只在首次构造时
+  // 发起一次 `create()`，而 `_safeCall` 每次调用都先 `await _createFuture`。
+  // 实测（`_pt/q5_probe_raw.txt`）：用 method channel 桩时，`create()` 的往返
+  // **跨用例后不再推进** ⇒ `_createFuture` 永久不完成 ⇒ 之后同一进程内
+  // **任何** `start()/stop()` 都**永久挂起**（不是抛错）。
+  // 完整说明见 `support/record_stub.dart` 第二层。
+  late FakeRecordPlatform rec;
+  setUp(() async {
+    rec = installFakeRecordPlatform();
+    // ★ `setUp` 跑在**真实 zone** ⇒ 这一次调用把 `_createFuture` 真正推完成。
+    await RcControllerService.instance.pttCancel();
+    rec.calls.clear();
+  });
+  tearDown(restoreRecordPlatform);
+
   group('RRS 远程设置页', () {
     testWidgets('RRS-01 默认关闭：说明"关闭"而不是让用户猜', (tester) async {
       await _pump(tester);
@@ -393,5 +411,158 @@ void main() {
       expect(sw.onChanged, isNotNull,
           reason: '关闭态必须能点开，否则「去开启」入口指向一个不可交互的页面');
     });
+
+    // ---------------- 以下为第四十一轮：两块「有测试但整块没被驱动」 ----------------
+
+    /// 高级代理卡片与对话框标题**是同一串字** ⇒ 只断言 `findsOneWidget` 会恒假。
+    Finder advCard() => find.text('MQTT 代理（高级，可选）');
+    Finder advDialog() =>
+        find.ancestor(of: find.text('保存'), matching: find.byType(AlertDialog));
+    /// 按**序号**取对话框内的输入框（`find.byWidget` 是身份匹配，
+    /// 重 build 后 Widget 实例会换 ⇒ 序号更稳）。
+    Finder advField(int i) => find
+        .descendant(
+            of: find.byType(AlertDialog), matching: find.byType(TextField))
+        .at(i);
+
+    testWidgets('RRS-23 高级代理：填好保存 → 四项真落库 + 明确"重启后生效"',
+        (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(advCard());
+      await tester.pumpAndSettle();
+      expect(advDialog(), findsOneWidget, reason: '点卡片必须真的打开高级代理对话框');
+
+      expect(find.descendant(
+              of: find.byType(AlertDialog), matching: find.byType(TextField)),
+          findsNWidgets(4),
+          reason: 'host / port / user / pass 四个字段一个都不能少');
+      await tester.enterText(advField(0), 'mqtt.example.com');
+      await tester.enterText(advField(1), '8883');
+      await tester.enterText(advField(2), 'admin');
+      await tester.enterText(advField(3), 's3cret');
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+
+      expect(store.brokerHost, 'mqtt.example.com');
+      expect(store.brokerPort, 8883);
+      expect(store.brokerUsername, 'admin');
+      expect(store.brokerPassword, 's3cret');
+      expect(find.text('已保存：重启远程模块后生效'), findsOneWidget,
+          reason: '保存 ≠ 已切换：必须说清"重启才生效"，否则用户以为已经换过去了');
+    });
+
+    testWidgets('RRS-24 高级代理：取消 → 一个字段都不落库', (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(advCard());
+      await tester.pumpAndSettle();
+      // 填了合法内容再取消 —— 才验得出"取消"真拦住了写入，
+      // 而不是"因为内容没填所以没写"。
+      await tester.enterText(advField(0), '不该被保存');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      expect(advDialog(), findsNothing);
+      expect(store.brokerHost, isEmpty, reason: '取消必须一个字段都不写');
+      expect(find.text('已保存：重启远程模块后生效'), findsNothing);
+    });
+
+    testWidgets('RRS-25 高级代理：非数字被过滤；端口留空 = null（走默认 TLS）',
+        (tester) async {
+      final store = await _pump(tester);
+
+      await tester.tap(advCard());
+      await tester.pumpAndSettle();
+
+      await tester.enterText(advField(1), '8a8');
+      expect(tester.widget<TextField>(advField(1)).controller!.text, '88',
+          reason: '端口字段必须只收数字（inputFormatters），否则 int.tryParse 静默变 null');
+
+      await tester.enterText(advField(0), 'mqtt.example.com');
+      await tester.enterText(advField(1), '');
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+
+      expect(store.brokerHost, 'mqtt.example.com');
+      expect(store.brokerPort, isNull,
+          reason: '端口留空要落 null（调用方回落到默认 TLS 端口），不能写成 0');
+    });
+
+    testWidgets('RRS-26 对讲面板：按住录音不可用 → 松手给出"未录到音频"（不是静默）',
+        (tester) async {
+      stubPermissions({Permission.microphone: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      // record 桩由顶层 `setUp` 装好（见 main() 头注：单例构造时机决定成败）。
+
+      await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+      await tester.tap(find.byTooltip('对讲机'));
+      await tester.pumpAndSettle();
+
+      // 本页没有别的 CircleAvatar ⇒ 这个 finder 唯一命中面板里的"按住说话"。
+      expect(find.byType(CircleAvatar), findsOneWidget);
+      // ★ **整条手势都必须跑在 `runAsync` 里**，三个理由缺一不可：
+      // ① `_PttSheet` 的两个回调会 `await` 录音插件的 Future，而
+      //    `AudioRecorder._createFuture` 是 `late final` 且**只在首次构造时
+      //    创建一次**（`record-7.1.1/lib/src/record.dart:25,32-41`），本文件在
+      //    顶层 `setUp`（真实 zone）里预热过它 ⇒ 它属于**真实 zone**；
+      //    fake-async 只推进本 zone 的微任务，跨 zone 的那个**永远等不到**
+      //    （症状是"断言找不到文本"，不是抛错；详见 `main()` 头注）。
+      // ② `TapGestureRecognizer` 的 100ms `didExceedDeadline` 是 `Timer`
+      //    （`tap.dart:308-311,370-376`）——在真实 zone 里下按才会得到**真实**
+      //    计时器，`pump(150ms)` 推的是 fake 时钟，推不动它。
+      // ③ 抬手要走 arena sweep → `acceptGesture`（`tap.dart:347-354`）才会
+      //    补发 down+up，所以 down 与 up 必须在同一段真实时间里成对发生。
+      await tester.runAsync(() async {
+        final g = await tester.startGesture(
+            tester.getCenter(find.byType(CircleAvatar)));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await g.up();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      });
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('按住下方按钮开始说话'), findsOneWidget,
+          reason: '录音没起来就必须留在待机态，不能让用户以为正在录');
+      expect(find.text('未录到音频'), findsOneWidget,
+          reason: '松手必须给出结果 —— 静默什么都不显示等于"按了没反应"');
+    }, timeout: const Timeout(Duration(seconds: 90)));
+
+    testWidgets('RRS-27 对讲面板：滑出手势取消 → 真的走到 onCancel（释放录音）',
+        (tester) async {
+      stubPermissions({Permission.microphone: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      // record 桩由顶层 `setUp` 装好（见 main() 头注）。
+
+      await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+      await tester.tap(find.byTooltip('对讲机'));
+      await tester.pumpAndSettle();
+
+      // down 之后**取消**（不抬手）⇒ 触发 onTapCancel → onCancel → pttCancel。
+      // ★ 同 RRS-26：整条手势 + 真实计时器都要在 `runAsync` 里。
+      // ⚠️ 必须等过 `kPressTimeout`（100ms）：`TapGestureRecognizer` 只有在
+      // `_sentTapDown` 为真时才会在 PointerCancel 上调 onTapCancel
+      // （`packages/flutter/lib/src/gestures/tap.dart:315-319`），
+      // 而 `_sentTapDown` 由 `didExceedDeadline()` 置位（`:308-311`）。
+      // 取消时 arena 还没 sweep ⇒ `_wonArenaForPrimaryPointer` 仍是 false，
+      // 没有任何"补发 down"的机会 ⇒ 那个 100ms 计时器是**唯一**通路，
+      // 而它必须是**真实**计时器（在 runAsync 内下按才会得到）。
+      // 只 `pump(150ms)` 推 fake 时钟 ⇒ onTapCancel **永不触发**，断言会以
+      // "没有 stop 调用"的形式失败（看起来像生产代码没释放录音，其实是手势没被识别）。
+      await tester.runAsync(() async {
+        final g = await tester.startGesture(
+            tester.getCenter(find.byType(CircleAvatar)));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await g.cancel();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      });
+      await tester.pumpAndSettle();
+
+      expect(rec.calls, contains('stop'),
+          reason: '滑出取消必须真的释放录音通道（`pttCancel()` → `_rec.stop()`），'
+              '否则麦克风被一直占着 —— 只有断言"面板还在"是恒真的');
+      expect(tester.takeException(), isNull);
+    }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }

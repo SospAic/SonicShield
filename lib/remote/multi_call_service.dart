@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 
@@ -381,6 +382,52 @@ class MultiCallService {
 
   void _notify() {
     if (!_updates.isClosed) _updates.add(null);
+  }
+
+  /// 宿主测试接缝（第三十八轮新增；**不改任何既有方法的签名或行为**）。
+  ///
+  /// ## 为什么需要它
+  /// [_sessions] / [_activeId] 全私有，而宿主上 [connect] **恒返回 false**
+  /// —— `getUserMedia` 与 `createPeerConnection` 没有另一侧（相机、对端均不存在），
+  /// 也就是说"会话"这件事在宿主机上**没有任何生产来源**。
+  /// 后果：`multi_video_screen.dart` 的窗口栅格、`_VideoTile`（约 100 行）、
+  /// 底部指令条**结构上一条都执行不到** —— 它们只在 `sessions` 非空时才构建。
+  ///
+  /// 这里只提供「注入会话 + 还原」的最小通道（与 `RcEndpointService.debugBind`、
+  /// `CallService.setPhaseForTest` 同形），让**只能靠锁**的那几类分支可被断言：
+  /// 焦点切换（切换不得挂断其它路）、逐路挂断、相位文案档位、指令条目标。
+  ///
+  /// ⚠️ 仅 `@visibleForTesting`：生产代码绝不调用 —— `analysis_options.yaml`
+  /// 已把 `invalid_use_of_visible_for_testing_member` 设为 **error**。
+  /// ⚠️ 注入的会话**不带 [MultiCallSession.pc] / [MultiCallSession.waitTimer]**
+  /// （宿主上不可能有真的 PC），因此本方法不产生任何真实信令或计时器。
+  @visibleForTesting
+  void debugSeed(Iterable<MultiCallSession> sessions, {String? activeId}) {
+    for (final s in sessions) {
+      _sessions[s.peer.deviceId] = s;
+      _byCallId[s.callId] = s.peer.deviceId;
+    }
+    // 显式传 [activeId] 时以它为准（测试要能从"非第一路"起步）。
+    _activeId = activeId ?? _activeId;
+    // 与 [connect] 的 `_activeId ??= deviceId` 同一语义：第一路自动成为焦点。
+    _activeId ??= _sessions.isEmpty ? null : _sessions.keys.first;
+    _notify();
+  }
+
+  /// 清空注入的会话并把焦点复位（宿主测试的 `tearDown` 用）。
+  ///
+  /// ⚠️ 与 [dispose] 的差别：**不关闭** [_updates] 控制器 ——
+  /// 测试要在同一进程里反复「注入 → 断言 → 还原」，控制器一旦 close
+  /// 就再也订不上，后续用例全部假绿。
+  @visibleForTesting
+  void debugClear() {
+    for (final s in _sessions.values) {
+      _cancelWaitTimer(s);
+    }
+    _sessions.clear();
+    _byCallId.clear();
+    _activeId = null;
+    _notify();
   }
 
   Future<void> dispose() async {
