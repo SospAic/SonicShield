@@ -1,10 +1,11 @@
 # 技能：flutter-widget-test-harness（宿主 widget 测试）
 
 > 权威记录分散在 docs/17 §46②（四类）→ §48⑥（六类）→ §49⑤（七类）→ §50⑤（八类）
-> → §72.4 / docs/12 §75.4（第 41 轮）。
+> → §72.4 / docs/12 §75.4（第 41 轮）→ §73.4 / §76.4（第 43 轮）→ §74.4 / §77.4（第 44 轮）。
 > 本文件是**汇总版**，供下一会话直接引用；若有出入，以 docs/17 最新节为准。
 > 第 21–25 轮实测沉淀；每一条都有"报错形态 → 根因 → 修法"的实证。
-> 附录 A（第 25 轮）→ B（第 26 轮）→ C（第 38 轮）→ D（第 39 轮）→ E（第 40 轮）→ F（第 41 轮）。
+> 附录 A（第 25 轮）→ B（第 26 轮）→ C（第 38 轮）→ D（第 39 轮）→ E（第 40 轮）→ F（第 41 轮）
+> → **G（第 43–44 轮）**。
 
 ## 触发条件
 
@@ -282,3 +283,90 @@ D.2 的判据只到"有没有专属测试文件"。第 40 轮证明**还要再�
 第 40 轮的 lcov 被同路径**覆盖写掉** ⇒ 第 41 轮无法把某文件 `±1 行` 钉到具体行号，
 只能靠"两次独立全量 + 一次单文件"三个样本做定性判断。
 配套新工具：**`_pt/lcovdiff2.py <A> <B> [目标文件]`** —— 两份 lcov 的**逐行 DA 计数对比**。
+
+## 附录 G · 第 43–44 轮沉淀：判据第四/五代 + 五个新假故障（2026-09-28）
+
+### G.1 选目标的两条新判据（比任何"找大块"都值钱）
+
+**判据第四代（第 43 轮）：「插件不推回调 ≠ 回调不可执行」。**
+凡 UI 里出现"插件回调 / builder"，**先查它是不是 `public final` 字段** ——
+是则宿主可达：`tester.widget<MobileScanner>(find.byType(MobileScanner)).onDetect!(BarcodeCapture(...))`
+拿到的是**同一个闭包**，跑的是生产代码本身（不是伪造输入）。
+⚠️ **"可达性"在同一个插件里也不统一**：`onDetect` / `errorBuilder` 是字段，但
+`onDetectError` 是**非空参数** ⇒ 写 `!` 会被 `flutter analyze` 判 `unnecessary_non_null_assertion`。
+**逐个查签名，别从一个字段类推到同名字段。**
+
+**判据第五代（第 44 轮）：「源码锁是绿的」≠「那条业务路径被执行过」。**
+`test/support/source_text.dart` 的 `stripComments` + `methodBody` 切片这类**文本锁**，
+为绿只证明**源码里有那几行字**。标本：`assist_host.dart` 的 D-7 ——
+锁里明明断言出现 `未放行` / `任务动作需要权限`，但**从没有一条带 `action` 的任务真的发出去过**，
+整块 22 行零覆盖。
+**动作**：全库 grep `methodBody` / `source_text`，列出"只有文本锁、没有行为用例"的清单逐个补。
+
+### G.2 新假故障 17：`identical(a, b)` 判"是不是同一条 `Stream`" **必为假**
+
+`StreamController.stream` **每次访问都新建一个包装对象**（实测
+`identical(ch.events, ch.events) == false`）。"指向同一条流"只能用
+**源码锁**（`stripComments` + 类体切片断言出现 `RcEndpointService.instance.events`、
+**不出现** `StreamController`）+ 行为侧只锁 `isBroadcast`。
+**症状是"假红"，不是生产缺陷。**
+
+### G.3 新假故障 18：同类型 widget **二次 `pumpWidget` 复用同一个 `State`**
+
+`initState` **不会**再跑 ⇒ "先挂载 → 再往 prefs 塞数据 → 再挂载"永远只渲染出第一次的数据。
+**夹具必须首次挂载前一次性备好全部状态**；真要重挂载得换 `key` 或先 `pumpWidget(Container())` 卸载。
+
+### G.4 新假故障 19：**广播流事件不是"同 tick 立即可见"**
+
+`StreamController.broadcast()` 里 `add` 的事件**不会**在被订阅的同一个同步段到达监听者
+⇒ `seen.last` 撞 `Bad state: No element`（看起来像"没广播"，其实是"还没送到"）。
+修法：**订阅后**与**触发后**各加一次 `await Future<void>.delayed(Duration.zero)`。
+（与"先 `pumpWidget` 再 `add`"是同一条铁律的另一面。）
+
+### G.5 新假故障 20：平台桩的**返回类型必须与插件声明一致**
+
+`flutter_local_notifications` 的 `initialize` 被声明为**非空 `bool`**；桩写成
+`(call) async => null` ⇒ 在 `platform_flutter_local_notifications.dart:143` 抛
+`type 'Null' is not a subtype of type 'FutureOr<bool>'`（**抛错，不是挂起**）。
+修法：`(call) async => call.method == 'initialize' ? true : null`。
+⇒ **写平台桩前先看一眼插件的返回类型声明**，"顺手返回 null"不总是安全。
+
+### G.6 新坑：**别凭猜构造缺陷窗口**，并且**删掉多余的测试脚手架**
+
+第 44 轮 AH-65 首版凭猜构造"发布中途 `close()`"的窗口（还给假 transport 加了
+`holdPublish` / `releasePublish`）⇒ 断言不成立。实测真窗口在
+`AssistSession.registerFailure()`（由 `_onHandshakeFailure` 调用）：它把 `phase` 置为
+`AssistPhase.closed` 而 `_session` **此时仍非空**（在 `await audit` 之前）。
+⇒ **先读源码定位真窗口**，改用例走那条路径，**并把多加的夹具删回原样**。
+
+### G.7 新坑：UI 里"同一件事"常有两个名字
+
+ack 的 SnackBar 用的是**描述**（`volumeLabelForPercent(42) == '媒体音量 42%'`）而不是命令名
+⇒ `find.textContaining('✓ 调节音量')` 必然 `Found 0 widgets`。
+**断言必须按实际渲染的那个字符串写。**
+
+### G.8 新手法：把 `@visibleForTesting` 注入缝从"塞状态"用到"观测副作用"
+
+第 40 轮把 `RcEndpointService.debugBind` / `debugDispatch` 用来**塞入**测试状态；
+第 44 轮把它当**观测窗**：注入 `resolvePresetHandler` / `playHandler` / `legacyHandler` /
+`actionHandler`，然后断言**真实副作用**（音量被夹到 `[0,1]`、时长 3000ms、`loop=false`、
+随机振动拿不到参数化引擎时**不静默降级**而是报 `未接线参数化振动`、`script.stop` 之后**一次都不再振动**）。
+**缝的数量与生产签名都没变。** 由此拿到 `endpoint_service._runScript` 主链路的
+**首个行为级覆盖**（未覆盖 527 → 435）。
+
+### G.9 新纪律：文档批量回刷用**带 `count` 守卫**的脚本
+
+每轮基线数字有 **6 个必查落点**（`docs/00` / `docs/09` banner / `docs/12` 最新节 /
+`docs/17` 最新节 / `README.md` 门禁块 / `HANDOVER.md` §0 + §9 第 0 项，外加 `CHANGELOG.md`「已知限制」段）。
+手改长行极易漏改或改错。改用 `_pt/doc_syncNN.py`：把
+`(文件, old, new, 期望命中数)` 列成表，**任何一条命中数不符就整体不写盘**
+（第 44 轮：41 处 / 7 文件一次通过）。
+
+### G.10 新见证：**`DA` 计数会抖动，但 `LH/LF` 稳定**
+
+同一份代码、同一套测试连跑两次全量 `--coverage`，lcov **字节数不同**；
+逐行 `DA:` 对比：**48 行 / 14 文件** 的执行计数有差，但
+**覆盖状态变化 0 行、计数上升 0 行、`LH` 完全相同**。
+⇒ 这正是门禁 ratchet **只卡 `LH/LF` 与比值、不卡 `DA`** 的原因，
+也是"阈值留 4~8 行余量、别卡在实测值上"的**实测依据**。
+工具：`_pt/lcovdiff2.py`（无目标文件时只报一个文件，**全量对比要自己遍历 `SF:`/`DA:`**）。
