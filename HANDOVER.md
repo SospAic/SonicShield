@@ -11,10 +11,10 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-28，最近一次全绿门禁 = 第四十六轮的 **post-ratchet 终验**，产物 `_pt/v9gate.txt`）**：v1.9.0-alpha（`+17`），
-功能层 **1924/1924** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
-**覆盖率：门禁口径（可测面）93.59%（8972/9586）／对外诚实数字（全局）89.06%（8974/10076）** ——
-双指标 ratchet：`COVERAGE_MIN=93.3` **且** `MIN_COVERED=8966`（只升不降；见 §1、docs/12 §79）。
+**当前状态（2026-09-28，最近一次全绿门禁 = 第四十七轮的 **post-ratchet 终验**，产物 `_pt/w9gate.txt`）**：v1.9.0-alpha（`+17`），
+功能层 **1939/1939** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
+**覆盖率：门禁口径（可测面）94.86%（9097/9590）／对外诚实数字（全局）90.27%（9099/10080）** ——
+双指标 ratchet：`COVERAGE_MIN=94.8` **且** `MIN_COVERED=9091`（只升不降；见 §1、docs/12 §80）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
@@ -2245,11 +2245,11 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 当前可选的非硬件项（按建议优先级）：
 0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §79.6）**
-   **真实基线（2026-09-28 第四十六轮，产物 `_pt/v5gate.txt`）**：
-   门禁口径（可测面）**93.59%（8972/9586）**／对外诚实数字（全局）**89.06%（8974/10076）**；
-   功能层 **1924** + 压测 **24** 全绿（门禁四步 RC=0）。
-   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=93.3` **且** `MIN_COVERED=8966`，只升不降）—— 补完一批就**同步抬高**它。
-   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → 92.6 → **93.3**。
+   **真实基线（2026-09-28 第四十七轮，产物 `_pt/w6gate.txt`（pre-ratchet）／`_pt/w9gate.txt`（post-ratchet 终验））**：
+   门禁口径（可测面）**94.86%（9097/9590）**／对外诚实数字（全局）**90.27%（9099/10080）**；
+   功能层 **1939** + 压测 **24** 全绿（门禁四步 RC=0）。
+   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=94.8` **且** `MIN_COVERED=9091`，只升不降）—— 补完一批就**同步抬高**它。
+   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → 92.6 → 93.3 → **94.8**。
    ⚠️ **阈值必须在所有代码改动落地之后再取实测值**：第三十三轮先按 72.68 抬到 72.6，
       随后又落了 11 行"宿主不可达"的安全必需代码 ⇒ 72.59，差 0.01pt 卡红。
    ⚠️ **1 行抖动是常态**（本轮 5823/5822，上一轮 5506/5507）：阈值取"实测 − 0.05pt"
@@ -2266,7 +2266,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
    并把"为什么不可达"写进 docs/12 §52.4。**验收标准是"缺口有取证"，
    不是"缺口是 0"。**
    **剩余缺口的逐文件降序以最近一轮实测为准**（**每轮开场先跑** `python _pt/covgap.py 30`）；
-   第四十五轮残缺口分布见 `docs/12 §78.5 / §78.6`（可测面仍缺 **688 行**、全局仍缺 **1176 行**）。
+   第四十七轮残缺口分布见 `docs/12 §80.5 / §80.6`（可测面仍缺 **493 行**、全局仍缺 **981 行**）。
    ★ **选目标的判据已在第四十/四十一轮定型**（三件套工具见项目 MEMORY）：
    先 `python _pt/covhomoscan.py 10` —— 若**最大连续未覆盖块 < 15 行** ⇒「同源红利」已耗尽，
    改用「**有无专属测试文件**」×「**缺口比 MISS/LF**」排序，**不看缺口绝对数**；
@@ -2275,9 +2275,11 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
    ③（第四代，第四十三轮新增）「**插件不推回调 ≠ 回调不可执行**」—— `MobileScanner.onDetect` / `errorBuilder` 是**公开 final 字段**，宿主上可取同一闭包直接驱动。
    ④（第五代，第四十四轮新增）「**源码锁是绿的 ≠ 那条业务路径被执行过**」—— `methodBody` / `source_text` 文本锁为绿只证明源码里有那几行字。动作：全库 `grep methodBody` / `source_text`，列"只有文本锁、没有行为用例"的清单逐个补。
    ⑤（第六代，第四十五轮新增）「**同域文本锁整块 → 先问这一域的平台依赖能不能做成替身**」—— 一份替身可**同时**解锁多块：第四十五轮的 `test/support/webrtc_stub.dart` 一次撬掉 `call_service` + `multi_call_service` = **−210 行**。动作：按**插件/平台**给 `lib/` 分组，找"多文件 + 只有文本锁"的组合。
+   ⑥（第七代／归纳，第四十七轮新增）「**有注入缝的类，缝要开在「链路入口」，不是逐个处理器进去**」—— 第四十四轮给 `endpoint_service` 开的 `debugDispatch` 只是**绕到链路中段**，于是"前端"（主题路由 / 多盐试解 / 准入 / 限流 / 兜底 / 广播）整段仍是文本锁；第四十七轮把缝前移到 `debugHandleRaw`（+ `debugSetOwnCode`）后，一次拿到 **+125 行**。⚠️ 缝隙代价：**注释里写出被测方法名会被 `methodBody` 的 `indexOf` 命中**（见 `docs/12 §80.4` 第 1 条）。
    —— 第四十/四十一/四十三轮靠前三问连补十二块（合计 +451 行，**零生产代码改动**）；
    第四十四轮靠第四代补五块（**+144 行**，零生产代码改动）；
-   第四十五轮靠第五代补四块（**+212 行**，唯一行为改动 = BUG-076 的一个实参）。
+   第四十五轮靠第五代补四块（**+212 行**，唯一行为改动 = BUG-076 的一个实参）；
+   第四十七轮靠第⑥条补**入站链路入口**一块（**+125 行**，生产代码行为 0 行改动）。
    - **ROI 已验证**：UI 页"一条 pump + 2–4 条交互断言"就能拿 **60–75%**
      （样本：`remote_tasks_tab` 0.30%→71.55%、`remote_screen` 0.84%→73.12%）。
    - ★ **性价比最高的一档：先写"整个 App 外壳"的 pump**。第二十二轮实测：
@@ -2662,49 +2664,58 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第四十六轮**实测，产物 `_pt/v5gate.txt`（pre-ratchet）
+## ★ 当前口径（**第四十七轮**实测，产物 `_pt/w6gate.txt`（pre-ratchet）／`_pt/w9gate.txt`（post-ratchet 终验）
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
-> 第四十五轮按纪律回刷；本轮（第四十六轮）再次回刷为实测值。
+> 第四十五轮按纪律回刷；第四十六/四十七轮再次回刷为实测值。
 
 | 项 | 实测 |
 |---|---|
 | `bash scripts/gates.sh`（**4 步**） | **RC=0 全绿** |
-| 1/4 analyze | `No issues found!`（14.1s） |
-| 2/4 功能层 | **1924** |
+| 1/4 analyze | `No issues found!`（11.9s） |
+| 2/4 功能层 | **1939** |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 93.59%（8972/9586）** ≥ `COVERAGE_MIN=93.3` 且 ≥ `MIN_COVERED=8966` |
-| 全局（对外诚实数字） | **89.06%（8974/10076）** |
-| 真实进度 | **+74 行**（8900 → 8974，全部来自 `playback_service.dart` 76 → 2） |
-| 机器锁（DGC / GEC / version） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 93.3 / 8966`） |
+| 4/4 覆盖率 ratchet | **可测面 94.86%（9097/9590）** ≥ `COVERAGE_MIN=94.8` 且 ≥ `MIN_COVERED=9091` |
+| 全局（对外诚实数字） | **90.27%（9099/10080）** |
+| 真实进度 | **+125 行**（8974 → 9099：入站链路前端） |
+| 机型锁（DGC / GEC / version） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 94.8 / 9091`） |
 | 设备层 | `adb devices` 空 ⇒ **未执行**（**未执行 ≠ 失败**） |
-| 续作入口 | **`docs/17 §76`（末节 §76.5 = 下一轮入口）** |
+| 续作入口 | **`docs/17 §77`（末节 §77.5 = 下一轮入口）** |
 
-**本轮做了什么**：把第六代判据**换域** —— 同一把尺子（"整域只剩源码文本锁 ⇒ 先问这一域的
-平台依赖能不能做成替身"）从 `flutter_webrtc` 换到 `just_audio`：`playback_service.dart`
-**76 行零覆盖**（宿主上 `AudioPlayer` 一碰插件 `await` **永久挂起**）。新建
-`test/support/just_audio_stub.dart`（照 `just_audio_platform_interface 4.6.0` 真实接口写，
-静态可写单例 + `tearDown` 还原）+ `test/playback_service_justaudio_test.dart`（**13 例**）
-⇒ 未覆盖 **76 → 2（98.2%）**；**生产代码 0 行改动**、**分母 9586 / 10076 一字未动**
-（替身在测试侧，不产生生产行）⇒ **纯收益**。阈值三处同步抬至 **93.3 / 8966**。
+**本轮做了什么**：判据链新增第 ⑨ 条 —— **「有注入缝的类，缝要开在『链路入口』」**。
+`endpoint_service` 的可测面缺口 **435 行**里 209 个连续块**最大只有 8 行**（MQTT / salt / 文件 / PTT /
+广播文案五个异构桶）⇒ 它不是"一份替身撬一整块"的形状（第 45/46 轮那套打法不适用）；
+但它的**入站前端**（主题命名空间路由 → cmd 多盐候选试解 → 准入裁决 → 限流窗口与停类插队 →
+`guardDispatch` 兜底 → 收尾广播）此前**只有源码文本锁**（唯一生产者是真 MQTT `client.updates` 监听器）。
+⇒ 新增两个 `@visibleForTesting` 缝 `debugSetOwnCode` / `debugHandleRaw`（与既有
+`debugBind` / `debugDispatch` / `debugSendTo` 同族，**不改任何既有方法的签名或行为**），
+新建 `test/endpoint_inbound_raw_test.dart`（**15 例** IR-01…15，全部用**真 `RcCodec` 造真密文**）
+⇒ 可测面残缺口 **614 → 493 行**、**真实进度 +125 行**（8974 → 9099）。
+**生产代码行为 0 行改动**；⚠️ **分母 +4 行**（两个缝自身的可执行行，如实计入，不塞豁免）。
 
 **★ 新增长期规则**
-- **纯 `test()` 文件只要碰插件通道**，就必须先 `TestWidgetsFlutterBinding.ensureInitialized()`
-  —— `AudioSession` 的**构造器**会 `setMethodCallHandler`，binding 未就绪 ⇒ 在
-  `AudioPlayer()` 构造阶段**全灭**（13/13 红），栈指向 `platform_channel.dart:589`。
-- **插件"激活期"会替你做一次归位**：`just_audio` 在 `_setPlatformActive(true)` 里先
-  `setVolume(1.0)` / `setLoopMode(off)` ⇒ 平台侧观测序列的**前一两项不是业务代码发的**，
-  断言必须按真实顺序写（否则"期望 0.4 实得 1.0"这类假红会把人引向业务代码）。
-- **`stop()` 之后的下发观测不到**：收尾的 `setLoopMode(off)` 排在 `await player.stop()` 之后，
-  此刻 `_platform` 已切到 `_IdleAudioPlayer`（纯 Dart 无操作）⇒ 登记为"**观测不到**"
-  而不是"没执行"（两者必须分开写）。
-- **静态可写单例型替身**（`JustAudioPlatform.instance`）必须 `tearDown` **还原原实例**，
-  否则污染同进程其它测试文件；且 import 传递依赖包要显式加进 `dev_dependencies`。
+- 🔴 **`methodBody` / 源码文本锁：注释里写出被测方法的完整声明签名 = 自炸**。
+  `test/support/source_text.dart` 的 `methodBody()` 用 `src.indexOf(signature)` 定位，而
+  `endpoint_decode_fail_test.dart` / `unpair_revoke_test.dart` / `q10_endpoint_test.dart` /
+  `q35_endpoint_wiring_test.dart` / `guarded_dispatch_test.dart` 这五处**没有先 `stripComments`**
+  ⇒ 缝的文档注释里写了一句 `Future<void> _handleRaw(` ⇒ 定位到注释、切片"平衡但错误"，
+  **四条锁集体假红**（首轮全量门禁实测现场）。**是假红不是回归** —— 但它会吃掉一整轮。
+- **缝要开在链路入口**：`debugDispatch`（第四十四轮）绕到的是链路**中段**，前端整段仍不可测；
+  `debugHandleRaw`（第四十七轮）前移到**入口**，一段缝换来 `_handleRaw` / `_handlePeerEvent` /
+  `_peerName` / `_broadcast` / `_rememberSeen` / 三个审计限频器 / `_rememberCmdTs` / `_awaitAck` /
+  `requestPairing` / `_savePeerSalt` 十余处的**行为**覆盖。
+- **真密文优先于假桩**：15 例全部走真 `RcCodec.deriveKey` + 真 AES-GCM。"让 decode 恒成功"的桩
+  会把"密钥模型对不对"这条最重要的判据一起桩掉。
+- **注入缝的行如实计入分母**（第三十八/四十五/四十七轮同一纪律）：缝不许藏、不许塞进豁免。
 
-**未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行）；② 🟡 `endpoint_service` 剩 **435 行**
-（可测面 614 行缺口的 71%）—— 下一轮**先做块分类**（MQTT / salt / 文件 / PTT / 广播文案）
-再判宿主可达性；③ 🟡 同域替身判据的下一批候选：`flutter_local_notifications`（残余仅 3 单行）、
-`mobile_scanner`（残余 4 行）；④ 🟡 长尾 `ptt_tab` 22 / `remote_scripts_tab` 12 / `remote_screen` 10；
-⑤ 🟡 A10/A12–A15、F-3 待拍板、`rotatedPairingCode` 无 UI 入口。
-**接力棒**：`docs/17 §76.5`（本文件 §6 第 0 项同源）。
+**未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行）；② 🟡 `endpoint_service` 剩 **310 行**
+（MQTT 连接态 / salt 派生校验 / 文件传输 / PTT 音频 / 广播文案五个桶，**逐桶判可达性**，
+不可达桶登记进 `docs/12 §80.6` 后停止重复投入）；③ 🟡 `pair_qr_screen` 的 4 行（L336-339，
+`SharedPreferencesStorePlatform` 打 `setValue` 抛错桩，先 `setMockInitialValues({})` 清 `_completer`）；
+④ 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
+`remote_screen` 10；⑤ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` / `share_plus` /
+`file_picker` / `flutter_tts`；⑥ 🟡 A10/A12–A15、F-3 待拍板、`rotatedPairingCode` 无 UI 入口；
+⑦ 🟢 BUG-075 / BUG-076 的设备侧补证（仍未做）。
+
+**接力棒**：`docs/17 §77.5`（本文件 §6 第 0 项同源）。
