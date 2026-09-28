@@ -1,4 +1,4 @@
-﻿# =====================================================================
+﻿﻿# =====================================================================
 # 声盾 SonicShield —— 统一门禁脚本（v1.9.0-alpha 同步版，落实 HANDOVER §6.11）
 #
 # ⚠️ 本文件与 scripts/gates.sh 必须是**同一套判据**。历史上 .ps1 停在「3 步、
@@ -12,8 +12,8 @@
 #   .\scripts\gates.ps1                  # analyze + 功能(+覆盖率) + 压测 + 覆盖率ratchet
 #   .\scripts\gates.ps1 -WithDevice      # + 设备端全套（检测到模拟器/真机时）
 #   .\scripts\gates.ps1 -WithAot         # + AOT 绝对验收（flutter drive --profile）
-#   $env:COVERAGE_MIN = '92.6'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
-#   $env:MIN_COVERED  = '8892'           # 可覆盖"绝对覆盖行"下限（同上）
+#   $env:COVERAGE_MIN = '93.3'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
+#   $env:MIN_COVERED  = '8966'           # 可覆盖"绝对覆盖行"下限（同上）
 #   第 45 轮（2026-09-28）：90.4 / 8680 → 92.6 / 8892（可测面 92.82% / 8898 分子 − 6 行余量）。
 #   $env:SKIP_COVERAGE = '1'             # 只在排查覆盖率工具本身时用
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
@@ -90,8 +90,8 @@ if (($out -join "`n") -match "All tests passed") {
 #        且**完全没有 `MIN_COVERED`**（第 34 轮给 gates.sh 加的"分母稀释"防线在 .ps1 上缺失）。
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
-    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '92.6' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '8892' }
+    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '93.3' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '8966' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。

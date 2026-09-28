@@ -75,6 +75,12 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^4.0.0
   mocktail: ^1.0.4
+  # 平台替身需要直接实现 `JustAudioPlatform` / `AudioPlayerPlatform`
+  # （`test/support/just_audio_stub.dart`，第 46 轮）。
+  # 它是 `just_audio` 的传递依赖；这里显式声明只为满足
+  # `depend_on_referenced_packages`（否则在测试里 import 会被 analyze 判红）。
+  # ⚠️ 版本必须与 pubspec.lock 里的 `just_audio_platform_interface` 一致。
+  just_audio_platform_interface: ^4.6.0
 
 flutter:
   uses-material-design: true
