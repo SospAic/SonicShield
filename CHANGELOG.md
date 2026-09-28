@@ -5,6 +5,99 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第四十五轮（2026-09-28）· 「平台通道替身」拿下**同域源码文本锁**整块（WebRTC 双文件 −210 行）+ 抓修 **BUG-076** + 抬阈值至 **92.6 / 8892**
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/u8gate.txt`（pre-ratchet）
+> 与 `_pt/u9gate.txt`（post-ratchet 终验）。
+> **生产代码仅 1 处行为改动**（BUG-076 的一个实参 + 一个 `@visibleForTesting` 缝）；
+> **分母 9584 → 9586 / 10074 → 10076（+2）**；真实进度 **8688 → 8900（+212 行）**。
+
+**Added（新增测试，63 例）**
+- 🟢 **新建 `test/support/webrtc_stub.dart`** —— `flutter_webrtc 1.6.2+hotfix.3` 的**平台替身**。
+  它只复刻插件**平台侧的返回形状**（`FlutterWebRTC.Method` 的
+  `getUserMedia` / `createPeerConnection` / `createOffer` / `addTrack` / `addCandidate` /
+  `mediaStreamTrackSwitchCamera` / `trackDispose` …，以及
+  `FlutterWebRTC/peerConnectionEvent<peerConnectionId>`、`FlutterWebRTC.Event`
+  两条事件通道的 `StandardMethodCodec` 信封），**不做任何业务判断** ——
+  跑的是生产代码本身，不是伪造输入。附带可编程失败开关
+  （`failUserMedia` / `failCreateOffer` / `failSetRemoteDescription` / `failAddCandidate` /
+  `failSpeakerphone` / `failSwitchCamera`）与观测面
+  （`methods` / `calls` / `addedCandidates` / `countOf` / `called` / `lastArgs` / **`constraintsOf`**）。
+- 🟢 **新建 `test/call_service_webrtc_test.dart`（39 例，CS-01…CS-39）** ——
+  `call_service.dart` 未覆盖 **132 → 14**。★ 此前该文件**只有源码文本锁**
+  （`test/call_flow_test.dart` 的 35 条 `methodBody` 断言行），**没有一次真实的 WebRTC
+  会话被执行过**。锁的是：主叫三条失败路径（取流失败 → `mediaFailed` / `createOffer` 抛错 /
+  **空 SDP 不得当成功**）、★ **端点离线时 `invite` 必须 `enqueueOnFail == false`**（BUG-076 回归锁）、
+  invite 载荷齐全 / 语音约束 `video:false` 但**免提仍要开** / 视频约束 `facingMode`+640×480 /
+  已在通话 → `alreadyInCall` / 平台不支持免提 → **静默降级而非报错**、
+  被叫侧（只振铃 / 自动接通 → `createAnswer` / 占线回 `callEnd(busy)` /
+  answer 发不出去 → `failed` / 媒体失败 → `callEnd(reason=media)` / `acceptPending` 守卫 /
+  `declinePending` → `rejected`/`declined`）、
+  ★ **ICE 时序**（`onAnswer` 补喂缓存候选、远端描述就位后直接投递、形状不对忽略、
+  **单条候选失败不影响整路**、缓存上界 `maxBufferedCandidates = 64` 丢**最旧**）、
+  连接状态（`connected` / `failed` → `failureHint(turnConfigured:)` + 广播 /
+  ★ **`closed` 的副作用不得覆盖真因**）、收尾与设备控制
+  （`hangUp` 两态 / 归位时免提关+`trackDispose`+流清空 / `switchCamera` / 静音两态）、
+  以及 `CallService.iceServers()`（无 TURN 2 条 STUN，配 TURN 3 条带 username/credential）。
+- 🟢 **新建 `test/multi_call_service_connect_test.dart`（23 例，MC-01…MC-23）** ——
+  `multi_call_service.dart` 未覆盖 **100 → 12**。锁的是：`connect` 主链（成功时载荷与焦点 /
+  取流失败 / **重复设备被拒** / 端点离线 / `createOffer` 抛错 / ★ **多路复用同一条本地流** /
+  语音模式）、事件路由（answer / **空 SDP 不建联** / candidate / **别人的 `callId` 不得串台** /
+  非字符串 `callId` 不炸 / `call.end` **只挂一路**）、连接状态（`connected` /
+  `failed` 文案含 `TURN` / `closed` / ★ **已失败不被之后的 `closed` 覆盖**）、
+  挂断与焦点（焦点回落 / 无会话时 no-op / 全挂断 / `setActive`）。
+- 🟢 **`test/remote_console_tab_test.dart` 扩 1 例（RCT-14）** —— `remote_console_tab.dart`
+  未覆盖 **2 → 0（满覆盖）**。`_send` 端点分支的 `if (ok)`（L372-373）此前**结构上到不了**
+  （宿主上 `RcEndpointService.sendTo` 恒返回 `false` ⇒ 永远走"已入队"那一半）；
+  本轮用新增的 `debugSendTo` 替身让 `sendTo` 报成功，并顺带锁住
+  ★ **记账（`_armExpectation`）与「8 秒未响应」提示是同一套状态机的两端** ——
+  只记不报会让用户对着一个永远不动的界面干等。
+
+**Fixed（缺陷修复）**
+- 🔴 **BUG-076（本轮抓修，唯一的生产代码行为改动）**：`lib/remote/call_service.dart` 的
+  `startCall` 发出的 `callInvite` **漏了 `enqueueOnFail: false`**。
+  `sendTo` 的默认值是 `true`，因此这条**实时信令**会被写进 outbox 补发队列 ——
+  而 `sendTo` / `flushOutbox` **没有 TTL 或过期过滤**（只跳过缺 `wire` 与解不开的条目）。
+  后果：本端 `_teardown` 之后对端才上线，就会收到**上一通的过期 invite**，
+  照常振铃；**自动接通**开着时更会静默建立一路**无人管理**的会话
+  （麦克风/摄像头已开、且因 `_answered == true` 连 45s 振铃超时都不会启动）。
+  这在源码注释里其实已经写明"outbox 不适用于实时通话"，且 `_sendCallMsg` 的
+  answer / candidate / end **一律传 `false`** —— 唯独 invite 漏掉。
+  既有回归锁 `test/cov_remote_ctrl2_test.dart:168` 只锁了那一半，**没有任何测试约束
+  invite 的 outbox 行为**。修法：显式补 `enqueueOnFail: false`，
+  并由 CS-04 锁死（断言 `sent.single.enqueueOnFail == false`）。
+
+**Changed（测试口径与工具）**
+- 🔧 **阈值 ratchet 三处同步**：`COVERAGE_MIN` 90.4 → **92.6**、
+  `MIN_COVERED` 8680 → **8892**（可测面分子 8898 − 6 行抖动余量），
+  同步于 `scripts/gates.sh` + `scripts/gates.ps1`（BOM `ef bb bf` 保留 +
+  `PARSE_ERROR_COUNT=0`）+ 本文件「已知限制」段。双向留痕见 `docs/12 §78`。
+- 📌 **判据换代（第六代）**：**「同一域里"只有源码文本锁"的整块」用「平台通道替身」拿下**。
+  第五代只在**单文件**尺度上问"这条路径跑过吗"；本轮把它推到**域**尺度：
+  `lib/remote/` 里 `call_service` + `multi_call_service` 两块 232 行**共用一个平台**
+  （WebRTC），因此**一次平台替身投资撬掉两块**。清单与代价评估见 `docs/17 §75.3`。
+- 🧰 **新增工具 `_pt/daplay.py <lib 相对路径>`**：从 `coverage/lcov.info` 导出某文件
+  逐行 `DA` 命中/未命中行号。此前只靠 `covgap.py`（缺口数）与 `covblocks.py`（连续块），
+  **判"某一行到底覆盖没有"要点开 lcov 人工数行**；本轮判 `remote_console_tab` 的
+  缺口**精确就是 L372-373** 时用到。
+  ⚠️ 已知边界：`SF:` 匹配用的是后缀比较 ⇒ `call_service.dart` 会**同时**匹配到
+  `multi_call_service.dart`（同名后缀）。查 `multi_*` 类文件名时**以 `covgap.py` 为准**。
+
+**Known issues（如实记录，不掩盖）**
+- ⚠️ 本轮踩坑（详见「已知限制」段与 `docs/12 §78.4`）：平台桩的 `rtcp` 字段非空要求、
+  `_Map<Object?, Object?>` 不能直接 `as Map<String, dynamic>`、
+  `unawaited(t.stop())` 的微任务时序会**把异常记到下一条用例头上**、
+  以及桩方法名写错（`switchCamera` vs **`mediaStreamTrackSwitchCamera`**）会制造**假红**。
+- ⚠️ **`playback_service.dart` 仍是可测面最大的单文件缺口（76 / 110 行，30.9%）**，
+  但**本轮确认其宿主可达性成本高于收益**：它走 `just_audio`，宿主上 `AudioPlayer`
+  一碰插件 `await` 就**永久挂起**（`cov_services_test.dart` L656-700 已实测记录）。
+  要拿下必须再做一份 `JustAudioPlatform` 替身（接口方法**非抽象**、默认 `throw`，
+  可 `extends` 后只覆写 12 个被调用的方法 —— 可行性已探明，见 `docs/17 §75.5`）。
+- ⚠️ `pair_qr_screen.dart` 残余 **4 行**（L336-339，`_handleDetectedCode` 的 `catch` 兜底）
+  仍为未覆盖：构造它需要给 `SharedPreferencesStorePlatform` 打一个**会抛错的桩**
+  （`store.addPaired` → `prefs.setString`），成本独立于本轮成果，**转入下一轮**。
+
 #### 第四十四轮（2026-09-28）· 「源码锁是绿的 ≠ 业务路径被执行过」+ 抬阈值至 **90.4 / 8680**
 
 > 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
@@ -665,14 +758,49 @@
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **覆盖率 90.63%（8686/9584）**（门禁口径＝**可测面**）／**全局（对外诚实数字）86.24%（8688/10074）**（2026-09-28 **第四十四轮**实测）
-  —— 未达 95% 目标（⚠️ 本行 2026-09-28 **第四十四轮**实测更新；
-  此前「89.13%（8542/9584）」是第四十三轮值、「88.13%（8446/9584）」是第四十一轮值、
+- **覆盖率 92.82%（8898/9586）**（门禁口径＝**可测面**）／**全局（对外诚实数字）88.33%（8900/10076）**（2026-09-28 **第四十五轮**实测）
+  —— 未达 95% 目标（⚠️ 本行 2026-09-28 **第四十五轮**实测更新；
+  此前「90.63%（8686/9584）」是第四十四轮值、「89.13%（8542/9584）」是第四十三轮值、「88.13%（8446/9584）」是第四十一轮值、
   「86.83%（8315/9576）」是第四十轮值、
   「85.69%（8206/9576）」是第三十九轮值、
   「84.49%（8091/9576）」是第三十八轮值、
   「83.13%（7949/9562）」是第三十七轮值、「82.36%（7875/9562）」是第 36 轮续六值、
   「79.91%（7641/9562）」是续五值、「78.47%（7499/9556）」是续四值；**以当前实测值为准**）。
+  ⚠️ 2026-09-28 **第四十五轮（自动化续作，单人会话）**：判据推至**第六代** ——
+  **「同一域里"只有源码文本锁"的整块」可以用「平台通道替身」拿下**。
+  `call_service.dart`（未覆盖 **132 行**）与 `multi_call_service.dart`（未覆盖 **100 行**）
+  此前**只有 `methodBody` 源码文本锁**（`call_flow_test.dart` 的 35 条断言行），
+  **从没有一次真实的 WebRTC 会话被执行过** —— 宿主上 `RTCPeerConnection` 一碰插件就挂，
+  于是"取流 → 建联 → ICE → 收尾"整条链路零执行。
+  新增平台替身 `test/support/webrtc_stub.dart`（照 `flutter_webrtc 1.6.2+hotfix.3` 的
+  **真实通道名与返回形状**写：`FlutterWebRTC.Method` / `FlutterWebRTC/peerConnectionEvent<id>` /
+  `FlutterWebRTC.Event`），新增 `test/call_service_webrtc_test.dart`（**39 例**）与
+  `test/multi_call_service_connect_test.dart`（**23 例**），并给 `RcEndpointService` 加
+  `@visibleForTesting debugSendTo` 出站替身（`sendTo` 的**成功**分支要求 `_client` 存在且
+  连接态为 `connected`，宿主上不可能满足，只能注入）。
+  ⇒ `call_service` **132 → 14**、`multi_call_service` **100 → 12**、
+  `remote_console_tab` **2 → 0（满覆盖）**；新增 **63 例**（功能层 1848 → **1911**），
+  可测面 **90.63% → 92.82%（8898 / 9586）**，阈值抬至 **92.6 / 8892**，门禁 **RC=0 全绿**。
+  **真实进度 +212 行**（8688 → **8900**）；⚠️ 分母 **+2 行**（9584 → 9586 / 10074 → 10076，
+  来源 = `debugSendTo` 注入缝**自身**的可执行行，如实计入分母，**不塞进豁免**）。
+  🔴 **抓修 BUG-076**：`CallService.startCall` 发出的 `callInvite` **漏了 `enqueueOnFail: false`**
+  （`sendTo` 的默认值是 `true`，与本节注释"outbox 不适用于实时通话"及
+  `_sendCallMsg` 的 answer/candidate/end 一律 `false` **正好相反**）⇒ 这条实时信令会被写进
+  outbox 补发队列；本端 `_teardown` 之后对端才上线，就会收到**上一通的过期 invite** 并照常振铃
+  —— 自动接通开着时更会静默建立一路**无人管理**的会话（麦克风/摄像头已开，
+  且因 `_answered == true` 连 45s 振铃超时都不会启动）。
+  `sendTo` 里**没有** TTL/过期过滤（`flushOutbox` 只跳过缺 `wire` 与解不开的条目）⇒ 该判断成立；
+  既有锁只锁了 answer/candidate/end，**invite 恰好漏掉**。
+  ⚠️ 本轮记下的**三个坑**：① `flutter_webrtc` 平台桩的 `RTCRtpParameters.fromMap` 要求
+  `rtcp` 的 `cname` / `reducedSize` **非空**，给 `{}` 会抛
+  `type 'Null' is not a subtype of type 'bool'`，**而该错误发生在没人 `await` 的
+  `pc.addTrack` 路径上** ⇒ 症状是"整个用例莫名失败"；
+  ② `StandardMessageCodec` 解出的嵌套 map 运行时类型是 `_Map<Object?, Object?>`
+  ⇒ `as Map<String, dynamic>` 必抛，要**逐层重建 `MapEntry`**（本轮加了 `constraintsOf()`）；
+  ③ `hangUp` 里的 `unawaited(t.stop())` 在**微任务**里才发到通道上 ⇒ `tearDown` 若紧接着
+  `uninstall()`，异常会记在**下一条用例**头上（`MissingPluginException: trackDispose`）。
+  另：`Helper.switchCamera` 实际打的通道方法是 **`mediaStreamTrackSwitchCamera`**，
+  桩里写成 `switchCamera` 会让断言**静默变成"平台没被调用"**（本轮实测到的一次**假红**）。
   ⚠️ 2026-09-28 **第四十四轮（自动化续作，单人会话）**：本轮判据推至**第五代** ——
   **「源码锁是绿的」≠「那条业务路径被执行过」**。`assist_host.dart` 的
   `task.upsert` 载荷裁决（D-7）此前**只有 `methodBody` 文本锁**（断言源码里出现
@@ -819,7 +947,7 @@
   **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
   缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
   与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
-  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=90.4` **且** 绝对覆盖行 `MIN_COVERED=8680`
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=92.6` **且** 绝对覆盖行 `MIN_COVERED=8892`
   —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
   （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
   74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；

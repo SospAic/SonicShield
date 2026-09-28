@@ -350,7 +350,32 @@ LOAD_SUSPECT="${LOAD_SUSPECT:-60}"
 #      ② `flutter_local_notifications` 的 `initialize` 平台层声明返回 `bool`（**非** `bool?`）
 #      ⇒ mock 桩一律返回 `null` 会在宿主上炸 `Null is not a subtype of FutureOr<bool>`。
 #      双向留痕见 `docs/12 §77` 与 `CHANGELOG`「已知限制」段。
-COVERAGE_MIN="${COVERAGE_MIN:-90.4}"
+# ── 第四十五轮（2026-09-28）────────────────────────────────────────────
+#      判据再推一格（第六代）：**「同一域里"只有源码文本锁"的整块」可以用
+#      「平台通道替身」拿下** —— `call_service.dart`(132 行未覆盖) 与
+#      `multi_call_service.dart`(100 行未覆盖) 此前**只有 `methodBody` 文本锁**
+#      （`call_flow_test.dart` 35 条源码断言），**从没有一次真实的 WebRTC 会话
+#      被执行过**：宿主上 `RTCPeerConnection` 一碰插件就挂，于是"取流→建联→
+#      ICE→收尾"整条链路零执行。
+#      本轮**不改生产逻辑**（唯一行为改动是 BUG-076 的一个实参），新增
+#      `test/support/webrtc_stub.dart`（照 `flutter_webrtc 1.6.2+hotfix.3` 的
+#      **真实通道名与返回形状**写的平台替身），并新增
+#      `test/call_service_webrtc_test.dart`(39 例) +
+#      `test/multi_call_service_connect_test.dart`(23 例)。
+#      ⇒ `call_service` 未覆盖 **132 → 14**、`multi_call_service` **100 → 12**。
+#      另设 `RcEndpointService.debugSendTo`（`@visibleForTesting`）出站替身，
+#      让 `sendTo` 的**成功分支**在宿主上可达 —— 顺手清掉
+#      `remote_console_tab.dart` 的最后 2 行（**8 → 2 → 0 满覆盖**）。
+#      ⚠️ 并抓修 **BUG-076**：`CallService.startCall` 发出的 `callInvite` **漏了**
+#      `enqueueOnFail: false`（默认 `true`）⇒ 本端已 `_teardown` 后，对端上线仍会
+#      收到**上一通的过期 invite** 并照常振铃 —— 自动接通开着时更会静默建立一路
+#      **无人管理**的会话（麦/摄像头已开，且因 `_answered=true` 连 45s 振铃超时都不启动）。
+#      ⇒ 阈值 90.4 → **92.6**、`MIN_COVERED` 8680 → **8892**（可测面分子 8898 − 6 行抖动余量）。
+#      ⚠️ 本轮分母 **9584 → 9586 / 10074 → 10076（+2）**：来自 `endpoint_service.dart`
+#      新增的 `debugSendTo` 注入缝**自身的可执行行**，如实计入分母
+#      （与第三十八轮同型 —— 注入缝的行不许藏、也不许塞进豁免）。
+#      双向留痕见 `docs/12 §78` 与 `CHANGELOG`「已知限制」段。
+COVERAGE_MIN="${COVERAGE_MIN:-92.6}"
 
 # ── 第三十四轮：再补一个**分子**硬下限 ────────────────────────────────────
 #
@@ -370,7 +395,12 @@ COVERAGE_MIN="${COVERAGE_MIN:-90.4}"
 # → 阈值 7443 → **7494**（实测 − 5 行抖动余量）。
 #   ⚠️ 分子下限是**绝对数**，不随豁免口径变化 ⇒ 它是"豁免有没有被用来掩盖
 #   真实倒退"的最后一道防线：豁免只会让**分母**变小，改不动分子。
-MIN_COVERED="${MIN_COVERED:-8680}"
+MIN_COVERED="${MIN_COVERED:-8892}"
+#   ⚠️ 第四十五轮（2026-09-28）实测可测面分子 **8898** → 阈值 8680 → **8892**（实测 − 6 行抖动余量）。
+#      ⚠️ 本轮分母 **9584 → 9586 / 10074 → 10076（+2）**（新增注入缝自身的行）；真实进度
+#      **8688 → 8900（+212 行）**，其中 **+210** 来自两个新增 WebRTC 行为测试文件、
+#      **+2** 来自 `remote_console_tab` 的 `_armExpectation` 成功分支清尾。
+#      ⚠️ 分子下限是**绝对数、不随口径变化** ⇒ 它照旧是"分母被稀释/被豁免掩盖"的最后防线。
 #   ⚠️ 第四十四轮（2026-09-28）实测可测面分子 **8686** → 阈值 8536 → **8680**（实测 − 6 行抖动余量）。
 #      ⚠️ 本轮分母 **9584 / 10074 一字未动**；真实进度 **8544 → 8688（+144 行）**，生产代码 0 行改动。
 #      ⚠️ 分子下限是**绝对数、不随口径变化** ⇒ 它照旧是"分母被稀释/被豁免掩盖"的最后防线。

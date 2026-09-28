@@ -350,6 +350,15 @@ class CallService {
         'fromName': store.deviceName,
       }),
       store,
+      // ⚠️ BUG-076：**必须显式** `false`。`sendTo` 的默认值是 `true`，
+      // 于是这条 invite 会被写进 outbox 补发队列 —— 与本节注释
+      // （"outbox 不适用于实时通话"）以及 `_sendCallMsg`（answer/candidate/end
+      // 一律 `false`）**正好相反**。补发的 invite 携带的是**上一通的 SDP**，
+      // 而本端此刻已经 `_teardown`（`_pc` 已关、callId 已清）：对端上线后收到
+      // 这条过期 invite 会照常振铃，自动接通开着时更会静默建立一路
+      // **无人管理**的会话（麦克风/摄像头已开、且因为 `_answered=true`
+      // 连 45s 振铃超时都不会启动）。
+      enqueueOnFail: false,
     );
     if (!sent) {
       // 端点离线（outbox 不适用于实时通话）。

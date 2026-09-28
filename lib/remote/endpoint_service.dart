@@ -195,6 +195,25 @@ class RcEndpointService {
   Future<void> debugDispatch(RcMessage msg, PairedEndpoint peer) =>
       _dispatch(msg, peer);
 
+  /// 出站发送的宿主替身（第 45 轮新增；**不改 `sendTo` 的签名与默认行为**）。
+  ///
+  /// `sendTo` 的**成功**分支要求 `_client` 存在且
+  /// `connectionStatus.state == connected` —— 宿主机连不上 broker，
+  /// 于是"发出去之后"的整条链路在宿主上**结构性不可达**：通话信令的
+  /// `sent == true` 分支、多路视频的建连中段、候选重放 …
+  /// 这些此前只有源码锁兜底（`docs/17 §74` 判据第五代：
+  /// **"源码锁是绿的" ≠ "那条业务路径被执行过"**）。
+  ///
+  /// 注入后 [sendTo] 在进入任何真实发送逻辑**之前**直接转交替身：
+  /// * 替身为 `null`（生产恒为 null）⇒ 逐字节走原路径，行为不变；
+  /// * 替身返回 `true` ⇒ 等价于"broker 已受理并投递"。
+  ///
+  /// ⚠️ 仅 `@visibleForTesting`（`analysis_options.yaml` 已把
+  /// `invalid_use_of_visible_for_testing_member` 设为 error，生产调用会编译失败）。
+  @visibleForTesting
+  Future<bool> Function(PairedEndpoint endpoint, RcMessage msg,
+      RemoteStore store, bool enqueueOnFail)? debugSendTo;
+
   bool get isRunning => _running;
 
   Future<void> start(RemoteStore store, AppDatabase db) async {
@@ -2148,6 +2167,9 @@ class RcEndpointService {
   /// 才能被解开。
   Future<bool> sendTo(PairedEndpoint endpoint, RcMessage msg, RemoteStore store,
       {bool enqueueOnFail = true, bool withSalt = true}) async {
+    // 宿主替身（仅测试注入）：非空时直接给出"是否已投递"，不再碰客户端。
+    final override = debugSendTo;
+    if (override != null) return override(endpoint, msg, store, enqueueOnFail);
     // 统一补发方标识：接收端据此反查发送方名称并渲染回执（不参与鉴权）。
     final out = msg.from == store.deviceId
         ? msg

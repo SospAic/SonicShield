@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_console_tab.dart';
 import 'package:sonic_shield/remote/command_channel.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_playback.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
@@ -699,6 +700,43 @@ void main() {
     expect(prefs.getKeys().where((k) => k.startsWith('rc:volume:')), isEmpty,
         reason: '"发送即记忆"会把端点拒掉的值记成已生效（假成功）');
 
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  }, timeout: const Timeout(Duration(seconds: 90)));
+
+  // ---------------- F · `_send` 的**成功**分支（第四十五轮） ----------------
+
+  /// RCT-14（第四十五轮）：`_send` 端点分支的 `if (ok)`（本文件 L372-373）
+  /// 此前**结构上到不了** —— `_pumpNoChannel` 走 `RcEndpointService.sendTo`，
+  /// 而宿主上端点服务 `_client == null` ⇒ 该调用**恒返回 `false`**（这正是
+  /// RCT-04 的锁：「未连接 → 已入队」）。于是"真的发出去了"那一半从未被执行。
+  ///
+  /// 第四十五轮给 `RcEndpointService` 加了 `@visibleForTesting debugSendTo`
+  /// **出站替身**（`sendTo` 的成功分支要求 `_client` 存在且连接态为 connected，
+  /// 宿主上不可能满足，只能注入）。本用例用它把这一半补齐，并顺带验证：
+  /// ★ 记账（`_armExpectation`）与「8 秒未响应」提示是**同一套状态机的两端** ——
+  ///   只记不报会让用户对着一个永远不动的界面干等。
+  testWidgets('RCT-14 端点在线：命令发出即记账，8 秒无回执必须如实报「端点未响应」',
+      (tester) async {
+    final svc = RcEndpointService.instance;
+    addTearDown(() => svc.debugSendTo = null);
+    // 只有"真的发出去了"才记账 ⇒ 这里让 sendTo 报成功。
+    svc.debugSendTo = (ep, msg, store, enqueueOnFail) async => true;
+
+    await _pumpNoChannel(tester,
+        enabled: true, eps: [_ep('ep-1', '客厅手机')], selected: 'ep-1');
+    await _tap(tester, 'Ping');
+
+    expect(find.textContaining('端点离线'), findsNothing,
+        reason: '命令确实发出去了 —— 再说"离线/已入队"就是自相矛盾的提示');
+
+    // `_ackTimeoutSec = 8`，扫描器每 1s 一轮 ⇒ 推到第 9 秒必已过期。
+    await tester.pump(const Duration(seconds: 9));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.textContaining('端点未响应'), findsOneWidget,
+        reason: '记了账却没等来回执，必须把"点了没反应"的三种常见原因说出来');
+
+    // 收尾推掉 SnackBar 计时，避免 pending timer。
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   }, timeout: const Timeout(Duration(seconds: 90)));
