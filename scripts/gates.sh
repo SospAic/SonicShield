@@ -12,6 +12,8 @@
 #   ONLY_DEVICE=1 bash ...               # 只跑设备层（迭代设备用例时不必重跑 465 例宿主测试）
 #   COVERAGE_MIN=70 bash ...             # 覆盖率 ratchet 阈值（默认见下方 COVERAGE_MIN）
 #   SKIP_COVERAGE=1 bash ...             # 跳过覆盖率 ratchet（只在排查覆盖率工具本身时用）
+#   FUNC_RETRY=0 bash ...               # 功能层撞上 Dart VM 资源耗尽时不降并发重跑（默认重跑）
+#   FUNC_RETRY_CONC=4 bash ...           # 重跑的并发度（默认 4）
 #   APP_ID=... bash ...                  # 覆盖包名（默认 com.sonicshield.sonic_shield）
 # 退出码：0=全绿；1=有门禁失败（代码回归）；3=代码全绿但有**环境阻塞**（未执行，非失败）。
 #   ⚠️ 压测层红时先看整机负载：负载 ≥60% 判为"墙钟预算测量无效"→ 归入 3（环境阻塞），
@@ -393,7 +395,7 @@ LOAD_SUSPECT="${LOAD_SUSPECT:-60}"
 #      如实计入（同第三十八/四十五轮纪律：缝的行不许藏、不许塞豁免）。
 #      ⇒ 阈值 93.3 → **94.8**、`MIN_COVERED` 8966 → **9091**（可测面分子 9097 − 6 行抖动余量）。
 #      双向留痕见 `docs/12 §80` 与 `CHANGELOG`「已知限制」段。
-COVERAGE_MIN="${COVERAGE_MIN:-94.8}"
+COVERAGE_MIN="${COVERAGE_MIN:-95.9}"
 
 # ── 第三十四轮：再补一个**分子**硬下限 ────────────────────────────────────
 #
@@ -415,7 +417,7 @@ COVERAGE_MIN="${COVERAGE_MIN:-94.8}"
 #   真实倒退"的最后一道防线：豁免只会让**分母**变小，改不动分子。
 # 第四十六轮实测 **8972**（可测面分子）→ 阈值 8892 → **8966**（实测 − 6 行抖动余量）。
 # 第四十七轮实测 **9097**（可测面分子）→ 阈值 8966 → **9091**（实测 − 6 行抖动余量）。
-MIN_COVERED="${MIN_COVERED:-9091}"
+MIN_COVERED="${MIN_COVERED:-9217}"
 #   ⚠️ 第四十五轮（2026-09-28）实测可测面分子 **8898** → 阈值 8680 → **8892**（实测 − 6 行抖动余量）。
 #      ⚠️ 本轮分母 **9584 → 9586 / 10074 → 10076（+2）**（新增注入缝自身的行）；真实进度
 #      **8688 → 8900（+212 行）**，其中 **+210** 来自两个新增 WebRTC 行为测试文件、
@@ -457,6 +459,24 @@ perf_verdict() {  # $1=压测前负载  $2=失败时负载  → 回显 BLOCKED |
   fi
 }
 
+# 功能层"红"的**定性**：Dart VM 自身因宿主内存/线程耗尽而崩 ≠ 代码回归。
+#
+# 2026-09-28 实测（第四十八轮 post-ratchet 终验 X9）：
+#   `flutter test --exclude-tags perf --coverage` 在 01:28 处**整进程崩**，
+#   74 例被标 "did not complete"，日志里**一条断言失败都没有**，只有：
+#     Shell: === Crash occurred when compiling ...persistent_hash_map... in optimizing JIT mode
+#     Shell: .../dart/runtime/vm/zone.cc: 95: error: Out of memory.
+#     Shell: .../dart/runtime/vm/os_thread.cc: 345: error: Could not start thread DartWorker: 22
+#   且**三个不同 pid 同时崩** ⇒ 宿主级内存/线程耗尽
+#   （本机 16 逻辑核 ⇒ 多路并发的 flutter_tester 各自跑 optimizing JIT）。
+#   **这不是代码回归** —— 不区分就会报成 `[FAIL] 功能层`
+#   （RC=1 代码回归），让人去追一个不存在的 bug。
+#   与压测层同哲学：**把噪声当回归报上去是更贵的错误**。
+is_vm_resource_crash() {  # $1=输出 → 0 = 撞上 Dart VM 自身的资源耗尽（非断言失败）
+  printf '%s' "$1" \
+    | grep -qE "error: Out of memory\.|Could not start thread DartWorker|Crash occurred when compiling"
+}
+
 # 开工前的整机负载提示（只提示，不改判定；判定逻辑在压测层失败分支）。
 LOAD_START=$(machine_load)
 if [ "$LOAD_START" -ge "$LOAD_SUSPECT" ]; then
@@ -489,10 +509,41 @@ echo "=== 门禁 2/4: 功能层（--exclude-tags perf）==="
 # 不额外多跑一遍测试。SKIP_COVERAGE=1 退回裸跑。
 COV_FLAG=""
 if [ "${SKIP_COVERAGE:-0}" != "1" ]; then COV_FLAG="--coverage"; fi
-out=$(flutter test --exclude-tags perf $COV_FLAG 2>&1 | tr '\r' '\n')
+# ⚠️ 并发**只在"撞上 VM 资源耗尽"的重跑里**下调：首次仍用默认并发，
+#    这样"正常路径"的覆盖率口径与历史各轮逐字一致，不引入任何口径漂移。
+FUNC_CONC=""
+run_func() { flutter test --exclude-tags perf $COV_FLAG $FUNC_CONC 2>&1 | tr '\r' '\n'; }
+out=$(run_func)
 echo "$out" | tail -1
 if echo "$out" | grep -q "All tests passed"; then
   echo "[PASS] 功能层"
+elif is_vm_resource_crash "$out"; then
+  echo "[?] 功能层首次撞上 Dart VM 资源耗尽（**无任何断言失败**）→ 降并发重跑确认…"
+  echo "$out" | grep -E "Out of memory|Could not start thread|Crash occurred when compiling" | head -4 || true
+  fail_dump 功能层 "$out"
+  if [ "${FUNC_RETRY:-1}" = "1" ]; then
+    FUNC_CONC="--concurrency=${FUNC_RETRY_CONC:-4}"
+    out2=$(run_func)
+    echo "$out2" | tail -1
+    if echo "$out2" | grep -q "All tests passed"; then
+      echo "[PASS] 功能层（降并发重跑确认 ✅）"
+      echo "  ⚠️ 首次是**宿主内存/线程耗尽**，不是代码回归；本次重跑并发 = ${FUNC_RETRY_CONC:-4}。"
+      echo "     已留证：首次完整输出在 \${GATE_LOG_DIR:-/tmp}/gates_功能层.log。"
+    elif is_vm_resource_crash "$out2"; then
+      echo "[BLOCKED] 功能层：连续两次 Dart VM 资源耗尽 —— **不是代码回归，也不是通过**"
+      echo "  请在空闲机器上复跑： flutter test --exclude-tags perf --coverage"
+      fail_dump 功能层重跑 "$out2"
+      BLOCKED=$((BLOCKED+1))
+    else
+      echo "[FAIL] 功能层（重跑未过，且**不是** VM 资源耗尽 → 真回归）"
+      echo "$out2" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true
+      fail_dump 功能层重跑 "$out2"
+      FAIL=$((FAIL+1))
+    fi
+  else
+    echo "[FAIL] 功能层（FUNC_RETRY=0，未降并发重跑确认）"
+    FAIL=$((FAIL+1))
+  fi
 else
   echo "[FAIL] 功能层"
   echo "$out" | grep -E "\[E\]|Expected:|Actual:" | head -6 || true

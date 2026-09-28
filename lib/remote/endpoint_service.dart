@@ -248,6 +248,35 @@ class RcEndpointService {
   Future<void> debugHandleRaw(String topic, String wire) =>
       _handleRaw(topic, wire);
 
+  /// MQTT 客户端工厂替身（第四十八轮新增）。
+  ///
+  /// 传输整层（连接/订阅/发送/补发/订阅接口）的运行前提是「有一个 MQTT
+  /// 客户端、且状态为 connected」，而宿主连不上 broker ⇒ 这一桶
+  /// 约 128 行此前**一行都没被执行过**，只有源码文本锁兜底。
+  /// 第四十四轮立的判据第五代正是冲这个来的：
+  /// **「源码锁是绿的」 ≠ 「那条业务路径被执行过」**。
+  ///
+  /// 之所以能做成替身（而不是像 `flutter_webrtc` / `just_audio` 那样
+  /// 只能另找切入点）：`mqtt_client` 的客户端是**纯 Dart 类**，
+  /// **不是平台通道**；`connect` / `publishMessage` / `subscribe` /
+  /// `unsubscribe` / `disconnect` 与 getter `connectionStatus` / `updates`
+  /// 全是可覆写的普通成员 ⇒ 子类覆写后跑的**是生产代码本身**。
+  /// 替身见 `test/support/mqtt_client_stub.dart`。
+  ///
+  /// 为 `null`（生产恒为 null）⇒ 逐字节走原路径：端口来源、`secure`、
+  /// 遗嘱、凭据门、ack 类级联**一个字段都不变**
+  /// （`test/rc_transport_lock_test.dart` 与 `test/q35_endpoint_wiring_test.dart`
+  /// 仍在锁着这些不变量）。
+  ///
+  /// ⚠️ 与第 47 轮同一个教训：本段注释**刻意不写出任何被测方法的完整声明
+  /// 签名**（也不写出客户端工厂的全名 + 点号 + 方法名的连写形式）。
+  /// 理由：若干文本锁用 `indexOf(签名)` 在**未剥注释**的源码上定位
+  /// （`test/support/source_text.dart` 的注记），注释里出现同一字符串
+  /// 会让定位命中注释、切片"平衡但错误" ⇒ **假红，不是回归**。
+  @visibleForTesting
+  MqttServerClient Function(String broker, String clientId, int port)?
+      debugClientFactory;
+
   bool get isRunning => _running;
 
   Future<void> start(RemoteStore store, AppDatabase db) async {
@@ -413,9 +442,10 @@ class RcEndpointService {
     // （见上），自定义端口只是自建 broker 的监听端口不同。
     // 两处都写全 `?? RemoteStore.defaultBrokerPort`：端口的唯一真源仍是
     // `rcBrokerPort`（`test/rc_transport_lock_test.dart` TL-03/TL-12 锁着）。
-    final client =
-        _client = MqttServerClient.withPort(store.broker, deviceId,
-            store.brokerPort ?? RemoteStore.defaultBrokerPort)
+    final client = _client = (debugClientFactory?.call(store.broker, deviceId,
+                store.brokerPort ?? RemoteStore.defaultBrokerPort) ??
+            MqttServerClient.withPort(store.broker, deviceId,
+                store.brokerPort ?? RemoteStore.defaultBrokerPort))
           ..port = store.brokerPort ?? RemoteStore.defaultBrokerPort
           ..secure = true
           ..keepAlivePeriod = 30

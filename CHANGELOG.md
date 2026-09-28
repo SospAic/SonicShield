@@ -5,6 +5,71 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第四十八轮（2026-09-28）· **判据第六代「换域」第三站：MQTT 客户端替身** —— `endpoint_service` 的**传输整层**（连接 / 订阅 / 发送 / 补发）首次上机（未覆盖 **314 → 190**）—— 抬阈值至 **95.9 / 9217**
+
+> 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
+> 数据基准：`bash scripts/gates.sh`（4 步）**RC=0**，产物 `_pt/x5gate.txt`（pre-ratchet）、
+> `_pt/x9gate.txt`（post-ratchet 首跑 —— 功能层撞 **Dart VM 资源耗尽**，见 🛡️ 条与 `docs/12 §81.4`）
+> 与 `_pt/x10gate.txt`（**gate 加固后的权威终验**，`_pt/x10.txt.done` = `0`）。
+> **生产代码行为 0 行改动**（只加一个 `@visibleForTesting` 客户端工厂缝）；**分母 +2 行**。
+
+- 🧰 **新增注入缝**（`lib/remote/endpoint_service.dart`）：
+  `@visibleForTesting MqttServerClient Function(String broker, String clientId, int port)? debugClientFactory`。
+  与既有 `debugBind` / `debugDispatch` / `debugSendTo` / `debugSetOwnCode` / `debugHandleRaw` 同族，
+  **不改任何既有方法的签名或行为**；生产恒为 `null` ⇒ 逐字节走原路径。
+  ⚠️ 缝加在 `_connect()` 的客户端**构造表达式**上，因此必须同时满足五条既有文本锁
+  （TL-03 第三个实参含共享常量 / TL-04 级联里有 `secure = true` / TL-09 全库仅一处构造点 /
+  TL-13 每个构造点都开 TLS / QW-01 端口两处都取自 `store.brokerPort`）—— 已全部复跑全绿。
+- 🧪 **新增平台替身** `test/support/mqtt_client_stub.dart`：`FakeMqttServerClient extends MqttServerClient`。
+  之所以可行：`mqtt_client` 的客户端是**纯 Dart 类、不是平台通道**，
+  `connect` / `publishMessage` / `subscribe` / `unsubscribe` / `disconnect` 与
+  getter `connectionStatus` / `updates` 全是可覆写的普通成员 ⇒ 覆写后跑的是**生产代码本身**。
+  与第 45 轮（`flutter_webrtc` 通道桩）、第 46 轮（`JustAudioPlatform` 静态可写单例，须 tearDown 还原）
+  不同：**本缝是实例注入型，注入点自带 `@visibleForTesting`，无需全局还原**。
+- 🧪 **新建 `test/endpoint_mqtt_link_test.dart`（21 例 MQ-01…21）**：
+  - 连接：`start()` 装配（broker / clientId / 端口三个构造实参）＋**级联字段逐个断言真落到实例**
+    （`secure` / `keepAlivePeriod` / `autoReconnect` / `resubscribeOnAutoReconnect`）／幂等／
+    本机 deviceId 为空 ⇒ 不构造客户端／`connect()` 抛错与"连上但状态非 connected"同走重连分支／
+    订阅集合（本机 cmd **两次** + 每个已配对端点的 evt）／`refreshSubscriptions` 未连接时早返回／
+    `onConnected` 重连路径补订 + 补发／首连**不触发** `onConnected` 也必须补一次冲刷／
+    `stop()` 断开后能重新起一条连接。
+  - 真实入站入口：**从 `client.updates` 流投递**（`_handleRaw` 的唯一生产调用点，**不是**测试缝）
+    驱动整条链路；并证明监听器体内 `for` 循环的"一次投递多条"语义。
+  - 出站：连接态 `_send` 真投递（**用对端密钥把密文解回来**，断言 `from` 被补成本机 deviceId）／
+    未连接时留痕且一条不投／`sendTo` 真实 `publish`／离线暂存的是**密文**（补发路径解得开）／
+    `flushOutbox` 未连接返回 0 且**不动队列**／坏条目丢弃并留痕／`flushAllOutbox` 覆盖全部端点。
+  - 契约对照：端口取自 `store.brokerPort`（两处）／凭据门"两者都非空才携带"。
+- 📈 **实测**：可测面 **94.86% → 96.15%（9223 / 9592）**、全局 **90.27% → 91.50%（9225 / 10082）**；
+  **真实进度 +126 行**（9099 → **9225**）；可测面残缺口 **493 → 369**；功能层 **1939 → 1960**。
+- 🧬 **变异测试（3 处，全部断言级判红）**：`..secure = false` ⇒ **MQ-01** 判红；
+  `removeOutbox` 注释掉 ⇒ **MQ-08 / MQ-09 / MQ-18 / MQ-19** 判红；
+  `_connect` 直连订阅改成 `cmdX` ⇒ **MQ-06** 判红。三处均按字节还原、md5 **逐字相同**
+  （`4f9c8a0b58cb5372b570ad2568ee1d49`）。
+- 🛡️ **门禁加固（功能层 VM 资源耗尽定性）**：post-ratchet 首跑（X9）功能层在 01:28 处**整进程崩**
+  —— 74 例 `did not complete`、**一条断言失败都没有**，日志只有 `zone.cc:95 Out of memory` /
+  `os_thread.cc:345 Could not start thread DartWorker` / `Crash occurred when compiling …
+  persistent_hash_map… in optimizing JIT mode`，且**三个不同 pid 同时崩** ⇒ 宿主级内存/线程耗尽
+  （16 逻辑核 ⇒ 多路并发的 flutter_tester 各自跑 optimizing JIT），**不是代码回归**。
+  `scripts/gates.sh` / `gates.ps1` 新增 `is_vm_resource_crash()` 定性 + **降并发重跑**
+  （`FUNC_RETRY=1` 默认开、重跑并发 `FUNC_RETRY_CONC=4`）；连续两次耗尽 ⇒ `[BLOCKED]`
+  （归 RC=3 环境阻塞，**不是** RC=1 回归）。与压测层同哲学：**把噪声当回归报上去是更贵的错误**；
+  首跑仍用默认并发 ⇒ 正常路径的覆盖率口径与历史各轮逐字一致。
+- 🔴 **本轮最贵的坑（三次"红，但不是那件事"）**：
+  ① 变异写成 `..secure = false; // MUTA` 会在级联里插一个 `;` ⇒ **编译失败**，
+  测试文件**加载期**报错（`+0 -1 loading … [E] Compilation failed`）——
+  **是红，但不是断言判红**；改用**块注释** `/* MUTA */` 后才是真判红。
+  ② 替身成员名 **`published` 撞上 `MqttClient` 自带的 `Stream<MqttPublishMessage>? get published`**
+  ⇒ 12 条 analyze 报错；改名 `sentWires`（与 `Helper.switchCamera` 假红同族）。
+  ③ 首轮变异测试**暴露了断言本身没在约束**：`_connect` 的直连订阅与 `refreshSubscriptions` 的补订
+  **主题字符串逐字相同** ⇒ 只断言 `contains` 的话改坏任一都不判红；已加强为**断言次数 == 2**
+  并**再跑一次单点变异**确认它真的会红（`Expected: <2>, Actual: <1>`）。
+  ④ 同一份 outbox 上"首连的补发"与"显式 `flushOutbox`"会**并发读到同一条** ⇒ 审计计数 1 → 2 的假红；
+  夹具改为"先 start 并把首连补发推完，再入队"。
+- ⚠️ **诚实边界**：可测面仍缺 **369 行**；490 行设备层豁免不在可测面分母内（未覆盖 **488**）
+  ⇒ 全局合计缺 **857 行**（`857 − 369 = 488 == 490 − 2` ✅）。设备层 `adb devices` 为空 ⇒ **未执行**。
+  本轮**未以任何方式凑数**的两处留白：`Timer.periodic(60s)` 心跳体（≈13 行，真实时钟无法加速，
+  而 fake-async 会让 `databaseFactoryFfi` 永久挂死）与 `_handleRaw` 抛错时的监听器兜底（≈3 行）。
+
 #### 第四十七轮（2026-09-28）· **入站原始报文链路上机**：`endpoint_service` 的「主题路由 → 多盐试解 → 准入 → 限流 → 执行 → 广播」第一次被**行为**驱动 —— 抬阈值至 **94.8 / 9091**
 
 > 本轮由**自动化续作**（`d7dcb8fd…` 续作长跑，每 2 小时）驱动，**单人会话**完成。
@@ -826,9 +891,9 @@
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **覆盖率 94.86%（9097/9590）**（门禁口径＝**可测面**）／**全局（对外诚实数字）90.27%（9099/10080）**（2026-09-28 **第四十七轮**实测）
-  —— 未达 95% 目标（⚠️ 本行 2026-09-28 **第四十七轮**实测更新；
-  此前「93.59%（8972/9586）」是第四十六轮值、「92.82%（8898/9586）」是第四十五轮值、「90.63%（8686/9584）」是第四十四轮值、「89.13%（8542/9584）」是第四十三轮值、「88.13%（8446/9584）」是第四十一轮值、
+- **覆盖率 96.15%（9223/9592）**（门禁口径＝**可测面**）／**全局（对外诚实数字）91.50%（9225/10082）**（2026-09-28 **第四十八轮**实测）
+  —— 未达 97% 目标（⚠️ 本行 2026-09-28 **第四十八轮**实测更新；
+  此前「94.86%（9097/9590）」是第四十七轮值、「93.59%（8972/9586）」是第四十六轮值、「92.82%（8898/9586）」是第四十五轮值、「90.63%（8686/9584）」是第四十四轮值、「89.13%（8542/9584）」是第四十三轮值、「88.13%（8446/9584）」是第四十一轮值、
   「86.83%（8315/9576）」是第四十轮值、
   「85.69%（8206/9576）」是第三十九轮值、
   「84.49%（8091/9576）」是第三十八轮值、
@@ -1047,7 +1112,7 @@
   **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
   缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
   与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
-  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=94.8` **且** 绝对覆盖行 `MIN_COVERED=9091`
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=95.9` **且** 绝对覆盖行 `MIN_COVERED=9217`
   —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
   （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
   74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；

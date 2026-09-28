@@ -12,8 +12,8 @@
 #   .\scripts\gates.ps1                  # analyze + 功能(+覆盖率) + 压测 + 覆盖率ratchet
 #   .\scripts\gates.ps1 -WithDevice      # + 设备端全套（检测到模拟器/真机时）
 #   .\scripts\gates.ps1 -WithAot         # + AOT 绝对验收（flutter drive --profile）
-#   $env:COVERAGE_MIN = '94.8'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
-#   $env:MIN_COVERED  = '9091'           # 可覆盖"绝对覆盖行"下限（同上）
+#   $env:COVERAGE_MIN = '95.9'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
+#   $env:MIN_COVERED  = '9217'           # 可覆盖"绝对覆盖行"下限（同上）
 #   第 45 轮（2026-09-28）：90.4 / 8680 → 92.6 / 8892（可测面 92.82% / 8898 分子 − 6 行余量）。
 #   $env:SKIP_COVERAGE = '1'             # 只在排查覆盖率工具本身时用
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
@@ -29,6 +29,18 @@ $ErrorActionPreference = "Stop"
 $fail = 0
 # 环境阻塞（未执行 ≠ 失败）—— 与 gates.sh 的 BLOCKED/RC=3 语义对齐。
 $blocked = $false
+
+# 功能层"红"的**定性**：Dart VM 自身因宿主内存/线程耗尽而崩 ≠ 代码回归。
+# 2026-09-28 实测：`--coverage` 全量跑在 01:28 处整进程崩，74 例 "did not complete"，
+# 日志里一条断言失败都没有，只有 vm/zone.cc `Out of memory.` 与
+# vm/os_thread.cc `Could not start thread DartWorker`（三个 pid 同时崩）。
+# 判据与 gates.sh 的 is_vm_resource_crash 同源 —— 两条入口不允许漂移。
+function Test-VmResourceCrash([string]$text) {
+    if ($text -match 'error: Out of memory\.') { return $true }
+    if ($text -match 'Could not start thread DartWorker') { return $true }
+    if ($text -match 'Crash occurred when compiling') { return $true }
+    return $false
+}
 
 function Run-Gate([string]$name, [scriptblock]$cmd, [string]$expect) {
     Write-Host "`n=== 门禁: $name ===" -ForegroundColor Cyan
@@ -56,12 +68,37 @@ if (($out -join "`n") -match "No issues found") {
 
 Write-Host "=== 门禁 2/4: 功能层（--exclude-tags perf，顺带产出 coverage/lcov.info）===" -ForegroundColor Cyan
 # 功能层**顺带产出**覆盖率（第 4 步的 ratchet 据此判定），不额外多跑一遍测试。
+# ⚠️ 并发**只在"撞上 VM 资源耗尽"的重跑里**下调：首次仍用默认并发，
+#    这样"正常路径"的覆盖率口径与历史各轮逐字一致。
 $covFlag = @()
 if ($env:SKIP_COVERAGE -ne '1') { $covFlag = @('--coverage') }
-flutter test --exclude-tags perf @covFlag 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
+$funcConc = @()
+flutter test --exclude-tags perf @covFlag @funcConc 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
     Tee-Object -Variable out | Select-Object -Last 1
-if (($out -join "`n") -match "All tests passed") {
+$joined = ($out -join "`n")
+if ($joined -match "All tests passed") {
     Write-Host "[PASS] 功能层" -ForegroundColor Green
+} elseif (Test-VmResourceCrash $joined) {
+    Write-Host "[?] 功能层首次撞上 Dart VM 资源耗尽（无任何断言失败）→ 降并发重跑确认…" -ForegroundColor Yellow
+    $retryConc = if ($env:FUNC_RETRY_CONC) { $env:FUNC_RETRY_CONC } else { '4' }
+    if ($env:FUNC_RETRY -eq '0') {
+        Write-Host "[FAIL] 功能层（FUNC_RETRY=0，未降并发重跑确认）" -ForegroundColor Red
+        $fail++
+    } else {
+        $funcConc = @("--concurrency=$retryConc")
+        flutter test --exclude-tags perf @covFlag @funcConc 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
+            Tee-Object -Variable out2 | Select-Object -Last 1
+        $joined2 = ($out2 -join "`n")
+        if ($joined2 -match "All tests passed") {
+            Write-Host "[PASS] 功能层（降并发重跑确认，并发=$retryConc）" -ForegroundColor Green
+        } elseif (Test-VmResourceCrash $joined2) {
+            Write-Host "[BLOCKED] 功能层：连续两次 Dart VM 资源耗尽 —— 不是代码回归，也不是通过" -ForegroundColor Yellow
+            $blocked = $true
+        } else {
+            Write-Host "[FAIL] 功能层（重跑未过，且不是 VM 资源耗尽 → 真回归）" -ForegroundColor Red
+            $fail++
+        }
+    }
 } else {
     Write-Host "[FAIL] 功能层" -ForegroundColor Red
     ($out | Select-String -Pattern '\[E\]|Expected:|Actual:' | Select-Object -First 6) |
@@ -90,8 +127,8 @@ if (($out -join "`n") -match "All tests passed") {
 #        且**完全没有 `MIN_COVERED`**（第 34 轮给 gates.sh 加的"分母稀释"防线在 .ps1 上缺失）。
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
-    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '94.8' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '9091' }
+    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '95.9' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '9217' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。
