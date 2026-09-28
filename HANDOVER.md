@@ -11,19 +11,28 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-28，最近一次全绿门禁 = 第四十四轮，产物 `_pt/t7gate.txt`）**：v1.9.0-alpha（`+17`），
-功能层 **1848/1848** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
-**覆盖率：门禁口径（可测面）90.63%（8686/9584）／对外诚实数字（全局）86.24%（8688/10074）** ——
-双指标 ratchet：`COVERAGE_MIN=90.4` **且** `MIN_COVERED=8680`（只升不降；见 §1、docs/12 §77）。
+**当前状态（2026-09-28，最近一次全绿门禁 = 第四十五轮，产物 `_pt/u9gate.txt`）**：v1.9.0-alpha（`+17`），
+功能层 **1911/1911** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
+**覆盖率：门禁口径（可测面）92.82%（8898/9586）／对外诚实数字（全局）88.33%（8900/10076）** ——
+双指标 ratchet：`COVERAGE_MIN=92.6` **且** `MIN_COVERED=8892`（只升不降；见 §1、docs/12 §78）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
+⭐ **第四十五轮（2026-09-28）按新判据（第六代）『同一域里只有源码文本锁的整块 → 用平台通道替身拿下』（**唯一行为改动 = BUG-076 的一个实参**）**：
+① **新建** `test/support/webrtc_stub.dart`（`flutter_webrtc 1.6.2+hotfix.3` 的**平台替身**，只复刻平台侧返回形状，不做业务判断：`FlutterWebRTC.Method` 的 getUserMedia / createPeerConnection / createOffer / addTrack / addCandidate / `mediaStreamTrackSwitchCamera` / trackDispose + `FlutterWebRTC/peerConnectionEvent<id>` / `FlutterWebRTC.Event` 两条事件通道的 StandardMethodCodec 信封；带可编程失败开关与 `methods`/`calls`/`addedCandidates`/`called`/`lastArgs`/`constraintsOf` 观测面）；
+② **新建** `test/call_service_webrtc_test.dart`（**39 例** CS-01…39）—— `call_service.dart` 未覆盖 **132 → 14**。此前该文件**只有 `call_flow_test.dart` 的 35 条 `methodBody` 文本锁**，**没有一次真实 WebRTC 会话被执行过**（宿主上 `RTCPeerConnection` 一碰插件就挂 ⇒「取流→建联→ICE→收尾」整条链路零执行）；
+③ **新建** `test/multi_call_service_connect_test.dart`（**23 例** MC-01…23）—— `multi_call_service.dart` 未覆盖 **100 → 12**；
+④ `test/remote_console_tab_test.dart` 扩 1 例（RCT-14）—— `remote_console_tab.dart` **2 → 0（满覆盖）**。`_send` 端点分支的 `if (ok)`（L372-373）此前**结构上到不了**（宿主上 `sendTo` 恒返回 false）⇒ 用新增的 `RcEndpointService.debugSendTo`（`@visibleForTesting`）替身驱动，并锁住「记账与『8 秒未响应』是同一套状态机的两端」。
+新增 **63 例**（功能层 1848 → 1911）。**真实进度 +212 行**（8688 → 8900），**分母 +2 行**（9584→9586 / 10074→10076，来源 = 注入缝自身的可执行行），阈值抬至 **92.6 / 8892**。
+🔴 **抓修 BUG-076**：`CallService.startCall` 的 `callInvite` 漏 `enqueueOnFail: false` ⇒ 实时信令被写进 outbox 补发队列，本端 `_teardown` 后对端上线会收到**上一通的过期 invite** 并振铃；**自动接通**开着时更会静默建立一路**无人管理**的会话（麦/摄像头已开且 `_answered=true` ⇒ 连 45s 振铃超时都不启动）。`sendTo`/`flushOutbox` **无 TTL 过滤** ⇒ 判断成立；既有锁只锁了 answer/candidate/end，**invite 恰好漏掉**。
+⚠️ **四个坑（已沉淀进 `docs/12 §78.4` / `docs/17 §75.4`）**：① `RTCRtpParameters.fromMap` 要求 `rtcp` 的 `cname`/`reducedSize` **非空**，给 `{}` 抛 `Null is not a subtype of bool`，**且发生在没人 `await` 的 `pc.addTrack` 上** ⇒ 症状是『整个用例莫名失败』；② `StandardMessageCodec` 的嵌套 map 是 `_Map<Object?, Object?>`，`as Map<String, dynamic>` 必抛 ⇒ 逐层重建 `MapEntry`；③ `unawaited(t.stop())` 在**微任务**里才发到通道 ⇒ `tearDown` 紧接着 `uninstall()` 会把异常记在**下一条用例**头上；④ 桩方法名写成 `switchCamera`（真名 **`mediaStreamTrackSwitchCamera`**）会制造**假红**。
+详见 `docs/12 §78` / `docs/17 §75`。
 ⭐ **第四十四轮（2026-09-28）按新判据（第五代）「源码锁是绿的 ≠ 业务路径被执行过」连补五块（**纯测试，生产代码 0 行改动**）**：
 ① **新建** `test/endpoint_script_run_test.dart`（12 例 ESR-01…12）驱动 `endpoint_service._runScript` 指令组主链路（delay/play/tts/vibrate 四类步骤、一次一组互斥、`script.stop` 终止、`occurrenceId` 分段审计）—— 该文件**首次获得行为级覆盖**，未覆盖 **527 → 435 行**；
 ② `assist_host.dart` **22 → 0 行（满覆盖）**：★ D-7 任务载荷裁决此前**只有 `methodBody` 文本锁**、**从没有一条带 `action` 的任务真的发出去过** ⇒ 本轮用真实 wire 驱动（载荷层拒绝 + 审计 `assist.deny` + 只发布一次 / `task` 非 map 走 `TaskWire` 兜底 / `onCommand` 抛异常落 `处理器异常` 且 ack 带回原始异常文本 / `tick()` 心跳相位差异 / `maxSeenWires` 去重挡回放）；
 ③ `script_executor.dart` **14 → 0 行（满覆盖）**（`RcCancel.sleep` 自然到点 **不得**被当成取消 / `runRecordWindow` v2 分流 / `activeCancel` / `ScriptDraft.toPayload` 往返 / `worstCaseMs` / `fromJsonString` 等价 / ★ `registerStopHandler` 用**真实 `didReceiveNotificationResponse` 平台调用**验证「只有 `rc_script_stop` 触发终止」）；
 ④ `guard_screen.dart` **2 → 0 行（满覆盖）**（候选**取消勾选**须真的从持久化集合移除 / 引擎状态流 `addError` 须落文案而非永远转圈）；
 ⑤ `remote_console_tab.dart` **8 → 2 行**（★ 音量滑杆**拖动中不得下发**、只有 `onChangeEnd` 才发 / ack 失败显示原因且**不写偏好**）+ `pair_qr_screen.dart` **7 → 5 行**（`onDetectError` 后**必须仍在扫码**）+ `rc_script.dart` **6 → 0 行（满覆盖）**。
-新增 **34 例**（功能层 1814 → 1848）。**真实进度 +144 行**（8544 → 8688），**分母 9584 / 10074 一字未动**，阈值抬至 **90.4 / 8680**。
+新增 **34 例**（功能层 1814 → 1848）。**真实进度 +144 行**（8544 → 8688），**分母 9584 / 10074 一字未动**，阈值抬至 **90.4 / 8680**（⚠️ 已由第四十五轮抬至 **92.6 / 8892**）。
 ⚠️ **五个坑（已沉淀进 `docs/12 §77.4` / `docs/17 §74.4`）**：
 ① 同一插件里“可达性”**不统一** —— `onDetect`/`errorBuilder` 是 **public final 字段**，但 `onDetectError` 是**非空参数**（写 `!` 会被 analyze 判 `unnecessary_non_null_assertion`）；
 ② 平台桩返回类型必须与插件声明一致（`initialize` 是非空 `bool`，桩返回 `null` 抛 `type 'Null' is not a subtype of type 'FutureOr<bool>'`）；
@@ -2228,12 +2237,12 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
-0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §76.6）**
-   **真实基线（2026-09-28 第四十四轮，产物 `_pt/t7gate.txt`）**：
-   门禁口径（可测面）**90.63%（8686/9584）**／对外诚实数字（全局）**86.24%（8688/10074）**；
-   功能层 **1848** + 压测 **24** 全绿（门禁四步 RC=0）。
-   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=90.4` **且** `MIN_COVERED=8680`，只升不降）—— 补完一批就**同步抬高**它。
-   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → **90.4**。
+0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §78.6）**
+   **真实基线（2026-09-28 第四十五轮，产物 `_pt/u9gate.txt`）**：
+   门禁口径（可测面）**92.82%（8898/9586）**／对外诚实数字（全局）**88.33%（8900/10076）**；
+   功能层 **1911** + 压测 **24** 全绿（门禁四步 RC=0）。
+   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=92.6` **且** `MIN_COVERED=8892`，只升不降）—— 补完一批就**同步抬高**它。
+   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → **92.6**。
    ⚠️ **阈值必须在所有代码改动落地之后再取实测值**：第三十三轮先按 72.68 抬到 72.6，
       随后又落了 11 行"宿主不可达"的安全必需代码 ⇒ 72.59，差 0.01pt 卡红。
    ⚠️ **1 行抖动是常态**（本轮 5823/5822，上一轮 5506/5507）：阈值取"实测 − 0.05pt"
@@ -2250,14 +2259,18 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
    并把"为什么不可达"写进 docs/12 §52.4。**验收标准是"缺口有取证"，
    不是"缺口是 0"。**
    **剩余缺口的逐文件降序以最近一轮实测为准**（**每轮开场先跑** `python _pt/covgap.py 30`）；
-   第四十四轮残缺口分布见 `docs/12 §77.6`（可测面仍缺 **898 行**、全局仍缺 **1386 行**）。
+   第四十五轮残缺口分布见 `docs/12 §78.5 / §78.6`（可测面仍缺 **688 行**、全局仍缺 **1176 行**）。
    ★ **选目标的判据已在第四十/四十一轮定型**（三件套工具见项目 MEMORY）：
    先 `python _pt/covhomoscan.py 10` —— 若**最大连续未覆盖块 < 15 行** ⇒「同源红利」已耗尽，
    改用「**有无专属测试文件**」×「**缺口比 MISS/LF**」排序，**不看缺口绝对数**；
    并继续追问三问：①「**测试文件覆盖的是哪一层**（纯函数 / widget）」、
    ②「**某块分支是否被任何路径驱动过**」、
    ③（第四代，第四十三轮新增）「**插件不推回调 ≠ 回调不可执行**」—— `MobileScanner.onDetect` / `errorBuilder` 是**公开 final 字段**，宿主上可取同一闭包直接驱动。
-   —— 第四十/四十一/四十三轮靠这三问连补十二块（合计 +451 行，**零生产代码改动**）。
+   ④（第五代，第四十四轮新增）「**源码锁是绿的 ≠ 那条业务路径被执行过**」—— `methodBody` / `source_text` 文本锁为绿只证明源码里有那几行字。动作：全库 `grep methodBody` / `source_text`，列"只有文本锁、没有行为用例"的清单逐个补。
+   ⑤（第六代，第四十五轮新增）「**同域文本锁整块 → 先问这一域的平台依赖能不能做成替身**」—— 一份替身可**同时**解锁多块：第四十五轮的 `test/support/webrtc_stub.dart` 一次撬掉 `call_service` + `multi_call_service` = **−210 行**。动作：按**插件/平台**给 `lib/` 分组，找"多文件 + 只有文本锁"的组合。
+   —— 第四十/四十一/四十三轮靠前三问连补十二块（合计 +451 行，**零生产代码改动**）；
+   第四十四轮靠第四代补五块（**+144 行**，零生产代码改动）；
+   第四十五轮靠第五代补四块（**+212 行**，唯一行为改动 = BUG-076 的一个实参）。
    - **ROI 已验证**：UI 页"一条 pump + 2–4 条交互断言"就能拿 **60–75%**
      （样本：`remote_tasks_tab` 0.30%→71.55%、`remote_screen` 0.84%→73.12%）。
    - ★ **性价比最高的一档：先写"整个 App 外壳"的 pump**。第二十二轮实测：
@@ -2642,21 +2655,23 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（第三十六轮续六实测，产物 `_pt/l3.txt`）
+## ★ 当前口径（**第四十五轮**实测，产物 `_pt/u8gate.txt`（pre-ratchet）/ `_pt/u9gate.txt`（post-ratchet））
+
+> ⚠️ 本块原为**第三十六轮续六**的快照（1707 例 / 82.36%），已**连超九轮**；
+> 2026-09-28 第四十五轮按纪律**回刷为实测值**（本块自称「以本块为准」⇒ 长期不刷即是一处静默漂移）。
 
 | 项 | 实测 |
 |---|---|
 | `bash scripts/gates.sh`（**4 步**） | **RC=0 全绿** |
-| 1/4 analyze | `No issues found!` |
-| 2/4 功能层 | **1707**（续五 1677 ⇒ +30） |
+| 1/4 analyze | `No issues found!`（7.4s） |
+| 2/4 功能层 | **1911** |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 82.36%（7875/9562）** ≥ `COVERAGE_MIN=82.2` 且 ≥ `MIN_COVERED=7867` |
-| 全局（对外诚实数字） | **78.36%（7877/10052）** |
-| 真实进度 | **+234 行**（7643 → 7877） |
-| 文档锁单跑 | **33/33 PASS** |
-| APK | 129,580,547 B · 03:47:40 · md5 `eea37ebc…`（本轮**零生产代码改动** ⇒ 仍是有效产物） |
-| 设备层 | `adb devices` 空 ⇒ **未执行** |
-| 续作入口 | **`docs/17 §67`** |
+| 4/4 覆盖率 ratchet | **可测面 92.82%（8898/9586）** ≥ `COVERAGE_MIN=92.6` 且 ≥ `MIN_COVERED=8892` |
+| 全局（对外诚实数字） | **88.33%（8900/10076）** |
+| 真实进度 | **+212 行**（8688 → 8900；其中 +210 = 两个webrtc测试文件，+2 = RCT-14） |
+| 机器锁（DGC / GEC / version） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 92.6 / 8892`） |
+| 设备层 | `adb devices` 空 ⇒ **未执行**（**未执行 ≠ 失败**） |
+| 续作入口 | **`docs/17 §75`（末节 §75.5 = 下一轮入口）** |
 
 **本轮做了什么**：新写 `_pt/covgap.py` 量化缺口 ⇒ 发现 **39% 缺口集中在 `endpoint_service.dart`**
 （756 行）⇒ 集中补 30 例测试（`test/deep_endpoint_dispatch2_test.dart`）驱动 `_dispatch` 的
