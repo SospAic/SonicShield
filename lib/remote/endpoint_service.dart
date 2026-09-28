@@ -214,6 +214,40 @@ class RcEndpointService {
   Future<bool> Function(PairedEndpoint endpoint, RcMessage msg,
       RemoteStore store, bool enqueueOnFail)? debugSendTo;
 
+  /// 装配本机配对码（接收侧派生的输入之一）。
+  ///
+  /// 生产路径在 [start] 里从 `RemoteStore.ensurePairingCode()` 装配，而 [start]
+  /// 紧接着就要去真连 broker —— 宿主机连不上 ⇒ 接收侧密钥**永远装配不出来**，
+  /// 入站链路整段不可达。本缝只做赋值，**不改任何既有方法的行为**。
+  @visibleForTesting
+  void debugSetOwnCode(String code) {
+    _ownCode = code;
+  }
+
+  /// 直接驱动一次**入站原始报文**（等价于 broker 投递到 `client.updates`
+  /// 监听器的那一刻）。
+  ///
+  /// [debugDispatch] 绕过的是入站链路的**整条前端** —— 主题命名空间路由
+  /// （协助会合 vs 配对遥控）、cmd 多盐候选试解、准入裁决、限流窗口与停类插队、
+  /// `guardDispatch` 兜底、以及收尾广播。那一整段此前的唯一生产入口是真实 MQTT
+  /// 监听器，宿主上只有源码锁（`docs/17 §74` 判据第五代：
+  /// **"源码锁是绿的" ≠ "那条业务路径被执行过"**）。本缝让它能被**行为**驱动。
+  ///
+  /// ⚠️ 本缝是**箭头函数** ⇒「`_connect` 的入站监听器是唯一生产调用点」那条
+  /// 形状锁（`guarded_dispatch_test.dart` 在监听器起点之后检索那句调用）不会
+  /// 误判红 —— 箭头体里的调用形态与那句以 `await` 起头的语句**不同形**。
+  ///
+  /// 🔴 **本段注释刻意不写出 `_handleRaw` 的完整声明签名**（连类型前缀一起）。
+  /// 原因：`test/support/source_text.dart` 的 `methodBody()` 用
+  /// `src.indexOf(signature)` 定位 —— 它拿的是**原始源码**（这几处锁没有先
+  /// `stripComments`）。注释里出现同一个字符串 ⇒ 定位到注释、切片"平衡但错误"，
+  /// `DF-05` / `UR-10` / `WR-01` / `Q1-09` 会集体假红（**第四十七轮实测现场**）。
+  /// 教训与 `source_text.dart` 文件头写的是同一条：**判源码文本前先剥注释**，
+  /// 而"不剥注释"的调用点时，注释本身就成了毒。
+  @visibleForTesting
+  Future<void> debugHandleRaw(String topic, String wire) =>
+      _handleRaw(topic, wire);
+
   bool get isRunning => _running;
 
   Future<void> start(RemoteStore store, AppDatabase db) async {
