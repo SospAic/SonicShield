@@ -11,12 +11,19 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-28，最近一次全绿门禁 = 第四十五轮，产物 `_pt/u9gate.txt`）**：v1.9.0-alpha（`+17`），
-功能层 **1911/1911** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
-**覆盖率：门禁口径（可测面）92.82%（8898/9586）／对外诚实数字（全局）88.33%（8900/10076）** ——
-双指标 ratchet：`COVERAGE_MIN=92.6` **且** `MIN_COVERED=8892`（只升不降；见 §1、docs/12 §78）。
+**当前状态（2026-09-28，最近一次全绿门禁 = 第四十六轮的 **post-ratchet 终验**，产物 `_pt/v9gate.txt`）**：v1.9.0-alpha（`+17`），
+功能层 **1924/1924** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
+**覆盖率：门禁口径（可测面）93.59%（8972/9586）／对外诚实数字（全局）89.06%（8974/10076）** ——
+双指标 ratchet：`COVERAGE_MIN=93.3` **且** `MIN_COVERED=8966`（只升不降；见 §1、docs/12 §79）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
+⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
+① **新建** `test/support/just_audio_stub.dart`（照 `just_audio_platform_interface 4.6.0` 的 `JustAudioPlatform` / `AudioPlayerPlatform` 写；`JustAudioPlatform.instance` 是**静态可写单例** ⇒ `tearDown` 必须**还原原实例**，否则污染同进程其它测试文件；另把该包显式加进 `dev_dependencies` 以过 `depend_on_referenced_packages`）；
+② **新建** `test/playback_service_justaudio_test.dart`（**13 例** PA-01…13）—— `lib/services/playback_service.dart` 未覆盖 **76 → 2 行（98.2%）**：取会话 → 载入 → 设音量/循环填充 → 起播 → 随机时长到点收尾 → 渐强/淡入/淡出 → `maxDurationMs<=0` 取整段 / 时长未知回落 → 多轨混音（正常 + **只坏一轨** + `stopSoundscape` 提前打断）→ `stop()` 打断如实报失败 → 载入抛错走 catch 且 `finally` 摘除登记 → `dispose()` **两道平台异常都被吞**且字段无条件清空（幂等）。此前这 76 行**一条都没执行过**（宿主上 `AudioPlayer` 一碰插件 `await` **永久挂起**，第 34 轮已实测记录）。
+新增 **13 例**（功能层 1911 → **1924**）。**真实进度 +74 行**（8900 → 8974），**分母 9586 / 10076 一字未动**（替身在测试侧 ⇒ 纯收益），阈值抬至 **93.3 / 8966**。
+⚠️ **残余 2 行如实登记为结构性**：`const SoundscapeTrackInput(` 构造器行（`const` 实例编译期规范化）+ 扩展方法 `stopSoundscape()`（被类内同名实例成员**遮蔽** ⇒ 死代码）。
+⚠️ **四个坑（已沉淀进 `docs/12 §79.4` / `docs/17 §76.4`）**：① 纯 `test()` 文件碰插件通道**必须**先 `TestWidgetsFlutterBinding.ensureInitialized()`（`AudioSession` 构造器会 `setMethodCallHandler`）否则 13 例全灭；② `just_audio` **激活期**会先替播放器"归位"一次 `setVolume(1.0)`/`setLoopMode(off)` ⇒ 观测序列前一两项**不是**本服务发的；③ 收尾的 `setLoopMode(off)` 排在 `await player.stop()` 之后（平台已切 `_IdleAudioPlayer`）⇒ **结构性观测不到**；④ 挂起根因逐行核实：`_pluginPlatform.init`（`just_audio.dart:1425`）抛异常后 `durationCompleter`（`:1313`）永不完成，`play()`（`:937`）的 `playCompleter` 只在 `_sendPlayRequest` 里 complete ⇒ **不报错、就是挂住**。
+详见 `docs/12 §79` / `docs/17 §76`。
 ⭐ **第四十五轮（2026-09-28）按新判据（第六代）『同一域里只有源码文本锁的整块 → 用平台通道替身拿下』（**唯一行为改动 = BUG-076 的一个实参**）**：
 ① **新建** `test/support/webrtc_stub.dart`（`flutter_webrtc 1.6.2+hotfix.3` 的**平台替身**，只复刻平台侧返回形状，不做业务判断：`FlutterWebRTC.Method` 的 getUserMedia / createPeerConnection / createOffer / addTrack / addCandidate / `mediaStreamTrackSwitchCamera` / trackDispose + `FlutterWebRTC/peerConnectionEvent<id>` / `FlutterWebRTC.Event` 两条事件通道的 StandardMethodCodec 信封；带可编程失败开关与 `methods`/`calls`/`addedCandidates`/`called`/`lastArgs`/`constraintsOf` 观测面）；
 ② **新建** `test/call_service_webrtc_test.dart`（**39 例** CS-01…39）—— `call_service.dart` 未覆盖 **132 → 14**。此前该文件**只有 `call_flow_test.dart` 的 35 条 `methodBody` 文本锁**，**没有一次真实 WebRTC 会话被执行过**（宿主上 `RTCPeerConnection` 一碰插件就挂 ⇒「取流→建联→ICE→收尾」整条链路零执行）；
@@ -2237,12 +2244,12 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
-0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §78.6）**
-   **真实基线（2026-09-28 第四十五轮，产物 `_pt/u9gate.txt`）**：
-   门禁口径（可测面）**92.82%（8898/9586）**／对外诚实数字（全局）**88.33%（8900/10076）**；
-   功能层 **1911** + 压测 **24** 全绿（门禁四步 RC=0）。
-   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=92.6` **且** `MIN_COVERED=8892`，只升不降）—— 补完一批就**同步抬高**它。
-   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → **92.6**。
+0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §79.6）**
+   **真实基线（2026-09-28 第四十六轮，产物 `_pt/v5gate.txt`）**：
+   门禁口径（可测面）**93.59%（8972/9586）**／对外诚实数字（全局）**89.06%（8974/10076）**；
+   功能层 **1924** + 压测 **24** 全绿（门禁四步 RC=0）。
+   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=93.3` **且** `MIN_COVERED=8966`，只升不降）—— 补完一批就**同步抬高**它。
+   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → 92.6 → **93.3**。
    ⚠️ **阈值必须在所有代码改动落地之后再取实测值**：第三十三轮先按 72.68 抬到 72.6，
       随后又落了 11 行"宿主不可达"的安全必需代码 ⇒ 72.59，差 0.01pt 卡红。
    ⚠️ **1 行抖动是常态**（本轮 5823/5822，上一轮 5506/5507）：阈值取"实测 − 0.05pt"
@@ -2655,41 +2662,49 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第四十五轮**实测，产物 `_pt/u8gate.txt`（pre-ratchet）/ `_pt/u9gate.txt`（post-ratchet））
+## ★ 当前口径（**第四十六轮**实测，产物 `_pt/v5gate.txt`（pre-ratchet）
 
-> ⚠️ 本块原为**第三十六轮续六**的快照（1707 例 / 82.36%），已**连超九轮**；
-> 2026-09-28 第四十五轮按纪律**回刷为实测值**（本块自称「以本块为准」⇒ 长期不刷即是一处静默漂移）。
+> ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
+> 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
+> 第四十五轮按纪律回刷；本轮（第四十六轮）再次回刷为实测值。
 
 | 项 | 实测 |
 |---|---|
 | `bash scripts/gates.sh`（**4 步**） | **RC=0 全绿** |
-| 1/4 analyze | `No issues found!`（7.4s） |
-| 2/4 功能层 | **1911** |
+| 1/4 analyze | `No issues found!`（14.1s） |
+| 2/4 功能层 | **1924** |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 92.82%（8898/9586）** ≥ `COVERAGE_MIN=92.6` 且 ≥ `MIN_COVERED=8892` |
-| 全局（对外诚实数字） | **88.33%（8900/10076）** |
-| 真实进度 | **+212 行**（8688 → 8900；其中 +210 = 两个webrtc测试文件，+2 = RCT-14） |
-| 机器锁（DGC / GEC / version） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 92.6 / 8892`） |
+| 4/4 覆盖率 ratchet | **可测面 93.59%（8972/9586）** ≥ `COVERAGE_MIN=93.3` 且 ≥ `MIN_COVERED=8966` |
+| 全局（对外诚实数字） | **89.06%（8974/10076）** |
+| 真实进度 | **+74 行**（8900 → 8974，全部来自 `playback_service.dart` 76 → 2） |
+| 机器锁（DGC / GEC / version） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 93.3 / 8966`） |
 | 设备层 | `adb devices` 空 ⇒ **未执行**（**未执行 ≠ 失败**） |
-| 续作入口 | **`docs/17 §75`（末节 §75.5 = 下一轮入口）** |
+| 续作入口 | **`docs/17 §76`（末节 §76.5 = 下一轮入口）** |
 
-**本轮做了什么**：新写 `_pt/covgap.py` 量化缺口 ⇒ 发现 **39% 缺口集中在 `endpoint_service.dart`**
-（756 行）⇒ 集中补 30 例测试（`test/deep_endpoint_dispatch2_test.dart`）驱动 `_dispatch` 的
-**20 条冷分支** ⇒ 该文件未覆盖 **756 → 528 行**，整库真实进度 **+234 行**。
-阈值 ratchet 三处同步抬至 **82.2 / 7867**；顺带修掉 `CHANGELOG` 残留 `78.4/7494` 的既有漂移
-（**本轮开场门禁因此是红的**）。
+**本轮做了什么**：把第六代判据**换域** —— 同一把尺子（"整域只剩源码文本锁 ⇒ 先问这一域的
+平台依赖能不能做成替身"）从 `flutter_webrtc` 换到 `just_audio`：`playback_service.dart`
+**76 行零覆盖**（宿主上 `AudioPlayer` 一碰插件 `await` **永久挂起**）。新建
+`test/support/just_audio_stub.dart`（照 `just_audio_platform_interface 4.6.0` 真实接口写，
+静态可写单例 + `tearDown` 还原）+ `test/playback_service_justaudio_test.dart`（**13 例**）
+⇒ 未覆盖 **76 → 2（98.2%）**；**生产代码 0 行改动**、**分母 9586 / 10076 一字未动**
+（替身在测试侧，不产生生产行）⇒ **纯收益**。阈值三处同步抬至 **93.3 / 8966**。
 
 **★ 新增长期规则**
-- **`flutter_background_service` 在非 Android/iOS 是「平台 getter 直接抛」**（在任何 MethodChannel
-  **之前**）⇒ 打桩通道无效，必须用 `BackgroundServiceManager.invokeHook`；`NativeBridge` 自身已
-  catch `PlatformException`/`MissingPluginException`，宿主安全 —— **两者要区分对待**。
-- **宿主可观测性**：无 broker 时 `_send`/`_ack` 是安全 no-op，只留 `status='skipped'` +
-  「出站消息未发出」⇒ 这就是"分支走到了"的证据。
-- **改阈值必须三处同步**（`gates.sh` / `gates.ps1` / `CHANGELOG`），否则 DGC/GEC 判红。
-- **动手前先跑 `_pt/covgap.py` 量化缺口**，别平均撒网。
+- **纯 `test()` 文件只要碰插件通道**，就必须先 `TestWidgetsFlutterBinding.ensureInitialized()`
+  —— `AudioSession` 的**构造器**会 `setMethodCallHandler`，binding 未就绪 ⇒ 在
+  `AudioPlayer()` 构造阶段**全灭**（13/13 红），栈指向 `platform_channel.dart:589`。
+- **插件"激活期"会替你做一次归位**：`just_audio` 在 `_setPlatformActive(true)` 里先
+  `setVolume(1.0)` / `setLoopMode(off)` ⇒ 平台侧观测序列的**前一两项不是业务代码发的**，
+  断言必须按真实顺序写（否则"期望 0.4 实得 1.0"这类假红会把人引向业务代码）。
+- **`stop()` 之后的下发观测不到**：收尾的 `setLoopMode(off)` 排在 `await player.stop()` 之后，
+  此刻 `_platform` 已切到 `_IdleAudioPlayer`（纯 Dart 无操作）⇒ 登记为"**观测不到**"
+  而不是"没执行"（两者必须分开写）。
+- **静态可写单例型替身**（`JustAudioPlatform.instance`）必须 `tearDown` **还原原实例**，
+  否则污染同进程其它测试文件；且 import 传递依赖包要显式加进 `dev_dependencies`。
 
-**未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行）；② 🟡 `endpoint_service` 剩 528 行；
-③ 🟡 `guard_screen` 87 + `multi_video_screen` 117 **无专属测试文件**（性价比最高）；
-④ 🟡 `call_service`/`multi_call_service`/`playback_service`（WebRTC + 音频）；
+**未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行）；② 🟡 `endpoint_service` 剩 **435 行**
+（可测面 614 行缺口的 71%）—— 下一轮**先做块分类**（MQTT / salt / 文件 / PTT / 广播文案）
+再判宿主可达性；③ 🟡 同域替身判据的下一批候选：`flutter_local_notifications`（残余仅 3 单行）、
+`mobile_scanner`（残余 4 行）；④ 🟡 长尾 `ptt_tab` 22 / `remote_scripts_tab` 12 / `remote_screen` 10；
 ⑤ 🟡 A10/A12–A15、F-3 待拍板、`rotatedPairingCode` 无 UI 入口。
-**接力棒**：`.workbuddy-ai/memory/HANDOVER-2026-09-26e.md`（最新）。
+**接力棒**：`docs/17 §76.5`（本文件 §6 第 0 项同源）。
