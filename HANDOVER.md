@@ -11,10 +11,13 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-29 第四十九轮，最近一次全绿门禁 = **post-ratchet 权威终验**，产物 `_pt/y9gate.txt`）**：v1.9.0-alpha（`+17`），
+**当前状态（2026-09-30 第五十轮，最近一次全绿门禁 = **干净环境权威终验**，产物 `_pt/z5gate.txt`）**：v1.9.0-alpha（`+17`），
 功能层 **1973/1973** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
-**覆盖率：门禁口径（可测面）96.89%（9298/9596）／对外诚实数字（全局）92.21%（9300/10086）** ——
-双指标 ratchet：`COVERAGE_MIN=96.8` **且** `MIN_COVERED=9292`（只升不降；见 §1、docs/12 §82）。
+**设备层解封（用户指令「模拟器全量测试」）**：`emulator-5554`（sonic_test / API 36 x86_64）上
+**集成 8 文件 22 例 + AOT 验收 6 例全绿**（`_pt/z4.txt`）；🔴 **抓修 BUG-078**（升级路径 P0：插件持久化的
+旧 FGS 类型位残留 ⇒ 升级后服务被拉起必崩；`MainActivity` 最早时机幂等迁移修复，原生层 +45 行）。
+**覆盖率：门禁口径（可测面）96.89%（9298/9596）／对外诚实数字（全局）92.21%（9300/10086）**（持平）——
+双指标 ratchet：`COVERAGE_MIN=96.8` **且** `MIN_COVERED=9292`（只升不降；见 §1、docs/12 §83）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
@@ -2664,53 +2667,52 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第四十九轮**实测，产物 `_pt/y8gate.txt`（pre-ratchet）／`_pt/y9gate.txt`（post-ratchet 权威终验）
+## ★ 当前口径（**第五十轮**实测，产物 `_pt/z5gate.txt`（干净宿主权威终验）／`_pt/z4.txt`（设备层模拟器全量）
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
-> 第四十五轮按纪律回刷；第四十六~四十九轮逐轮回刷为实测值。
+> 第四十五轮按纪律回刷；第四十六~五十轮逐轮回刷为实测值。
 
 | 项 | 实测 |
 |---|---|
-| `bash scripts/gates.sh`（**4 步**） | **RC=0 全绿** |
-| 1/4 analyze | `No issues found!`（9.8s） |
+| `bash scripts/gates.sh`（**4 步**，干净环境，模拟器已关） | **RC=0 全绿** |
+| 1/4 analyze | `No issues found!` |
 | 2/4 功能层 | **1973** |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 96.89%（9298/9596）** ≥ `COVERAGE_MIN=96.8` 且 ≥ `MIN_COVERED=9292` |
+| 4/4 覆盖率 ratchet | **可测面 96.89%（9298/9596）** ≥ `COVERAGE_MIN=96.8` 且 ≥ `MIN_COVERED=9292`（持平，阈值不抬） |
 | 全局（对外诚实数字） | **92.21%（9300/10086）** |
-| 真实进度 | **+75 行**（9225 → 9300：PTT/录音/音源库三桶 + BUG-077） |
-| 机器锁（DGC / GEC / version / SCR） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 96.8 / 9292`） |
-| 设备层 | `adb devices` 空 ⇒ **未执行**（**未执行 ≠ 失败**） |
-| 续作入口 | **`docs/17 §79`（末节 §79.5 = 下一轮入口）** |
+| **设备层（本轮解封）** | `emulator-5554`（sonic_test / API 36 x86_64）：**集成 8 文件 22 例 + AOT 验收 6 例全绿**（冒烟 4/4 · 桥接 6/6 · 振动 6/6 · 守卫开关 1/1 · 多视频 1/1 · **后台振动 3/3 首次** · assist_e2e 真 broker 1/1 · AOT drive 6/6） |
+| 🔴 本轮缺陷 | **BUG-078**（升级路径 P0：插件持久化旧 FGS 类型位残留 ⇒ 升级后服务被拉起即崩；`MainActivity` 最早时机幂等迁移修复，原生 +45 行，logcat 留痕复验） |
+| 真实进度 | Dart 覆盖 **持平**（BUG-078 是原生层，不进 Dart lcov）；**设备层从「连续 17 轮未执行」转为常规可跑** |
+| 机器锁（DGC / GEC / version / SCR） | 待本轮回刷后复跑（Z6） |
+| 续作入口 | **`docs/17 §80`（末节 §80.5 = 下一轮入口）** |
 
-**本轮做了什么**：§78.5 清单的 ②③ 号桶一次拿下 —— 新建
-`test/endpoint_ptt_evidence_test.dart`（**11 例**）：
-**PTT 桶**（`_playPtt`/`_pttFailed` ≈34 行，五条失败/成功路径，`playHandler` 注入 + path_provider
-通道桩指向真实临时目录）；**录音取证桶**（`_recordEvidence` ≈30 行，权限拒绝/到点/异常/终止四终态，
-`RecordPlatform` 平台层假实现本轮加可编程 `startError`）；**音源库桶**（`rc.assetList` 真回执 +
-`sound.play{assetId}`，出站回执**用对端密钥解回来**断言）。
-🔴 **抓修 BUG-077**（手输配对提交无 catch ⇒ 异常裸奔；+4 行生产代码，PQR-37 覆盖；扫码路径 4 行由
-PQR-38 锁死）⇒ `pair_qr_screen.dart` **满覆盖**、`endpoint_service` 未覆盖 **190 → 123**。
-**生产代码行为改动 = BUG-077 的 +4 行**；**分母 +4**（如实计入）。
+**本轮做了什么**：用户指令「使用模拟器做全量测试」⇒ 启动 AVD `sonic_test`（API 36 / x86_64），
+设备层 8 个集成测试文件 22 例 + `flutter drive --profile` AOT 验收 6 例**全绿**；过程中
+🔴 **抓修 BUG-078**（模拟器冒烟加载期「Connection closed」⇒ logcat crash 三次 FATAL：
+`startForeground` 请求类型 `0x3 ⊄ manifest 0x2`；根因 = 插件 6.3.1 把 `foreground_service_types`
+**持久化**在 SharedPreferences，第 35 轮 F-2 收紧后旧值残留；判别实验排除「旧包陈旧」——
+新构建装上 4 秒同样崩；修复 = `MainActivity.onCreate` 最早期幂等迁移剔除 `dataSync`，
+实测 logcat `"mediaPlayback,dataSync" -> "mediaPlayback"`，其后全绿）。
+真包缓存 `app-debug-real.apk` 已刷新为含修复的新构建（身份 python 复核）。
 
 **★ 新增长期规则**
-- 🔴 **入站链路断言竞速**：`_handleRaw` 链含平台通道与 sqflite isolate 的**事件队列**往返，
-  固定轮数的微任务 `settle` 会与断言竞速（症状：`database_closed` 假噪声 + 空数组假红）
-  ⇒ 用**有界 `until()` 轮询等「收尾回执真的投出」**（先 `await logs.append` 再
-  `unawaited(_send)` ⇒ 回执出现 ⇒ 审计必然已落库）。
-- 🔴 **`SharedPreferences` 平台层的键带 `flutter.` 前缀**（legacy `_prefix`）⇒
-  抛错桩必须 `endsWith('.rc_paired')`，`key == 'rc_paired'` 永不命中（空转假绿）。
-- **`SharedPreferences._store` 是 getter**（每次读 instance）⇒ 挂载完成后换桩即刻生效，
-  不必重置 `_completer`。
-- **「手输与扫码共用一条提交路径」不等于「同一条失败路径」**：扫码有 catch、手输没有
-  —— 共用性断言要**分成功/失败两侧**各自取证（本轮 BUG-077 的教训）。
+- 🔴 **带载门禁的宿主数字一律作废**：模拟器（qemu 4 核）与宿主功能层并发 ⇒ 98% 负载下
+  有界等待窗口用例 9 例假红（25 分钟前刚全绿）⇒「有红即作废」纪律生效；设备层作业与
+  宿主权威门禁**必须分开跑**（先设备层 → 杀模拟器 → 干净门禁）。
+- 🔴 **首次 Gradle 构建在负载下 814s** ⇒ 设备层单文件中继超时必须 ≥ 2700s（900s 打穿两次）。
+- 🔴 **中继设备作业环境三件套**：`JAVA_HOME`（Z1 漏配 ⇒ Gradle 全灭 `loading [E]`）+
+  `ANDROID_HOME` + `WITH_DEVICE=1 WITH_AOT=1 DEV=...`（Z1 漏 export ⇒ 门禁设备层被跳过）。
+- 🟡 `flutter_background_service` 的类型配置是**持久化**的（Config → SharedPreferences）
+  ⇒ 任何「收紧类型位」的变更都必须配**升级迁移**，否则存量用户必崩（BUG-078 类别）。
 
-**未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行，`adb devices` 连续多轮为空）；
-② 🟡 `endpoint_service` 剩 **123 行**（113 块、最大 6 行 —— 碎片化，逐条判可达性，
+**未闭环**：① 🟡 `endpoint_service` 剩 **123 行**（113 块、最大 6 行 —— 碎片化，逐条判可达性，
 不可达桶登记进 `docs/12 §82.6` 后停止重复投入）；
-③ 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
-`remote_screen` 10；④ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` /
-`share_plus` / `file_picker` / `flutter_tts`；⑤ 🟡 A10/A12–A15、F-3 待拍板、
-`rotatedPairingCode` 无 UI 入口；⑥ 🟢 BUG-075 / BUG-076 / BUG-077 的设备侧补证（仍未做）。
+② 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
+`remote_screen` 10；③ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` /
+`share_plus` / `file_picker` / `flutter_tts`；④ 🟡 A10/A12–A15、F-3 待拍板、
+`rotatedPairingCode` 无 UI 入口；⑤ 🟡 BUG-075 的**扫码流真机**补证（BUG-076/077 设备侧已由
+本轮模拟器全量覆盖 —— assist_e2e 真 broker 端到端 + 全套设备用例）；⑥ 🟡 真机（MIUI arm64）
+依旧不在线 —— 模拟器已可作为**常规设备层测试面**，真机专项（厂商确认框/降级链）仍待设备。
 
-**接力棒**：`docs/17 §79.5`（本文件 §6 第 0 项同源）。
+**接力棒**：`docs/17 §80.5`（本文件 §6 第 0 项同源）。
