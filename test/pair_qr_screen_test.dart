@@ -7,6 +7,8 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart'
+    as spi;
 import 'package:sonic_shield/features/remote/pair_qr_screen.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
@@ -668,4 +670,145 @@ void main() {
           reason: '每帧弹 SnackBar 会刷屏并撑爆队列，提示必须就地渲染');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // 第四十九轮：落盘失败的 catch 兜底。
+  //
+  // ① PQR-37（手输路径）：🔴 抓修 **BUG-077** —— `_submitManualPair` 此前
+  //    **没有任何 catch**（栈实测：`_openManualPairDialog → _submitManualPair →
+  //    _pairFromUri → addPaired` 异常一路裸奔到框架），落盘失败 = 用户看到
+  //    未处理异常。本轮给生产代码接上与扫码路径同文案的 catch。
+  // ② PQR-38（扫码路径）：`_handleDetectedCode` 的 catch（此前零覆盖 4 行）。
+  //
+  // 桩的两处关键（47/48 轮探明 + 本轮实测修正）：
+  // • 桩必须**选择性**抛错 —— 全抛会炸掉挂载期 `_load` 的身份写入；
+  // • 键到平台层带 **`flutter.` 前缀**（legacy `_prefix`）⇒ 必须 endsWith 匹配，
+  //   否则桩永远不触发（Y3 轮空转假绿的根因）。
+  // ---------------------------------------------------------------------------
+  group('PQR 落盘失败兜底（第四十九轮）', () {
+    testWidgets('PQR-37 配对表写盘失败 → catch 兜底：明说"配对失败：原因"，不得画成成功',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final thrower = _FailingPairStore();
+      final prev = spi.SharedPreferencesStorePlatform.instance;
+      spi.SharedPreferencesStorePlatform.instance = thrower;
+      addTearDown(() => spi.SharedPreferencesStorePlatform.instance = prev);
+
+      tester.view.physicalSize = const Size(1200, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+          const ProviderScope(child: MaterialApp(home: PairQrScreen())));
+      await tester.pumpAndSettle();
+
+      // 阶梯自证 ①：挂载期身份写入走的就是抛错桩（证明换桩生效）。
+      // ⚠️ SharedPreferences 平台层收到的是**带 `flutter.` 前缀**的键
+      // （legacy 实现加前缀后才调 store）⇒ 一律用 endsWith 匹配。
+      expect(thrower.bag.keys.any((k) => k.endsWith('.rc_device_id')), isTrue,
+          reason: '挂载期 rc_device_id 必须已经过抛错桩落袋 —— 否则换桩无效');
+
+      await tester.tap(find.text('扫不了码？手动输入'));
+      await tester.pumpAndSettle();
+      // 阶梯自证 ②：对话框真的开了。
+      expect(find.text('手动输入配对码'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).at(0), '0123456789abcdef');
+      await tester.enterText(find.byType(TextField).at(1), 'AB2CD5EF');
+      await tester.enterText(find.byType(TextField).at(2), '客厅手机');
+      await tester.tap(find.text('配对'));
+      await tester.pumpAndSettle();
+      // 阶梯自证 ③：对话框关了 = 校验通过、提交被接受。
+      expect(find.text('手动输入配对码'), findsNothing,
+          reason: '对话框未关 ⇒ 校验拦住了提交（fieldError），流程根本没到落盘');
+
+      expect(thrower.pairWriteAttempts, greaterThanOrEqualTo(1),
+          reason: '前置自证：配对表写入真的被尝试过（否则用例空转假绿）');
+      expect(find.textContaining('配对失败'), findsOneWidget,
+          reason: 'catch 兜底必须把失败说出来，不得静默吞掉');
+      expect(find.textContaining('模拟盘满'), findsOneWidget,
+          reason: '原因文本必须透传给用户（不是笼统一句失败）');
+      expect(find.textContaining('已配对'), findsNothing,
+          reason: '失败绝不得同时画成成功（假成功比失败更贵）');
+      expect(
+          thrower.bag.keys.where((k) => k.endsWith('.rc_paired')), isEmpty,
+          reason: '配对表确实没写进去');
+    });
+
+    testWidgets('PQR-38 扫码路径：落盘失败走 _handleDetectedCode 的 catch 兜底（L336-339）',
+        (tester) async {
+      stubPermissions({Permission.camera: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+      await _pump(tester);
+      // ⚠️ 换桩时机：`SharedPreferences._store` 是 **getter**（每次调用都读
+      // `SharedPreferencesStorePlatform.instance`）⇒ 挂载完成后再换桩也生效，
+      // 且不必重置 _completer（那会让 _pump 拿到的 store 与屏幕脱钩）。
+      final thrower = _FailingPairStore();
+      final prev = spi.SharedPreferencesStorePlatform.instance;
+      spi.SharedPreferencesStorePlatform.instance = thrower;
+      addTearDown(() => spi.SharedPreferencesStorePlatform.instance = prev);
+
+      await tester.tap(find.text('扫描对端二维码'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      // 与第四十三轮 PQR-28/30 同法：`MobileScanner` 的 `onDetect` 是
+      // **公开 final 字段**，宿主上取同一闭包直接驱动（detector 局部助手
+      // 在别的作用域，这里内联同实现）。
+      tester.widget<MobileScanner>(find.byType(MobileScanner)).onDetect!(
+          const BarcodeCapture(barcodes: [
+        Barcode(
+            rawValue:
+                'sonicshield://pair/0123456789abcdef/%E5%AE%A2%E5%8E%85/ab2c-d5ef',
+            format: BarcodeFormat.qrCode),
+      ]));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(thrower.pairWriteAttempts, greaterThanOrEqualTo(1),
+          reason: '前置自证：配对表写入真的被尝试过');
+      expect(find.textContaining('配对失败'), findsOneWidget,
+          reason: '扫码路径的 catch 兜底（此前零覆盖的 4 行）必须把失败说出来');
+      expect(find.textContaining('模拟盘满'), findsOneWidget,
+          reason: '原因文本必须透传');
+      expect(find.textContaining('已配对'), findsNothing,
+          reason: '失败不得画成成功');
+    });
+  });
+}
+
+/// 只拦 `rc_paired` 的**选择性抛错桩**（PQR-37）。
+///
+/// 挂载期写 `rc_device_id` / `rc_device_name` / `rc_pair_code` 必须放行
+/// （否则 `_load` 未捕获异常直接炸掉用例，永远到不了 `_pairFromUri` 的 catch）。
+class _FailingPairStore extends spi.SharedPreferencesStorePlatform {
+  final Map<String, Object> bag = <String, Object>{};
+  int pairWriteAttempts = 0;
+
+  @override
+  Future<Map<String, Object>> getAll() async => Map<String, Object>.of(bag);
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    // ⚠️ legacy SharedPreferences 会给键加 `flutter.` 前缀才到平台层
+    // （shared_preferences_legacy.dart `_prefix`）⇒ 必须 endsWith 匹配。
+    if (key.endsWith('.rc_paired')) {
+      pairWriteAttempts++;
+      throw Exception('rc_paired 模拟盘满');
+    }
+    bag[key] = value;
+    return true;
+  }
+
+  @override
+  Future<bool> remove(String key) async {
+    bag.remove(key);
+    return true;
+  }
+
+  @override
+  Future<bool> clear() async {
+    bag.clear();
+    return true;
+  }
 }

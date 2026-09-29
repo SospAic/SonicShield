@@ -269,11 +269,25 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
   ///
   /// 码**不在这里归一化**：交给 `_pairFromUri → PairQrProtocol.parseUri`
   /// 单点处理（剥连字符 + 转大写），保证归一化只有协议层一处实现。
+  ///
+  /// ⚠️ BUG-077（第四十九轮修）：此前本方法的失败会**裸奔** ——
+  /// `_handleDetectedCode`（扫码路径）有自己的 `try/catch`，手输路径却没有；
+  /// 落盘失败（盘满 / prefs 异常）时用户看到的是**未处理异常**而不是失败卡片。
+  /// 现在与扫码路径同文案同警示（`配对失败：$e` + `_resultWarn`）。
   Future<void> _submitManualPair(
       String rawId, String rawName, String rawCode) async {
     final uri = '${PairQrProtocol.prefix}${rawId.trim()}/'
         '${Uri.encodeComponent(rawName.trim())}/${rawCode.trim()}';
-    await _pairFromUri(uri);
+    try {
+      await _pairFromUri(uri);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _result = '配对失败：$e';
+          _resultWarn = true;
+        });
+      }
+    }
   }
 
   /// 停止扫描并释放相机（mobile_scanner 6.x：controller 用后必须 dispose，
