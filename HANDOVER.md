@@ -11,10 +11,10 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-09-29 回刷，最近一次全绿门禁 = 第四十八轮的 **post-ratchet 权威终验**，产物 `_pt/x10gate.txt`）**：v1.9.0-alpha（`+17`），
-功能层 **1960/1960** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
-**覆盖率：门禁口径（可测面）96.15%（9223/9592）／对外诚实数字（全局）91.50%（9225/10082）** ——
-双指标 ratchet：`COVERAGE_MIN=95.9` **且** `MIN_COVERED=9217`（只升不降；见 §1、docs/12 §81）。
+**当前状态（2026-09-29 第四十九轮，最近一次全绿门禁 = **post-ratchet 权威终验**，产物 `_pt/y9gate.txt`）**：v1.9.0-alpha（`+17`），
+功能层 **1973/1973** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**。
+**覆盖率：门禁口径（可测面）96.89%（9298/9596）／对外诚实数字（全局）92.21%（9300/10086）** ——
+双指标 ratchet：`COVERAGE_MIN=96.8` **且** `MIN_COVERED=9292`（只升不降；见 §1、docs/12 §82）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
@@ -2244,12 +2244,12 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   真机剩下的增量只有①厂商安装策略②真实无线环境，**别再把它当成整条链路的阻塞**。
 
 当前可选的非硬件项（按建议优先级）：
-0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §79.6 / §81.6）**
-   **真实基线（2026-09-28 第四十八轮，产物 `_pt/x5gate.txt`（pre-ratchet）／`_pt/x10gate.txt`（post-ratchet 权威终验））**：
-   门禁口径（可测面）**96.15%（9223/9592）**／对外诚实数字（全局）**91.50%（9225/10082）**；
-   功能层 **1960** + 压测 **24** 全绿（门禁四步 RC=0）。
-   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=95.9` **且** `MIN_COVERED=9217`，只升不降）—— 补完一批就**同步抬高**它。
-   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → 92.6 → 93.3 → 94.8 → **95.9**。
+0. ★ **覆盖率冲刺（用户明确要求 100%；实测裁决：100% 在宿主门禁内不可达，量化见 docs/12 §79.6 / §82.6）**
+   **真实基线（2026-09-29 第四十九轮，产物 `_pt/y8gate.txt`（pre-ratchet）／`_pt/y9gate.txt`（post-ratchet 权威终验））**：
+   门禁口径（可测面）**96.89%（9298/9596）**／对外诚实数字（全局）**92.21%（9300/10086）**；
+   功能层 **1973** + 压测 **24** 全绿（门禁四步 RC=0）。
+   ⚠️ 门禁已内置 **双指标 ratchet**（`COVERAGE_MIN=96.8` **且** `MIN_COVERED=9292`，只升不降）—— 补完一批就**同步抬高**它。
+   ⚠️ **阈值链（只升不降，每步都有 docs/12 留痕）**：73.2 → 74.0 → 74.1 → 78.4 → 79.8 → 82.2 → 83.0 → 84.3 → 85.5 → 86.6 → 87.9 → 88.9 → 90.4 → 92.6 → 93.3 → 94.8 → 95.9 → **96.8**。
    ⚠️ **阈值必须在所有代码改动落地之后再取实测值**：第三十三轮先按 72.68 抬到 72.6，
       随后又落了 11 行"宿主不可达"的安全必需代码 ⇒ 72.59，差 0.01pt 卡红。
    ⚠️ **1 行抖动是常态**（本轮 5823/5822，上一轮 5506/5507）：阈值取"实测 − 0.05pt"
@@ -2664,63 +2664,53 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第四十八轮**实测，产物 `_pt/x5gate.txt`（pre-ratchet）／`_pt/x10gate.txt`（post-ratchet 权威终验）
+## ★ 当前口径（**第四十九轮**实测，产物 `_pt/y8gate.txt`（pre-ratchet）／`_pt/y9gate.txt`（post-ratchet 权威终验）
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
-> 第四十五轮按纪律回刷；第四十六~四十八轮逐轮回刷为实测值。
+> 第四十五轮按纪律回刷；第四十六~四十九轮逐轮回刷为实测值。
 
 | 项 | 实测 |
 |---|---|
 | `bash scripts/gates.sh`（**4 步**） | **RC=0 全绿** |
-| 1/4 analyze | `No issues found!`（10.2s） |
-| 2/4 功能层 | **1960** |
+| 1/4 analyze | `No issues found!`（9.8s） |
+| 2/4 功能层 | **1973** |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 96.15%（9223/9592）** ≥ `COVERAGE_MIN=95.9` 且 ≥ `MIN_COVERED=9217` |
-| 全局（对外诚实数字） | **91.50%（9225/10082）** |
-| 真实进度 | **+126 行**（9099 → 9225：MQTT 传输整层） |
-| 机器锁（DGC / GEC / version / SCR） | **`RC_LOCKS=0`**（26 例全过；DGC 读回 `scripts = CHANGELOG = 95.9 / 9217`） |
+| 4/4 覆盖率 ratchet | **可测面 96.89%（9298/9596）** ≥ `COVERAGE_MIN=96.8` 且 ≥ `MIN_COVERED=9292` |
+| 全局（对外诚实数字） | **92.21%（9300/10086）** |
+| 真实进度 | **+75 行**（9225 → 9300：PTT/录音/音源库三桶 + BUG-077） |
+| 机器锁（DGC / GEC / version / SCR） | **`RC_LOCKS=0`**（DGC 读回 `scripts = CHANGELOG = 96.8 / 9292`） |
 | 设备层 | `adb devices` 空 ⇒ **未执行**（**未执行 ≠ 失败**） |
-| 续作入口 | **`docs/17 §78`（末节 §78.5 = 下一轮入口）** |
+| 续作入口 | **`docs/17 §79`（末节 §79.5 = 下一轮入口）** |
 
-**本轮做了什么**：判据第六代「换域」第三站 —— **MQTT 客户端替身**。`mqtt_client` 的客户端是
-**纯 Dart 类（不是平台通道）** ⇒ `FakeMqttServerClient extends MqttServerClient` 覆写
-`connect` / `publishMessage` / `subscribe` / `connectionStatus` / `updates` 即可让**生产代码本身**上机。
-新增 `@visibleForTesting` 缝 `debugClientFactory`（客户端**构造表达式**注入点，与
-debugBind / debugDispatch / debugSendTo / debugSetOwnCode / debugHandleRaw 同族，
-**不改既有签名/行为**，五条文本锁 TL-03/04/09/13/QW-01 复跑全绿）；
-新建 `test/support/mqtt_client_stub.dart` + `test/endpoint_mqtt_link_test.dart`（**21 例** MQ-01…21）
-⇒ `endpoint_service` 未覆盖 **314 → 190**，**传输整层（连接/订阅/发送/补发）首次上机**。
-**生产代码行为 0 行改动**；⚠️ **分母 +2 行**（缝自身，如实计入）。
-
-**🛡️ 门禁加固（本轮新增）**：X9 post-ratchet 首跑功能层**整进程崩**（74 例 did not complete、
-**零断言失败**，`zone.cc:95 Out of memory` / `os_thread.cc:345 Could not start thread DartWorker`，
-三个 pid 同时崩 ⇒ 宿主 16 核并发 optimizing JIT 耗尽，**不是回归**）⇒
-`gates.sh` / `gates.ps1` 新增 `is_vm_resource_crash()` 定性 + 降并发重跑
-（`FUNC_RETRY=1` 默认 / `FUNC_RETRY_CONC=4`）；连续两次 ⇒ `[BLOCKED]`（RC=3 环境阻塞）。
+**本轮做了什么**：§78.5 清单的 ②③ 号桶一次拿下 —— 新建
+`test/endpoint_ptt_evidence_test.dart`（**11 例**）：
+**PTT 桶**（`_playPtt`/`_pttFailed` ≈34 行，五条失败/成功路径，`playHandler` 注入 + path_provider
+通道桩指向真实临时目录）；**录音取证桶**（`_recordEvidence` ≈30 行，权限拒绝/到点/异常/终止四终态，
+`RecordPlatform` 平台层假实现本轮加可编程 `startError`）；**音源库桶**（`rc.assetList` 真回执 +
+`sound.play{assetId}`，出站回执**用对端密钥解回来**断言）。
+🔴 **抓修 BUG-077**（手输配对提交无 catch ⇒ 异常裸奔；+4 行生产代码，PQR-37 覆盖；扫码路径 4 行由
+PQR-38 锁死）⇒ `pair_qr_screen.dart` **满覆盖**、`endpoint_service` 未覆盖 **190 → 123**。
+**生产代码行为改动 = BUG-077 的 +4 行**；**分母 +4**（如实计入）。
 
 **★ 新增长期规则**
-- 🔴 **变异脚本改级联必须用块注释 `/* MUTx */`**：行注释 `//` 会在 `..secure = false;` 处多插一个
-  `;` ⇒ **编译失败**（加载期红，**不是断言判红** —— 是红，但不是那件事）。
-- 🔴 **替身成员名先查父类**：`published` 撞 `MqttClient` 自带的
-  `Stream<MqttPublishMessage>? get published` ⇒ 12 条 analyze 报错（改名 `sentWires`；
-  与 `Helper.switchCamera` 假红同族）。
-- **纯 Dart 客户端类也能做替身**：判据⑥「换域」**不只适用于平台通道** —— 三种替身形态至此集齐：
-  通道桩（45 轮 flutter_webrtc）／静态可写单例（46 轮 just_audio，须 tearDown 还原）／
-  **实例注入型工厂缝**（48 轮 mqtt_client，注入点自带 `@visibleForTesting`，无需全局还原）。
-- **断言要约束「次数」而不是「包含」**：两处主题字符串逐字相同时，`contains` 改坏任一都不判红
-  ⇒ 断言 `== 2` 并单点变异证实它真的会红（`Expected: <2>, Actual: <1>`）。
-- **同一份 outbox 上「首连补发」与「显式 flush」会并发读到同一条** ⇒ 审计计数 1 → 2 假红；
-  夹具改为「先 start 并把首连补发推完，再入队」。
+- 🔴 **入站链路断言竞速**：`_handleRaw` 链含平台通道与 sqflite isolate 的**事件队列**往返，
+  固定轮数的微任务 `settle` 会与断言竞速（症状：`database_closed` 假噪声 + 空数组假红）
+  ⇒ 用**有界 `until()` 轮询等「收尾回执真的投出」**（先 `await logs.append` 再
+  `unawaited(_send)` ⇒ 回执出现 ⇒ 审计必然已落库）。
+- 🔴 **`SharedPreferences` 平台层的键带 `flutter.` 前缀**（legacy `_prefix`）⇒
+  抛错桩必须 `endsWith('.rc_paired')`，`key == 'rc_paired'` 永不命中（空转假绿）。
+- **`SharedPreferences._store` 是 getter**（每次读 instance）⇒ 挂载完成后换桩即刻生效，
+  不必重置 `_completer`。
+- **「手输与扫码共用一条提交路径」不等于「同一条失败路径」**：扫码有 catch、手输没有
+  —— 共用性断言要**分成功/失败两侧**各自取证（本轮 BUG-077 的教训）。
 
 **未闭环**：① 🔴 真机安装 + 运行期 `dumpsys`（未执行，`adb devices` 连续多轮为空）；
-② 🟡 `endpoint_service` 剩 **190 行**（文件传输 ≈40 / PTT 音频 ≈28 / salt 派生与校验 /
-广播文案与 ack，逐桶判可达性，不可达桶登记进 `docs/12 §81.6` 后停止重复投入）；
-③ 🟡 `pair_qr_screen` 的 4 行（L336-339，构造法已探明：`SharedPreferencesStorePlatform`
-打 `setValue` 抛错桩 + 先 `setMockInitialValues({})` 清 `_completer`）；
-④ 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
-`remote_screen` 10；⑤ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` / `share_plus` /
-`file_picker` / `flutter_tts`；⑥ 🟡 A10/A12–A15、F-3 待拍板、`rotatedPairingCode` 无 UI 入口；
-⑦ 🟢 BUG-075 / BUG-076 的设备侧补证（仍未做）。
+② 🟡 `endpoint_service` 剩 **123 行**（113 块、最大 6 行 —— 碎片化，逐条判可达性，
+不可达桶登记进 `docs/12 §82.6` 后停止重复投入）；
+③ 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
+`remote_screen` 10；④ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` /
+`share_plus` / `file_picker` / `flutter_tts`；⑤ 🟡 A10/A12–A15、F-3 待拍板、
+`rotatedPairingCode` 无 UI 入口；⑥ 🟢 BUG-075 / BUG-076 / BUG-077 的设备侧补证（仍未做）。
 
-**接力棒**：`docs/17 §78.5`（本文件 §6 第 0 项同源）。
+**接力棒**：`docs/17 §79.5`（本文件 §6 第 0 项同源）。
