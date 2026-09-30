@@ -155,9 +155,14 @@ class AppDatabase {
     // v2 → v3：夜间独立豁免（2026-09，v1.9，docs/20 §8）。
     // 任务级开关，**默认 0 = 不豁免**；主开关另存于 kv，两者皆开才放行。
     // 老库补列后全部为 0，等价于"功能未启用"，行为与升级前一致。
+    // BUG-079（第五十三轮抓修）：v2 时代 occurrences 表**同样没有** quiet_exempt 列，
+    // 升级时漏补 ⇒ 旧库升级后 deletePendingQuietExempt()（关闭夜间豁免主开关时的
+    // fail-safe 清除）每次调用必抛 `no such column`，replan 整链失败（模拟器现场每分钟刷）。
     if (oldV < 3) {
       await db.execute(
           'ALTER TABLE tasks ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
+      await db.execute(
+          'ALTER TABLE occurrences ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
     }
   }
 

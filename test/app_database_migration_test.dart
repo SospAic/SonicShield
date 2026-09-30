@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
+import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
 
 /// `AppDatabase` 的**库迁移与辅助面**测试（第四十轮新建）。
 ///
@@ -56,12 +57,25 @@ void main() {
     )''';
 
   /// 造一个"老版本"的库文件并写一行真实数据，然后**关掉**（模拟用户手上的旧库）。
+  ///
+  /// BUG-079 修复（第五十三轮）后 v2→v3 还会 ALTER occurrences —— 真实 v1 库
+  /// （v1.0 起 onCreate 就有 occurrences）一定带着这张表，所以假库也必须造
+  /// （v1 形状 = 无 quiet_exempt），否则 ALTER 会抛 no such table。
   Future<void> makeLegacyDb(String path, int version, {String? extraAlter}) async {
     final legacy = await openDatabase(
       path,
       version: version,
       onCreate: (db, v) async {
         await db.execute(v1Tasks);
+        await db.execute('''
+          CREATE TABLE occurrences (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            fire_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            volume REAL,
+            duration_ms INTEGER
+          )''');
         if (extraAlter != null) await db.execute(extraAlter);
         await db.insert('tasks', {
           'id': 'legacy-1',
@@ -124,6 +138,80 @@ void main() {
     expect(row['condition_json'], '{"kind":"timeWindow"}',
         reason: 'v2 已有数据必须原样保留 —— 重跑 v1→v2 会抛 duplicate column name');
     expect(row['quiet_exempt'], 0);
+  });
+
+  test('MIG-06 BUG-079 v2 老库 → v3：occurrences.quiet_exempt 也必须补上（fail-safe 清除不得再抛 no such column）',
+      () async {
+    final dir = newTmpDir();
+    final path = p.join(dir.path, 'sonic_shield.db');
+    // 造 v2 库：tasks（v2 形状 = +condition_json）+ occurrences（v2 形状 = **无 quiet_exempt**）
+    // —— 与 09-23 首装旧包在设备上留下的库完全同构（BUG-079 现场复刻）。
+    final legacy = await openDatabase(
+      path,
+      version: 2,
+      onCreate: (db, v) async {
+        await db.execute(v1Tasks);
+        await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
+        await db.execute('''
+          CREATE TABLE occurrences (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            fire_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            volume REAL,
+            duration_ms INTEGER
+          )''');
+        await db.insert('tasks', {
+          'id': 'legacy-1',
+          'name': '老任务',
+          'enabled': 1,
+          'trigger_type': 'dailyAt',
+          'trigger_json': '{"kind":"dailyAt"}',
+          'action_type': 'playAudio',
+          'action_json': '{"kind":"playAudio"}',
+          'created_at': 1,
+          'updated_at': 1,
+        });
+        await db.insert('occurrences', {
+          'id': 'occ-pending',
+          'task_id': 'legacy-1',
+          'fire_at': 1,
+          'status': 'pending',
+        });
+        await db.insert('occurrences', {
+          'id': 'occ-done',
+          'task_id': 'legacy-1',
+          'fire_at': 2,
+          'status': 'done',
+        });
+      },
+    );
+    await legacy.close();
+
+    final db = await AppDatabase.open(dir.path);
+    addTearDown(db.close);
+
+    final occCols = {
+      for (final r in await db.db.rawQuery('PRAGMA table_info(occurrences)'))
+        r['name']! as String
+    };
+    expect(occCols, contains('quiet_exempt'),
+        reason: 'BUG-079：v2→v3 迁移必须同时补 occurrences 表，'
+            '否则旧库升级后关闭夜间豁免主开关的 fail-safe 清除必然抛 no such column');
+
+    // 旧行保留 + 默认值等价于"未豁免"。
+    final rows = await db.db.query('occurrences', orderBy: 'fire_at ASC');
+    expect(rows, hasLength(2), reason: '升级不得丢已提交计划');
+    for (final r in rows) {
+      expect(r['quiet_exempt'], 0, reason: '老库补列后必须为 0（fail-safe）');
+    }
+
+    // 行为锁：升级后 OccurrenceRepository.deletePendingQuietExempt() 真实可调用
+    // （修复前此处必抛 DatabaseException(no such column: quiet_exempt)），
+    // 且只清除 pending+exempt 行 —— done 行与未豁免的 pending 行都不受影响。
+    final repo = OccurrenceRepository(db);
+    final deleted = await repo.deletePendingQuietExempt();
+    expect(deleted, 0, reason: '补列默认 0 ⇒ 没有任何豁免行可清，但调用本身不得抛');
   });
 
   test('MIG-03 通用 JSON 列辅助往返 + inject 单例注入生效', () async {
