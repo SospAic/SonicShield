@@ -28,6 +28,13 @@ import 'package:flutter_test/flutter_test.dart';
 /// 本锁只锁「**文本里的数字**是否与脚本一致」，不锁「跑出来的覆盖率真的达标」——
 /// 后者只能由门禁第 4 步（`tool/coverage_report.dart`）在真实 `coverage/lcov.info`
 /// 上判定。两者是互补的：本锁防"文档骗人"，门禁防"代码退步"。
+///
+/// ## 两组锁（第五十五轮起）
+///
+/// - `DGC-*`：**阈值**一致性（`COVERAGE_MIN` / `MIN_COVERED` = `gates.sh` ↔ `CHANGELOG`）。
+/// - `BAS-*`：**绝对分数**一致性（`9299/9597`、`9301/10087` 这类数字逐位比对）——
+///   补上第五十四轮实测漏网的那一类：**百分比相同、数字不同**，DGC 抓不到。
+///   设计说明见下方 `BAS` 段。
 
 // ═══════════════════════ 纯函数（可被反面样本直接喂） ═══════════════════════
 
@@ -197,6 +204,187 @@ String? gateConsistencyViolation(String shellSrc, String changelogMd) {
   return null;
 }
 
+// ═══════════ 基线**绝对分数**一致锁（BAS，第五十五轮） ═══════════
+//
+// ## 为什么需要它（第五十四轮实测的漏网形状）
+//
+// 第 53 轮把宿主数字刷到 `1974 / 9299 / 9597 / 9301 / 10087`，但 `README.md`、
+// `docs/00`、`docs/09`、`docs/21`、`docs/22`、`HANDOVER.md`、`CHANGELOG.md`
+// 六类落点**仍停在 `1973 / 9298 / 9596 / 9300 / 10086`**。
+//
+// 两组数字的**百分比巧合相同**（`96.89%` / `92.21%`）：
+//   - `9298/9596 = 96.8953…%` → 96.89
+//   - `9299/9597 = 96.8948…%` → 96.89
+// DGC-01…03 只校验**阈值与百分比**（`COVERAGE_MIN` / `MIN_COVERED` / `measuredPct`），
+// 因此**判绿**；人工目视同样容易滑过。⇒ 只有**逐位比对绝对分数**才能发现。
+//
+// ## 判据（真源 = 「权威根节」）
+//
+// `docs/12` 与 `docs/17` 的**最新顶级章节**是每轮现场写就的权威基线（离门禁最近），
+// 二者必须给出**同一对**绝对分数；其余「当前基线」落点必须**逐位含有**这对分数。
+// 本锁**不需要**外部产物（`coverage/lcov.info` 被 `.gitignore` 排除 ⇒ 不能当判据），
+// 全部输入都是**受版本控制的文本** —— 这是刻意的：锁必须能在干净克隆上跑。
+//
+// ## 诚实边界（本锁**不**判什么）
+//
+// - 不判「文档数字与真实门禁产物一致」：没有任何受版本控制的真值载体，
+//   只能靠**互相一致**逼近 —— 若所有落点**同时**漂到同一个错值，本锁抓不到。
+// - `docs/00` 是**逐行历史表**（doc30 行合法保留第四十九轮旧值），
+//   故只做「含有」检查、不做「唯一性」检查。
+// - `docs/21` 同理（保留报告周期历史值）。
+
+/// 剥掉 markdown 装饰符（`*` 加粗、`` ` `` 行内代码）。
+///
+/// 目的：让「口径标签 → 数字」的**相邻关系**在 `可测面 **96.89%（…）**` 与
+/// `可测面 96.89%（…）` 两种写法下**一致可匹配**（否则正则要写两套）。
+String stripMdDecor(String s) => s.replaceAll('*', '').replaceAll('`', '');
+
+/// 一条「口径 → 覆盖率（分子/分母）」断言。
+class BaselineClaim {
+  const BaselineClaim(this.label, this.pct, this.covered, this.total);
+
+  final String label;
+  final double pct;
+  final int covered;
+  final int total;
+
+  /// 绝对分数的**规范写法**（落点必须逐位含有它）。
+  String get fraction => '$covered/$total';
+
+  @override
+  String toString() => '$label $pct%（$fraction）';
+
+  @override
+  bool operator ==(Object other) =>
+      other is BaselineClaim &&
+      other.pct == pct &&
+      other.covered == covered &&
+      other.total == total;
+
+  @override
+  int get hashCode => Object.hash(pct, covered, total);
+}
+
+/// 可测面口径的标签词（门禁阈值用的那个口径）。
+const String kTestableLabel = r'可测面|门禁口径';
+
+/// 全局口径的标签词（对外诚实数字）。
+const String kGlobalLabel = r'全局|对外诚实数字';
+
+/// 设备层豁免**分母**（`background_engine.dart` 454 + `main.dart` 36）。
+///
+/// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
+/// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
+const int kDeviceExemptLines = 454 + 36;
+
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 452/454 ⇒ 2；`main.dart` 0/36）。
+const int kDeviceExemptCovered = 2;
+
+/// 抽「<标签> … X%（A/B）」形态的基线断言。
+///
+/// 标签词与数字之间最多 32 个非换行字符（容忍加粗、全角括号、连接词）。
+List<BaselineClaim> extractBaselineClaims(String text, String labelPattern) {
+  final re = RegExp('($labelPattern)[^\\n]{0,32}?([0-9]{1,3}\\.[0-9]{2})\\s*%'
+      '\\s*[（(]\\s*([0-9]{3,5})\\s*/\\s*([0-9]{3,5})\\s*[)）]');
+  return re
+      .allMatches(stripMdDecor(text))
+      .map((m) => BaselineClaim(m.group(1)!, double.parse(m.group(2)!),
+          int.parse(m.group(3)!), int.parse(m.group(4)!)))
+      .toList();
+}
+
+/// 取 markdown 的**最后一个**顶级章节（`## ` 起至文末）。
+///
+/// 「最新节」= 每轮现场写就的权威基线节；空串 ⇒ 调用方必须判红。
+String lastTopSection(String md) {
+  final idx = md.lastIndexOf('\n## ');
+  return idx < 0 ? '' : md.substring(idx);
+}
+
+/// 从 `CHANGELOG.md` 抽出「### 已知限制」段（落点之一；该段含基线第一条 + 历史链）。
+String changelogLimitsSection(String md) {
+  final start = md.indexOf('### 已知限制');
+  if (start < 0) return '';
+  final next = md.indexOf('\n### ', start + 1);
+  return md.substring(start, next < 0 ? md.length : next);
+}
+
+/// **一致性判定器**：`null` = 一致；非 `null` = 判红原因。
+///
+/// 所有「解析不到 / 落点缺数字」的情形都返回非 `null`（判红而不是跳过）——
+/// 与 DGC 同一条纪律：锁必须响，不能因为"没找到东西"就默认通过。
+String? baselineConsistencyViolation({
+  required String doc12,
+  required String doc17,
+  required Map<String, String> landingPoints,
+}) {
+  final roots = <String, ({BaselineClaim testable, BaselineClaim global})>{};
+  final inputs = <String, String>{
+    'docs/12-测试报告.md': doc12,
+    'docs/17-接管审计与续作清单.md': doc17,
+  };
+  for (final e in inputs.entries) {
+    final sec = lastTopSection(e.value);
+    if (sec.trim().isEmpty) {
+      return '${e.key}：找不到 `## ` 顶级章节（判红，不跳过）';
+    }
+    final t = extractBaselineClaims(sec, kTestableLabel).toSet();
+    final g = extractBaselineClaims(sec, kGlobalLabel).toSet();
+    if (t.isEmpty) {
+      return '${e.key} 最新节里没有「可测面 X%（A/B）」形态的权威基线（判红）——'
+          '请在该节写一行：`**宿主基线（权威）**：可测面 X%（A/B） / 全局 Y%（C/D）`';
+    }
+    if (t.length > 1) {
+      return '${e.key} 最新节里有 ${t.length} 个**互不相同**的可测面基线'
+          '（${t.join(' / ')}）⇒ 锁不知道该信哪条（判红）';
+    }
+    if (g.isEmpty) {
+      return '${e.key} 最新节里没有「全局 Y%（C/D）」形态的权威基线（判红）';
+    }
+    if (g.length > 1) {
+      return '${e.key} 最新节里有 ${g.length} 个**互不相同**的全局基线'
+          '（${g.join(' / ')}）⇒ 锁不知道该信哪条（判红）';
+    }
+    roots[e.key] = (testable: t.first, global: g.first);
+  }
+
+  final keys = roots.keys.toList();
+  final a = roots[keys[0]]!, b = roots[keys[1]]!;
+  if (a.testable != b.testable || a.global != b.global) {
+    return '两个权威根节**互相漂移**：`${keys[0]}` = ${a.testable} / ${a.global}，'
+        '`${keys[1]}` = ${b.testable} / ${b.global}';
+  }
+
+  final t = a.testable, g = a.global;
+  if (g.total - t.total != kDeviceExemptLines) {
+    return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 454 + 36，见 DEX 锁）';
+  }
+  if (g.covered - t.covered != kDeviceExemptCovered) {
+    return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
+        '${g.covered - t.covered} ≠ $kDeviceExemptCovered';
+  }
+  for (final c in <BaselineClaim>[t, g]) {
+    final computed = c.covered * 100 / c.total;
+    if ((computed - c.pct).abs() > 0.05) {
+      return '权威基线自相矛盾：写着 ${c.pct}%，但 ${c.fraction} = '
+          '${computed.toStringAsFixed(2)}%';
+    }
+  }
+
+  final need = <String>[t.fraction, g.fraction];
+  final missing = <String>[];
+  for (final e in landingPoints.entries) {
+    final absent = need.where((n) => !e.value.contains(n)).toList();
+    if (absent.isNotEmpty) missing.add('${e.key}（缺 ${absent.join('、')}）');
+  }
+  if (missing.isNotEmpty) {
+    return '「当前基线」落点没有同步到根节声明的**绝对分数** '
+        '${need.join(' / ')}：\n  ${missing.join('\n  ')}';
+  }
+  return null;
+}
+
 /// 在 `CHANGELOG.md` 的「已知限制」段**内**做一次替换（反面样本构造用）。
 ///
 /// 不在整篇替换：`COVERAGE_MIN` 在历史版本段里也出现过，全局 `replaceFirst`
@@ -361,6 +549,168 @@ void main() {
       expect(c.measuredCovered, isNotNull);
       expect(gateConsistencyViolation(shellSrc, bad), isNotNull,
           reason: '只改了百分比、没改分数 ⇒ 自相矛盾 ⇒ 判红');
+    });
+  });
+
+  // ═══════════ 基线绝对分数一致锁（BAS，第五十五轮新增） ═══════════
+  //
+  // 起因：第五十四轮实测「6 处当前基线落点仍停在第 49/51 轮数字」而百分比**巧合相同**
+  // （`9298/9596` 与 `9299/9597` 都写 96.89%）⇒ DGC 只比阈值与百分比，**抓不到**。
+  group('BAS 基线绝对分数一致锁（防「百分比相同、数字不同」的漂移）', () {
+    final d12 = File('docs/12-测试报告.md').readAsStringSync();
+    final d17 = File('docs/17-接管审计与续作清单.md').readAsStringSync();
+
+    /// 「当前基线」落点。`docs/00` 与 `docs/21` 保留逐轮历史值 ⇒ 只做「含有」检查。
+    final landing = <String, String>{
+      'README.md': File('README.md').readAsStringSync(),
+      'docs/00-文档索引.md': File('docs/00-文档索引.md').readAsStringSync(),
+      'docs/09-测试计划与测试用例.md':
+          File('docs/09-测试计划与测试用例.md').readAsStringSync(),
+      'docs/21-全功能点测试与缺陷修复报告.md':
+          File('docs/21-全功能点测试与缺陷修复报告.md').readAsStringSync(),
+      'docs/22-远程命令全量清单.md': File('docs/22-远程命令全量清单.md').readAsStringSync(),
+      'HANDOVER.md': File('HANDOVER.md').readAsStringSync(),
+      'CHANGELOG.md（已知限制段）': changelogLimitsSection(changelogMd),
+    };
+
+    ({BaselineClaim testable, BaselineClaim global})? rootOf(String text) {
+      final sec = lastTopSection(text);
+      final t = extractBaselineClaims(sec, kTestableLabel).toSet();
+      final g = extractBaselineClaims(sec, kGlobalLabel).toSet();
+      if (t.length != 1 || g.length != 1) return null;
+      return (testable: t.first, global: g.first);
+    }
+
+    /// 只改**最后一个**顶级章节（反面样本构造用）。
+    String mutateLastSection(String md, Pattern from, String to) {
+      final idx = md.lastIndexOf('\n## ');
+      expect(idx, greaterThanOrEqualTo(0), reason: '样本构造失败：没有顶级章节');
+      final mutated = md.substring(idx).replaceFirst(from, to);
+      expect(mutated, isNot(md.substring(idx)),
+          reason: '样本构造失败：段内没找到要替换的模式 $from');
+      return md.substring(0, idx) + mutated;
+    }
+
+    test('BAS-01 两个权威根节各须给出唯一的可测面/全局基线（解析不到即红）', () {
+      final r12 = rootOf(d12);
+      final r17 = rootOf(d17);
+      expect(r12, isNotNull,
+          reason: '`docs/12` 最新节里没有唯一的「可测面 X%（A/B）」+「全局 Y%（C/D）」'
+              '权威基线 ⇒ 本锁失去真源，必须红（不许跳过）');
+      expect(r17, isNotNull,
+          reason: '`docs/17` 最新节缺权威基线 ⇒ 判红。该节请写一行：'
+              '`**宿主基线（权威）**：可测面 X%（A/B） / 全局 Y%（C/D）`');
+      print('[BAS] docs/12 最新节 : ${r12?.testable} / ${r12?.global}');
+      print('[BAS] docs/17 最新节 : ${r17?.testable} / ${r17?.global}');
+    });
+
+    test('BAS-02 ★ 两个权威根节必须逐位一致（防两节互相漂移）', () {
+      final r12 = rootOf(d12), r17 = rootOf(d17);
+      expect(r12, isNotNull);
+      expect(r17, isNotNull);
+      expect(r12!.testable.fraction, r17!.testable.fraction,
+          reason: '可测面**绝对分数**在两个根节里不一致 ⇒ 至少有一节没回刷');
+      expect(r12.global.fraction, r17.global.fraction,
+          reason: '全局**绝对分数**在两个根节里不一致 ⇒ 至少有一节没回刷');
+    });
+
+    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 490 行；已覆盖 +2 行）', () {
+      final r12 = rootOf(d12);
+      expect(r12, isNotNull);
+      final t = r12!.testable, g = r12.global;
+      expect(g.total - t.total, kDeviceExemptLines,
+          reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
+              '$kDeviceExemptLines（= 454 + 36，与 DEX 锁同源）');
+      expect(g.covered - t.covered, kDeviceExemptCovered,
+          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 452/454）');
+    });
+
+    test('BAS-04 ★ 7 个「当前基线」落点必须逐位含有根节的绝对分数', () {
+      final r12 = rootOf(d12);
+      expect(r12, isNotNull);
+      final need = <String>[r12!.testable.fraction, r12.global.fraction];
+      for (final e in landing.entries) {
+        for (final n in need) {
+          expect(e.value.contains(n), isTrue,
+              reason: '${e.key} 里找不到 `$n` —— 该落点没同步到当前权威基线'
+                  '（第五十四轮实测过：`9298/9596` 与 `9299/9597` 百分比相同、'
+                  '数字不同，机器锁与目视**都**漏过）');
+        }
+      }
+    });
+
+    test('BAS-05 权威基线的百分比与分数必须自洽（±0.05pt）', () {
+      final r12 = rootOf(d12);
+      expect(r12, isNotNull);
+      for (final c in <BaselineClaim>[r12!.testable, r12.global]) {
+        final computed = c.covered * 100 / c.total;
+        expect((computed - c.pct).abs(), lessThanOrEqualTo(0.05),
+            reason: '写着 ${c.pct}%，但 ${c.fraction} = '
+                '${computed.toStringAsFixed(2)}%');
+      }
+    });
+
+    test('BAS-06 端到端判定器在真实仓库文本上必须判绿', () {
+      final v = baselineConsistencyViolation(
+          doc12: d12, doc17: d17, landingPoints: landing);
+      expect(v, isNull, reason: '基线绝对分数不一致：$v');
+    });
+
+    group('反面样本（篡改过的文本喂进去必须判红）', () {
+      test('BAS-90a 根节里改掉一位数字 → 判红', () {
+        final bad = mutateLastSection(d12, '9299/9597', '9298/9596');
+        expect(
+            baselineConsistencyViolation(
+                doc12: bad, doc17: d17, landingPoints: landing),
+            isNotNull,
+            reason: '根节被改、落点没改 ⇒ 必须判红（这正是第五十四轮的形状）');
+      });
+
+      test('BAS-90b 某个落点改掉一位数字 → 判红', () {
+        // 必须用 `replaceAll`：`README.md` 里这对分数出现**两次**（门禁基线块 + 覆盖率行），
+        // 只改第一处的话第二处仍含真值 ⇒ 样本失效（本组首跑实测踩到，故留痕）。
+        final bad = Map<String, String>.from(landing)
+          ..['README.md'] =
+              landing['README.md']!.replaceAll('9299/9597', '9298/9596');
+        expect(bad['README.md'], isNot(landing['README.md']));
+        expect(bad['README.md']!.contains('9299/9597'), isFalse,
+            reason: '样本构造失败：改完仍含真值 ⇒ 这条反例就测不到东西');
+        expect(
+            baselineConsistencyViolation(
+                doc12: d12, doc17: d17, landingPoints: bad),
+            isNotNull,
+            reason: '落点数字与根节不同 ⇒ 必须判红，不许因为"百分比一样"放过');
+      });
+
+      test('BAS-90c 落点里的绝对分数被删掉 → 判红（vacuity 守卫）', () {
+        final bad = Map<String, String>.from(landing)
+          ..['HANDOVER.md'] =
+              landing['HANDOVER.md']!.replaceAll('9301/10087', '');
+        expect(bad['HANDOVER.md'], isNot(landing['HANDOVER.md']));
+        expect(
+            baselineConsistencyViolation(
+                doc12: d12, doc17: d17, landingPoints: bad),
+            isNotNull,
+            reason: '找不到数字必须判红，不能默认通过');
+      });
+
+      test('BAS-90d 豁免面几何被破坏（分母 +1）→ 判红', () {
+        final bad = mutateLastSection(d12, '10087', '10088');
+        expect(
+            baselineConsistencyViolation(
+                doc12: bad, doc17: d17, landingPoints: landing),
+            isNotNull,
+            reason: '全局分母 − 可测面分母 ≠ 490 ⇒ 豁免面几何漂移');
+      });
+
+      test('BAS-90e 根节塞进第二条不同的可测面基线 → 判红（防"只取第一条"的假绿）', () {
+        final bad = '$d12\n> 可测面 99.99%（9999/9999）\n';
+        expect(
+            baselineConsistencyViolation(
+                doc12: bad, doc17: d17, landingPoints: landing),
+            isNotNull,
+            reason: '同一节里两条互不相同的可测面基线 ⇒ 真源不唯一 ⇒ 必须判红');
+      });
     });
   });
 }
