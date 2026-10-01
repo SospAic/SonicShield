@@ -283,6 +283,91 @@ const int kDeviceExemptLines = 454 + 36;
 /// 设备层豁免面**已覆盖**行（`background_engine.dart` 452/454 ⇒ 2；`main.dart` 0/36）。
 const int kDeviceExemptCovered = 2;
 
+// ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
+
+/// 「机器锁」= 门禁之外的 4 份**契约锁**文件（与 `_pt/jobBX4.sh` 的复跑清单同源）。
+///
+/// 🔴 这是一个**显式清单**：将来新增第 5 把锁时**必须**同时加进来，否则
+/// 「自述计数」会漏算新锁（那正是本锁要防的漂移，只是换了个来源）。
+const List<String> kMachineLockFiles = <String>[
+  'test/doc_gate_consistency_test.dart',
+  'test/gate_entrypoint_consistency_test.dart',
+  'test/version_consistency_test.dart',
+  'test/scripts_encoding_lock_test.dart',
+];
+
+/// 静态统计一个 Dart 测试文件里的 `test(` 用例数。
+///
+/// 只认**行首（允许缩进）**的 `test(`：
+/// - 注释行以 `//` / `///` 起头 ⇒ 不可能命中（`^[ \t]*` 之后必须先出现 `test(`）；
+/// - `machineLockCountViolation` 之类的**函数名**不会误命中（它们不以 `test(` 开头）。
+int countStaticLockTests(String src) {
+  final re = RegExp(r'^[ \t]*test\(', multiLine: true);
+  return re.allMatches(src).length;
+}
+
+/// 抽「机器锁 … N/N」自述计数。
+///
+/// 返回 `null` = 该文本里**没有**这个自述（调用方必须判红，不许跳过）；
+/// 返回 `-1` = 写了但不自洽（分子 ≠ 分母）；
+/// 其余 = 自述的数字。
+int? parseMachineLockClaim(String text) {
+  final re = RegExp(r'机器锁[^\n]{0,40}?([0-9]{1,3})\s*/\s*([0-9]{1,3})');
+  final m = re.firstMatch(stripMdDecor(text));
+  if (m == null) return null;
+  final a = int.parse(m.group(1)!);
+  final b = int.parse(m.group(2)!);
+  return a == b ? a : -1;
+}
+
+/// **一致性判定器**：`null` = 一致；非 `null` = 判红原因。
+///
+/// ## 补的是第三类漂移：**自述计数过期**
+///
+/// `DGC` 锁阈值、`BAS` 锁绝对分数、`BRL` 锁「自称最近/当前」——
+/// 三者**都**不校验「机器锁共 N 例」这个自述数字。第五十七轮实测现场：
+/// 机器锁实测 **47** 例、文档自述停在 **45**，而三把锁**全绿**。
+///
+/// ## 真源与边界（诚实标注）
+///
+/// - **可静态化的那一半**（本锁）：机器锁例数 = 4 个锁文件里 `test(` 的行数
+///   ⇒ 唯一真源是**版本控制里的源码本身**，因此可以机器化、可以自动判红。
+/// - **不可静态化的那一半**：**功能层例数**依赖门禁产物（`_pt/*gate.txt`，
+///   不在版本控制内）⇒ 本锁**不**替它背书，只能收尾人工核对。
+///   不许假装它也能静态锁。
+String? machineLockCountViolation({
+  required String doc12,
+  required String doc17,
+  required int staticCount,
+}) {
+  if (staticCount <= 0) {
+    return '静态统计到 $staticCount 例 ⇒ 清单或正则失效（判红，不跳过）';
+  }
+  final inputs = <String, String>{
+    'docs/12-测试报告.md': lastTopSection(doc12),
+    'docs/17-接管审计与续作清单.md': lastTopSection(doc17),
+  };
+  for (final e in inputs.entries) {
+    if (e.value.trim().isEmpty) {
+      return '${e.key}：找不到 `## ` 顶级章节（判红，不跳过）';
+    }
+    final claim = parseMachineLockClaim(e.value);
+    if (claim == null) {
+      return '${e.key} 最新节里没有「机器锁 N/N」自述计数（判红）——'
+          '请在该节写一行：`机器锁 **N/N**`';
+    }
+    if (claim == -1) {
+      return '${e.key} 最新节的「机器锁 N/N」**分子分母不一致**（判红）';
+    }
+    if (claim != staticCount) {
+      return '${e.key} 自述机器锁 $claim 例，而 4 个锁文件静态统计为 $staticCount 例'
+          ' ⇒ **自述计数过期**（第五十七轮实测：实测 47 例 vs 自述 45，'
+          '`DGC`/`BAS`/`BRL` 三把锁全绿也抓不到）';
+    }
+  }
+  return null;
+}
+
 /// 抽「<标签> … X%（A/B）」形态的基线断言。
 ///
 /// 标签词与数字之间最多 32 个非换行字符（容忍加粗、全角括号、连接词）。
@@ -1011,6 +1096,91 @@ void main() {
       expect(thresholdChainStaleViolations(coverageMin: 96.8, docs: explain),
           isEmpty,
           reason: '解释性文字里出现「阈值链」三字不得被当成真正的阈值链');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // MCL：机器锁「自述计数」一致锁（第五十九轮新增；补 §87.6 / §88.5 第 8 项）
+  // ══════════════════════════════════════════════════════════════════
+
+  group('MCL 机器锁「自述计数」一致锁（防「自述计数过期」——DGC/BAS/BRL 都抓不到）', () {
+    final d12 = File('docs/12-测试报告.md').readAsStringSync();
+    final d17 = File('docs/17-接管审计与续作清单.md').readAsStringSync();
+
+    int staticCount() {
+      var n = 0;
+      for (final f in kMachineLockFiles) {
+        n += countStaticLockTests(File(f).readAsStringSync());
+      }
+      return n;
+    }
+
+    test('MCL-01 清单里的 4 把锁文件都必须在（不许指向不存在的文件）', () {
+      for (final f in kMachineLockFiles) {
+        expect(File(f).existsSync(), isTrue,
+            reason: '`kMachineLockFiles` 里的 `$f` 不存在 ⇒ 自述计数会漏算这一把锁');
+        expect(countStaticLockTests(File(f).readAsStringSync()),
+            greaterThan(0),
+            reason: '$f 里一个 `test(` 都数不到 ⇒ 计数判据失效（恒真）');
+      }
+    });
+
+    test('MCL-02 ★ 真实仓库：活根节自述计数 == 静态统计，且落点逐位含有该计数', () {
+      final n = staticCount();
+      final claim = '$n/$n';
+      final v = machineLockCountViolation(
+          doc12: d12, doc17: d17, staticCount: n);
+      print('[MCL] 4 把锁文件静态统计 = $n 例；'
+          'docs/12 = ${parseMachineLockClaim(lastTopSection(d12))}；'
+          'docs/17 = ${parseMachineLockClaim(lastTopSection(d17))}');
+      expect(v, isNull, reason: '机器锁自述计数不一致：$v');
+
+      // 落点（与 `BAS` 同款「含有」检查）：自述计数必须**逐位**出现，
+      // 否则"文档里另一半还停在旧计数上"（第五十七轮实测 14 处回刷的正是这个面）。
+      final landing = <String, String>{
+        'README.md': File('README.md').readAsStringSync(),
+        'HANDOVER.md': File('HANDOVER.md').readAsStringSync(),
+        'CHANGELOG.md（已知限制段）':
+            changelogLimitsSection(File('CHANGELOG.md').readAsStringSync()),
+      };
+      final missing = <String>[];
+      for (final e in landing.entries) {
+        if (!e.value.contains(claim)) missing.add(e.key);
+      }
+      expect(missing, isEmpty,
+          reason: '这些落点里找不到 `$claim`（机器锁自述计数）：${missing.join('、')} ⇒ '
+              '自述计数在落点间漂移（同一件事在不同文件里写着不同的数）');
+    });
+
+    group('反面样本（篡改过的文本喂进去必须判红）', () {
+      test('MCL-90a ★ 反面样本：自述 99/99 ≠ 静态统计 → 判红', () {
+        const bad12 = '\n## §99 假节\n机器锁 **99/99**。\n';
+        const bad17 = '\n## §99 假节\n机器锁 **99/99**。\n';
+        final v = machineLockCountViolation(
+            doc12: bad12, doc17: bad17, staticCount: staticCount());
+        expect(v, isNotNull,
+            reason: '★ 自述计数与源码静态统计不符 ⇒ 必须判红 ——'
+                '这正是第五十七轮实测（实测 47 / 自述 45）漏网的那一类');
+      });
+
+      test('MCL-90b ★ 反面样本：分子分母不一致（47/50）→ 判红', () {
+        const bad12 = '\n## §99 假节\n机器锁 **47/50**。\n';
+        const bad17 = '\n## §99 假节\n机器锁 **47/50**。\n';
+        final v = machineLockCountViolation(
+            doc12: bad12, doc17: bad17, staticCount: staticCount());
+        expect(v, isNotNull, reason: '分子分母不一致是"自述已坏"的强信号，必须判红');
+      });
+
+      test('MCL-90c ★ 反面样本：活节里**根本没有**自述计数 → 判红（不许跳过）', () {
+        final n = staticCount();
+        const bad12 = '\n## §99 假节\n本节没有任何自述计数。\n';
+        final bad17 = '\n## §99 假节\n机器锁 **$n/$n**。\n';
+        final v = machineLockCountViolation(
+            doc12: bad12, doc17: bad17, staticCount: n);
+        expect(v, isNotNull,
+            reason: '解析不到 ⇒ 判红而不是跳过：锁必须响，'
+                '"没找到东西就默认通过"等于把锁变成恒真断言');
+      });
     });
   });
 }
