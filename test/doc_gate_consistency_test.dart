@@ -821,7 +821,14 @@ void main() {
 
     group('反面样本（篡改过的文本喂进去必须判红）', () {
       test('BAS-90a 根节里改掉一位数字 → 判红', () {
-        final bad = mutateLastSection(d12, '9299/9597', '9298/9596');
+        // 🔴 判据必须**随权威根节走**：直接取当前根节的可测面绝对分数，再把分子/分母各减 1。
+        // （第五十八轮实测踩到：样本里写死 `9299/9597` ⇒ 基线一升级样本就"改不动"，
+        //   mutateLastSection 找不到模式 ⇒ 假红。故改为从活根节派生。）
+        final frac = rootOf(d12)!.testable.fraction;
+        final parts = frac.split('/');
+        final perturbed =
+            '${int.parse(parts[0]) - 1}/${int.parse(parts[1]) - 1}';
+        final bad = mutateLastSection(d12, frac, perturbed);
         expect(
             baselineConsistencyViolation(
                 doc12: bad, doc17: d17, landingPoints: landing),
@@ -832,11 +839,15 @@ void main() {
       test('BAS-90b 某个落点改掉一位数字 → 判红', () {
         // 必须用 `replaceAll`：`README.md` 里这对分数出现**两次**（门禁基线块 + 覆盖率行），
         // 只改第一处的话第二处仍含真值 ⇒ 样本失效（本组首跑实测踩到，故留痕）。
+        // 🔴 同样**随根节走**（第五十八轮改为派生，避免基线升级后样本失效）。
+        final frac = rootOf(d12)!.testable.fraction;
+        final parts = frac.split('/');
+        final perturbed =
+            '${int.parse(parts[0]) - 1}/${int.parse(parts[1]) - 1}';
         final bad = Map<String, String>.from(landing)
-          ..['README.md'] =
-              landing['README.md']!.replaceAll('9299/9597', '9298/9596');
+          ..['README.md'] = landing['README.md']!.replaceAll(frac, perturbed);
         expect(bad['README.md'], isNot(landing['README.md']));
-        expect(bad['README.md']!.contains('9299/9597'), isFalse,
+        expect(bad['README.md']!.contains(frac), isFalse,
             reason: '样本构造失败：改完仍含真值 ⇒ 这条反例就测不到东西');
         expect(
             baselineConsistencyViolation(
@@ -846,9 +857,10 @@ void main() {
       });
 
       test('BAS-90c 落点里的绝对分数被删掉 → 判红（vacuity 守卫）', () {
+        // 🔴 随根节走的全局分数（第五十八轮改为派生）。
+        final gfrac = rootOf(d12)!.global.fraction;
         final bad = Map<String, String>.from(landing)
-          ..['HANDOVER.md'] =
-              landing['HANDOVER.md']!.replaceAll('9301/10087', '');
+          ..['HANDOVER.md'] = landing['HANDOVER.md']!.replaceAll(gfrac, '');
         expect(bad['HANDOVER.md'], isNot(landing['HANDOVER.md']));
         expect(
             baselineConsistencyViolation(
@@ -940,10 +952,17 @@ void main() {
 
     test('BRL-90b 反面样本：自述最近 = 最新轮次 → 判绿（判据非恒真）', () {
       final n = latestRoundFromChangelog(changelogMd)!;
+      // 🔴 轮次必须**从 CHANGELOG 首条标题派生**（第五十八轮实测踩到：样本写死
+      //    `第五十七轮` ⇒ 真源一升级，样本就不再代表"等于最新轮次" ⇒ 假红）。
+      final cn = RegExp(r'^####\s*第([一二三四五六七八九十零百\d]+)轮',
+              multiLine: true)
+          .firstMatch(changelogMd)!
+          .group(1)!;
       final good = <String, String>{
-        'x.md': '> 最近一次全绿门禁（第五十七轮）实测：RC=0\n',
+        'x.md': '> 最近一次全绿门禁（第$cn轮）实测：RC=0\n',
       };
-      expect(recentGateStaleViolations(latestRound: n, docs: good), isEmpty);
+      expect(recentGateStaleViolations(latestRound: n, docs: good), isEmpty,
+          reason: '样本用的轮次 [$cn] 必须等于最新轮次 [$n]');
     });
 
     test('BRL-90c 反面样本：±5 行内有历史标记 ⇒ 豁免（防误伤历史段）', () {
