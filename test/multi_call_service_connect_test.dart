@@ -422,4 +422,50 @@ void main() {
       expect(svc.sessions, hasLength(2));
     });
   });
+
+  // ══════════════════ MC-D 覆盖率冲刺（第六十一轮） ══════════════════
+  //
+  // 只补**既有未覆盖分支**，不新增任何生产代码；断言的是"用户看到的后果"。
+
+  group('MC-D 收尾路径：信令异常与"断线未关"', () {
+    test('BK-MC-01 answer 信令处理抛错 → 该路判失败并给出理由（不停在"连接中"）',
+        () async {
+      await svc.connect(peer('EP40'), store);
+      final s = svc.sessionOf('EP40')!;
+      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      svc.attach(ctrl.stream);
+      // SDP 不合法的常见形态：平台侧抛 PlatformException。
+      rtc.failSetRemoteDescription = true;
+      addTearDown(() => rtc.failSetRemoteDescription = false);
+
+      ctrl.add(<String, dynamic>{
+        'type': RcCmd.callAnswer,
+        'payload': <String, dynamic>{
+          'callId': s.callId,
+          'sdp': 'answer-sdp',
+          'sdpType': 'answer',
+        },
+      });
+      await settle();
+
+      expect(s.phase, MultiCallPhase.failed,
+          reason: '信令处理失败却停在 connecting ⇒ 用户永远只看到转圈，不知道这路已经废了');
+      expect(s.failure, '应答信令处理失败',
+          reason: '失败必须带可诊断的原因，否则只能显示一句无信息量的"连接失败"');
+      expect(s.answered, isFalse,
+          reason: '远端描述没设成功就不能算"已应答"——否则 45s 超时会把真未接放过');
+      await ctrl.close();
+      await settle(2);
+    });
+
+    test('BK-MC-02 连接状态 = 断开（非关闭）→ 同样按"已挂断"收尾', () async {
+      await svc.connect(peer('EP41'), store);
+      // `disconnected` 是**独立**于 `closed` 的一个枚举值：只处理 closed
+      // 会让"网络抖一下"的一路永远留在列表里显示"连接中"。
+      await rtc.pushConnectionState('disconnected');
+      await settle();
+      expect(svc.sessionOf('EP41')!.phase, MultiCallPhase.closed,
+          reason: 'disconnected 分支漏掉 ⇒ 该路再也回不到终态，用户无法重连');
+    });
+  });
 }

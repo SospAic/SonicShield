@@ -665,4 +665,65 @@ void main() {
       await settle(2);
     });
   });
+
+  // ══════════════════ CS-G 覆盖率冲刺（第六十一轮） ══════════════════
+  //
+  // 只补**既有未覆盖分支**（协商中途抛错 / `closed` 副作用真的到达），
+  // 生产代码 0 行改动。
+
+  group('CS-G 协商异常与 closed 副作用', () {
+    test('BK-CS-01 被叫接听时远端 SDP 不合法 → 收场为 failed，不留在 connecting',
+        () async {
+      await freshPrefs(<String, Object>{'rc_call_auto_answer': true});
+      rtc.failSetRemoteDescription = true;
+      addTearDown(() => rtc.failSetRemoteDescription = false);
+
+      final ok = await svc.onIncomingCall(
+          <String, dynamic>{'callId': 'C-70', 'sdp': 'bad-offer', 'video': false},
+          peer('EP0070'),
+          store);
+      await settle();
+
+      expect(ok, isFalse,
+          reason: '协商在本地就炸了却回 true ⇒ 主叫白等 45s，被叫界面停在"接听中"');
+      expect(svc.lastEndReason, CallEndReason.failed);
+      expect(svc.currentPhase, CallPhase.idle,
+          reason: '异常路径也必须归位，否则下一次通话从脏状态开始');
+    });
+
+    test('BK-CS-02 主叫收到 answer 但远端 SDP 不合法 → 同样收场为 failed',
+        () async {
+      await svc.startCall(peer('EP0071'), store);
+      final callId = svc.callId!;
+      rtc.failSetRemoteDescription = true;
+      addTearDown(() => rtc.failSetRemoteDescription = false);
+
+      await svc.onAnswer(<String, dynamic>{
+        'callId': callId,
+        'sdp': 'bad-answer',
+        'type': 'answer',
+      });
+      await settle();
+
+      expect(svc.lastEndReason, CallEndReason.failed,
+          reason: '远端描述设不上还留在 connecting ⇒ 双方都在等对方，谁也等不到');
+      expect(svc.currentPhase, CallPhase.idle);
+    });
+
+    test('BK-CS-03 通话中连接被关闭（副作用）→ 真的收尾，且不覆盖既有结束原因',
+        () async {
+      await svc.startCall(peer('EP0072'), store);
+      await rtc.pushConnectionState('connected');
+      await settle();
+      expect(svc.currentPhase, CallPhase.connected);
+
+      await rtc.pushConnectionState('closed');
+      await settle();
+
+      expect(svc.currentPhase, CallPhase.idle,
+          reason: '`closed` 是 `_pc.close()` 的副作用，本端必须跟着归位，'
+              '否则 UI 停在"通话中"而底层已断');
+      expect(svc.inCall, isFalse);
+    });
+  });
 }

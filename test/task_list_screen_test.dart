@@ -598,4 +598,32 @@ void main() {
           reason: '失败不能伪装成"没有任务"——用户会以为数据丢了');
     }, timeout: perTest);
   });
+
+  // ══════════════════ TLS-08 覆盖率冲刺（第六十一轮） ══════════════════
+  //
+  // TLS-03b/03c 覆盖的是开关的**成功**路径；失败路径（重排原生闹钟这一步炸了）
+  // 此前一行都没被执行过 —— 而它正是"开关看起来关掉了，重启又自己开了"的现场。
+
+  group('TLS-08 开关失败路径', () {
+    testWidgets('BK-TLS-01 重排失败 → 开关必须回落并**明说原因**（不许静默）',
+        (tester) async {
+      await addTask(tester, makeTask('t1', name: '唯一的'));
+      await pumpList(tester);
+
+      // 落库成功、重排原生闹钟失败：这是真机上最常见的中间态
+      // （后台服务被杀 / 精确闹钟权限被撤）。
+      BackgroundServiceManager.replanHook =
+          () async => throw StateError('replan-boom');
+
+      await tester.tap(find.byType(Switch));
+      await waitForText(tester, '切换失败：');
+
+      // ⚠️ 断言必须落在**开关真的回落**这一点上：只弹提示、开关仍显示"已关闭"
+      // 会让用户以为设置生效了，而库/服务其实没跟上。
+      await waitFor(tester, () => switchOf(tester, '唯一的'),
+          reason: '失败后开关必须回到与服务真实状态一致的取值（这里库仍是 enabled=true）');
+
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+  });
 }

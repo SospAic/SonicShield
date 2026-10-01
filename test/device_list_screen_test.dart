@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/device_list_screen.dart';
 import 'package:sonic_shield/remote/device_group.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 /// 「我的设备」页的 **widget 层**回归锁。
@@ -463,6 +464,29 @@ void main() {
         reason: '一台目标都没有时不该弹"失败汇总"（那是另一件事）');
     expect((await store()).outboxFor('gone-1'), isEmpty,
         reason: '已解配对的设备绝不能被下发（授权真源是配对表，不是组名单）');
+  });
+
+  testWidgets('BK-DLSW-22 组内群发 Ping：全部发出 → 如实报"已发 N 台 / 失败 0 台"',
+      (tester) async {
+    // 第六十一轮补：DLSW-18 只驱动了"全部失败"那一支（未连接 ⇒ sendTo 返回 false），
+    // 「一台都没失败」这条**成功汇总**从未被执行过 —— 而它才是用户日常看到的那一条。
+    RcEndpointService.instance.debugSendTo =
+        (endpoint, msg, store, enqueueOnFail) async => true;
+    addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+
+    await pump(tester,
+        endpoints: [ep('ep-1', name: 'MI_MAX_2'), ep('ep-2', name: '书房平板')],
+        groups: [dg('g1', '一楼展厅', ['ep-1', 'ep-2'])]);
+
+    await tester.tap(find.byTooltip('组内群发 Ping'));
+    await waitFor(tester,
+        () => find.textContaining('群发 Ping 完成').evaluate().isNotEmpty,
+        reason: '全部成功也要有回执 —— 没有回执用户不知道到底发没发');
+
+    expect(find.text('「一楼展厅」群发 Ping 完成：已发 2 台 / 失败 0 台'),
+        findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing,
+        reason: '零失败不该弹汇总对话框（弹了等于把成功说成异常）');
   });
 
   testWidgets('DLSW-20 勾选只为建组：不改「当前目标」、不写连接时间', (tester) async {
