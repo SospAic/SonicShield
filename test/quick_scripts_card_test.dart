@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/dashboard/quick_scripts_card.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
+import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/rc_script.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
@@ -177,5 +179,34 @@ void main() {
     expect(find.textContaining('请重新选择'), findsOneWidget);
     expect(store.outboxFor('ep-1'), isEmpty,
         reason: '已解配对的端点绝不能被下发命令 —— 授权真源是配对表');
+  });
+
+  testWidgets('QSC-07 ★ 端点在线的成功一侧：如实说"已发送、立即执行"（不混同离线）',
+      (tester) async {
+    await pumpCard(tester,
+        paired: [ep('ep-1')], scripts: [ss('s1', '欢迎光临')]);
+
+    // 宿主连不上 broker ⇒ `sendTo` 恒 false（QSC-04 覆盖的就是那一侧）。
+    // 用第 45 轮的 `debugSendTo` 缝驱动"broker 已受理"，走到成功文案 ——
+    // 两条文案混同的话，用户分不清"已经打了"和"排队等着"。
+    final svc = RcEndpointService.instance;
+    var calls = 0;
+    svc.debugSendTo = (endpoint, msg, store, enqueueOnFail) async {
+      calls++;
+      expect(endpoint.deviceId, 'ep-1');
+      expect(msg.type, RcCmd.scriptRun);
+      return true;
+    };
+    addTearDown(() => svc.debugSendTo = null);
+
+    await tester.tap(find.widgetWithText(FilledButton, '执行'));
+    await waitFor(tester,
+        () => find.textContaining('已发送').evaluate().isNotEmpty,
+        reason: '受理成功必须给出与"离线入队"不同的明确文案');
+
+    expect(calls, 1, reason: '「执行」必须真的把指令组交出去一次');
+    expect(find.textContaining('端点立即执行'), findsOneWidget);
+    expect(find.textContaining('已加入待发队列'), findsNothing,
+        reason: '已受理却报"已入队"会让用户以为没发出去、反复点');
   });
 }
