@@ -29,7 +29,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// 后者只能由门禁第 4 步（`tool/coverage_report.dart`）在真实 `coverage/lcov.info`
 /// 上判定。两者是互补的：本锁防"文档骗人"，门禁防"代码退步"。
 ///
-/// ## 三组锁（第五十五 / 五十七轮起）
+/// ## 五组锁（第五十五 / 五十七 / 五十九 / 六十轮起）
 ///
 /// - `DGC-*`：**阈值**一致性（`COVERAGE_MIN` / `MIN_COVERED` = `gates.sh` ↔ `CHANGELOG`）。
 /// - `BAS-*`：**绝对分数**一致性（`9299/9597`、`9301/10087` 这类数字逐位比对）——
@@ -38,6 +38,10 @@ import 'package:flutter_test/flutter_test.dart';
 /// - `BRL-*`：**「自称最近/当前」声明**一致性 —— 补上 `BAS`「整篇**含有**权威分数」抓不到的
 ///   第二类：**自述过期**（文件里某处确实写着权威分数 ⇒ `BAS-04` 判绿，但**自称『最近一次』
 ///   的那一段写的是旧值**）。设计说明见下方 `BRL` 段。
+/// - `MCL-*`：**机器锁「自述计数」**一致性 —— 补上第三类：**自述计数过期**
+///   （实测 47 例、文档自述 45，而 `DGC`/`BAS`/`BRL` 全绿）。见下方 `MCL` 段。
+/// - `CCL-*`：**「★ 当前口径」块标题自述轮次**一致性 —— 补上第四类：**权威块标题过期**
+///   （`HANDOVER` 的 ★ 块**数据已刷新、标题忘了改**，四把锁与全库审计都放行）。见下方 `CCL` 段。
 
 // ═══════════════════════ 纯函数（可被反面样本直接喂） ═══════════════════════
 
@@ -650,6 +654,79 @@ List<String> thresholdChainStaleViolations({
   return out;
 }
 
+// ═══════════ 「★ 当前口径」块标题自述轮次锁（CCL，第六十轮） ═══════════
+//
+// 第六十轮的稳态轮自查抓到**第四类漂移**：`HANDOVER.md` 末尾的
+// `## ★ 当前口径（**第N轮** …）` 块自称「以本块为准」，**块体数据已是第五十九轮，
+// 标题却停在第五十八轮** —— `DGC`（只比阈值）/`BAS`（整篇含有绝对分数）/
+// `BRL`（只认『最近一次全绿门禁』字样）/`MCL`（只比机器锁例数）**四把全判绿**；
+// 全库审计（`_pt/bg_drift_audit.py`）也把它归入 `[ok-历史节]`
+// （因为段落里确实出现过「第 59 轮」字样 ⇒ 「同段含最新轮次」的宽松判据放行）。
+//
+// 教训：**权威块的标题本身就是一处自称**。`BAS` 保证「整篇**含有**权威数字」，
+// 但**标题旁边的轮次标签**没有任何锁盯 —— 于是「数据刷新了、标题忘了改」这种
+// 最典型的刷新手误长期存活。本组锁把 `recentGateStaleViolations` 的判据
+// （命中短语的行里所有轮次号必须有一个 == 最新轮次，否则 ±window 行内须有历史标记）
+// 平移到 `★ 当前口径` 这个**权威块标题**短语上。
+//
+// 🔴 **只认「块标题」，不认正文引用**（第六十轮首跑实测踩到自指假红）：
+// 文档会**大量**以叙述方式提到这个块（`docs/38` 的表格行 `+ `★ 当前口径`块 → 第五十八轮`、
+// `docs/39` 的「读 `HANDOVER.md` 顶部 `★ 当前口径` 块」、`docs/40` 对本漂移的描述本身）
+// —— 那些是**叙述**不是自称。因此本锁要求该行**以标题形态开头**
+// （行首可带 `#`s / `**`，紧接 `★ 当前口径`），正文里的反引号引用一律不算。
+//
+// 为什么是「段落级宽松」而非「单行严格」：历史块（`HANDOVER.md` 的
+// 「第 36 轮续二/续三」★ 块）标题里写的是【第 36 轮续二】并自带
+// 「已过期 20+ 轮 / 勿照抄」⇒ 由历史标记豁免，不误伤。
+
+/// 称「★ 当前口径」**块标题**但自述轮次 ≠ 最新轮次的违规行（`文件:行号 说明`）。
+///
+/// 判红条件与 [recentGateStaleViolations] 同源：**标题行**里所有轮次号
+/// **没有一个**等于 [latestRound]，**且** ±[windowLines] 行内无历史标记。
+List<String> currentStanceStaleViolations({
+  required int latestRound,
+  required Map<String, String> docs,
+  int windowLines = 5,
+}) {
+  const phrase = '★ 当前口径';
+  // 只认「块标题」：行首（可缩进，可带 `#`s，可带 `**`）紧随 `★ 当前口径`。
+  final headingRe = RegExp(r'^[ \t]*(?:#{1,6}\s*)?\**\s*★\s*当前口径');
+  const historyMarkers = <String>[
+    '已被超越',
+    '已被后续',
+    '非当前基线',
+    '勿作当前基线',
+    '勿照抄',
+    '历史记录',
+    '历史口径',
+    '过期',
+  ];
+  final roundRe = RegExp(r'第([一二三四五六七八九十零百\d]+)轮');
+  final out = <String>[];
+  docs.forEach((rel, text) {
+    final lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (!line.contains(phrase)) continue;
+      if (!headingRe.hasMatch(line)) continue; // 只认块标题，排除正文引用
+      final rounds = roundRe
+          .allMatches(line)
+          .map((m) => chineseNumeralToInt(m.group(1)!))
+          .whereType<int>()
+          .toList();
+      if (rounds.contains(latestRound)) continue;
+      final lo = (i - windowLines).clamp(0, lines.length - 1);
+      final hi = (i + windowLines).clamp(0, lines.length - 1);
+      final near = lines.sublist(lo, hi + 1).join('\n');
+      if (historyMarkers.any(near.contains)) continue;
+      if (!_hasUnquotedOccurrence(line, phrase)) continue;
+      out.add('$rel:${i + 1} 称「$phrase」但标题轮次 $rounds ≠ 最新第 $latestRound 轮'
+          '（且 ±$windowLines 行内无历史标记）｜${line.trim()}');
+    }
+  });
+  return out;
+}
+
 void main() {
   final shellSrc = File('scripts/gates.sh').readAsStringSync();
   final changelogMd = File('CHANGELOG.md').readAsStringSync();
@@ -1180,6 +1257,92 @@ void main() {
         expect(v, isNotNull,
             reason: '解析不到 ⇒ 判红而不是跳过：锁必须响，'
                 '"没找到东西就默认通过"等于把锁变成恒真断言');
+      });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // CCL：「★ 当前口径」块标题自述轮次锁（第六十轮新增；补第四类漂移）
+  // ══════════════════════════════════════════════════════════════════
+
+  group('CCL 「★ 当前口径」块标题自述轮次锁（防「权威块标题过期」——DGC/BAS/BRL/MCL 都抓不到）', () {
+    final rawDocs = <String, String>{
+      'README.md': File('README.md').readAsStringSync(),
+      'HANDOVER.md': File('HANDOVER.md').readAsStringSync(),
+      'CHANGELOG.md': changelogMd,
+      for (final f in Directory('docs').listSync().whereType<File>())
+        if (f.path.endsWith('.md'))
+          f.path.replaceAll(r'\', '/'): f.readAsStringSync(),
+    };
+
+    test('CCL-01 ★ HANDOVER 末尾的 `## ★ 当前口径` 活块标题必须含最新轮次号（判据非恒真）', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull,
+          reason: '`CHANGELOG.md` 首条 `#### 第N轮` 取不到 ⇒ 本锁失去真源，必须红');
+      final handover = File('HANDOVER.md').readAsStringSync();
+      final headers = handover
+          .split('\n')
+          .where((l) => l.startsWith('## ★ 当前口径'))
+          .toList();
+      expect(headers, isNotEmpty,
+          reason: '`HANDOVER.md` 末尾的 `## ★ 当前口径` 活块不见了 ⇒ 本锁失去锚点');
+      // 🔴 轮次必须**从 CHANGELOG 首条标题派生**（不写死，防基线升级后样本假红）。
+      final cn = RegExp(r'^####\s*第([一二三四五六七八九十零百\d]+)轮',
+              multiLine: true)
+          .firstMatch(changelogMd)!
+          .group(1)!;
+      expect(headers.last.contains('第$cn轮'), isTrue,
+          reason: '活块标题 = [${headers.last}]，未含最新轮次「第$cn轮」⇒ 标题自述过期'
+              '（第六十轮实测：块体已是第五十九轮，标题却停在第五十八轮）');
+    });
+
+    test('CCL-02 ★ 真实仓库：全库无「★ 当前口径 标题轮次过期」违规', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull);
+      final v = currentStanceStaleViolations(latestRound: n!, docs: rawDocs);
+      for (final s in v) {
+        print('[CCL] 违规：$s');
+      }
+      expect(v, isEmpty,
+          reason: '权威块标题自称的轮次 ≠ 最新轮次 ⇒ 「数据刷新了、标题忘了改」'
+              '（`DGC`/`BAS`/`BRL`/`MCL` 四把锁都抓不到，全库审计也归入历史节）');
+    });
+
+    group('反面样本（篡改过的文本喂进去必须判红）', () {
+      test('CCL-90a ★ 反面样本：标题轮次停在旧轮次 → 判红', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final stale = n - 1;
+        final bad = <String, String>{
+          'HANDOVER.md': '## ★ 当前口径（**第$stale轮** · 旧数据）\n\n> 以本块为准。\n',
+        };
+        expect(currentStanceStaleViolations(latestRound: n, docs: bad),
+            isNotEmpty,
+            reason: '标题轮次写成上一轮（$stale ≠ $n）且无历史标记 ⇒ 必须判红 ——'
+                '这正是第六十轮实测的真实形状');
+      });
+
+      test('CCL-90b 反面样本：标题 = 最新轮次 → 判绿（判据非恒真）', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final cn = RegExp(r'^####\s*第([一二三四五六七八九十零百\d]+)轮',
+                multiLine: true)
+            .firstMatch(changelogMd)!
+            .group(1)!;
+        final good = <String, String>{
+          'HANDOVER.md': '## ★ 当前口径（**第$cn轮** · 实测）\n\n> 以本块为准。\n',
+        };
+        expect(currentStanceStaleViolations(latestRound: n, docs: good), isEmpty,
+            reason: '样本用的轮次 [$cn] 必须等于最新轮次 [$n]');
+      });
+
+      test('CCL-90c ★ 反面样本：标题无轮次号且无历史标记 → 判红（vacuity 守卫）', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final bare = <String, String>{
+          'HANDOVER.md': '## ★ 当前口径（以本块为准）\n\n> 数据见下表。\n',
+        };
+        expect(currentStanceStaleViolations(latestRound: n, docs: bare),
+            isNotEmpty,
+            reason: '标题不写轮次号 ⇒ 读者无法判断它是否过期；解析出来的轮次列表为空'
+                '也必须判红（而不是"没轮次就不检查"的假绿）');
       });
     });
   });
