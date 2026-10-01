@@ -29,12 +29,15 @@ import 'package:flutter_test/flutter_test.dart';
 /// 后者只能由门禁第 4 步（`tool/coverage_report.dart`）在真实 `coverage/lcov.info`
 /// 上判定。两者是互补的：本锁防"文档骗人"，门禁防"代码退步"。
 ///
-/// ## 两组锁（第五十五轮起）
+/// ## 三组锁（第五十五 / 五十七轮起）
 ///
 /// - `DGC-*`：**阈值**一致性（`COVERAGE_MIN` / `MIN_COVERED` = `gates.sh` ↔ `CHANGELOG`）。
 /// - `BAS-*`：**绝对分数**一致性（`9299/9597`、`9301/10087` 这类数字逐位比对）——
 ///   补上第五十四轮实测漏网的那一类：**百分比相同、数字不同**，DGC 抓不到。
 ///   设计说明见下方 `BAS` 段。
+/// - `BRL-*`：**「自称最近/当前」声明**一致性 —— 补上 `BAS`「整篇**含有**权威分数」抓不到的
+///   第二类：**自述过期**（文件里某处确实写着权威分数 ⇒ `BAS-04` 判绿，但**自称『最近一次』
+///   的那一段写的是旧值**）。设计说明见下方 `BRL` 段。
 
 // ═══════════════════════ 纯函数（可被反面样本直接喂） ═══════════════════════
 
@@ -402,6 +405,166 @@ String _mutateChangelogSection(String md, Pattern from, String to) {
   return md.substring(0, start) + mutated + md.substring(end);
 }
 
+// ═══════════ 「自称最近/当前」声明锁（BRL，第五十七轮） ═══════════
+//
+// 第五十七轮的全库反漂移审计（`_pt/bg_drift_audit.py`，范围超出 BAS-04 的 7 个落点）
+// 在**真实语料**上抓到两处 BAS 结构性抓不到的漂移：
+//
+//   1. `docs/22 §6` 的表头写着「最近一次全绿门禁，2026-10-01 **第五十六轮**」，
+//      但紧邻其下的 ⚠️ 注却写「上表已回刷为**最近一次全绿门禁（2026-09-28 第四十六轮）**
+//      的实测值」——**同一段落里两个互斥的「最近一次」**，且该注的阈值链停在 `94.8`
+//      （漏了 95.9 → 96.8）。`BAS-04` 只做「整篇**含有** 9299/9597」，该文件第 297 行
+//      正好含有 ⇒ **判绿**。
+//   2. `docs/23 §1.1` 的门禁基线行自称「**最近一次**全绿门禁（2026-09-28 第四十七轮）」，
+//      实际最近一次是 2026-10-01 第五十六轮 —— 该文件根本不在 7 落点里 ⇒ 无人盯。
+//
+// 教训与第五十四轮同源、但更细：**漂移不一定是「数字错」，可以是「自述过期」**。
+// 所以本组锁只盯两件事：
+//   - `BRL-02`：凡称「最近一次全绿门禁」的行，**必须指向最新轮次**（真源 =
+//     `CHANGELOG.md` 最上面那条 `#### 第N轮` 标题），或在 ±5 行内有显式历史标记；
+//   - `BRL-03`：凡写「阈值链」的行，**必须含 `scripts/gates.sh` 的 COVERAGE_MIN 默认值**。
+
+/// 中文数字 → 整数（只支持到 99，轮次足够）。解析失败返回 `null`。
+int? chineseNumeralToInt(String s) {
+  const digits = {
+    '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+  };
+  if (s.isEmpty) return null;
+  if (RegExp(r'^\d+$').hasMatch(s)) return int.tryParse(s);
+  var tens = 0; // 十位（`十` 之前的部分 × 10）
+  var ones = 0; // 个位
+  var sawDigit = false;
+  for (final ch in s.split('')) {
+    if (ch == '百') return null; // 轮次不会到百位；解析不了返回 null，调用方判红
+    if (ch == '十') {
+      tens = (sawDigit ? ones : 1) * 10;
+      ones = 0;
+      sawDigit = false;
+      continue;
+    }
+    final d = digits[ch];
+    if (d == null) return null;
+    ones = d;
+    sawDigit = true;
+  }
+  final v = tens + ones;
+  return v == 0 ? null : v;
+}
+
+/// 从 `CHANGELOG.md` 取**最新轮次号**：文件最上面第一条 `#### 第N轮` 标题。
+///
+/// 取不到 → `null`（本锁失去真源 ⇒ 调用方必须判红，不许跳过）。
+int? latestRoundFromChangelog(String md) {
+  final re = RegExp(r'^####\s*第([一二三四五六七八九十零百\d]+)轮', multiLine: true);
+  final m = re.firstMatch(md);
+  if (m == null) return null;
+  return chineseNumeralToInt(m.group(1)!);
+}
+
+/// 称「最近一次全绿门禁」但仍指向**旧**轮次的违规行（`文件:行号 说明`）。
+///
+/// `docs` 的 key 是相对路径；`windowLines` 用于「±N 行内有历史标记即豁免」。
+/// 判红条件：行内含该短语 **且** 行内出现的轮次号**没有一个**等于
+/// [latestRound]，**且** ±window 行内没有历史标记。
+List<String> recentGateStaleViolations({
+  required int latestRound,
+  required Map<String, String> docs,
+  int windowLines = 5,
+}) {
+  const phrase = '最近一次全绿门禁';
+  const historyMarkers = <String>[
+    '已被超越',
+    '已被后续',
+    '非当前基线',
+    '勿作当前基线',
+    '勿照抄',
+    '历史记录',
+    '历史口径',
+    '过期',
+  ];
+  final roundRe = RegExp(r'第([一二三四五六七八九十零百\d]+)轮');
+  final out = <String>[];
+  docs.forEach((rel, text) {
+    final lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (!line.contains(phrase)) continue;
+      final rounds = roundRe
+          .allMatches(line)
+          .map((m) => chineseNumeralToInt(m.group(1)!))
+          .whereType<int>()
+          .toList();
+      if (rounds.contains(latestRound)) continue;
+      final lo = (i - windowLines).clamp(0, lines.length - 1);
+      final hi = (i + windowLines).clamp(0, lines.length - 1);
+      final near = lines.sublist(lo, hi + 1).join('\n');
+      if (historyMarkers.any(near.contains)) continue;
+      if (!_hasUnquotedOccurrence(line, phrase)) continue;
+      out.add('$rel:${i + 1} 称「$phrase」但轮次 $rounds ≠ 最新第 $latestRound 轮'
+          '（且 ±$windowLines 行内无历史标记）｜${line.trim()}');
+    }
+  });
+  return out;
+}
+
+/// 行内是否存在**未被引号包裹**的 [needle]。
+///
+/// 为什么必须区分：项目文档会**逐字引用**漂移原文（如 `「…自称『最近一次全绿门禁（第四十六轮）』…」`），
+/// 那是**叙述**不是自称。第五十七轮首跑实测：不加这一层，`BRL-02` 会把
+/// `docs/12 §90` / `docs/17 §87` / `CHANGELOG` 里对本漂移的**描述**判成新的漂移（自指假阳性）。
+bool _hasUnquotedOccurrence(String line, String needle) {
+  const openQ = ['「', '『', '“', '"'];
+  const closeQ = ['」', '』', '”', '"'];
+  var start = 0;
+  while (true) {
+    final i = line.indexOf(needle, start);
+    if (i < 0) return false;
+    start = i + 1;
+    final before = i > 0 ? line[i - 1] : '';
+    final after = i + needle.length < line.length ? line[i + needle.length] : '';
+    if (openQ.contains(before) || closeQ.contains(after)) continue;
+    return true;
+  }
+}
+
+/// 写「阈值链」但**没有走到脚本当前阈值**的段落。
+///
+/// 判据按**段落**（连续非空行）而非单行：真实的阈值链会**跨行折行**
+/// （`docs/22 §6` 的链就横跨 4 行）。只有当段落**整体像一条链**（箭头后跟数字 ≥ 4 处）
+/// 才检查终点 —— 这样"解释 BRL-03 判据本身"的说明文字（没有箭头）不会被误伤。
+List<String> thresholdChainStaleViolations({
+  required double coverageMin,
+  required Map<String, String> docs,
+}) {
+  const phrase = '阈值链';
+  final need = coverageMin.toStringAsFixed(1);
+  final arrowRe = RegExp(r'→\s*\d+(?:\.\d+)?');
+  final out = <String>[];
+  docs.forEach((rel, text) {
+    final lines = text.split('\n');
+    var i = 0;
+    while (i < lines.length) {
+      if (lines[i].trim().isEmpty) {
+        i++;
+        continue;
+      }
+      var j = i;
+      while (j < lines.length && lines[j].trim().isNotEmpty) {
+        j++;
+      }
+      final para = lines.sublist(i, j).join('\n');
+      final arrows = arrowRe.allMatches(para).length;
+      if (para.contains(phrase) && arrows >= 4 && !para.contains(need)) {
+        out.add('$rel:${i + 1} 「$phrase」段落像一条阈值链（箭头 $arrows 处）'
+            '却未含当前 `COVERAGE_MIN=$need`');
+      }
+      i = j;
+    }
+  });
+  return out;
+}
+
 void main() {
   final shellSrc = File('scripts/gates.sh').readAsStringSync();
   final changelogMd = File('CHANGELOG.md').readAsStringSync();
@@ -711,6 +874,124 @@ void main() {
             isNotNull,
             reason: '同一节里两条互不相同的可测面基线 ⇒ 真源不唯一 ⇒ 必须判红');
       });
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BRL：「自称最近/当前」声明锁（第五十七轮新增，第三组）
+  // ═══════════════════════════════════════════════════════════════════════════
+  group('BRL 「自称最近/当前」声明锁（防「自述过期」——BAS 结构性抓不到）', () {
+    final rawDocs = <String, String>{
+      'README.md': File('README.md').readAsStringSync(),
+      'HANDOVER.md': File('HANDOVER.md').readAsStringSync(),
+      'CHANGELOG.md': changelogMd,
+      for (final f in Directory('docs').listSync().whereType<File>())
+        if (f.path.endsWith('.md'))
+          f.path.replaceAll(r'\', '/'): f.readAsStringSync(),
+    };
+
+    test('BRL-01 最新轮次号必须可从 CHANGELOG.md 解析出来（解析不到即红）', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull,
+          reason: '`CHANGELOG.md` 最上面那条 `#### 第N轮` 标题取不到 ⇒ 本锁失去真源，'
+              '必须红，不许跳过');
+      print('[BRL] CHANGELOG 最新轮次 = 第 $n 轮');
+      // 中文数字解析器自检（判据非恒真）
+      expect(chineseNumeralToInt('五十七'), 57);
+      expect(chineseNumeralToInt('十'), 10);
+      expect(chineseNumeralToInt('五十六'), 56);
+      expect(chineseNumeralToInt('百'), isNull, reason: '百位不支持 ⇒ 必须显式判红');
+    });
+
+    test('BRL-02 ★ 凡称「最近一次全绿门禁」的行必须指向最新轮次（或有历史标记）', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull);
+      final v =
+          recentGateStaleViolations(latestRound: n!, docs: rawDocs);
+      for (final s in v) {
+        print('[BRL] 违规：$s');
+      }
+      expect(v, isEmpty,
+          reason: '自述「最近一次全绿门禁」却指向旧轮次 ⇒ 与第五十四轮的「当前基线」'
+              '漂移同类（更隐蔽：整篇仍含权威分数 ⇒ BAS-04 抓不到）');
+    });
+
+    test('BRL-03 ★ 凡写「阈值链」的行必须走到脚本当前 COVERAGE_MIN', () {
+      final t = parseGateThresholds(shellSrc);
+      expect(t, isNotNull);
+      final v = thresholdChainStaleViolations(
+          coverageMin: t!.coverageMin, docs: rawDocs);
+      for (final s in v) {
+        print('[BRL] 违规：$s');
+      }
+      expect(v, isEmpty,
+          reason: '阈值链是「只升不降」的凭据链，停在旧阈值 ⇒ 读者会以为阈值更低');
+    });
+
+    test('BRL-90a 反面样本：把某文件的自称最近改成旧轮次 → 判红', () {
+      final n = latestRoundFromChangelog(changelogMd)!;
+      final bad = <String, String>{
+        'x.md': '> 最近一次全绿门禁（2026-09-28 第四十六轮）实测：功能层 1511\n',
+      };
+      final v = recentGateStaleViolations(latestRound: n, docs: bad);
+      expect(v, isNotEmpty,
+          reason: '旧轮次且无历史标记 ⇒ 必须判红（这正是 `docs/22 §6` 的真实形状）');
+    });
+
+    test('BRL-90b 反面样本：自述最近 = 最新轮次 → 判绿（判据非恒真）', () {
+      final n = latestRoundFromChangelog(changelogMd)!;
+      final good = <String, String>{
+        'x.md': '> 最近一次全绿门禁（第五十七轮）实测：RC=0\n',
+      };
+      expect(recentGateStaleViolations(latestRound: n, docs: good), isEmpty);
+    });
+
+    test('BRL-90c 反面样本：±5 行内有历史标记 ⇒ 豁免（防误伤历史段）', () {
+      final n = latestRoundFromChangelog(changelogMd)!;
+      final ok = <String, String>{
+        'x.md': '⚠️ 本段已被后续收口超越（勿作当前基线）\n'
+            '\n> **最近一次全绿门禁 gateBB（2026-09-25）实测**：功能层 1511\n',
+      };
+      expect(recentGateStaleViolations(latestRound: n, docs: ok), isEmpty,
+          reason: '历史段必须能豁免，否则锁会误伤 `docs/17 §5x` 的历史结论');
+    });
+
+    test('BRL-90d 反面样本：阈值链被截断在旧阈值 → 判红', () {
+      final bad = <String, String>{
+        'x.md': '> 历史阈值链：74.5 → 73.2 → 78.4 → 79.8 → 82.2 → 93.3 → **94.8**；\n',
+      };
+      final v =
+          thresholdChainStaleViolations(coverageMin: 96.8, docs: bad);
+      expect(v, isNotEmpty, reason: '链停在 94.8 却声称是阈值链 ⇒ 必须判红');
+    });
+
+    test('BRL-90e 反面样本：阈值链走到当前阈值 → 判绿', () {
+      final ok = <String, String>{
+        'x.md': '> 历史阈值链：73.2 → 78.4 → 82.2 → 93.3 → 94.8 → 95.9 → **96.8**。\n',
+      };
+      expect(thresholdChainStaleViolations(coverageMin: 96.8, docs: ok),
+          isEmpty);
+    });
+
+    test('BRL-90f ★ 反面样本：**被引用**（引号内）的旧轮次不算自称 → 判绿', () {
+      final n = latestRoundFromChangelog(changelogMd)!;
+      final quoted = <String, String>{
+        'x.md': '| 1 | `docs/22 §6` 的注 | 表头「最近一次全绿门禁（第五十六轮）」'
+            'vs 其下的注「上表已回刷为『最近一次全绿门禁（第四十六轮）』的实测值」 | … |\n',
+      };
+      expect(recentGateStaleViolations(latestRound: n, docs: quoted), isEmpty,
+          reason: '文档会**逐字引用**漂移原文 —— 本轮的 `docs/12 §90` / `docs/17 §87` / `CHANGELOG` '
+              '正是这种形状；不排除引用 ⇒ 锁会自指假红（第五十七轮首跑实测踩到）');
+    });
+
+    test('BRL-90g ★ 反面样本：说明 BRL-03 判据本身的文字（无箭头）→ 判绿', () {
+      final explain = <String, String>{
+        'x.md': '- `BRL-03` ★：凡含「阈值链」的行必须含 `scripts/gates.sh` 的 '
+            '`COVERAGE_MIN` 默认值。\n',
+      };
+      expect(thresholdChainStaleViolations(coverageMin: 96.8, docs: explain),
+          isEmpty,
+          reason: '解释性文字里出现「阈值链」三字不得被当成真正的阈值链');
     });
   });
 }
