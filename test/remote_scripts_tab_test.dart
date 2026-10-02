@@ -248,6 +248,28 @@ void main() {
         reason: '若事件仍只从 RcEndpointService 取，协助会话下进度永远不出现');
   });
 
+  testWidgets('RS-14 已发出但 8 秒无回应 → 明说"未收到端点回应"（不永远停在"进度见下方"）',
+      (tester) async {
+    final ch = await pumpCh(tester);
+    await tester.tap(find.widgetWithText(FilledButton, '执行').first);
+    await frames(tester, 6);
+    expect(ch.sent, hasLength(1),
+        reason: '前置：通道已受理（ok=true 才会起 8 秒看门狗）');
+
+    // 8 秒看门狗到点：**发出 ≠ 已被执行**；端点不回应必须把这件事说出来，
+    // 否则界面停在"进度见下方"，用户以为"点了没反应"。
+    // ⚠️ 不能用「一次大 pump」：SnackBar 的展示计时器要等**入场动画完成**才启动，
+    //    且 ScaffoldMessenger 是**队列**（前一条「已发送」先走完才轮到看门狗那条）。
+    //    ⇒ 按 300ms 步进轮询，出现即停（最多推进 12s 模拟时间）。
+    var found = false;
+    for (var i = 0; i < 40 && !found; i++) {
+      await tester.pump(const Duration(milliseconds: 300));
+      found = find.textContaining('8 秒未收到端点回应').evaluate().isNotEmpty;
+    }
+    expect(found, isTrue,
+        reason: '端点若从未回应（未确认也未开始执行），必须由本端主动说明');
+  });
+
   // ---------------------------------------------------------------------------
   // 第四十三轮：**配对通道**下的四个"从未被驱动过"的分支。
   //

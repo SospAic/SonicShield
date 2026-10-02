@@ -468,4 +468,35 @@ void main() {
           reason: 'disconnected 分支漏掉 ⇒ 该路再也回不到终态，用户无法重连');
     });
   });
+
+  // ══════════════════ MC-E 覆盖率冲刺（第六十四轮） ══════════════════
+  //
+  // 只补**既有未覆盖分支**，不新增任何生产代码；断言的是"用户看到的后果"。
+
+  group('MC-E 等待应答超时（真实计时器）', () {
+    test('MC-24 发出 invite 后一直无应答 → 满 45 秒判该路失败「对方无应答」', () async {
+      final ok = await svc.connect(peer('EP50'), store);
+      expect(ok, isTrue, reason: '前置：invite 已发出，该路进入 connecting');
+      final s = svc.sessionOf('EP50')!;
+      expect(s.phase, MultiCallPhase.connecting);
+
+      // 记录相位迁移：`hangUp` 随后会把该路收成 closed，故必须看**迁移过程**，
+      // 不能只看终态 —— 否则 failed 这一段被 closed 覆盖后就观测不到了。
+      final phases = <MultiCallPhase>[];
+      final sub = svc.updates.listen((_) => phases.add(s.phase));
+      addTearDown(sub.cancel);
+
+      // 真实计时器：等待上限 = call_lifecycle.waitLimitMs(isCaller: true) = 45s。
+      // 这是宿主上唯一一条"真超时到点"的路径（判定逻辑由纯函数锁死，但回调体
+      // 只有真等到点才执行）—— 发出 invite 后对方一直不接，不能永远停在"连接中"。
+      await Future<void>.delayed(const Duration(milliseconds: 46500));
+
+      expect(phases, contains(MultiCallPhase.failed),
+          reason: '一直无应答必须判失败，否则该路永远显示"连接中"，用户无从判断对端是否收到');
+      expect(s.failure, '对方无应答',
+          reason: '失败原因必须可诊断，且与单路 waitLimitMs 同源（两处超时值不得漂移）');
+      expect(s.answered, isFalse,
+          reason: '从未收到 answer ⇒ 不得被标成已回答，否则后续会误判已接通');
+    });
+  });
 }

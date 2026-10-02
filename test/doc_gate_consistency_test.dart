@@ -727,6 +727,70 @@ List<String> currentStanceStaleViolations({
   return out;
 }
 
+// ═══════════ 「★ 当前口径」活块**续作指针**一致锁（RCL，第六十四轮） ═══════════
+//
+// 第六十四轮的稳态轮自查抓到**第五类漂移**：`HANDOVER.md` 末尾的
+// `## ★ 当前口径` 活块**块体已刷到第六十三轮**，但块**尾部**的两行自述留在
+// **第六十一轮** ——
+//   · `**接力棒**：docs/17 §91.5（…命名空间顺延 **`jobBL*`**）`（真值应为 §93.5 / `jobBN*`）
+//   · `③ 🟡 可测面残差 **181 行**…`（真值应为 142）
+// `DGC`/`BAS`/`BRL`/`MCL` 四把锁全绿；`CCL` 只认**块标题**（标题确实已是第 63 轮 ⇒ 放行）；
+// 全库审计（`_pt/bg_drift_audit.py`）`ODD_HITS=0`（它不校验 § 指针与裸残差计数）。
+//
+// 影响面比 `CCL` 更严重：★ 块自称「以本块为准」，块尾的**接力棒指针**若过期，
+// 下一个会话可能照着**旧 §**（§91.5 = 第六十一轮的接力棒）走 ⇒ 读到错误的「下一轮要做什么」。
+//
+// 本组锁把「**块内自称**必须彼此一致」落到实处：活块里 `续作入口/接力棒 §X` 指针
+// 必须与块尾 `**接力棒**：…§X` 指向**同一节**。历史子块靠 `**历史（` 起头的行截断。
+
+/// 「★ 当前口径」活块里**续作指针**不自洽的违规（`文件:行号 说明`）。
+///
+/// 判据（非恒真、防 vacuity）：
+/// 1. 找不到 `## ★ 当前口径` 活块 ⇒ 判红（锁失去锚点）；
+/// 2. 活块里找不到 `接力棒 §X` 指针 ⇒ 判红（不允许"没找到就放行"）；
+/// 3. 活块尾部缺 `**接力棒**：…§X` 行 ⇒ 判红（指针是块自称的一部分，不得消失）；
+/// 4. 两处 `§X` 不一致 ⇒ 判红（**块尾指针过期**，正是第六十四轮实测形状）。
+List<String> relayPointerStaleViolations(String handover) {
+  final lines = handover.split('\n');
+  var start = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('## ★ 当前口径')) start = i;
+  }
+  if (start < 0) {
+    return ['HANDOVER.md: 找不到 `## ★ 当前口径` 活块（RCL 失去锚点）'];
+  }
+  var end = lines.length;
+  for (var i = start + 1; i < lines.length; i++) {
+    if (lines[i].startsWith('**历史（')) {
+      end = i;
+      break;
+    }
+  }
+  final block = lines.sublist(start, end).join('\n');
+  // 「续作入口」行里的 `接力棒 §X.Y`（本块对**下一轮接力棒**的自称）。
+  final wantRe = RegExp(r'接力棒\s*§\s*([0-9]+(?:\.[0-9]+)?)');
+  final wantM = wantRe.firstMatch(block);
+  if (wantM == null) {
+    return ['HANDOVER.md: ★ 活块里找不到 `接力棒 §X.Y` 指针'
+        '（vacuity 守卫：判据不得恒真）'];
+  }
+  // 块尾 `**接力棒**：…§X`（行首锚定，只认被 `**` 包裹的那一行）。
+  final tailRe = RegExp(r'^\*\*接力棒\*\*：.*?§\s*([0-9]+(?:\.[0-9]+)?)',
+      multiLine: true);
+  final tailM = tailRe.firstMatch(block);
+  if (tailM == null) {
+    return ['HANDOVER.md: ★ 活块尾部缺 `**接力棒**：…§X.Y` 行'
+        '（块自称必须含接力棒指针）'];
+  }
+  final want = wantM.group(1)!;
+  final got = tailM.group(1)!;
+  if (got != want) {
+    return ['HANDOVER.md: ★ 活块 `接力棒 §$want` 与块尾 `**接力棒**：…§$got` 不一致'
+        '（块尾指针过期 ⇒ 下一轮会照**旧 §** 读接力棒）'];
+  }
+  return const [];
+}
+
 void main() {
   final shellSrc = File('scripts/gates.sh').readAsStringSync();
   final changelogMd = File('CHANGELOG.md').readAsStringSync();
@@ -1343,6 +1407,82 @@ void main() {
             isNotEmpty,
             reason: '标题不写轮次号 ⇒ 读者无法判断它是否过期；解析出来的轮次列表为空'
                 '也必须判红（而不是"没轮次就不检查"的假绿）');
+      });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // RCL：「★ 当前口径」活块**续作指针**一致锁（第六十四轮新增；补第五类漂移）
+  // ══════════════════════════════════════════════════════════════════
+
+  group('RCL 「★ 当前口径」活块续作指针一致锁（防「块尾接力棒指针过期」）', () {
+    final handover = File('HANDOVER.md').readAsStringSync();
+
+    /// 取 `## ★ 当前口径` 活块（到下一个 `**历史（` 起头的行前）。
+    String liveBlock() {
+      final lines = handover.split('\n');
+      var start = -1;
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('## ★ 当前口径')) start = i;
+      }
+      if (start < 0) return '';
+      var end = lines.length;
+      for (var i = start + 1; i < lines.length; i++) {
+        if (lines[i].startsWith('**历史（')) {
+          end = i;
+          break;
+        }
+      }
+      return lines.sublist(start, end).join('\n');
+    }
+
+    test('RCL-01 ★ 真实仓库：活块 `接力棒 §X` 与块尾一致（且判据非恒真 —— 确实解析到 §）',
+        () {
+      expect(relayPointerStaleViolations(handover), isEmpty,
+          reason: '★ 活块尾部指针过期 ⇒ 下一轮会话会照**旧 §** 读接力棒'
+              '（第六十四轮实测：行写 §93.5、尾写 §91.5 / `jobBL*`）');
+      // 非恒真守卫：活块里必须**真的**存在两处锚点，否则上面的 isEmpty 是假绿。
+      final b = liveBlock();
+      expect(RegExp(r'接力棒\s*§\s*[0-9]').hasMatch(b), isTrue,
+          reason: '活块里连 `接力棒 §X` 都没有 ⇒ 判据恒真');
+      expect(RegExp(r'^\*\*接力棒\*\*：.*?§', multiLine: true).hasMatch(b), isTrue,
+          reason: '活块尾部连 `**接力棒**：…§X` 都没有 ⇒ 判据恒真');
+    });
+
+    test('RCL-02 ★ 真实文本上做变异：块尾指针改成旧 § ⇒ 必判红（防"只对假样本敏感"）',
+        () {
+      // 只在**真实文本**上把块尾那一行改掉（第一处 `**接力棒**：` 就是活块尾部）。
+      final mutated = handover.replaceFirst(
+          RegExp(r'^\*\*接力棒\*\*：.*$', multiLine: true),
+          '**接力棒**：`docs/17 §1.5`（被篡改成旧指针）。');
+      expect(mutated, isNot(equals(handover)),
+          reason: '夹具必须真的改到文本（否则这条用例恒绿）');
+      expect(relayPointerStaleViolations(mutated), isNotEmpty,
+          reason: '真实文本里块尾指针一旦过期，锁必须响 —— 否则它保护不了真仓库');
+    });
+
+    group('反面样本（篡改过的文本喂进去必须判红）', () {
+      test('RCL-90a ★ 反面样本：行 §99.5 与尾 §98.5 不一致 → 判红', () {
+        const bad = '## ★ 当前口径（**第99轮**）\n\n'
+            '| 续作入口 | **`docs/17 §99`（接力棒 §99.5）** |\n\n'
+            '**接力棒**：`docs/17 §98.5`（旧）。\n';
+        expect(relayPointerStaleViolations(bad), isNotEmpty,
+            reason: '行/尾指针不一致是「块尾过期」的强信号，必须判红');
+      });
+
+      test('RCL-90b 反面样本：行 §99.5 与尾 §99.5 一致 → 判绿（非恒真）', () {
+        const good = '## ★ 当前口径（**第99轮**）\n\n'
+            '| 续作入口 | **`docs/17 §99`（接力棒 §99.5）** |\n\n'
+            '**接力棒**：`docs/17 §99.5`（一致）。\n';
+        expect(relayPointerStaleViolations(good), isEmpty,
+            reason: '两处指向同一节 ⇒ 不得误报');
+      });
+
+      test('RCL-90c ★ 反面样本：活块里没有 `接力棒 §X` 锚点 → 判红（vacuity 守卫）', () {
+        const bare = '## ★ 当前口径（**第99轮**）\n\n'
+            '**接力棒**：`docs/17 §99.5`（无行锚点）。\n';
+        expect(relayPointerStaleViolations(bare), isNotEmpty,
+            reason: '解析不到锚点必须判红，而不是"没找到就放行"的假绿');
       });
     });
   });

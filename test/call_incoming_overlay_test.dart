@@ -265,4 +265,39 @@ void main() {
         reason: '会话已结束，覆盖层必须收起（否则用户被黑屏挡住）');
     await _unmount(tester);
   });
+
+  // =====================================================================
+  // 6 · 振铃时点「接听 / 拒接」：无待接 invite 时必须是**安全 no-op**
+  //     （`acceptPending` / `declinePending` 的契约：按钮可能被连点，
+  //     也可能在超时收尾之后才被点到 ⇒ 返回 false / 静默收场，绝不误接通/崩）
+  // =====================================================================
+
+  testWidgets('CIO-08 ringing 点「接听」但已无待接 invite → 不得误接通、界面不崩',
+      (tester) async {
+    await _pumpHost(tester, CallPhase.ringing);
+    // 前置：振铃时「接听」入口在（CIO-02 已证）。
+    expect(find.byIcon(Icons.call), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.call));
+    await _flush(tester);
+    // 判据：没有待接 invite ⇒ 不得把相位错误推进「协商中」，也不得抛异常。
+    expect(CallService.instance.currentPhase, CallPhase.ringing,
+        reason: '无 invite 却切成协商中 = 按钮制造了一通根本不会建立的通话');
+    expect(find.text('来电…'), findsOneWidget,
+        reason: '接听失败后界面必须仍停在振铃态，用户还能再点一次');
+    expect(tester.takeException(), isNull);
+    await _unmount(tester);
+  });
+
+  testWidgets('CIO-09 ringing 点「拒接」→ 走 declinePending，无 invite 时安全收场不崩',
+      (tester) async {
+    await _pumpHost(tester, CallPhase.ringing);
+    await tester.tap(find.byIcon(Icons.call_end));
+    await _flush(tester);
+    // 判据：`_endCall` 在振铃态必须走 `declinePending`（而非 hangUp 死路），
+    // 且没有待接 invite 时安静收场 —— 不抛异常、界面不残留半死状态。
+    expect(tester.takeException(), isNull);
+    expect(find.byIcon(Icons.call_end), findsOneWidget,
+        reason: '收场由服务层相位驱动；此处仅证「点了不崩」（真实拒接信令属设备层）');
+    await _unmount(tester);
+  });
 }
