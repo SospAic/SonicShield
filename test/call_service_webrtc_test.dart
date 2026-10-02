@@ -755,4 +755,39 @@ void main() {
           reason: '到点必须记成"未接"（对方无应答），而不是含糊的失败');
     }, timeout: const Timeout(Duration(seconds: 90)));
   });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 被叫振铃等待上限 —— 与 CS-H 对称的另一半。CS-H 只拿到**主叫**那一侧
+  // （等 45s 后自己收尾）；被叫侧到点时还多一件事：**主动上报 `rc.call.missed`**，
+  // 好让主叫不必单方面等满自己的超时。这一行此前**从未被执行过**，本组只此一条，真等 46s。
+  // ══════════════════════════════════════════════════════════════════════
+
+  group('CS-I 被叫振铃等待上限（真实计时）', () {
+    test('CS-41 被叫振铃 45s 无人接听 → 主动上报 rc.call.missed 并收尾（不让主叫干等）',
+        () async {
+      final ringedOut = <String>[];
+      svc.onRingTimeout = (String id) async {
+        ringedOut.add(id);
+      };
+      addTearDown(() => svc.onRingTimeout = null);
+
+      final ok = await svc.onIncomingCall(
+          <String, dynamic>{'callId': 'C-41', 'sdp': 'offer-sdp', 'video': true},
+          peer('EP0041'),
+          store);
+      expect(ok, isTrue, reason: '前置：手动模式必须真的进入振铃');
+      expect(svc.currentPhase, CallPhase.ringing);
+      expect(svc.isCaller, isFalse);
+
+      // 用户既不接听也不拒接 ⇒ 只能靠被叫自己的振铃上限（`calleeRingTimeout` = 45s）。
+      await Future<void>.delayed(const Duration(seconds: 46));
+
+      expect(ringedOut, ['C-41'],
+          reason: '被叫到点必须**主动**上报 `rc.call.missed` —— 否则主叫只能单方面等满'
+              '自己的 45s（BUG-050 的下半段：被叫一声不吭地超时，主叫把"对方没接"误判成"网络不通"）');
+      expect(svc.currentPhase, CallPhase.idle);
+      expect(svc.inCall, isFalse);
+      expect(svc.lastEndReason, CallEndReason.missed);
+    }, timeout: const Timeout(Duration(seconds: 90)));
+  });
 }

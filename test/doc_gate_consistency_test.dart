@@ -42,6 +42,14 @@ import 'package:flutter_test/flutter_test.dart';
 ///   （实测 47 例、文档自述 45，而 `DGC`/`BAS`/`BRL` 全绿）。见下方 `MCL` 段。
 /// - `CCL-*`：**「★ 当前口径」块标题自述轮次**一致性 —— 补上第四类：**权威块标题过期**
 ///   （`HANDOVER` 的 ★ 块**数据已刷新、标题忘了改**，四把锁与全库审计都放行）。见下方 `CCL` 段。
+/// - `RCL-*`：**「★ 当前口径」活块续作指针**一致性 —— 补上第五类：**块尾接力棒指针过期**
+///   （第六十四轮实测：行写 §93.5、尾写 §91.5 / `jobBL*`）。见下方 `RCL` 段。
+/// - `SSL-*`：**`HANDOVER` 顶部「当前状态（第N轮）」快照轮次**一致性 —— 补上第六类：
+///   **TL;DR 状态快照过期**（第六十七轮实测：项目已第 66 轮，顶部 §0 仍写第六十五轮 /
+///   `98.81%（9483/9597）` / 阈值 `98.7 / 9477`；`git log` 佐证第 61~63 轮同样漏刷）。
+///   六把锁与全库审计**全部放行**（`DGC` 只看阈值、`BAS` 只要求「整篇含有」、
+///   `BRL` 不认「当前状态」、`MCL` 只比例数、`CCL`/`RCL` 只管 ★ 块、审计用语表无此词）。
+///   见下方 `SSL` 段。
 
 // ═══════════════════════ 纯函数（可被反面样本直接喂） ═══════════════════════
 
@@ -791,6 +799,76 @@ List<String> relayPointerStaleViolations(String handover) {
   return const [];
 }
 
+// ═══════════ HANDOVER 顶部「当前状态」快照轮次一致锁（SSL，第六十七轮） ═══════════
+//
+// 第六十七轮开工自查抓到**第六类漂移**：`HANDOVER.md` 顶部 §0「五分钟上手」的
+// 状态快照行 `**当前状态（<日期> 第N轮）**` **整轮漏刷** —— 项目已在第 66 轮、该行却
+// 仍写「第六十五轮 / 可测面 98.81%（9483/9597） / 阈值 98.7 / 9477」。
+//
+// 六把锁与全库审计**全都放行**：
+//   · `DGC` 只看阈值；`BAS` 只要求「整篇**含有**权威分数」（★ 活块含 ⇒ 判绿）；
+//   · `BRL` 只认「最近一次全绿门禁」字样与「阈值链」，**不认**「当前状态」；
+//   · `MCL` 只比机器锁例数；`CCL` 只认 `## ★ 当前口径` 块**标题**；`RCL` 只认块**尾**指针；
+//   · `_pt/bg_drift_audit.py` 的 rule[2] 用语表里**没有**「当前状态」。
+// `git log` 佐证这是**反复发生**的（第 61~63 轮同样停在旧轮次，第 64 轮才被顺手改回）。
+//
+// 判据：凡含「当前状态」且带「第N轮」的行，N 必须 == `CHANGELOG.md` 首条轮次
+// （±windowLines 行内有历史标记者豁免）；且 `HANDOVER.md` 必须**真的存在**该状态行
+// （否则锁失去锚点 ⇒ 判红，不许"没找到就放行"）。
+
+/// `HANDOVER` 顶部「当前状态（第N轮）」快照过期违规（`文件:行号 说明`）。
+///
+/// `docs` 的 key 是相对路径；`windowLines` 用于「±N 行内有历史标记即豁免」。
+/// 非恒真守卫：`HANDOVER.md` 里找不到带轮次的「当前状态」行 ⇒ 追加一条违规（锚点缺失）。
+List<String> statusSnapshotStaleViolations({
+  required int latestRound,
+  required Map<String, String> docs,
+  int windowLines = 5,
+}) {
+  const phrase = '当前状态';
+  const anchorFile = 'HANDOVER.md';
+  const historyMarkers = <String>[
+    '已被超越',
+    '已被后续',
+    '非当前基线',
+    '勿作当前基线',
+    '勿照抄',
+    '历史记录',
+    '历史口径',
+    '过期',
+  ];
+  final roundRe = RegExp(r'第([一二三四五六七八九十零百\d]+)轮');
+  final out = <String>[];
+  var anchorSeen = false;
+  docs.forEach((rel, text) {
+    final lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      if (!line.contains(phrase)) continue;
+      if (!_hasUnquotedOccurrence(line, phrase)) continue;
+      final rounds = roundRe
+          .allMatches(line)
+          .map((m) => chineseNumeralToInt(m.group(1)!))
+          .whereType<int>()
+          .toList();
+      if (rounds.isEmpty) continue; // 不写轮次的「当前状态」不在本锁判据内
+      if (rel == anchorFile) anchorSeen = true;
+      if (rounds.contains(latestRound)) continue;
+      final lo = (i - windowLines).clamp(0, lines.length - 1);
+      final hi = (i + windowLines).clamp(0, lines.length - 1);
+      final near = lines.sublist(lo, hi + 1).join('\n');
+      if (historyMarkers.any(near.contains)) continue;
+      out.add('$rel:${i + 1} 「$phrase（…第 ${rounds.join("/")} 轮…）」≠ 最新第 '
+          '$latestRound 轮（且 ±$windowLines 行内无历史标记）｜${line.trim()}');
+    }
+  });
+  if (!anchorSeen) {
+    out.add('$anchorFile: 找不到带轮次的「$phrase（第N轮）」状态行'
+        '（SSL 失去锚点 ⇒ 判红，不许"没找到就放行"）');
+  }
+  return out;
+}
+
 void main() {
   final shellSrc = File('scripts/gates.sh').readAsStringSync();
   final changelogMd = File('CHANGELOG.md').readAsStringSync();
@@ -1483,6 +1561,98 @@ void main() {
             '**接力棒**：`docs/17 §99.5`（无行锚点）。\n';
         expect(relayPointerStaleViolations(bare), isNotEmpty,
             reason: '解析不到锚点必须判红，而不是"没找到就放行"的假绿');
+      });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // SSL：HANDOVER 顶部「当前状态（第N轮）」快照一致锁（第六十七轮新增；补第六类漂移）
+  // ══════════════════════════════════════════════════════════════════
+
+  group('SSL HANDOVER 顶部「当前状态」快照轮次一致锁（防「TL;DR 状态快照过期」——DGC/BAS/BRL/MCL/CCL/RCL 都抓不到）',
+      () {
+    final allDocs = <String, String>{
+      'HANDOVER.md': File('HANDOVER.md').readAsStringSync(),
+      'README.md': File('README.md').readAsStringSync(),
+      'CHANGELOG.md': changelogMd,
+      for (final f in Directory('docs').listSync().whereType<File>())
+        if (f.path.endsWith('.md'))
+          f.path.replaceAll(r'\', '/'): f.readAsStringSync(),
+    };
+
+    test('SSL-01 ★ HANDOVER 顶部状态行必须含最新轮次（判据非恒真 —— 确实解析到该行）', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull,
+          reason: '`CHANGELOG.md` 首条 `#### 第N轮` 取不到 ⇒ 本锁失去真源，必须红');
+      final handover = File('HANDOVER.md').readAsStringSync();
+      final roundRe = RegExp(r'第[一二三四五六七八九十零百\d]+轮');
+      final statusLines = handover
+          .split('\n')
+          .where((l) => l.contains('当前状态') && roundRe.hasMatch(l))
+          .toList();
+      expect(statusLines, isNotEmpty,
+          reason: '`HANDOVER.md` 顶部「当前状态（第N轮）」行不见了 ⇒ 本锁失去锚点');
+      // 🔴 轮次必须**从 CHANGELOG 首条标题派生**（不写死，防基线升级后样本假红）。
+      final cn = RegExp(r'^####\s*第([一二三四五六七八九十零百\d]+)轮',
+              multiLine: true)
+          .firstMatch(changelogMd)!
+          .group(1)!;
+      expect(statusLines.first.contains('第$cn轮'), isTrue,
+          reason: '顶部状态行 = [${statusLines.first}]，未含最新轮次「第$cn轮」⇒ 快照过期'
+              '（第六十七轮实测：项目已第 66 轮，该行仍写第六十五轮 / 98.81%）');
+    });
+
+    test('SSL-02 ★ 真实仓库：全库无「当前状态（第N轮）」轮次过期违规', () {
+      final n = latestRoundFromChangelog(changelogMd);
+      expect(n, isNotNull);
+      final v = statusSnapshotStaleViolations(latestRound: n!, docs: allDocs);
+      for (final s in v) {
+        print('[SSL] 违规：$s');
+      }
+      expect(v, isEmpty,
+          reason: '自称「当前状态（第N轮）」却指向旧轮次 ⇒ 顶部快照过期'
+              '（六把锁与全库审计的共同盲区；第 61~63 / 66 轮反复发生）');
+    });
+
+    group('反面样本（篡改过的文本喂进去必须判红）', () {
+      test('SSL-90a ★ 反面样本：状态行停在旧轮次 → 判红', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final stale = n - 1;
+        final bad = <String, String>{
+          'HANDOVER.md': '**当前状态（2026-10-02 第$stale轮）**：门禁四步 RC=0。\n',
+        };
+        expect(statusSnapshotStaleViolations(latestRound: n, docs: bad), isNotEmpty,
+            reason: '状态行写成上一轮（$stale ≠ $n）且无历史标记 ⇒ 必须判红');
+      });
+
+      test('SSL-90b 反面样本：状态行 = 最新轮次 → 判绿（判据非恒真）', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final good = <String, String>{
+          'HANDOVER.md': '**当前状态（2026-10-02 第$n轮）**：门禁四步 RC=0。\n',
+        };
+        expect(statusSnapshotStaleViolations(latestRound: n, docs: good), isEmpty,
+            reason: '状态行 = 最新轮次 ⇒ 不得误报');
+      });
+
+      test('SSL-90c ★ 反面样本：HANDOVER 里根本没有带轮次的状态行 → 判红（vacuity 守卫）', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final bare = <String, String>{
+          'HANDOVER.md': '## 0. 五分钟上手（TL;DR）\n\n当前状态：见下方 ★ 块。\n',
+        };
+        expect(statusSnapshotStaleViolations(latestRound: n, docs: bare), isNotEmpty,
+            reason: '解析不到锚点必须判红，而不是"没找到就放行"的假绿');
+      });
+
+      test('SSL-90d ★ 反面样本：±5 行内有历史标记 ⇒ 豁免（防误伤历史段）', () {
+        final n = latestRoundFromChangelog(changelogMd)!;
+        final stale = n - 1;
+        final hist = <String, String>{
+          'HANDOVER.md': '> 历史记录（已过期，勿照抄）：\n'
+              '> **当前状态（第$stale轮）**：旧快照。\n'
+              '**当前状态（2026-10-02 第$n轮）**：现行快照。\n',
+        };
+        expect(statusSnapshotStaleViolations(latestRound: n, docs: hist), isEmpty,
+            reason: '带历史标记的旧快照不得误伤（本文件里就留着第 36 轮的 ★ 历史块）');
       });
     });
   });
