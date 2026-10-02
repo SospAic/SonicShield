@@ -136,6 +136,45 @@ void main() {
     });
   });
 
+  testWidgets('JW-04 接入进行中（busy）→ 显示"正在接入…"+转圈，且输入框禁用',
+      (tester) async {
+    final s = await host.start();
+    await mount(tester);
+
+    // 让 hello 石沉大海：端点侧不作答 ⇒ 客户端停在 opening（`busy == true`）。
+    // 这正是"用户已经点了接入、但对端还没回"的那几秒 —— 此前没有任何用例
+    // 停在过这一帧。
+    joinBus.mute = true;
+
+    // ⚠️ 握手涉真实 AES-GCM ⇒ 必须回真实异步区；这里**只启动、不等它结束**，
+    // 以便在"接入中"这一帧做断言。
+    late Future<bool> joining;
+    await tester.runAsync(() async {
+      joining = client.join(s.code, s.password,
+          timeout: const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    });
+    await tester.pump();
+
+    expect(find.text('接入协助会话'), findsOneWidget,
+        reason: 'opening 阶段仍应停在表单页（还没接进去）');
+    expect(find.textContaining('正在接入…'), findsOneWidget,
+        reason: '接入中必须让用户看到"在动"，否则会以为没点着而反复点');
+    expect(find.byType(CircularProgressIndicator), findsOneWidget,
+        reason: '只有文字没有转圈，用户仍会怀疑卡死');
+    expect(
+        tester.widget<TextField>(find.byType(TextField).first).enabled, isFalse,
+        reason: '接入中改凭据不会作用于本次握手 —— 必须禁用，'
+            '否则用户以为改了就走新凭据');
+
+    // 放行握手（会走 2s 超时）后再收尾，避免留下未完成的链。
+    joinBus.mute = false;
+    await tester.runAsync(() async {
+      await joining;
+    });
+    await cleanup(tester);
+  }, timeout: const Timeout(Duration(seconds: 90)));
+
   // ---------------- JW-1x 控制台权限灰化 ----------------
 
   group('JW 控制台权限灰化', () {

@@ -175,6 +175,10 @@ class _FakePlayer extends PlaybackService {
   /// 非 null 时 `play` 挂在这里 —— 用来观察"播放中"的界面状态。
   Completer<void>? gate;
 
+  /// 非 null 时 `play` 抛出它 —— 驱动"试听失败必须可见且复位"的兜底分支
+  /// （文件被清理 / 编解码不支持）。
+  Object? throwOnPlay;
+
   @override
   Future<PlayResult> play({
     required String path,
@@ -187,6 +191,8 @@ class _FakePlayer extends PlaybackService {
     bool loopFill = false,
   }) async {
     played.add(path);
+    final t = throwOnPlay;
+    if (t != null) throw t;
     final g = gate;
     if (g != null) await g.future;
     return const PlayResult(ok: true, playedMs: 10);
@@ -562,6 +568,28 @@ void main() {
     expect(find.byIcon(Icons.stop), findsNothing);
   }, timeout: _timeout);
 
+  testWidgets('SLB-23 试听失败（文件被清理/编解码不支持）→ 提示可见且图标复位',
+      (tester) async {
+    await pumpLib(tester, seed: [asset(id: 'a', name: 'A')]);
+    player.throwOnPlay = StateError('Decoder init failed');
+
+    await tester.tap(find.byTooltip('试听'));
+    await tester.pump();
+    await tester.pump();
+
+    // 失败必须可见：否则用户只看到"点了没反应"，会反复点。
+    expect(find.textContaining('试听失败'), findsOneWidget,
+        reason: '播放失败要给可读原因，不能静默吞掉');
+    // 且必须复位 —— 否则图标永远停在"停止"，再点走的是"停止"分支，
+    // 表现为"这条音源再也试听不了"。
+    expect(find.byIcon(Icons.play_arrow), findsOneWidget,
+        reason: '失败后必须复位到"可试听"，否则该条永远点不动');
+    expect(find.byIcon(Icons.stop), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    await drainSnacks(tester);
+  }, timeout: _timeout);
+
   // ══════════════════════════════════════════════════════════════════════
   // SLB-C · 本地导入（分段驱动）
   // ══════════════════════════════════════════════════════════════════════
@@ -875,6 +903,40 @@ void main() {
     await tester.pumpAndSettle();
     expect(repo.deletedIds, isEmpty, reason: '取消 ⇒ 不删');
     expect(find.text('A'), findsOneWidget);
+  }, timeout: _timeout);
+
+  testWidgets('SLB-24 确认删除 → 记录与文件都真的删掉（不是只关掉对话框）',
+      (tester) async {
+    final a = asset(id: 'a', name: 'A', path: '${tmp.path}/audio_a.wav');
+    File(a.path).writeAsBytesSync(List<int>.filled(4, 1));
+    await pumpLib(tester, seed: [a], confirmDelete: true);
+
+    // ⚠️ 同 SLB-22：确认场景**不能**用 runReal（链会停在"等对话框结果"处
+    // zone 死锁）。这里改成"先按 SLB-22 的方式启动 → 点确认 → 再分段驱动"，
+    // 因为点完「删除」之后链才进入真实文件 I/O。
+    unawaited(deleteCallback(tester)());
+    await tester.pump();
+    expect(find.textContaining('删除「'), findsOneWidget);
+
+    await tester.tap(find.text('删除'));
+
+    // 真实事件循环转一圈 + 排空 fake 微任务（机制见文件头 §二）。
+    // ⚠️ **固定轮数、不做早退**：`_deleteAsset` 先删记录、再（异步）删文件、
+    // 最后才 `setState`。文件被 OS 删掉是同步可见的（`existsSync()` 立刻为
+    // false），但 Dart 侧的 `await f.delete()` **续体**要等下一次 pump 才恢复
+    // ⇒ 用"文件已消失"当退出条件会在 `setState` 之前收工，列表不刷新
+    // （首两跑实测正是这样红的：断言只看到旧的 'A'）。
+    for (var i = 0; i < 30; i++) {
+      await tester.runAsync(() async {
+        await Future<void>.delayed(Duration.zero);
+      });
+      await tester.pump();
+    }
+
+    expect(repo.deletedIds, ['a'], reason: '确认删除必须真的删记录，否则是"假删除"');
+    expect(File(a.path).existsSync(), isFalse,
+        reason: '文件也要删 —— 只删记录会留下永远无人回收的孤儿文件');
+    expect(find.text('A'), findsNothing, reason: '删完列表要立刻刷新');
   }, timeout: _timeout);
 
   testWidgets('SLB-21 卸载时释放试听播放器（否则解码器与唤醒锁会漏）',

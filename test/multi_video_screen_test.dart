@@ -8,7 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:sonic_shield/features/remote/multi_video_screen.dart';
 import 'package:sonic_shield/remote/call_lifecycle.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/multi_call_service.dart';
+import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 import 'support/permission_stub.dart';
@@ -408,6 +410,34 @@ void main() {
       // `RcEndpointService.sendTo` 在无 broker 时返回 false（并把密文暂存
       // 到 outbox）⇒ 界面必须把"没发出去"讲出来。
       expect(find.textContaining('发送失败'), findsOneWidget);
+      await retireSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('对当前目标发「取状态」且通道受理 → 明确回执"已向…发送"，与失败不混同',
+        (tester) async {
+      seedPaired([peer('d1', '客厅')]);
+      svc.debugSeed([session('d1', '客厅')]);
+      await pumpScreen(tester);
+
+      // 宿主无 broker ⇒ `sendTo` 恒 false；用第 45 轮的注入缝驱动"已受理"一侧
+      // （否则成功文案在宿主上**结构性不可达**，上面那条只测得到失败一侧）。
+      var sent = 0;
+      RcEndpointService.instance.debugSendTo =
+          (endpoint, msg, store, enqueueOnFail) async {
+        sent++;
+        expect(msg.type, RcCmd.deviceStatus);
+        return true;
+      };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+
+      await tester.tap(find.widgetWithText(FilledButton, '取状态'));
+      await drain(tester);
+      await tester.pump(const Duration(milliseconds: 400)); // SnackBar 入场
+
+      expect(sent, 1, reason: '「取状态」必须真的把信令交出去一次，而不是只改界面');
+      expect(find.textContaining('已向「客厅」发送'), findsOneWidget,
+          reason: '受理后必须报"已发送" —— 与"发送失败（已暂存）"是两种后果，'
+              '混同会让用户以为离线也能立即执行');
       await retireSnackBars(tester);
     }, timeout: perTest);
   });

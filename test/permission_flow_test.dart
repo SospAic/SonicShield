@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -76,6 +77,57 @@ void _stubDeviceInfoMissing() {
   TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
       .setMockMethodCallHandler(_deviceInfoChannel, (call) async {
     throw MissingPluginException('宿主没有 device_info 实现：${call.method}');
+  });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_deviceInfoChannel, null);
+  });
+}
+
+/// 装机信息通道的桩：**如实返回一份合法的 Android 机型数据**（厂商可指定）。
+///
+/// 与 [_stubDeviceInfoMissing] 相反，这是"识别成功"的一侧 —— 上一轮把它记为
+/// 延期，理由是"要为 4 行钉一个 24 键假数据、且会绑死在插件模型内部"。
+/// 但那 4 行（`_detectVendor` 的 Android 分支 + 厂商指引的展示分支）恰好是
+/// **提示价值最高**的一条：识别不出来只能给"通用步骤"，用户按通用路径在
+/// MIUI 上根本找不到对应开关。代价可控（一次性数据），故本轮补齐。
+///
+/// ⚠️ 键集必须与 `device_info_plus-10.1.2` 的 `AndroidDeviceInfo.fromMap` /
+/// `AndroidBuildVersion._fromMap` 的 **required 字段**逐一对齐：
+/// 少一个非空键 ⇒ `fromMap` 直接抛类型错误（症状是"找不到文本"，根因在键）。
+/// 插件新增必填键时这里会红 —— 这正是"绑死"的代价，已明示接受。
+void _stubDeviceInfoAndroid({required String manufacturer}) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_deviceInfoChannel, (call) async {
+    if (call.method != 'getDeviceInfo') {
+      throw MissingPluginException('未桩的 device_info 方法：${call.method}');
+    }
+    return <String, dynamic>{
+      'version': <String, dynamic>{
+        'codename': 'REL',
+        'incremental': '1',
+        'release': '13',
+        'sdkInt': 33,
+        'previewSdkInt': 0,
+      },
+      'board': 'x',
+      'bootloader': 'x',
+      'brand': 'Xiaomi',
+      'device': 'x',
+      'display': 'x',
+      'fingerprint': 'x',
+      'hardware': 'x',
+      'host': 'x',
+      'id': 'x',
+      'manufacturer': manufacturer,
+      'model': 'x',
+      'product': 'x',
+      'tags': 'release-keys',
+      'type': 'user',
+      'isPhysicalDevice': true,
+      'serialNumber': 'x',
+      'isLowRamDevice': false,
+    };
   });
   addTearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -269,6 +321,36 @@ void main() {
       final autostart = native.firstWhere((c) => c.method == 'openOemAutostart');
       expect((autostart.arguments as Map)['vendor'], 'generic',
           reason: 'vendor 必须来自识别结果，不能写死');
+    }, timeout: const Timeout(Duration(seconds: 90)));
+
+    testWidgets('PFL-06 保活引导·识别出具体厂商 → 给该厂商的设置路径，而不是通用步骤',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // 强制 Android 平台：`_detectVendor` 的机型分支只在 android 下走。
+      // ⚠️ 必须在**用例体内**复位（不能只 `addTearDown`）—— 框架在用例体结束后、
+      // tearDown 之前就会跑 `debugAssertAllFoundationVarsUnset`，晚一步即报
+      // "The value of a foundation debug variable was changed by the test."
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        _stubDeviceInfoAndroid(manufacturer: 'Xiaomi');
+        _installNative({'requestIgnoreBatteryOptimizations': null});
+
+        await _pump(tester);
+        await tester.tap(find.text('保活引导'));
+        await tester.pumpAndSettle();
+
+        // `vendor = manufacturer.toLowerCase()` ⇒ 'xiaomi' → 命中 _guides。
+        expect(find.text('后台保活设置（XIAOMI）'), findsOneWidget,
+            reason: '标题必须用识别出的厂商，否则用户不知道这是给他这台机的');
+        expect(find.text('小米 / 红米 (MIUI·澎湃OS)'), findsOneWidget,
+            reason: '识别出小米就该点名 MIUI/澎湃OS —— 这决定了用户能不能找到开关');
+        expect(find.textContaining('省电策略 → 无限制'), findsOneWidget,
+            reason: '必须给具体的设置路径，而不是笼统说"去关电池优化"');
+        expect(find.textContaining('通用步骤'), findsNothing,
+            reason: '识别成功却退回通用步骤 = 识别白做了（通用路径在 MIUI 上对不上）');
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }
