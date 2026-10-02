@@ -360,6 +360,25 @@ void main() {
       expect(find.byIcon(Icons.mic), findsWidgets);
     });
 
+    testWidgets('RRS-19b 对讲面板「关闭」真的关闭面板（不是一个摆设按钮）', (tester) async {
+      // 第 68 轮自查补：`_PttSheet` 的「关闭」此前只有"面板打开"被验过，
+      // 关闭按钮本身一次都没被点过 —— 一个点不动的关闭键会把用户困在面板里。
+      stubPermissions({Permission.microphone: PermissionStatus.granted});
+      addTearDown(clearPermissionStub);
+
+      await _pump(tester, endpoints: [_ep('0123456789abcdef', '客厅平板')]);
+
+      await tester.tap(find.byTooltip('对讲机'));
+      await tester.pumpAndSettle();
+      expect(find.text('对讲机 → 客厅平板'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(TextButton, '关闭'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('对讲机 → 客厅平板'), findsNothing,
+          reason: '关闭必须真的收起面板 —— 否则用户被困在无法退出的底部面板里');
+    });
+
     testWidgets('RRS-20 对讲机：麦克风被拒 → 明确提示且不打开面板', (tester) async {
       final requested = stubPermissions(
           {Permission.microphone: PermissionStatus.denied});

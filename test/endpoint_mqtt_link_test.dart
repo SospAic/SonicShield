@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -478,6 +480,30 @@ void main() {
       expect(store.outboxFor(peer.deviceId), isEmpty);
       expect(store.outboxFor(second), isEmpty,
           reason: '坏条目同样要被清掉，否则第二台设备的队列永远堵着');
+    });
+
+    test('MQ-22 flushOutbox 丢弃「缺 wire 字段」的畸形条目（不卡队列，也不计入投出条数）',
+        () async {
+      // 第 68 轮自查补：MQ-18/19 走的是 `wire` 非空但**解不开**（→ 2392 留痕丢弃）；
+      // 这里是 `wire` **缺失**的畸形条目（升级残留 / 半写盘）—— 走的是不同的
+      // `if (wire == null)` 分支，此前没有任何用例执行过。
+      await svc.start(store, db);
+      await settle(); // 首连那次补发推完（此时队列还空）
+      await prefs.setString(
+          'rc_outbox',
+          jsonEncode([
+            {'endpointId': peer.deviceId, 'at': 111}
+          ]));
+
+      expect(store.outboxFor(peer.deviceId), hasLength(1),
+          reason: '前提：畸形条目确实进了队列（缺 wire 但 endpointId 命中）');
+
+      final n = await svc.flushOutbox(store, peer);
+
+      expect(n, 0, reason: '没法重放的条目不算"实际交给客户端"');
+      expect(fake.sentWires, isEmpty, reason: '缺 wire 就不可能投得出去');
+      expect(store.outboxFor(peer.deviceId), isEmpty,
+          reason: '★ 畸形条目必须被丢弃 —— 留着会永久卡住它后面每一条命令');
     });
   });
 
