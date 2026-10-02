@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -365,6 +366,63 @@ void main() {
       expect(out.message, contains('未能通知对端'),
           reason: '配对请求是**一次性在线握手**：失败要当场说，'
               '暂存进 outbox 等对端上线再补发毫无意义');
+    });
+  });
+
+  // ═══════════════════════════════════════════════ D · 处理器异常兜底（BUG-051）
+
+  group('IR-D 处理器异常：guardDispatch 兜底必须留痕 + 回执（BUG-051）', () {
+    test('IR-16 处理器抛异常 → 审计 failed 带可读原因，且回执「处理器异常」', () async {
+      // `task.runNow` 的 `msg.payload['taskId'] as String?` 对非字符串抛 TypeError。
+      // 形状 = 历史实测的「ping 通、status.get 超时」：旧的裸调用会让异常逃逸出
+      // `_handleRaw`，于是**不回执 + 不写审计**，控制端只看到超时。
+      final seen = await collect(() async {
+        await svc.debugHandleRaw(cmdTopic(),
+            await sealCmd(inbound(RcCmd.taskRunNow, payload: {'taskId': 42})));
+      });
+      expect(
+          await countLogs(
+              action: RcCmd.taskRunNow,
+              status: 'failed',
+              contains: '处理器异常'),
+          1,
+          reason: '处理失败必须留下可读痕迹（BUG-051），不能让真实原因被隐藏');
+      // 失败回执：宿主机无 MQTT ⇒ 落为出站丢弃审计（证明真的**尝试**回执了）。
+      expect(
+          await countLogs(
+              action: RcEvt.ack, status: 'skipped', contains: '出站消息未发出'),
+          1,
+          reason: '失败也要回执，否则控制端等到超时才知道"不是没送到，是执行炸了"');
+      expect(seen, hasLength(1), reason: '兜底后收尾广播仍要发生');
+    });
+
+    test('IR-17 连审计都失败（数据库不可用）→ 打印兜底，且异常绝不外泄', () async {
+      // 「比处理失败更严重的信号」：DB 不可用 ⇒ 审计也写不进去。
+      // 此时必须把原因打到 stdout（否则这条命令的任何痕迹都没有）。
+      final dead = await AppDatabase.open(inMemoryDatabasePath);
+      await dead.close();
+      svc.debugBind(store: store, db: dead, saltStore: salts);
+
+      final printed = <String>[];
+      final seen = await runZoned(() async {
+        final s = <Map<String, dynamic>>[];
+        final sub = svc.events.listen(s.add);
+        try {
+          await svc.debugHandleRaw(cmdTopic(),
+              await sealCmd(inbound(RcCmd.taskRunNow, payload: {'taskId': 42})));
+          await Future<void>.delayed(Duration.zero);
+        } finally {
+          await sub.cancel();
+        }
+        return s;
+      }, zoneSpecification: ZoneSpecification(
+        print: (_, __, ___, String line) => printed.add(line),
+      ));
+
+      expect(printed.any((l) => l.contains('audit failed for')), isTrue,
+          reason: '连审计都失败必须被看见，不能静默吞掉');
+      expect(seen, hasLength(1),
+          reason: '异常不得外泄出 _handleRaw（外泄会打断 MQTT updates 监听）');
     });
   });
 }

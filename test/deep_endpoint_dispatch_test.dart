@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +12,7 @@ import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
+import 'package:sonic_shield/services/native_bridge.dart';
 
 /// 第 36 轮续四：直接驱动 `RcEndpointService._dispatch` 的**宿主可测**子处理器。
 ///
@@ -182,6 +184,28 @@ void main() {
       await svc.debugDispatch(
           cmd(RcCmd.deviceAlert, {'title': 'hi', 'body': 'there'}), peer);
       expect(await hasLog(action: 'device.alert'), isTrue);
+    });
+
+    test('device.alert 原生确认成功 → 审计写「找回告警已展示」（按真实结果回执）',
+        () async {
+      // 宿主默认没有原生桥 ⇒ `NativeBridge.alert` 返回 false，回执/审计都是
+      // 「原生未确认…」那一侧；**成功侧此前一行都没被执行过**。
+      // 这里桩原生 `alert` 返回 true，断言审计真的切成"已展示"。
+      const channel = MethodChannel(ChannelsMethod.channel);
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'alert') return true;
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      await svc.debugDispatch(
+          cmd(RcCmd.deviceAlert, {'message': '找到我'}), peer);
+
+      expect(await hasLog(action: 'device.alert', contains: '找回告警已展示'),
+          isTrue,
+          reason: '原生确认成功却写"未确认"= 成功被误报为失败（回执不可信）');
     });
 
     test('logs.recent → 不抛异常（_send 在宿主为 no-op）', () async {

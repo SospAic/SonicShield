@@ -253,6 +253,30 @@ void main() {
         reason: '找不到目标端点必须说清楚，不能静默 return（BUG-D）');
   });
 
+  testWidgets('CSP-11 点另一个单选项 → 选择真的写回（不是只改外观）', (tester) async {
+    await pumpCall(tester, endpoints: [
+      ep('0123456789abcdef', '客厅平板'),
+      ep('fedcba9876543210', '书房音箱'),
+    ]);
+
+    // 无预选时默认选中第一个（call_screen.dart:76-77）。
+    expect(
+        tester
+            .widget<RadioGroup<String>>(find.byType(RadioGroup<String>))
+            .groupValue,
+        '0123456789abcdef');
+
+    await tester.tap(find.text('书房音箱'));
+    await tester.pumpAndSettle();
+
+    expect(
+        tester
+            .widget<RadioGroup<String>>(find.byType(RadioGroup<String>))
+            .groupValue,
+        'fedcba9876543210',
+        reason: '点了没反应 = 用户以为选中了、实际呼叫的还是上一个端点（同类观感见 BUG-D）');
+  });
+
   testWidgets('CSP-06 视频呼叫·麦克风被拒 → 拦截并给出原因（不进入 startCall）',
       (tester) async {
     final requests = await pumpCall(tester,

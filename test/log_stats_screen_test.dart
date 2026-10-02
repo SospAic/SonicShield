@@ -415,6 +415,23 @@ void main() {
       await settleSnackBars(tester);
     });
 
+    testWidgets('LOG-12 导出失败 → 明说「导出失败」，不许假装已导出',
+        (tester) async {
+      await seed(tester, [logRow(atMs: base.millisecondsSinceEpoch)]);
+      await pumpLog(tester);
+      await waitForText(tester, 'play');
+
+      // 分享面板抛错（磁盘满 / 临时目录不可用 / 平台拒绝）⇒ 必须可见。
+      // 静默吞掉的后果是"用户以为导出成功、审计链实际断了"。
+      messenger().setMockMethodCallHandler(kShare, (call) async {
+        throw PlatformException(code: 'share_unavailable');
+      });
+
+      await tester.tap(find.byIcon(Icons.ios_share));
+      await waitForText(tester, '导出失败');
+      await settleSnackBars(tester);
+    });
+
     testWidgets('LOG-09 embedded：作为子 TAB 时不带标题、不带返回键', (tester) async {
       await seed(tester, [logRow(atMs: base.millisecondsSinceEpoch)]);
       await pumpLog(tester, embedded: true);

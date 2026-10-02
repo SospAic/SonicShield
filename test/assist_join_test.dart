@@ -533,6 +533,30 @@ void main() {
       expect(joinBus.published.length, before);
     });
 
+    test('AJ-53 tick()：active 未到期驱动倒计时；已关闭则只停表、不再推送', () async {
+      final s = await host.start();
+      expect(await client.join(s.code, s.password), isTrue);
+      expect(client.active, isTrue);
+
+      // active 且未到期：每次 tick 都必须推一次会话快照（这是倒计时的驱动源，
+      // 不 emit 界面上倒计时就永远停住）。
+      var emits = 0;
+      final sub = client.changes.listen((_) => emits++);
+      addTearDown(sub.cancel);
+      client.tick();
+      await pumpUntil(() => emits > 0);
+      expect(emits, greaterThan(0), reason: 'active 下 tick 必须驱动倒计时');
+
+      // 已关闭：tick 只应停表（1s 周期心跳不能继续空转、更不能乱推状态）。
+      await client.leave();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final before = emits;
+      client.tick();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(client.phase, AssistPhase.closed);
+      expect(emits, before, reason: 'closed 后 tick 必须只停表，不得再推送');
+    });
+
     test('AJ-48 端点未接入前 onWire 静默丢弃（无密钥，不解密）', () async {
       final s = await host.start();
       final wire = await acceptWire(s);
