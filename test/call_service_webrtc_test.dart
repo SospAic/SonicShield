@@ -28,9 +28,12 @@
 ///
 /// - **不测**真实媒体协商：SDP 是常量串，ICE 不真的打洞，`RTCVideoView` 的纹理
 ///   不存在（与 `multi_video_screen_test.dart` 同一处理）。
-/// - **不测** `_onWaitTimeout` 的 45s 真实计时：`callerAnswerTimeout` 是 45 秒，
-///   真实等待不可接受；该分支的**判定**已由 `call_lifecycle_test.dart` 的纯函数
-///   测试锁死（`timedOutMeansMissed` / `waitLimitMs`）。
+/// - **不测** `_onWaitTimeout` 的 45s 真实计时（**唯一例外见 CS-40**）：
+///   `callerAnswerTimeout` 是 45 秒，真实等待代价高；该分支的**判定**已由
+///   `call_lifecycle_test.dart` 的纯函数测试锁死（`timedOutMeansMissed` /
+///   `waitLimitMs`）。第六十六轮的 CS-40 **真等** 45s 是为了取得
+///   "主叫不会无限等待"这条只能在真计时器上拿到的证据
+///   （与 `multi_call_service_connect_test.dart` 的 MC-24 同一取舍）。
 /// - **不测** `CalleeAction.rejectBusy => false`（`onIncomingCall` 里那一条
 ///   **故意的不可达臂**：上面已提前 return，留它只为让 switch 穷尽）。
 ///
@@ -725,5 +728,31 @@ void main() {
               '否则 UI 停在"通话中"而底层已断');
       expect(svc.inCall, isFalse);
     });
+  });
+
+  // ══════════════════ CS-H 主叫等待应答上限（第六十六轮） ══════════════════
+  //
+  // `_startWaitTimer(isCaller: true)` 的 45s 计时器此前从未被驱动过：
+  // 主叫"会不会无限等待"只能靠**真计时器**取证，纯函数锁只能证明判定式
+  // 的存在，证明不了"到点真的收尾"。本组只此一条，真等 46s。
+
+  group('CS-H 主叫等待应答上限（真实计时）', () {
+    test('CS-40 被叫全程不应答 → 45s 到点判定"未接"并收尾（不无限等待）',
+        () async {
+      final id = await svc.startCall(peer('EP0080'), store);
+      expect(id, isNotNull, reason: '前置：主叫必须真的把 invite 发出去');
+      expect(svc.currentPhase, CallPhase.connecting);
+      expect(svc.inCall, isTrue);
+
+      // 被叫既不喂 answer、也不推 rc.call 状态 ⇒ 只能靠主叫自己的等待上限。
+      await Future<void>.delayed(const Duration(seconds: 46));
+
+      expect(svc.currentPhase, CallPhase.idle,
+          reason: '超时必须收尾 —— 否则主叫对着"连接中…"等到天荒地老'
+              '（BUG-050：既不知道没人接，也退不出这一页）');
+      expect(svc.inCall, isFalse);
+      expect(svc.lastEndReason, CallEndReason.missed,
+          reason: '到点必须记成"未接"（对方无应答），而不是含糊的失败');
+    }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }

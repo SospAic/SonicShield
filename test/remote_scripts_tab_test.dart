@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_scripts_tab.dart';
 import 'package:sonic_shield/remote/command_channel.dart';
@@ -23,8 +24,11 @@ class _FakeScriptChannel implements RcCommandChannel {
   /// 模拟"会话已激活/未激活"。
   bool sendable = true;
 
+  /// 通道标签（**可改**：用于驱动 `updates` 推送后的重建断言，RS-15）。
+  String labelText = '假端点（协助）';
+
   @override
-  String get label => '假端点（协助）';
+  String get label => labelText;
 
   @override
   Stream<Map<String, dynamic>> get events => _events.stream;
@@ -50,6 +54,10 @@ class _FakeScriptChannel implements RcCommandChannel {
 
   void emit(String type, Map<String, dynamic> payload) =>
       _events.add({'type': type, 'payload': payload});
+
+  /// 推一次"通道可用性变化" —— 等价于 `AssistChannel.updates` 的一次发射
+  /// （端点放行/收回权限、会话激活/关闭时触发）。
+  void bumpUpdates() => _updates.add(null);
 }
 
 /// 「指令组执行进度」的**用户可见后果**锁（BUG-057 的兄弟缺陷 `rc.script` 无消费者）。
@@ -271,6 +279,29 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // 第六十六轮：`_updSub`（通道可用性推送 → 重建）此前从未被驱动过。
+  // 本页 `initState` 订阅了 `channel.updates`，端点放行/收回权限、会话
+  // 激活/关闭都会推一次 —— 不重建的话横幅与按钮会停在旧值（与远程控制台
+  // 同源缺陷）。用**通道标签的变化**作为可观测面（标签就在卡片标题上）。
+  // ---------------------------------------------------------------------------
+
+  testWidgets('RS-15 通道可用性推送 → 本页真的重建（不是只在收到业务事件时才刷新）',
+      (tester) async {
+    final ch = await pumpCh(tester);
+    expect(find.text('假端点（协助）'), findsOneWidget, reason: '前置：通道标签已渲染');
+
+    // 模拟"会话状态变了"：标签随之变化 + 推一次 updates。
+    ch.labelText = '假端点（已重连）';
+    ch.bumpUpdates();
+    await frames(tester);
+
+    expect(find.text('假端点（已重连）'), findsOneWidget,
+        reason: '通道可用性变化必须推动本页重建 —— 否则横幅停在旧状态，'
+            '使用者看到的是"已经变了但界面没变"（与远程控制台同源缺陷）');
+    expect(find.text('假端点（协助）'), findsNothing);
+  });
+
+  // ---------------------------------------------------------------------------
   // 第四十三轮：**配对通道**下的四个"从未被驱动过"的分支。
   //
   // 此前本文件所有用例都在**协助会话**（`pumpCh`，注入假通道）下跑 ——
@@ -374,6 +405,75 @@ void main() {
       expect(find.text('请先完成端点配对'), findsOneWidget,
           reason: '组装器路由需要已配对端点 id；直接跳会报错，'
               '而错误页不会告诉使用者"先去配对"');
+    });
+
+    /// 带 **GoRouter** 的宿主：本页 `initState` 之外的 `context.push`
+    /// （「新建指令组」）用普通 `MaterialApp(home:)` 会直接抛
+    /// "No GoRouter found" ⇒ 那条跳转必须靠路由壳才能真实执行。
+    Future<List<String>> pumpRouted(WidgetTester tester,
+        {String endpointId = 'a1b2c3d4e5f60718'}) async {
+      final store = RemoteStore(await SharedPreferences.getInstance());
+      await store.addPaired(PairedEndpoint(
+        deviceId: endpointId,
+        name: '客厅手机',
+        secret: 'AB2CD5EF',
+        pairedAt: DateTime(2026, 1, 1),
+      ));
+      final visited = <String>[];
+      final router = GoRouter(
+        initialLocation: '/',
+        routes: [
+          GoRoute(
+              path: '/',
+              builder: (_, __) =>
+                  const Scaffold(body: RemoteScriptsTab())),
+          GoRoute(
+            path: '/remote/script-builder/:id',
+            builder: (ctx, s) {
+              final id = s.pathParameters['id']!;
+              visited.add('/remote/script-builder/$id');
+              return Scaffold(
+                appBar: AppBar(title: const Text('指令组装器页')),
+                body: Center(
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(ctx).maybePop(),
+                    child: const Text('返回'),
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      );
+      final view = tester.view;
+      view.physicalSize = const Size(1200, 4000);
+      view.devicePixelRatio = 1.0;
+      addTearDown(view.reset);
+      await tester.pumpWidget(
+          ProviderScope(child: MaterialApp.router(routerConfig: router)));
+      await frames(tester);
+      return visited;
+    }
+
+    testWidgets('RS-16 有已配对端点时点「新建指令组」→ 真的跳到组装器路由（带上该端点 id）',
+        (tester) async {
+      final visited = await pumpRouted(tester);
+      expect(find.text('新建指令组'), findsOneWidget, reason: '前置：入口在');
+
+      await tester.tap(find.text('新建指令组'));
+      await frames(tester, 10);
+
+      expect(visited, contains('/remote/script-builder/a1b2c3d4e5f60718'),
+          reason: '组装器靠路径参数定位目标端点；不带 id / 带错 id ⇒ '
+              '进去就是"端点不存在"，用户以为自己点错了');
+      expect(find.text('指令组装器页'), findsOneWidget,
+          reason: '必须真的落到组装器页，而不是停在原页（假跳转）');
+
+      // 返回后本页会 `await _load()` 刷新 —— 不抛异常即通过。
+      await tester.tap(find.text('返回'));
+      await frames(tester, 10);
+      expect(find.text('新建指令组'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 }

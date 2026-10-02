@@ -28,6 +28,8 @@
 ///   `response['textureId']`，桩只是复刻真实插件返回的形状）。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -38,6 +40,7 @@ import 'package:sonic_shield/core/app_keys.dart';
 import 'package:sonic_shield/features/remote/call_incoming_overlay.dart';
 import 'package:sonic_shield/remote/call_lifecycle.dart';
 import 'package:sonic_shield/remote/call_service.dart';
+import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 TestDefaultBinaryMessenger get _messenger =>
@@ -263,6 +266,41 @@ void main() {
         reason: '点了挂断却没结束会话 = 按钮是死的');
     expect(find.byIcon(Icons.call_end), findsNothing,
         reason: '会话已结束，覆盖层必须收起（否则用户被黑屏挡住）');
+    await _unmount(tester);
+  });
+
+  // =====================================================================
+  // 5.5 · 对端 `rc.call` 状态推送 → 覆盖层文案即时刷新（第六十六轮）
+  //       `_CallView._remoteStateSub` 此前从未被驱动过：状态镜像变了却
+  //       不重建 ⇒ "对方振铃中…" 永远不出现，主叫分不清"对方在响"与
+  //       "信令没送到"（这正是 BUG-050 的另一半）。
+  // =====================================================================
+
+  testWidgets('CIO-10 对端振铃状态推送 → 文案从"连接中…"变成"对方振铃中…"',
+      (tester) async {
+    final bus = StreamController<Map<String, dynamic>>.broadcast();
+    CallService.instance.attach(bus.stream);
+    addTearDown(() async {
+      await bus.close();
+      // 还原：本文件其它用例不依赖任何注入流。
+      CallService.instance.attach(const Stream.empty());
+    });
+
+    await _pumpHost(tester, CallPhase.connecting);
+    expect(find.text('连接中…'), findsOneWidget, reason: '前置：未收到对端状态时是通用文案');
+
+    // 真实生产入口：`rc.call` 的 state 由 endpoint_service 分派进 CallService。
+    bus.add(<String, dynamic>{
+      'type': RcEvt.callState,
+      'payload': <String, dynamic>{'state': 'ringing'},
+    });
+    await _flush(tester);
+
+    expect(find.text('对方振铃中…'), findsOneWidget,
+        reason: '对端已振铃必须与"信令根本没送到"区分开 —— '
+            '订阅了却不重建，界面就永远停在"连接中…"（BUG-050 的症状）');
+    expect(find.text('连接中…'), findsNothing);
+    expect(tester.takeException(), isNull);
     await _unmount(tester);
   });
 
