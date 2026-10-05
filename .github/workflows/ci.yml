@@ -104,6 +104,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 腾磁盘：ubuntu-latest 的 / 只有 ~14 GB 余量，而「Android Emulator + API 34
+      # 系统镜像 + AVD」要数 GB，实测会在 `sdkmanager --install emulator` 处报
+      # `No space left on device`，模拟器起不来 ⇒ 后续 adb 连接被拒 ⇒ 整 job 假红
+      # （2026-10-05 run 37310760536 实测）。这里只删与本次构建无关的大件，
+      # 不动 $AGENT_TOOLSDIRECTORY（Flutter 缓存就在那里）。
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android/sdk/ndk /usr/share/swift
+          sudo apt-get clean
+          df -h /
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.47.3
