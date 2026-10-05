@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/remote/controller_service.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/multi_call_service.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/rc_script.dart';
@@ -68,15 +69,28 @@ void main() {
   }
 
   group('控制器命令：离线 → 密文暂存，字段端到端可核对', () {
-    test('RC-01 sendScriptStop：scriptId 原样进密文，from 是本机 ID', () async {
+    test('RC-01 sendScriptStop：实时信令离线**不入队**（P1-15），构造字段仍可核对', () async {
       final svc = RcControllerService.instance;
+
+      // ① 真源判据：stop 属 live —— 端点上线时早已没有要停的对象，补发有害。
+      expect(rcOutboxFreshness(RcCmd.scriptStop), RcOutboxFreshness.live);
+
+      // ② 真实路径（不注入替身）：离线 ⇒ 明确失败，且**不**暂存。
+      //    P1-15 前这里会存进 outbox 等"上线后自动执行" —— 一个错误的承诺：
+      //    既占满队列挤掉可补发的命令，又让 UI"待发 N 条"虚高。
       final ok = await svc.sendScriptStop(endpoint, store, scriptId: 's-1');
       expect(ok, isFalse, reason: '宿主机无 MQTT 客户端，必然走离线分支');
+      expect(store.outboxFor('dev-1'), isEmpty,
+          reason: '★ live 信令禁止离线补发：不得占用队列、不得让"待发"虚高');
 
-      final msg = await decodeFirstOutbox();
-      expect(msg.type, RcCmd.scriptStop);
-      expect(msg.payload['scriptId'], 's-1');
-      expect(msg.from, 'ctrl-1', reason: 'sendTo 统一补本机 deviceId 作 from');
+      // ③ 构造侧字段核对：用宿主替身捕获 sendTo 收到的信封（不依赖入队）。
+      RcMessage? captured;
+      RcEndpointService.instance.debugSendTo =
+          (e, m, s, enqueueOnFail) async { captured = m; return false; };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+      await svc.sendScriptStop(endpoint, store, scriptId: 's-2');
+      expect(captured!.type, RcCmd.scriptStop);
+      expect(captured!.payload['scriptId'], 's-2');
     });
 
     test('RC-02 sendScript：payload 就是 script.toJson() 原样', () async {
@@ -182,29 +196,46 @@ void main() {
       expect(calls.where((c) => c == 'start'), hasLength(1));
     });
 
-    test('RC-13 正常录音松开：离线 → pttVoice 密文暂存，内容可解回，文件已清理',
+    test('RC-13 实时语音离线**不入队**（P1-15）：文件已清理，构造字段仍可核对',
         () async {
       final bytes = List<int>.generate(1024, (i) => i % 256);
-      final path =
+      String mkPath() =>
           '${Directory.systemTemp.path}/ptt_cov_small_${DateTime.now().microsecondsSinceEpoch}.bin';
-      File(path).writeAsBytesSync(bytes);
-
-      stubRecord(hasPermission: true, stopPath: path);
       final svc = RcControllerService.instance;
+
+      // ① 真源判据：PTT 语音属 live —— 端点上线时这段话早已过时，补发有害。
+      expect(rcOutboxFreshness(RcCmd.pttVoice), RcOutboxFreshness.live);
+
+      // ② 真实路径（不注入替身）：离线 ⇒ 明确失败、删临时文件、**不**暂存。
+      final path1 = mkPath();
+      File(path1).writeAsBytesSync(bytes);
+      stubRecord(hasPermission: true, stopPath: path1);
       expect(await svc.pttStart(), isTrue);
 
       final r = await svc.pttStopAndSend(endpoint, store);
       expect(r.ok, isFalse, reason: '宿主机离线，发送必失败');
       expect(r.message, '发送失败（端点离线）');
-      expect(File(path).existsSync(), isFalse, reason: '读出字节后必须删临时文件');
+      expect(File(path1).existsSync(), isFalse, reason: '读出字节后必须删临时文件');
+      expect(store.outboxFor('dev-1'), isEmpty,
+          reason: '★ PTT 是实时语音：端点上线时早已过时，禁止离线补发/占队列');
 
-      final msg = await decodeFirstOutbox();
-      expect(msg.type, RcCmd.pttVoice);
-      expect(msg.payload['audioB64'], base64Encode(bytes),
+      // ③ 构造侧字段核对：用宿主替身捕获 sendTo 收到的信封（不依赖入队）。
+      RcMessage? captured;
+      RcEndpointService.instance.debugSendTo =
+          (e, m, s, enqueueOnFail) async { captured = m; return false; };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+      final path2 = mkPath();
+      File(path2).writeAsBytesSync(bytes);
+      stubRecord(hasPermission: true, stopPath: path2);
+      expect(await svc.pttStart(), isTrue);
+      await svc.pttStopAndSend(endpoint, store);
+
+      expect(captured!.type, RcCmd.pttVoice);
+      expect(captured!.payload['audioB64'], base64Encode(bytes),
           reason: '音频字节必须原样（base64）进密文');
-      expect(msg.payload['durationMs'], isA<int>());
-      expect((msg.payload['voiceId'] as String).isNotEmpty, isTrue);
-      expect(msg.payload['fromName'], '控制端A');
+      expect(captured!.payload['durationMs'], isA<int>());
+      expect((captured!.payload['voiceId'] as String).isNotEmpty, isTrue);
+      expect(captured!.payload['fromName'], '控制端A');
     });
 
     test('RC-14 超过 200KB 上限 → 拒发并清理，不留暂存', () async {
@@ -236,6 +267,27 @@ void main() {
       expect(calls, contains('stop'));
       expect(File(path).existsSync(), isFalse, reason: '取消也必须清理临时文件');
       expect(svc.pttRecording, isFalse);
+    });
+
+    test('RC-16 ★ 录音参数按语音预算选（否则 60s 对讲必被"音频过大"拒发）', () {
+      // 真源判据：v1 曾直接吃 `record` 插件默认值（128 kbps / 44.1 kHz /
+      // 立体声）⇒ 60 s ≈ 960 KB，远超 pttMaxBytes=200 KB ⇒ 超过约 12 s 的
+      // 对讲全部被"音频过大（压缩率异常）"拒发，"≤60s" 的上限形同虚设。
+      // 语音改用宽带单声道（行业惯例 16 kHz / 单声道）后整段体积≈1/5。
+      // ⚠️ 这里必须 `final` 而非 `const`：cfg 本身是 const，但下面的 bitRate
+      //    是**实例字段**，常量表达式里访问实例字段会被编译器拒绝
+      //    （const_eval_property_access）——所以整段算式只能在运行期做。
+      // ignore: prefer_const_declarations
+      final cfg = RcControllerService.pttRecordConfig;
+      expect(cfg.sampleRate, 16000, reason: '语音宽带 16 kHz 足够，44.1 kHz 是无谓体积');
+      expect(cfg.numChannels, 1, reason: '对讲是单声道，立体声白占一倍体积');
+      expect(cfg.autoGain, isTrue, reason: '小声说话也要听得清（AGC）');
+      // ★ 硬预算：整段最大体积必须落在上限内（编码器还会有一点浮动余量）。
+      final worstBytes =
+          cfg.bitRate * RcControllerService.pttMaxSeconds ~/ 8;
+      expect(worstBytes, lessThan(RcControllerService.pttMaxBytes),
+          reason: '${RcControllerService.pttMaxSeconds}s × ${cfg.bitRate}bps '
+              '= $worstBytes B 必须 < ${RcControllerService.pttMaxBytes} B');
     });
   });
 

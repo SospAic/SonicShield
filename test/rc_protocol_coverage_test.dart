@@ -90,11 +90,14 @@ void main() {
   /// 注意：这里在 `test()` 之外执行，**不能用 `expect`**（会抛
   /// `OutsideTestException`），故用 `StateError` 表达"解析前提不成立"。
   String classBody(String src, String name) {
-    final start = src.indexOf('abstract final class $name {');
+    final sig = 'abstract final class $name {';
+    final start = src.indexOf(sig);
     if (start < 0) throw StateError('协议里找不到 $name 类');
-    final end = src.indexOf('\n}', start);
-    if (end <= start) throw StateError('$name 类体未正常闭合');
-    return src.substring(start, end);
+    // 花括号配对取类体：不再写死 `indexOf('\n}', start)`（依赖"类在行首收尾"
+    // 的排版，缩进一变就静默切错，见 test/support/source_text.dart / A12）。
+    final body = balancedSlice(src, start + sig.length - 1);
+    if (body == null) throw StateError('$name 类体未正常闭合');
+    return body;
   }
 
   /// 类体里的 `static const <name> =` 常量名。

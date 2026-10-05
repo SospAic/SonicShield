@@ -272,7 +272,17 @@ class RcScriptExecutor {
       ongoing: false,
     );
     Timer(const Duration(seconds: 3), () {
-      FlutterLocalNotificationsPlugin().cancel(0x5C81); // 弹窗/通知随之消失
+      // 弹窗/通知的清理是 **best-effort**：平台通道不可用时（宿主测试里 mock 通道
+      // 已摘除、真机上插件未就绪/被系统回收）**不能升级成"未处理的异步错误"**。
+      // 2026-10-04 门禁实测：这条 3 秒计时器在 `endpoint_ptt_evidence_test.dart`
+      // 的 tearDown 摘除 mock 通道后触发，抛
+      // `MissingPluginException(No implementation found for method cancel ...)`；
+      // 该异常落在 `Timer` 回调里无人接管，被 flutter_test 归到**当时正在跑的用例**
+      // 名下 ⇒ EV-01..04 集体假红（实为计时器越界，而不是断言失败）。
+      unawaited(
+          FlutterLocalNotificationsPlugin().cancel(0x5C81).catchError((Object _) {
+        // 通知已经不重要了：清不掉就让它自己消失，不制造未处理异步错误。
+      })); // 弹窗/通知随之消失
     });
 
     _current = null;

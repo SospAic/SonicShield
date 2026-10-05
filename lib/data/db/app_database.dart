@@ -15,7 +15,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const int dbVersion = 3;
+  static const int dbVersion = 4;
   static AppDatabase? _instance;
 
   static Future<AppDatabase> open([String? dirOverride]) async {
@@ -153,17 +153,37 @@ class AppDatabase {
       await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
     }
     // v2 → v3：夜间独立豁免（2026-09，v1.9，docs/20 §8）。
+    // v3 → v4：**修复"已升到 v3、却在 occurrences 上缺列"的历史库**（BUG-079 残留）。
+    //
     // 任务级开关，**默认 0 = 不豁免**；主开关另存于 kv，两者皆开才放行。
     // 老库补列后全部为 0，等价于"功能未启用"，行为与升级前一致。
-    // BUG-079（第五十三轮抓修）：v2 时代 occurrences 表**同样没有** quiet_exempt 列，
-    // 升级时漏补 ⇒ 旧库升级后 deletePendingQuietExempt()（关闭夜间豁免主开关时的
-    // fail-safe 清除）每次调用必抛 `no such column`，replan 整链失败（模拟器现场每分钟刷）。
-    if (oldV < 3) {
-      await db.execute(
-          'ALTER TABLE tasks ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
-      await db.execute(
-          'ALTER TABLE occurrences ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
+    //
+    // 为什么必须有 v4：v3 刚上线时 `_onUpgrade` **只补了 tasks.quiet_exempt**，
+    // occurrences.quiet_exempt 是第五十三轮才补上的（BUG-079）。**在那之前升到 v3
+    // 的库，`user_version` 已经是 3**，`oldV < 3` 这道闸再也进不去 ⇒ 列永远补不上
+    // ⇒ 远程 `task.upsert` / 本地重算触发的 `commitAll`（`INSERT INTO occurrences`
+    // 带 quiet_exempt）每次必抛 `no such column`，任务物化整链失败（三机实机取证）。
+    //
+    // 因此这里不再用版本闸做唯一判据，而是**按列存在性幂等补齐**（SQLite 的
+    // `ALTER TABLE ADD COLUMN` 不支持 `IF NOT EXISTS`）：列已在则为空操作，
+    // 对 v1/v2/v3 及全新库都安全。
+    if (oldV < 4) {
+      await _addIntColumnIfMissing(db, 'tasks', 'quiet_exempt');
+      await _addIntColumnIfMissing(db, 'occurrences', 'quiet_exempt');
     }
+  }
+
+  /// 幂等补一个 `INTEGER NOT NULL DEFAULT 0` 列：列已存在则原样返回、不抛。
+  ///
+  /// 存在性判据用 `PRAGMA table_info` —— 表不存在时它返回**空集而非抛异常**，
+  /// 因此对全新库/缺表库同样安全。
+  static Future<void> _addIntColumnIfMissing(
+      Database db, String table, String column) async {
+    final cols = await db.rawQuery('PRAGMA table_info($table)');
+    final names = {for (final r in cols) r['name']};
+    if (names.contains(column)) return;
+    await db.execute(
+        'ALTER TABLE $table ADD COLUMN $column INTEGER NOT NULL DEFAULT 0');
   }
 
   // ---------- kv ----------

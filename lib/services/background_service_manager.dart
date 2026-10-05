@@ -8,6 +8,7 @@ import '../core/constants.dart';
 import '../domain/models/action.dart';
 import 'background_engine.dart';
 import 'native_bridge.dart';
+import 'permission_flow.dart';
 
 /// UI 侧对后台服务的封装：启动/停止、开关守卫、订阅引擎状态。
 class BackgroundServiceManager {
@@ -44,6 +45,15 @@ class BackgroundServiceManager {
         onStart: engineEntryPoint,
         isForegroundMode: true,
         autoStart: false, // 由用户在首页显式开启（合规与功耗友好）
+        // autoStartOnBoot 在插件里的**默认值是 true**（platform_interface 5.1.2
+        // configs.dart:73），它会让插件自带的 id.flutter.background_service.BootReceiver
+        // 在 BOOT_COMPLETED 上**直接** startForegroundService(mediaPlayback)——而
+        // Android 15+（targetSdk 35+）明确禁止从 BOOT_COMPLETED 启动 mediaPlayback 型
+        // FGS ⇒ 进程在开机时被 ForegroundServiceStartNotAllowedException 打死、
+        // 反复重启并弹崩溃对话框（API 36 模拟器实测复现，见 docs/05）。
+        // 开机恢复改由本工程自己的 BootReceiver 排一次性精确闹钟（豁免路径）完成，
+        // 故此处必须显式关掉插件的开机自启。
+        autoStartOnBoot: false,
         notificationChannelId: NotificationChannels.service,
         initialNotificationTitle: '声盾 SonicShield',
         initialNotificationContent: '调度引擎运行中',
@@ -82,6 +92,7 @@ class BackgroundServiceManager {
         lastAction: data['lastAction'] as String?,
         guardActive: data['guardActive'] as bool? ?? false,
         guardError: data['guardError'] as String?,
+        alarmDiag: data['alarmDiag'] as String?,
       );
       _stateCtrl.add(_last!);
     });
@@ -99,6 +110,9 @@ class BackgroundServiceManager {
   Future<bool> start() async {
     final hook = startHook;
     if (hook != null) return hook();
+    // P1-02 服务边界准入：合规同意是引擎启动的**唯一准入层**，任何调用方
+    //（不只首页开关）都不得绕过。未同意 → 拒绝启动（返回 false，调用方提示）。
+    if (!await isComplianceAccepted()) return false;
     final ok = await _svc.startService();
     await Future<void>.delayed(const Duration(milliseconds: 800));
     return ok;

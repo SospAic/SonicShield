@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mqtt_client/mqtt_client.dart';
@@ -181,8 +182,13 @@ void main() {
       expect(fake.port, RemoteStore.defaultBrokerPort);
       expect(fake.secure, isTrue, reason: 'C-13：secure=false 就退化成明文 TCP');
       expect(fake.keepAlivePeriod, 30);
-      expect(fake.autoReconnect, isTrue);
-      expect(fake.resubscribeOnAutoReconnect, isTrue);
+      // P1-12：重连由本服务**独占**。库自带 autoReconnect 必须关掉 ——
+      // 否则重连有两条 owner（库 + 本服务退避 Timer）且互相不可见；且
+      // `mqtt_client` 只在 autoReconnect=false 时才回调 onDisconnected（见
+      // `_connect` 注记），关掉它才能拿到"连接已断"事件自己驱动退避重连。
+      expect(fake.autoReconnect, isFalse,
+          reason: '★ 开着 autoReconnect 会与本服务的退避重连形成双 owner');
+      expect(fake.resubscribeOnAutoReconnect, isFalse);
       expect(fake.connectCalls, 1);
     });
 
@@ -216,7 +222,11 @@ void main() {
       expect(fake.subscribed, isEmpty,
           reason: '连不上就订阅 = 对着空气订阅，必须停在重连上');
       expect(svc.isRunning, isTrue,
-          reason: '★ 服务仍然"在跑"（等着 10s 后重连）—— 这正是 autoReconnect 的语义');
+          reason: '★ 服务仍然"在跑"（已排定退避重连）—— P1-10 起用 connState 区分"已启用"与"在线"');
+      expect(svc.connState.phase, RcConnPhase.retrying,
+          reason: '失败后必须进入 retrying，且带 nextRetryAt 供 UI 提示');
+      expect(svc.connState.nextRetryAt, isNotNull);
+      expect(svc.connState.online, isFalse);
       await settle();
     });
 
@@ -226,7 +236,17 @@ void main() {
 
       expect(fake.connectCalls, 1);
       expect(fake.subscribed, isEmpty);
+      expect(svc.connState.phase, RcConnPhase.retrying);
       await settle();
+    });
+
+    test('MQ-23 连接成功 ⇒ connState 进入 online 且记 lastConnectedAt', () async {
+      await svc.start(store, db);
+
+      expect(svc.connState.phase, RcConnPhase.online);
+      expect(svc.connState.online, isTrue);
+      expect(svc.connState.lastConnectedAt, isNotNull);
+      expect(svc.connState.enabledButOffline, isFalse);
     });
 
     test('MQ-06 连接成功 ⇒ 订阅本机 cmd + 每个已配对端点的 evt（BUG-013 的行为侧）',
@@ -404,6 +424,37 @@ void main() {
       expect(back!.id, msg.id);
     });
 
+    test('MQ-24 ★ 送达账本：publish=published，端点回执后才=acked（P2-20）',
+        () async {
+      await svc.start(store, db);
+      final msg = RcMessage.now(RcCmd.ping, {});
+      expect(await svc.sendTo(peer, msg, store), isTrue);
+      expect(svc.debugDeliveryOf(msg.id)?.state, RcDeliveryState.published,
+          reason: 'publish 受理 ≠ 端点已执行 —— 此前的"乐观成功"就在这里');
+
+      Future<void> feedAck(String forId) async {
+        final ack = RcMessage.now(RcEvt.ack, {'ok': true, 'for': forId});
+        final key = await RcCodec.deriveKey(store.pairingCode, '$ownId|evt');
+        await svc.debugHandleRaw(
+            evtTopicOf(ctrlId), await RcCodec.encode(ack, key, evtTopicOf(ctrlId)));
+      }
+
+      await feedAck(msg.id);
+      expect(svc.debugDeliveryOf(msg.id)?.state, RcDeliveryState.acked,
+          reason: '端点最终回执到达 ⇒ 才推进终态');
+
+      // 反例 1：同一 requestId 的**重复** ack 不得翻转已终态记录。
+      await feedAck(msg.id);
+      expect(svc.debugDeliveryOf(msg.id)?.state, RcDeliveryState.acked);
+
+      // 反例 2：`for` 指向未知 requestId（迟到/无关）不得创建或影响任何记录。
+      await feedAck('unknownReqId1');
+      expect(svc.debugDeliveryOf('unknownReqId1'), isNull,
+          reason: '★ 迟到/无关 ack 不得"凭空"让一条命令变成已送达');
+      expect(svc.debugDeliveryOf(msg.id)?.state, RcDeliveryState.acked);
+      await settle();
+    });
+
     test('MQ-16 未连接 + enqueueOnFail ⇒ 暂存的是**密文**（补发路径解得开）',
         () async {
       final msg = RcMessage.now(RcCmd.ping, {'probe': 48});
@@ -507,6 +558,99 @@ void main() {
     });
   });
 
+  // ═══════════════════════════════════ F · 新鲜度 / 补发裁决（P1-15 / P2-21）
+
+  group('MQ-F 出站新鲜度：过期/实时条目禁止补发且留痕（P1-15 / P2-21）', () {
+    /// 直接落盘一条可带 `expiresAt` 的暂存条目（模拟入队时刻写入的 TTL）。
+    Future<void> putRaw(String id, String wire, {int? expiresAt}) async {
+      await prefs.setString(
+          'rc_outbox',
+          jsonEncode([
+            {
+              'id': id,
+              'endpointId': peer.deviceId,
+              'wire': wire,
+              'at': 1,
+              if (expiresAt != null) 'expiresAt': expiresAt,
+            }
+          ]));
+    }
+
+    test('MQ-30 已过 TTL 的瞬时命令：不投、丢弃、留痕"已过期"', () async {
+      await svc.start(store, db);
+      await settle(); // 首连那次补发推完（此时队列还空）
+      await putRaw('o-expired', await sealOutbox(RcCmd.soundPlay),
+          expiresAt: DateTime.now().millisecondsSinceEpoch - 1);
+
+      final n = await svc.flushOutbox(store, peer);
+
+      expect(n, 0, reason: '★ 过期命令绝不能发布（P1-15 的核心诉求）');
+      expect(fake.sentWires, isEmpty);
+      expect(store.outboxFor(peer.deviceId), isEmpty,
+          reason: '过期条目要被清掉，不能永久卡在队列头');
+      expect(
+          await countLogs(
+              action: 'outbox.drop', status: 'failed', contains: '过期'),
+          1,
+          reason: '★ 用户必须能看到"命令为什么没执行"');
+    });
+
+    test('MQ-31 未过 TTL 的瞬时命令仍按序补发（不是"一刀切全丢"）', () async {
+      await svc.start(store, db);
+      await settle();
+      await putRaw('o-fresh', await sealOutbox(RcCmd.soundPlay),
+          expiresAt: DateTime.now().millisecondsSinceEpoch + 60 * 1000);
+
+      final n = await svc.flushOutbox(store, peer);
+
+      expect(n, 1, reason: '窗口内的命令必须照常补发 —— 证明判据非恒真');
+      expect(fake.sentWires, hasLength(1));
+      expect(store.outboxFor(peer.deviceId), isEmpty);
+    });
+
+    test('MQ-32 实时信令（如 script.stop）即便没过期也禁止补发且留痕', () async {
+      await svc.start(store, db);
+      await settle();
+      // 模拟升级前落盘的"历史实时命令"（当时还没有 expiresAt、也没有分类）。
+      await putRaw('o-live', await sealOutbox(RcCmd.scriptStop));
+
+      final n = await svc.flushOutbox(store, peer);
+
+      expect(n, 0, reason: '★ 补发一条几小时前的 stop 是对着早已结束的会话乱喊');
+      expect(fake.sentWires, isEmpty);
+      expect(store.outboxFor(peer.deviceId), isEmpty);
+      expect(
+          await countLogs(
+              action: 'outbox.drop', status: 'failed', contains: '实时命令'),
+          1);
+    });
+
+    test('MQ-33 老数据无 expiresAt 的普通命令 ⇒ 恒可补发（升级不清空历史队列）',
+        () async {
+      await svc.start(store, db);
+      await settle();
+      await putRaw('o-legacy', await sealOutbox(RcCmd.ping));
+
+      expect(await svc.flushOutbox(store, peer), 1);
+      expect(fake.sentWires, hasLength(1));
+    });
+
+    test('MQ-34 sendTo 未连接 + 实时命令 ⇒ 根本不入队（不假装会执行）', () async {
+      // 故意不 start ⇒ 未连接分支
+      final ok =
+          await svc.sendTo(peer, RcMessage.now(RcCmd.vibrateStop, {}), store);
+
+      expect(ok, isFalse);
+      expect(store.outboxFor(peer.deviceId), isEmpty,
+          reason: '★ 实时信令入队只会占位并误导 UI（"上线后自动执行"是空话）');
+      expect(
+          await countLogs(
+              action: 'outbox.drop', status: 'failed', contains: '实时命令'),
+          1,
+          reason: '不入队也必须留痕 —— 绝不能静默');
+    });
+  });
+
   // ═══════════════════════════════════════════ D · 契约对照
 
   group('MQ-D 对照：源码文本锁的行为侧印证', () {
@@ -533,6 +677,115 @@ void main() {
           isTrue);
       expect(fake.connectionMessage?.variableHeader?.connectFlags.passwordFlag,
           isTrue);
+    });
+  });
+
+  // ═══════════════════════════════════════ E · P1-10/11/12 生命周期
+
+  group('MQ-E 连接生命周期：状态机 / 退避 / 代次（P1-10/11/12）', () {
+    test('MQ-24 旧代次的 onDisconnected 在 stop() 之后一律 no-op（无僵尸重连）',
+        () async {
+      await svc.start(store, db);
+      final oldCb = fake.onDisconnected!;
+      final genBefore = svc.debugConnGen;
+
+      await svc.stop();
+      oldCb(); // 旧代次回调迟到
+
+      expect(svc.debugConnGen, genBefore + 1,
+          reason: 'stop() 作废代次：应由 stop 自增，旧回调不得再产生新代次');
+      expect(svc.connState.phase, RcConnPhase.stopped,
+          reason: '★ 关掉服务后，旧回调不得把它拉回 retrying/connecting');
+      await settle();
+    });
+
+    test('MQ-25 库触发的 onDisconnected ⇒ 进入 retrying 并排定退避重连', () async {
+      await svc.start(store, db);
+      expect(svc.connState.phase, RcConnPhase.online);
+
+      fake.onDisconnected!.call();
+
+      expect(svc.connState.phase, RcConnPhase.retrying,
+          reason: '断连必须由唯一 owner 排重连，而不是靠库的 autoReconnect');
+      expect(svc.connState.nextRetryAt, isNotNull);
+      expect(svc.connState.enabledButOffline, isTrue);
+      await settle();
+    });
+
+    test('MQ-26 重试预算耗尽 ⇒ 进入 failed（停止空转，不再无限重连）', () async {
+      svc.debugSetReconnectPolicy(RcReconnectPolicy(
+        baseDelay: const Duration(milliseconds: 4),
+        minDelay: const Duration(milliseconds: 1),
+        maxDelay: const Duration(milliseconds: 8),
+        maxAttempts: 2,
+        random: Random(7),
+      ));
+      await svc.start(store, db);
+      expect(svc.connState.phase, RcConnPhase.online);
+
+      // 连续两次断连用满预算（模拟退避到点后重连仍失败），第三次触顶。
+      fake.onDisconnected!.call();
+      expect(svc.connState.phase, RcConnPhase.retrying);
+      fake.onDisconnected!.call();
+      fake.onDisconnected!.call();
+
+      expect(svc.connState.phase, RcConnPhase.failed,
+          reason: '★ 旧实现无预算、永远每 10s 重连一次；现在触顶即 failed');
+      expect(svc.connState.nextRetryAt, isNull, reason: 'failed 时不该再有重试时刻');
+    });
+
+    test('MQ-27 RcReconnectPolicy：指数上界被 maxDelay 截断 + 预算耗尽返回 null', () {
+      final p = RcReconnectPolicy(
+        baseDelay: const Duration(milliseconds: 100),
+        maxDelay: const Duration(milliseconds: 250),
+        minDelay: Duration.zero,
+        maxAttempts: 5,
+        random: Random(3),
+      );
+      // 上界序列：100, 200, 250, 250, 250（指数后触顶）。
+      for (final cap in <int>[100, 200, 250, 250, 250]) {
+        final d = p.nextDelay();
+        expect(d, isNotNull);
+        expect(d!.inMilliseconds, lessThanOrEqualTo(cap),
+            reason: 'Full Jitter 必须落在 [minDelay, cap] 内');
+        expect(d.inMilliseconds, greaterThanOrEqualTo(0));
+      }
+      expect(p.attempt, 5);
+      expect(p.nextDelay(), isNull, reason: '预算耗尽必须返回 null（进入 failed）');
+    });
+
+    test('MQ-28 RcReconnectPolicy：抖动有下限（防抽到 0ms 使退避失效）+ reset 复位', () {
+      final p = RcReconnectPolicy(
+        baseDelay: const Duration(seconds: 1),
+        maxDelay: const Duration(seconds: 10),
+        minDelay: const Duration(milliseconds: 400),
+        maxAttempts: 20,
+        random: Random(9),
+      );
+      for (var i = 0; i < 12; i++) {
+        final d = p.nextDelay()!;
+        expect(d.inMilliseconds, greaterThanOrEqualTo(400),
+            reason: '纯 full jitter 的 random(0,cap) 会抽到 0 ⇒ 立刻重连，退化掉退避');
+      }
+      p.reset();
+      expect(p.attempt, 0);
+      expect(p.nextDelay(), isNotNull, reason: '成功后复位，下一次断线重新从最小退避开始');
+    });
+
+    test('MQ-29 RcConnState.copyWith 保留 lastConnectedAt，clearRetry 清 nextRetryAt', () {
+      const s = RcConnState(RcConnPhase.online, lastConnectedAt: 123);
+      expect(s.online, isTrue);
+      expect(s.enabledButOffline, isFalse);
+
+      final r = s.copyWith(phase: RcConnPhase.retrying, nextRetryAt: 999);
+      expect(r.lastConnectedAt, 123);
+      expect(r.nextRetryAt, 999);
+
+      final f = r.copyWith(phase: RcConnPhase.failed, clearRetry: true);
+      expect(f.nextRetryAt, isNull);
+      expect(f.lastConnectedAt, 123);
+      expect(f.enabledButOffline, isTrue);
+      expect(f.online, isFalse);
     });
   });
 }

@@ -129,4 +129,77 @@ void main() {
           await RcCodec.decode(wire, key, 'sonicshield/v1/$bId/evt'), isNull);
     });
   });
+
+  group('P1-17 reserveInboundId：查重+预占的原子登记', () {
+    test('首次 true / 重复 false，且首次留下预占时间戳', () {
+      final seen = <String, int>{};
+      expect(RcCodec.reserveInboundId(seen, 'id-1', 1000), isTrue);
+      expect(RcCodec.reserveInboundId(seen, 'id-1', 1001), isFalse,
+          reason: '★ 第二次必须 false —— 证明"查重"不是恒 true；'
+              '若有人把它改回只读查重（不预占），并发重投会双通过');
+      expect(seen['id-1'], 1000, reason: '首次必须预占时间戳，供后续窗口剪枝');
+    });
+
+    test('窗口外条目被剪枝，不无限增长', () {
+      final seen = <String, int>{};
+      expect(RcCodec.reserveInboundId(seen, 'old', 0, windowMs: 100), isTrue);
+      expect(RcCodec.reserveInboundId(seen, 'new', 500, windowMs: 100), isTrue);
+      expect(seen.containsKey('old'), isFalse,
+          reason: '超窗条目必须被剪掉，否则长时间运行内存持续涨');
+      expect(seen['new'], 500);
+    });
+
+    test('空 ID 恒放行且不污染去重表（协议入口另有 P2-26 拒绝）', () {
+      final seen = <String, int>{};
+      expect(RcCodec.reserveInboundId(seen, '', 1), isTrue);
+      expect(RcCodec.reserveInboundId(seen, '', 2), isTrue);
+      expect(seen, isEmpty, reason: '空串不得进入去重表，否则会把"无 ID 报文"当成同一条');
+    });
+  });
+
+  group('P2-26 协议入口拒绝空 ID（fail closed）', () {
+    test('tryParse 对缺失 ID / 空串 ID 都返回 null', () {
+      expect(
+          RcMessage.tryParse(
+              const {'v': 1, 'ts': 1, 'type': RcCmd.ping, 'payload': <String, dynamic>{}}),
+          isNull,
+          reason: '缺失 ID 的报文不得被解析成 id="" 放进业务链路');
+      expect(
+          RcMessage.tryParse(const {
+            'v': 1,
+            'id': '',
+            'ts': 1,
+            'type': RcCmd.ping,
+            'payload': <String, dynamic>{}
+          }),
+          isNull,
+          reason: '空串 ID 同样 fail closed');
+      // 反面对照：合法非空 ID 必须照常解析（证明上面不是"恒返回 null"）。
+      final ok = RcMessage.tryParse(const {
+        'v': 1,
+        'id': 'abc123',
+        'ts': 1,
+        'type': RcCmd.ping,
+        'payload': <String, dynamic>{}
+      });
+      expect(ok, isNotNull);
+      expect(ok!.id, 'abc123');
+    });
+
+    test('encode 空 ID 后 decode 必失败；重复投递两次均 fail closed', () async {
+      final key = await RcCodec.deriveKey(bCode, '$bId|cmd');
+      final wire = await RcCodec.encode(
+          RcMessage(
+              id: '',
+              ts: DateTime.now().millisecondsSinceEpoch,
+              type: RcCmd.scriptRun),
+          key,
+          cmdTopic);
+
+      expect(await RcCodec.decode(wire, key, cmdTopic), isNull,
+          reason: '空 ID 报文必须被协议入口拒绝，绝不进入业务链路');
+      expect(await RcCodec.decode(wire, key, cmdTopic), isNull,
+          reason: '★ 重投同一条空 ID 报文仍 fail closed —— 不走"不查重"的旁路');
+    });
+  });
 }

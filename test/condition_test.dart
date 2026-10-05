@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/condition.dart';
 
@@ -142,6 +144,24 @@ void main() {
         expect(unmet(a, at: t), unmet(b, at: t), reason: 'h=$h 应一致');
       }
     });
+
+    test('CC-25 [P2-07] start==end 视为全天（00:00–24:00 不再是空窗口）', () {
+      // 任务编辑器结束时间下拉的「24:00」项取值 = `h * 60 % 1440` = 0；
+      // 用户选「00:00–24:00」时 start=0、end=0 ⇒ 旧写法退化成
+      // `cur >= 0 && cur < 0`（恒 false），任务在全天窗口下反而**永不执行**。
+      const c = TaskCondition(
+          windowStartMin: 0, windowEndMin: 0, skipInCall: false);
+      // 全天：任意时刻都必须放行（含 00:00 / 23:59 边界）。
+      for (final hm in [
+        const [0, 0],
+        const [6, 30],
+        const [12, 0],
+        const [23, 59],
+      ]) {
+        expect(unmet(c, at: DateTime(2026, 9, 18, hm[0], hm[1])), isNull,
+            reason: '全天窗口在 ${hm[0]}:${hm[1]} 必须放行');
+      }
+    });
   });
 
   group('CC 序列化与升级兼容', () {
@@ -178,6 +198,34 @@ void main() {
       expect(d, contains('仅充电'));
 
       expect(const TaskCondition(skipInCall: false).describe(), '无条件');
+    });
+  });
+
+  group('CC 概率门序列化（P2-01）', () {
+    // 旧 `fromJsonOrNull` 未读 `probabilityPct`：`toJson` 写出去的字段在重启 /
+    // 备份恢复后丢失，概率门被静默抹成"必执行"。以下用例走**真实 JSON 往返**
+    // （jsonEncode → fromJsonOrNull），不是读源码文本，故能抓住该回归。
+    test('CC-40 probabilityPct 经 toJson→jsonEncode→fromJsonOrNull 完整往返', () {
+      const c = TaskCondition(probabilityPct: 37, skipInCall: false);
+      final back = TaskCondition.fromJsonOrNull(jsonEncode(c.toJson()))!;
+      expect(back.probabilityPct, 37);
+      expect(back.hasAny, isTrue, reason: '概率 <100 应被计为"有条件"');
+      expect(back.describe(), contains('37%'));
+    });
+
+    test('CC-41 缺失 probabilityPct → 解析为 null（必执行），不回落到其它值', () {
+      final back = TaskCondition.fromJsonOrNull('{"skipInCall":false}')!;
+      expect(back.probabilityPct, isNull);
+    });
+
+    test('CC-42 100% 与 null 均视为必执行，往返后语义一致', () {
+      for (final v in <int?>[null, 100]) {
+        final c = TaskCondition(probabilityPct: v, skipInCall: false);
+        final back = TaskCondition.fromJsonOrNull(jsonEncode(c.toJson()))!;
+        expect(back.probabilityPct, v);
+        expect(back.hasAny, isFalse,
+            reason: 'stub 里 skipInCall:false 且无其它条件 ⇒ 无概率约束');
+      }
     });
   });
 }

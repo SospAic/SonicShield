@@ -109,6 +109,29 @@ void main() {
       }
     });
 
+    test('[P2-29] DateRange.days() 逐日历日、含端点、不重复', () {
+      // ⚠️ 本机时区为 Asia/Shanghai（无夏令时），无法在宿主上复现 DST 回拨
+      //    那一天"25 小时"的情形 —— DST 专项验证 **BLOCKED**（需 DST 时区设备）。
+      //    这里锁住的是**日历语义**这一可断言性质：days() 必须恰好逐日前进、
+      //    含首尾端点、严格递增；旧实现 `add(Duration(days:1))` 的固定 24h
+      //    步进在回拨日会原地停留在同一天（本机测不到，但判据本身正确）。
+      final r = DateRange(
+          start: DateTime(2026, 11, 1), end: DateTime(2026, 11, 3));
+      final days = r.days().toList();
+      expect(days, <DateTime>[
+        DateTime(2026, 11, 1),
+        DateTime(2026, 11, 2),
+        DateTime(2026, 11, 3),
+      ], reason: '含端点、每天一次、日历日不漂移');
+      for (var i = 1; i < days.length; i++) {
+        expect(days[i].isAfter(days[i - 1]), isTrue, reason: '必须严格递增');
+      }
+      // 单日范围也必须产出 1 天（旧实现若在回拨日重复，计数会变成 0 或 2）。
+      expect(DateRange(start: DateTime(2026, 11, 1), end: DateTime(2026, 11, 1))
+          .days()
+          .length, 1);
+    });
+
     test('免打扰非跨午夜窗口（quietStart < quietEnd）', () {
       const engine = ScheduleEngine(quietStartHour: 2, quietEndHour: 5);
       final t = Task(

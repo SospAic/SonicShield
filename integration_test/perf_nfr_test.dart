@@ -58,7 +58,12 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   const engine = ScheduleEngine();
-  final now = DateTime(2026, 9, 14, 12);
+  // P1-05 后口径变化（与 `test/performance_test.dart` PT 组同步）：随机窗口改为
+  // "**整窗抽样 + 事后按 now/end 过滤**"。基准起点必须落在**窗口边界之外**（午夜），
+  // 否则首/末日窗口会被 `now`/`end` 部分裁掉 —— 那是**正确行为**，但会让
+  // "≈6 条/任务"这条规模基准随 `now` 漂移、变成假红。取午夜 ⇒ 48h 恰覆盖
+  // 09-14/09-15 两个完整窗口（08:00–21:00），09-16 整窗落在 end 之外 ⇒ 稳定 6 条/任务。
+  final now = DateTime(2026, 9, 14);
 
   /// 打印一行测量结果（AOT 下的真实数字）。
   void report(String name, int ms, int budgetMs) {

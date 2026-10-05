@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/log_repository.dart';
+import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/task.dart';
@@ -12,6 +13,7 @@ import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
+import 'package:sonic_shield/services/background_service_manager.dart';
 import 'package:sonic_shield/services/native_bridge.dart';
 
 /// 第 36 轮续四：直接驱动 `RcEndpointService._dispatch` 的**宿主可测**子处理器。
@@ -49,6 +51,10 @@ void main() {
       pairedAt: DateTime(2024, 1, 1),
     );
   });
+
+  // P1-16：远程 toggle 现在会请求引擎立即重排；宿主无 FBS 平台实现 ⇒
+  // 注入 `replanHook` 既短路平台调用，又让"是否请求过重排"可断言。
+  tearDown(() => BackgroundServiceManager.replanHook = null);
 
   RcMessage cmd(String type, [Map<String, dynamic> payload = const {}]) =>
       RcMessage.now(type, payload);
@@ -146,6 +152,70 @@ void main() {
       final t = await TaskRepository(db).get('tk2');
       expect(t, isNotNull);
       expect(t!.enabled, isTrue);
+    });
+
+    test('P1-16 启用 → 清理旧 pending + 重物化新计划 + 请求引擎立即重排',
+        () async {
+      await seedTask('tk5', enabled: false);
+      final occ = OccurrenceRepository(db);
+      // 预置一条"幽灵计划"：模拟该任务此前留下的旧 pending（旧的时刻/旧定义）。
+      await occ.commitAll([
+        PlannedOccurrence(
+          id: 'ghost-tk5',
+          taskId: 'tk5',
+          fireAt: DateTime.now().add(const Duration(hours: 3)),
+          status: OccurrenceStatus.pending,
+          volume: 1.0,
+          durationMs: 1000,
+        ),
+      ]);
+      var replanCalls = 0;
+      BackgroundServiceManager.replanHook = () async => replanCalls++;
+
+      await svc.debugDispatch(
+          cmd(RcCmd.taskToggle, {'taskId': 'tk5', 'enabled': true}), peer);
+
+      expect(replanCalls, 1,
+          reason: '★ 远程启用必须请求引擎**立即**重排（P1-16）：全局 pending 高于'
+              '后台续算阈值时，光改 enabled 位可能长期不生成 occurrence ⇒ 静默漏执行');
+      // 幽灵计划必须失效，且必须有**新**计划产生（不是只改了一个布尔位）。
+      final ghost = await db.db.query('occurrences',
+          where: 'id = ?', whereArgs: ['ghost-tk5']);
+      expect(ghost.isEmpty || ghost.first['status'] != 'pending', isTrue,
+          reason: '旧的过期 pending 必须失效，否则启用后新计划与幽灵计划并存');
+      expect(await occ.pendingCountAfter(DateTime.now()), greaterThan(0),
+          reason: '启用后必须按当前定义重物化出未来计划');
+      expect(
+          await hasLog(
+              action: 'task.toggle', status: 'success', contains: '新计划'),
+          isTrue,
+          reason: '审计/回执必须能区分"已启用"与"已排程"，否则控制端误以为排程生效');
+    });
+
+    test('P1-16 停用 → 撤销该任务未执行计划 + 仍请求重排', () async {
+      await seedTask('tk6', enabled: true);
+      final occ = OccurrenceRepository(db);
+      await occ.commitAll([
+        PlannedOccurrence(
+          id: 'pend-tk6',
+          taskId: 'tk6',
+          fireAt: DateTime.now().add(const Duration(hours: 4)),
+          status: OccurrenceStatus.pending,
+          volume: 1.0,
+          durationMs: 1000,
+        ),
+      ]);
+      var replanCalls = 0;
+      BackgroundServiceManager.replanHook = () async => replanCalls++;
+
+      await svc.debugDispatch(
+          cmd(RcCmd.taskToggle, {'taskId': 'tk6', 'enabled': false}), peer);
+
+      expect(replanCalls, 1, reason: '停用同样要让引擎重排（撤销原生计划）');
+      final left = await db.db.query('occurrences',
+          where: "task_id = ? AND status = 'pending'", whereArgs: ['tk6']);
+      expect(left, isEmpty, reason: '★ 停用必须撤销该任务的未执行计划，'
+          '否则"关掉"后旧待执行计划仍会照常触发');
     });
   });
 

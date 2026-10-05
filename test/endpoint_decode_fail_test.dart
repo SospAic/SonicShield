@@ -59,23 +59,47 @@ void main() {
           reason: '必须走限频器，否则错码命令的每次补发都写一条');
     });
 
-    test('DF-07 ⚠️ 只在 cmd 主题审计，不在 evt 主题审计（防心跳噪声）', () {
+    test('DF-07 ⚠️ evt 主题解密失败改为**按来源双重抑制**审计（P2-22）', () {
       // ⚠️ 这里**不能**用 methodBody：`_handlePeerEvent` 体内有字符串字面量
       // `'{'`（识别 LWT 明文哨兵用），朴素的大括号计数器会把它算成真括号，
       // 于是匹配范围越界、把后面几个方法一起吞进来（实测：连 `decode.fail`
       // 都被算作"在这个方法里"）。改用"到下一个方法声明为止"的切片。
+      // 切片终点取紧随 `_handlePeerEvent` 之后的 `_tapAck`（P1-13 新增）。
       final start = src.indexOf('Future<void> _handlePeerEvent(');
-      final end = src.indexOf('void _rememberSeen(', start);
+      final end = src.indexOf('Future<void> _tapAck(', start);
       expect(start, greaterThanOrEqualTo(0));
       expect(end, greaterThan(start));
       final peerEvent = src.substring(start, end);
 
-      expect(peerEvent, contains('if (msg == null) return;'),
-          reason: '广播型事件是"每个已配对端点各一份密文"发到同一 evt 主题的，'
-              '端点侧解不开**别人**那一份是正常现象；在那里记会变成每 60s 一条的'
-              '噪声，把真正需要被看见的那条淹掉');
-      expect(peerEvent, isNot(contains('decode.fail')));
-      expect(peerEvent, isNot(contains('_auditDecodeFail')));
+      // P2-22：旧的"静默 return"必须消失，改为按来源限频审计。
+      expect(peerEvent, isNot(contains('if (msg == null) return;')),
+          reason: '静默 return ⇒ 盐/配对码不一致时端点零痕迹（P2-22 要修的正是它）');
+      expect(peerEvent, contains('_auditPeerEvtDecodeFail(peerId)'),
+          reason: 'evt 解密失败要按**来源**留痕，否则控制端只看到超时');
+      expect(peerEvent, isNot(contains('_auditDecodeFail(topic)')),
+          reason: '不能复用 cmd 主题的审计器（按主题限频会把另一来源的故障藏起来）');
+    });
+
+    test('DF-08 peer evt 失败审计必须"按来源 + 最近成功"双重抑制', () {
+      final audit = methodBody(src, 'Future<void> _auditPeerEvtDecodeFail(');
+      expect(audit, contains('peerEvtFailWorthAudit('),
+          reason: '缺"最近成功"抑制 ⇒ 健康设备被广播副本噪声刷爆（每 60s 一条心跳）');
+      expect(audit, contains('_peerEvtFail.allow('),
+          reason: '缺按来源限频 ⇒ 错误配置被反复补发时刷爆审计');
+      expect(audit, contains("action: 'decode.fail'"));
+    });
+
+    test('DF-09 peerEvtFailWorthAudit 真值表（含窗口边界）', () {
+      expect(peerEvtFailWorthAudit(lastOkMs: null, nowMs: 1000), isTrue,
+          reason: '从未成功 ⇒ 值得记（正是"配对成功却全解不开"的形状）');
+      expect(
+          peerEvtFailWorthAudit(lastOkMs: 1000, nowMs: 1000 + 599999), isFalse,
+          reason: '最近成功未超 10 分钟 ⇒ 广播副本噪声，不记');
+      expect(
+          peerEvtFailWorthAudit(
+              lastOkMs: 1000, nowMs: 1000 + rcPeerEvtNoiseWindowMs),
+          isTrue,
+          reason: '正好到窗口边界 ⇒ 重新值得记');
     });
   });
 }

@@ -19,6 +19,44 @@ class OccurrenceRepository {
     await batch.commit(noResult: true);
   }
 
+  /// 计划**对账**（P1-05 / P2-03）：把给定任务的**未来 pending** 整体替换为
+  /// 本轮重算结果，单事务完成。
+  ///
+  /// ## 为什么必须"先删后插"而不是只追加
+  /// 触发器/免打扰设置变更后，旧的 pending 已与新定义不符；`commitAll` 的
+  /// `ignore` 语义只会**保留旧条目**（幽灵计划：改了窗口仍按旧时刻响，
+  /// docs/50 §4.2 P2-03）。而计划本质是**可重算投影**：`ScheduleEngine` 的种子
+  /// 只由「任务 id + 定义版本 + 当地日期」决定，重算得到同一批 `occurrenceId`，
+  /// 所以"删未来 pending 再插入"对未变更的任务是**幂等**的、对已变更的是**正确替换**。
+  ///
+  /// 保留 `done/failed/skipped`：它们是**审计**，不是计划。
+  /// 保留 `fire_at <= now` 的 pending：它们已到期、正由 `executeDue` 补执行，
+  /// 删掉会漏触发（陈旧判定交给执行层的 10 分钟上限）。
+  ///
+  /// 为什么用单事务：避免"删完还没插"的中间态被 `executeDue` 观察到
+  /// （虽然两通道各自持重入守卫，但删/插之间不应存在空窗）。
+  Future<void> reconcile(
+    Iterable<String> taskIds,
+    List<PlannedOccurrence> entries,
+    DateTime now,
+  ) async {
+    await _db.db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final id in taskIds) {
+        batch.delete(
+          'occurrences',
+          where: "task_id = ? AND status = 'pending' AND fire_at > ?",
+          whereArgs: [id, now.millisecondsSinceEpoch],
+        );
+      }
+      for (final o in entries) {
+        batch.insert('occurrences', o.toRow(),
+            conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
   /// 到期且未处理的条目（含短暂逾期的补执行，由调用方限制补执行量）。
   Future<List<PlannedOccurrence>> due(DateTime now, {int limit = 10}) async {
     final rows = await _db.db.query(
@@ -51,6 +89,35 @@ class OccurrenceRepository {
       limit: limit,
     );
     return rows.map(PlannedOccurrence.fromRow).toList();
+  }
+
+  /// 每个任务在未来窗口内**最近的 pending 触发时间**（P2-12）。
+  ///
+  /// ## 为什么需要
+  /// `taskListProvider` 此前对**每条任务各查一次** [pendingWithin]，且该查询带
+  /// 全局 `limit`（默认 200）——任务/计划数一大，既产生 N+1 次 isolate 往返，
+  /// 又会因全局截断让部分任务永远显示不出「下次触发」。这里用**单条 GROUP BY**
+  /// 一次拿到所有任务的最近 pending：消除 N+1，且不受全局 limit 截断。
+  ///
+  /// 边界与 [pendingWithin] 一致（`from` 排他、`to` 包含）。返回
+  /// `taskId -> 最近 fireAt`；窗口内无 pending 的任务不出现在 map 中。
+  Future<Map<String, DateTime>> nextPendingByTask(
+      DateTime from, DateTime to) async {
+    final rows = await _db.db.rawQuery(
+      'SELECT task_id, MIN(fire_at) AS next_at FROM occurrences '
+      'WHERE status = \'pending\' AND fire_at > ? AND fire_at <= ? '
+      'GROUP BY task_id',
+      [from.millisecondsSinceEpoch, to.millisecondsSinceEpoch],
+    );
+    final out = <String, DateTime>{};
+    for (final r in rows) {
+      final id = r['task_id'];
+      final at = r['next_at'];
+      if (id is String && at is int) {
+        out[id] = DateTime.fromMillisecondsSinceEpoch(at);
+      }
+    }
+    return out;
   }
 
   Future<void> markStatus(String id, OccurrenceStatus status,

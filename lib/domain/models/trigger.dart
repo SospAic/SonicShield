@@ -60,12 +60,20 @@ class DateRange {
         !d.isAfter(DateTime(end.year, end.month, end.day));
   }
 
+  /// 逐**日历日**（当地时区）遍历 `[start, end]`（含端点）。
+  ///
+  /// P2-29：旧写法用 `d.add(const Duration(days: 1))` —— 固定加 24 小时。
+  /// 在启用夏令时的设备本地时区里，"回拨日"从当天午夜到次日午夜是 **25 小时**：
+  /// 午夜 00:00 加 24h 会落在**当天 23:00**（仍是同一天），循环于是**重复上一日**
+  /// 并可能**跳过日期范围末日**。改为按日历构造次日午夜
+  /// （`DateTime(y, m, day + 1)` 由 Dart 自动归一并保持本地午夜语义），
+  /// 无论当天是 23/24/25 小时都严格前进一步。
   Iterable<DateTime> days() sync* {
     var d = DateTime(start.year, start.month, start.day);
     final e = DateTime(end.year, end.month, end.day);
     while (!d.isAfter(e)) {
       yield d;
-      d = d.add(const Duration(days: 1));
+      d = DateTime(d.year, d.month, d.day + 1);
     }
   }
 

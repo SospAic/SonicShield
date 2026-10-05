@@ -126,6 +126,17 @@ class AssistJoinClient {
   final _seenWires = <String>{};
   static const _maxSeenWires = 512;
 
+  /// 本轮 `join()` 已发出的 `assist.hello` 消息 ID 集合（P2-30）。
+  ///
+  /// 端点回执把 hello 的 ID 写在 `payload.for`（见 `assist_host._sendAccept`）。
+  /// 控制端**必须**核对 accept 的 `for` 属于本轮发出的 hello —— 否则一次
+  /// 较早接入尝试的迟到 accept（QoS1 重投 / 上一轮 join 的存量回执）会被
+  /// 当成**本次**接入成功，控制端就此进入 `active`，而其 `sessionId`/权限/TTL
+  /// 全部来自**上一次**尝试，与界面当前显示的接入不一致（"看着连上了，其实
+  /// 是旧会话的残留状态"）。
+  final _pendingHellos = <String>{};
+  static const _maxPendingHellos = 32;
+
   /// 本会话审计轨迹（FIFO 环形，上限 [_maxAudit]）。
   final _audit = <AssistAuditEntry>[];
   static const _maxAudit = 200;
@@ -209,6 +220,7 @@ class AssistJoinClient {
     _error = null;
     _seen.clear();
     _seenWires.clear();
+    _pendingHellos.clear();
     _audit.clear(); // 新会话：审计轨迹只反映当前会话，不带上一轮的记录
     _emit();
 
@@ -218,10 +230,16 @@ class AssistJoinClient {
     while (DateTime.now().isBefore(deadline)) {
       if (_phase == AssistPhase.active) break;
       if (_phase == AssistPhase.closed) break; // 已被 reject / 终止
-      await send(RcMessage.now(RcAssistCmd.hello, {
+      final hello = RcMessage.now(RcAssistCmd.hello, {
         'ctrlName': ctrlName,
         'ver': AppMeta.version,
-      }));
+      });
+      // 先登记 ID 再发送：端点回得比本地登记快时会变成"自己的 hello 认不出"。
+      _pendingHellos.add(hello.id);
+      while (_pendingHellos.length > _maxPendingHellos) {
+        _pendingHellos.remove(_pendingHellos.first);
+      }
+      await send(hello);
       await Future<void>.delayed(helloRetryInterval);
     }
 
@@ -356,6 +374,21 @@ class AssistJoinClient {
 
     switch (msg.type) {
       case RcAssistCmd.accept:
+        // ---- P2-30：accept 必须回指本轮 join 发出的某个 hello ----
+        //
+        // 端点把被确认的 hello ID 写在 `payload.for`。若不核对，一条**迟到**的
+        // accept（上一轮 join 的存量回执被 QoS1 重投）会被当成本次接入成功，
+        // 控制端进入 active 却带着旧 sessionId/TTL/权限 —— 界面显示"已接入"
+        // 而实际会话状态错位。核对失败时**保持 opening**（继续等正确回执），
+        // 不置 active、不改任何会话字段。
+        final forId = msg.payload['for'] as String? ?? '';
+        if (forId.isEmpty || !_pendingHellos.contains(forId)) {
+          _record(RcAssistCmd.accept,
+              outbound: false,
+              ok: false,
+              detail: '忽略不匹配的 accept（for=${forId.isEmpty ? '缺失' : forId}）');
+          return;
+        }
         _sessionId = msg.payload['sessionId'] as String? ?? '';
         _epName = msg.payload['epName'] as String? ?? '声盾端点';
         final exp = (msg.payload['expiresAt'] as num?)?.toInt();

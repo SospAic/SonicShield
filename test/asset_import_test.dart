@@ -303,6 +303,45 @@ void main() {
           reason: '清单内名字必须唯一，否则"按名幂等"会漏导入');
     });
   });
+
+  group('atomicWrite（P2-23 原子落盘）', () {
+    late Directory dir;
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('atomic_write_test');
+    });
+    tearDown(() async {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    });
+
+    test('PAW-01 成功：最终文件存在、内容正确、无 .part 残留', () async {
+      final dest = '${dir.path}/a.wav';
+      await atomicWrite(dest, (tmp) async {
+        await File(tmp).writeAsString('hello');
+      });
+      expect(await File(dest).readAsString(), 'hello');
+      expect(await File('$dest.part').exists(), isFalse,
+          reason: '.part 已被 rename 成最终文件');
+    });
+
+    test('PAW-02 边写边抛：最终路径不出现、.part 被清理、原异常原样抛出', () async {
+      final dest = '${dir.path}/b.wav';
+      Object? caught;
+      try {
+        await atomicWrite(dest, (tmp) async {
+          await File(tmp).writeAsString('half'); // 先写了一半
+          throw StateError('disk full'); // 再抛
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<StateError>(), reason: '必须原样抛出原异常，不得掩盖');
+      expect(caught.toString(), contains('disk full'));
+      expect(await File(dest).exists(), isFalse,
+          reason: '失败时最终路径绝不出现（不会有半截可见文件）');
+      expect(await File('$dest.part').exists(), isFalse,
+          reason: '.part 必须被清理');
+    });
+  });
 }
 
 /// 在**行映射阶段**抛错的音源 —— 用来验证批量写入的原子性。

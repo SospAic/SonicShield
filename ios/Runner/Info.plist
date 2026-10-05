@@ -36,6 +36,16 @@
 	  - fetch        BGAppRefreshTask：唤起后刷新未来 48h 计划。
 	  App 被用户杀掉后的兜底 = 本地通知（UNUserNotificationCenter 日历触发，
 	  通知可带 ≤30s 提示音）。iOS 不存在 Android 式「系统级常驻」，这是平台限制。
+
+	  ⚠️ 纠正指针（P2-19，2026-10-04 静态核验）：上面 - processing / - fetch 与
+	  "日历触发本地通知兜底"是**意图**，当前生产代码**未落地** ——
+	  `ios/Runner/` 下除 `GeneratedPluginRegistrant` 与 `HapticBridge` 外**没有**
+	  BGTaskScheduler 注册/提交，`notification_service.dart` 也只有即时通知、
+	  无 `zonedSchedule`/日历触发。故本声明的实际能力是：`audio` 会话在 App
+	  存活/被系统保活时有效；被挂起/强杀后**不能保证**任何计划准点执行，
+	  也不能依靠本地日历通知兜底。真机行为矩阵（前台/后台/锁屏/强杀/通知拒绝）
+	  **未验证（BLOCKED：需 macOS+Xcode+真机）**。要落实 processing/fetch 或
+	  日历通知，须先在 macOS 上补齐对应回调，再据此复核本声明。
 	-->
 	<key>UIBackgroundModes</key>
 	<array>

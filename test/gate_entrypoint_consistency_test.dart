@@ -94,4 +94,60 @@ void main() {
     expect(badVal, isNot(shCovMin()),
         reason: '★ 反例必须与真源不同 ⇒ GEC-02 在同一判据下会判红 ⇒ 判据非恒真');
   });
+
+  // ───────────────────── 阶段 D：CI ratchet 与设备层 BLOCKED（P2-27 / P2-28） ─────────────────────
+  final ci = File('.github/workflows/ci.yml').readAsStringSync();
+
+  /// ci.yml 里覆盖率 ratchet 步骤的 `--gate=<x>` / `--min-covered=<y>`。
+  String? ciGate() => RegExp(r'--gate=([0-9.]+)').firstMatch(ci)?.group(1);
+  String? ciMinCovered() =>
+      RegExp(r'--min-covered=([0-9]+)').firstMatch(ci)?.group(1);
+
+  test('GEC-06 ★ CI 的覆盖率 ratchet 与 gates.sh 同阈值（PR 不得"全绿但覆盖下降"）', () {
+    expect(ciGate(), isNotNull,
+        reason: 'CI 里没有 `--gate=` ⇒ 覆盖率 ratchet 缺失，PR 可静默降覆盖（P2-27）');
+    expect(ciMinCovered(), isNotNull,
+        reason: 'CI 里没有 `--min-covered=` ⇒ 分母稀释防线在 CI 上不存在');
+    expect(double.tryParse(ciGate()!), shCovMin(),
+        reason: 'CI 的 --gate 必须与 gates.sh 默认值逐字一致，否则 CI 成了更松的门');
+    expect(int.tryParse(ciMinCovered()!), shMinCovered(),
+        reason: 'CI 的 --min-covered 必须与 gates.sh 默认值逐字一致');
+  });
+
+  test('GEC-06r 反例：把 CI 的 --gate 改小 → 与真源不一致（证明 GEC-06 非恒真）', () {
+    final bad = ci.replaceFirstMapped(
+        RegExp(r'--gate=([0-9.]+)'), (m) => '--gate=72.5');
+    expect(bad, isNot(ci), reason: '反例样本没构造成功 —— 替换没生效');
+    final badGate =
+        double.tryParse(RegExp(r'--gate=([0-9.]+)').firstMatch(bad)!.group(1)!);
+    expect(badGate, isNot(shCovMin()),
+        reason: '★ 反例必须与真源不同 ⇒ GEC-06 的相等判据会判红 ⇒ 判据非恒真');
+  });
+
+  /// 设备套件"无 adb / 无设备"分支必须落在 BLOCKED，且由 ALLOW_DEVICE_SKIP 显式放行 ——
+  /// 否则"用户明确要求跑设备层"会以 RC=0 静默通过（未执行被当成通过）。
+  bool deviceBlocksWhenUnavailable(String src) =>
+      src.contains('ALLOW_DEVICE_SKIP') && src.contains('[BLOCKED] 设备端门禁');
+
+  test('GEC-07 ★ gates.sh 设备层无设备时 BLOCKED（除非 ALLOW_DEVICE_SKIP=1）', () {
+    expect(deviceBlocksWhenUnavailable(sh), isTrue,
+        reason: 'WITH_DEVICE=1 却无设备时若只 SKIP，脚本会以 RC=0 结束 —— 用户要求的'
+            '设备验证"未执行"被读成"通过"（P2-28）');
+  });
+
+  test('GEC-07r 反例：抹掉 ALLOW_DEVICE_SKIP 或 BLOCKED 分支 → 判据判红', () {
+    expect(deviceBlocksWhenUnavailable(sh.replaceAll('ALLOW_DEVICE_SKIP', 'X')),
+        isFalse,
+        reason: '没有显式放行开关 ⇒ 判据必须判红');
+    expect(
+        deviceBlocksWhenUnavailable(
+            sh.replaceAll('[BLOCKED] 设备端门禁', 'X')),
+        isFalse,
+        reason: '没有 BLOCKED 兜底 ⇒ 判据必须判红');
+  });
+
+  test('GEC-08 ★ gates.ps1 与 gates.sh 同语义（设备层无设备时 BLOCKED）', () {
+    expect(deviceBlocksWhenUnavailable(ps), isTrue,
+        reason: '两条入口语义必须一致，否则走 .ps1 的设备验证会静默变绿');
+  });
 }

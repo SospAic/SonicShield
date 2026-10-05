@@ -286,14 +286,17 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 454 + `main.dart` 36）。
+/// 设备层豁免**分母**（`background_engine.dart` 516 + `main.dart` 37）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
-const int kDeviceExemptLines = 454 + 36;
+///
+/// ⚠️ 第七十四轮：`lib/main.dart` 新增一行装配接线（`pttStreamOpener`）⇒
+/// 其可执行行 36 → 37，豁免面分母 552 → **553**（第七十三轮为 516 + 36）。
+const int kDeviceExemptLines = 516 + 37;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 452/454 ⇒ 2；`main.dart` 0/36）。
-const int kDeviceExemptCovered = 2;
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/516 ⇒ 8；`main.dart` 0/37）。
+const int kDeviceExemptCovered = 8;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
@@ -458,7 +461,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 454 + 36，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 516 + 37，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1081,15 +1084,15 @@ void main() {
           reason: '全局**绝对分数**在两个根节里不一致 ⇒ 至少有一节没回刷');
     });
 
-    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 490 行；已覆盖 +2 行）', () {
+    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 553 行；已覆盖 +8 行）', () {
       final r12 = rootOf(d12);
       expect(r12, isNotNull);
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 454 + 36，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 516 + 37，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
-          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 452/454）');
+          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/516）');
     });
 
     test('BAS-04 ★ 7 个「当前基线」落点必须逐位含有根节的绝对分数', () {
@@ -1174,12 +1177,18 @@ void main() {
       });
 
       test('BAS-90d 豁免面几何被破坏（分母 +1）→ 判红', () {
-        final bad = mutateLastSection(d12, '10087', '10088');
+        // 🔴 随根节走（第七十轮改为派生）：样本原先写死 `10087`，全局分母一升级
+        //   （10087 → 10118）就"改不动" ⇒ `mutateLastSection` 找不到模式 ⇒ 假红。
+        //   与 BAS-90a/b/c 同款修法（第五十八轮起「反面样本必须随活根节派生」）。
+        final gfrac = rootOf(d12)!.global.fraction;
+        final parts = gfrac.split('/');
+        final perturbed = '${parts[0]}/${int.parse(parts[1]) + 1}';
+        final bad = mutateLastSection(d12, gfrac, perturbed);
         expect(
             baselineConsistencyViolation(
                 doc12: bad, doc17: d17, landingPoints: landing),
             isNotNull,
-            reason: '全局分母 − 可测面分母 ≠ 490 ⇒ 豁免面几何漂移');
+            reason: '全局分母 − 可测面分母 ≠ 553 ⇒ 豁免面几何漂移');
       });
 
       test('BAS-90e 根节塞进第二条不同的可测面基线 → 判红（防"只取第一条"的假绿）', () {

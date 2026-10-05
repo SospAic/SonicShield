@@ -290,6 +290,8 @@ class _ConnectingView extends StatelessWidget {
             child: FloatingActionButton.large(
               heroTag: 'caller-hangup',
               backgroundColor: Colors.red,
+              // P2-31：补语义标签（原来只有图标，读屏无法播报"挂断"）。
+              tooltip: '挂断',
               // 挂断入口是**必须**的：没有它，用户在这 45s 里无法取消呼叫。
               onPressed: () => onHangUp(),
               child: const Icon(Icons.call_end, color: Colors.white),

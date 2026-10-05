@@ -16,6 +16,14 @@ import android.util.Log
 class AlarmWatchdogReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        // P1-03：停止守护后残留的精确闹钟**不得**再把引擎拉起来（否则引擎"关不掉"）。
+        // 双保险：① `should_run` 已是持久化的权威开关；② 代次核对兜住"关闭→重启"
+        // 竞态（停止时 `setServiceShouldRun(false)` 自增代次，停止前排出的闹钟全部作废）。
+        val prefs = context.getSharedPreferences(
+            NativeBridgePlugin.PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(NativeBridgePlugin.KEY_SHOULD_RUN, false)) return
+        val gen = intent.getIntExtra(NativeBridgePlugin.EXTRA_GENERATION, -1)
+        if (gen != prefs.getInt(NativeBridgePlugin.KEY_GENERATION, 0)) return
         try {
             val svc = Intent()
                 .setClassName(context, "id.flutter.flutter_background_service.BackgroundService")

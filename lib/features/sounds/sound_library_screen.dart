@@ -56,6 +56,32 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
   late final PlaybackService _previewPlayer =
       widget.previewPlayer ?? PlaybackService();
 
+  /// 音源列表的**缓存 Future**（P2-24）。
+  ///
+  /// ## 为什么不能在 `build` 里现取
+  /// 旧实现 `FutureBuilder(future: _listAssets())` 把查询建在 `build` 内：
+  /// 试听（`setState(_previewingId=…)`）等**与列表无关**的状态变化也会重建
+  /// build → 重新查一遍 DB 并解码 tags，音源多时每次试听都全量重查。
+  /// 改为在 `initState` 建一次、只在**导入/删除/刷新**后显式换新 future，
+  /// 其余 `setState` 复用同一个已完成 future（`FutureBuilder` 不再重复请求）。
+  late Future<List<AudioAsset>> _assetsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _assetsFuture = _listAssets();
+  }
+
+  /// 库内容变化后换新 future（导入完成后 / 删除后）。
+  void _reloadAssets() {
+    if (!mounted) return;
+    // 用块体：箭头体会把赋值表达式的值（Future）返回给 setState，
+    // Flutter 会判「setState 回调返回了 Future」而抛错。
+    setState(() {
+      _assetsFuture = _listAssets();
+    });
+  }
+
   Future<AssetRepository> _assets() => ref.read(assetRepoProvider.future);
 
   /// 失败即回滚的批量导入器（单批写库 + 已落盘文件清理）。
@@ -87,9 +113,11 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
           AssetImportEntry(
             name: f.name,
             materialize: (id) async {
-              final dest = File('${docs.path}/audio_$id${_ext(f.path!)}');
-              await File(f.path!).copy(dest.path);
-              return AssetBlob(path: dest.path, sizeBytes: await dest.length());
+              // P2-23：写 .part 再原子 rename —— 边写边抛时不留下半截可见文件。
+              final dest = '${docs.path}/audio_$id${_ext(f.path!)}';
+              await atomicWrite(dest, (tmp) => File(f.path!).copy(tmp));
+              return AssetBlob(
+                  path: dest, sizeBytes: await File(dest).length());
             },
           ),
     ];
@@ -99,7 +127,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('导入完成：新增 ${outcome.added} 条'
                 '${outcome.skipped > 0 ? '（跳过重名 ${outcome.skipped} 条）' : ''}')));
-        setState(() {});
+        _reloadAssets();
       }
     } catch (e) {
       if (mounted) {
@@ -131,9 +159,12 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
             durationMs: (it['durationMs'] as num?)?.toInt() ?? 0,
             materialize: (id) async {
               final data = await rootBundle.load('assets/audio/${it['file']}');
-              final dest = File('${docs.path}/audio_$id.wav');
-              await dest.writeAsBytes(data.buffer.asUint8List(), flush: true);
-              return AssetBlob(path: dest.path, sizeBytes: data.lengthInBytes);
+              // P2-23：同上，预置库落盘也走原子写入。
+              final dest = '${docs.path}/audio_$id.wav';
+              await atomicWrite(dest,
+                  (tmp) => File(tmp).writeAsBytes(data.buffer.asUint8List(),
+                      flush: true));
+              return AssetBlob(path: dest, sizeBytes: data.lengthInBytes);
             },
           ),
       ];
@@ -143,6 +174,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('预置音效导入完成：新增 ${outcome.added} 条，'
                 '跳过已存在 ${outcome.skipped} 条（库内共 ${items.length} 条）')));
+        _reloadAssets();
       }
     } catch (e) {
       if (mounted) {
@@ -164,7 +196,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
     } catch (_) {
       // 孤儿文件不影响使用，下次同路径写入会覆盖。
     }
-    if (mounted) setState(() {});
+    _reloadAssets();
   }
 
   Future<void> _preview(String path, String id) async {
@@ -230,7 +262,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         onPressed: _import,
       ),
       body: FutureBuilder<List<AudioAsset>>(
-        future: _listAssets(),
+        future: _assetsFuture,
         builder: (context, snap) {
           final items = snap.data ?? const [];
           if (items.isEmpty) {

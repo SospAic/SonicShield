@@ -193,10 +193,18 @@ Map<String, dynamic> crudTaskWire(
   };
 }
 
-/// 回执是否指向本条命令（无 `for` 的回执视为匹配）。
+/// 回执是否**精确指向**本条命令（P2-20）。
+///
+/// 旧实现 `f == null || f == cmdId` 把"没有 `for` 的回执"也当成本条命令的回执 ——
+/// 迟到/无关的同类型 ack 都能满足等待，探针于是**假绿**。
+/// 收紧为：
+/// * `for` 存在 ⇒ 必须与本条命令 id 相等；
+/// * `for` 缺失 ⇒ **仅**非 `rc.ack` 的响应（`rc.pong`/`rc.status` 等本就不带
+///   `for` 的广播式回执）视为匹配；`rc.ack` 缺 `for` 一律不匹配。
 bool forOk(RcMessage r, String cmdId) {
   final f = r.payload['for'];
-  return f == null || f == cmdId;
+  if (f == null) return r.type != RcEvt.ack;
+  return f == cmdId;
 }
 
 Future<void> main(List<String> args) async {

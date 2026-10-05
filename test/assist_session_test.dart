@@ -5,6 +5,8 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/remote/assist.dart';
 
+import 'support/source_text.dart';
+
 /// 临时协助会话（v1.7，docs/18）契约测试。
 ///
 /// 重点锁定两类不变量：
@@ -247,9 +249,30 @@ void main() {
       // 该常量全仓除定义外只有一条字面量断言，无任何生产侧发出/消费 ——
       // 保留它比删除更糟（让人以为"状态镜像已实现"）。若日后要真正做状态镜像，
       // 必须连同控制端的消费方一起提交。
-      final src = File('lib/remote/assist.dart').readAsStringSync();
-      expect(src.contains("'rc.assist'"), isFalse,
-          reason: 'RcAssistCmd.state 已被删除，不得复活');
+      //
+      // A13 加固：此前只扫 `lib/remote/assist.dart` **单文件** —— 死常量若在
+      // 别处复活（protocol / 任意 App 源）就抓不到。改为**全仓扫描**，
+      // 并**剥注释**（本仓刻意在注释里写明"rc.assist 已删"，不剥注释会假红），
+      // 补"扫到 N 个文件"哨兵证明扫描不是空转。
+      final hits = <String>[];
+      var scanned = 0;
+      for (final dir in ['lib', 'tool']) {
+        for (final f in Directory(dir).listSync(recursive: true)) {
+          if (f is! File || !f.path.endsWith('.dart')) continue;
+          scanned++;
+          final src = stripComments(f.readAsStringSync());
+          if (src.contains("'rc.assist'")) {
+            hits.add(f.path.replaceAll(r'\', '/'));
+          }
+        }
+      }
+      // 哨兵：路径写错 / 目录改名时会退化成"永远绿"，必须先证明扫到了东西。
+      expect(scanned, greaterThan(50),
+          reason: '应扫到大量 Dart 源文件（lib + tool）—— 只扫到 $scanned 个'
+              '说明扫描路径失效，本锁会恒真');
+      expect(hits, isEmpty,
+          reason: 'RcAssistCmd.state（rc.assist）已被删除，不得在任何生产源中复活；'
+              '命中：$hits');
     });
   });
 }

@@ -74,8 +74,33 @@ android {
 
     buildTypes {
         release {
+            // ⚠️ R8 规则必须显式接入：Flutter Gradle 插件在 `FlutterPlugin.kt:218`
+            // 里**写死** `releaseBuildType.isMinifyEnabled = true` —— release 包一定压缩。
+            // 不接规则时，靠反射按类名加载的 ML Kit（mobile_scanner 扫码依赖）会被
+            // 重命名/裁剪，扫码时原生方法通道抛 NullPointerException，相机起不来
+            // （现象即「相机启动失败」，v1.9.0-alpha+17 实测复现）。
+            // 详见 android/app/proguard-rules.pro 顶部说明。
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // 无真 keystore 时回退 debug 签名，保证 `flutter build apk --release` 可用。
             // ⚠️ 正式发布前必须换成真 keystore（见上方注释）。
+            //
+            // P1-14：CI / 正式发布必须 fail-closed —— 设 `REQUIRE_RELEASE_SIGNING=1`
+            // 时若没有正式 keystore，直接让构建失败，**绝不**静默回退 debug 签名。
+            // 否则会产出应用身份/升级签名不匹配的"正式"包（误发布即成事故）。
+            // 本地 `flutter build apk --release`（debug-only 调试用）不设该变量，
+            // 仍按原行为回退 debug 签名，保持开发可用性。
+            val requireReleaseSigning =
+                (System.getenv("REQUIRE_RELEASE_SIGNING") ?: "0") == "1"
+            if (requireReleaseSigning && !hasReleaseKeystore) {
+                throw GradleException(
+                    "REQUIRE_RELEASE_SIGNING=1 但未找到正式 keystore" +
+                        "（android/key.properties ⇒ storeFile）。正式/CI Release" +
+                        " 构建禁止回退 debug 签名（P1-14）。请注入签名 secret 后重试。",
+                )
+            }
             signingConfig = if (hasReleaseKeystore) {
                 signingConfigs.getByName("release")
             } else {

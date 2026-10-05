@@ -670,7 +670,28 @@ class CallService {
       'iceServers': await iceServers(),
       'sdpSemantics': 'unified-plan',
     });
-    _localStream?.getTracks().forEach(pc.addTrack);
+    // ⚠️ BUG-077：addTrack **必须**把本地流一并传进去。
+    //
+    // flutter_webrtc 的 Dart 层写死了 `'streamIds': [stream?.id]`
+    // （rtc_peerconnection_impl.dart:604）：不传 stream ⇒ 发过去的是 `[null]`，
+    // Java 侧 `streamIds.toArray(new String[0])` 得到 `String[null]`，
+    // native `nativeAddTrack` 拿这个 null 去调 `JniHelper.getStringBytes`
+    // 直接抛 NPE；WebRTC 的 `CheckException` 见到 pending 异常即
+    // `RTC_CHECK(false)`（jvm.cc:81）⇒ SIGABRT。
+    //
+    // 症状就是「发起视频/语音通话后程序崩溃」（P0）：getUserMedia 已成功、
+    // 摄像头指示灯已亮，紧接着 addTrack 处整个进程 abort。旧写法
+    // `forEach(pc.addTrack)` 正是"不传 stream"——而
+    // `integration_test/camera_probe_test.dart` 传了 stream，所以探针能过、
+    // 生产却崩（这也是"profile 通过、release 崩溃"假象的由来）。
+    final local = _localStream;
+    if (local != null) {
+      // await：addTrack 是异步平台调用，结果被丢弃时异常会变成"无人接管的
+      // 未来错误"（同 webrtc_stub 第 45 轮记录的那类静默失败）。
+      for (final t in local.getTracks()) {
+        await pc.addTrack(t, local);
+      }
+    }
     pc.onTrack = (event) {
       if (event.streams.isNotEmpty) {
         _remoteStream = event.streams.first;

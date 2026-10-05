@@ -9,7 +9,9 @@ import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
 
 Task _task(TriggerConfig trigger,
-    {String id = 'task-1', QuietPolicy quiet = QuietPolicy.skip}) {
+    {String id = 'task-1',
+    QuietPolicy quiet = QuietPolicy.skip,
+    DateTime? updatedAt}) {
   final now = DateTime.now();
   return Task(
     id: id,
@@ -24,7 +26,7 @@ Task _task(TriggerConfig trigger,
     quietPolicy: quiet,
     priority: 0,
     createdAt: now,
-    updatedAt: now,
+    updatedAt: updatedAt ?? now,
   );
 }
 
@@ -171,6 +173,100 @@ void main() {
       final t = _task(const DailyTrigger(time: TimeSpec(hour: 10, minute: 0)))
           .copyWith(enabled: false);
       expect(engine.materialize(t, now), isEmpty);
+    });
+  });
+
+  // ── P1-05：计划是「可重算投影」────────────────────────────────────
+  //
+  // 旧实现把随机抽样窗口裁到 `now`（`clampedStart = max(winStart, now)`），
+  // 于是**同一天**每次续算（now 前进）都会重采样出**另一批**时刻；再叠加
+  // `commitAll` 的 ignore 语义（旧的留着、新的追加），当天候选总数与最小间隔
+  // 都不再受 timesPerDay/minGap 约束。修复后种子只由「任务 id + 定义版本 +
+  // 当地日期」决定，`now` 只用于事后过滤 ⇒ 重算是同一批时刻的**子集**。
+  group('P1-05 计划确定性（重算 = 同一批时刻的子集）', () {
+    const engine = ScheduleEngine();
+    final range =
+        DateRange(start: DateTime(2026, 9, 12), end: DateTime(2026, 9, 12));
+
+    test('随机窗口：now 前进后重算，结果必须是早批的子集', () {
+      final t = _task(RandomWindowTrigger(
+        dateRange: range,
+        windowStart: const TimeSpec(hour: 9),
+        windowEnd: const TimeSpec(hour: 21),
+        timesPerDay: 4,
+        minGap: const Duration(minutes: 60),
+      ));
+      final early = engine
+          .materialize(t, DateTime(2026, 9, 12, 8))
+          .map((e) => e.fireAt)
+          .toSet();
+      final late = engine
+          .materialize(t, DateTime(2026, 9, 12, 15))
+          .map((e) => e.fireAt)
+          .toSet();
+      expect(early, hasLength(4), reason: '08:00 应得到整窗 4 条');
+      expect(late, isNotEmpty);
+      expect(
+        late.difference(early),
+        isEmpty,
+        reason: '★ now 前进后必须只是**过滤**掉已过时刻，绝不能重采样出新的时刻。'
+            '旧实现（窗口裁到 now）在这里会得到一批全新的时刻 ⇒ 判红。',
+      );
+      expect(late.length, lessThan(early.length),
+          reason: 'now 已前进到窗口内，应过滤掉部分已过时刻（严格子集）');
+    });
+
+    test('随机间隔：now 前进后重算，结果必须是早批的子集', () {
+      final t = _task(RandomIntervalTrigger(
+        dateRange: range,
+        minGap: const Duration(hours: 2),
+        maxGap: const Duration(hours: 4),
+        activeStart: const TimeSpec(hour: 0),
+        activeEnd: const TimeSpec(hour: 23, minute: 59),
+        maxPerDay: 8,
+      ));
+      final early = engine
+          .materialize(t, DateTime(2026, 9, 12, 0))
+          .map((e) => e.fireAt)
+          .toSet();
+      final late = engine
+          .materialize(t, DateTime(2026, 9, 12, 12))
+          .map((e) => e.fireAt)
+          .toSet();
+      expect(early, isNotEmpty);
+      expect(
+        late.difference(early),
+        isEmpty,
+        reason: '★ 间隔序列必须从**活动窗口起点**确定地推进，now 只做过滤；'
+            '旧实现以 max(dayStart, now) 为游标起点 ⇒ 序列随 now 变化 ⇒ 判红。',
+      );
+    });
+
+    test('任务定义版本（updatedAt）变化 ⇒ 当天随机计划整体重采样', () {
+      final trigger = RandomWindowTrigger(
+        dateRange: range,
+        windowStart: const TimeSpec(hour: 9),
+        windowEnd: const TimeSpec(hour: 21),
+        timesPerDay: 4,
+        minGap: const Duration(minutes: 60),
+      );
+      final now = DateTime(2026, 9, 12, 8);
+      final v1 = engine
+          .materialize(_task(trigger, updatedAt: DateTime(2026, 9, 11, 8)), now)
+          .map((e) => e.fireAt)
+          .toList();
+      final v2 = engine
+          .materialize(_task(trigger, updatedAt: DateTime(2026, 9, 11, 9)), now)
+          .map((e) => e.fireAt)
+          .toList();
+      expect(v1, isNotEmpty);
+      expect(v2, isNotEmpty);
+      expect(
+        v1,
+        isNot(equals(v2)),
+        reason: '★ 定义版本必须进入种子：否则改了任务定义后，当天的随机时刻仍是旧的，'
+            '用户看不到"改了就换一批"。',
+      );
     });
   });
 }

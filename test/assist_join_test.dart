@@ -93,14 +93,26 @@ void main() {
     return RcCodec.encode(RcMessage.now(type, payload), key, s.topic);
   }
 
+  Future<String> lastHelloId(AssistSession s) async {
+    final key = await RcAssist.ctlKey(s.code, s.password);
+    for (final p in joinBus.published.reversed) {
+      final m = await RcCodec.decode(p.wire, key, s.topic);
+      if (m?.type == RcAssistCmd.hello) return m!.id;
+    }
+    return '';
+  }
+
   Future<String> acceptWire(
     AssistSession s, {
     DateTime? expiresAt,
     AssistPerms perms = AssistPerms.none,
     String sessionId = 'sid-injected',
     String epName = '端点-测试机',
-  }) =>
+    String? forId,
+  }) async =>
       epWire(s, RcAssistCmd.accept, {
+        // P2-30：端点回执必须回指本轮 join 发出的 hello；默认取最近一条 hello 的 ID。
+        'for': forId ?? await lastHelloId(s),
         'sessionId': sessionId,
         'epName': epName,
         'expiresAt':
@@ -258,6 +270,41 @@ void main() {
       expect(client.sessionId, first, reason: '端点对重复 hello 幂等，不新建会话');
       expect(joinBus.unsubscribed, contains(s.topic), reason: '重复接入前应先退订旧主题');
       expect(joinBus.subscribed.where((t) => t == s.topic).length, 2);
+    });
+
+    test('AJ-24b P2-30：for 不匹配本轮 hello 的迟到 accept 必须被忽略（保持 opening）',
+        () async {
+      final s = await host.start();
+      final fut = await joinMuted(s);
+
+      // 注入一条 for 指向"别的 hello"的 accept（模拟上一轮 join 的存量回执重投）。
+      await client.onWire(await acceptWire(s,
+          forId: 'stale-hello-from-previous-attempt', sessionId: 'old-sid'));
+
+      expect(client.active, isFalse,
+          reason: '★ 不匹配的 accept 不得把控制端带入 active（否则会带着旧会话状态）');
+      expect(client.phase, AssistPhase.opening);
+      expect(client.sessionId, isEmpty, reason: '被忽略的 accept 不得写入任何会话字段');
+
+      // 正确回执到达后仍能正常接入（证明上面不是"恒忽略"）。
+      await client.onWire(await acceptWire(s, sessionId: 'new-sid'));
+      expect(await fut, isTrue);
+      expect(client.active, isTrue);
+      expect(client.sessionId, 'new-sid');
+    });
+
+    test('AJ-24c P2-30：缺失 for 的 accept 也 fail closed（保持 opening）', () async {
+      final s = await host.start();
+      final fut = await joinMuted(s);
+
+      await client.onWire(await acceptWire(s, forId: ''));
+
+      expect(client.active, isFalse, reason: '缺 for 无法核对来源，按 fail closed 处理');
+      expect(client.phase, AssistPhase.opening);
+
+      // 收尾：注入正确 accept 让 join 正常结束，避免用例超时噪声。
+      await client.onWire(await acceptWire(s));
+      expect(await fut, isTrue);
     });
 
     test('AJ-25 端点 reject(ttl_expired) → 可读错误 + 清理', () async {

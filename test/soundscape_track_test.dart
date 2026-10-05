@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/services/background_engine.dart';
 
+import 'support/source_text.dart';
+
 /// BUG-059 回归锁：声景轨道**点名了就必须满足，满足不了就跳过 + 留痕**，
 /// 绝不拿"库里任意一条"顶上。
 ///
@@ -72,8 +74,11 @@ void main() {
             '实际入参: $params');
 
     // 3) 声景执行必须调用这个纯函数（不能有人绕过它直接 `??=`）。
-    final j = src.indexOf('Future<void> soundscapeAndLog(');
-    final body = src.substring(j, src.indexOf('\n  }', j));
+    // 花括号配对取方法体：不再写死 `indexOf('\n  }', j)`（A12）。
+    // ⚠️ P1-07 后 `soundscapeAndLog` 改为返回 `ExecutionOutcome`（把真实成败
+    // 带出给 occurrence/ack），锚点随之更新 —— 判据本身不变。
+    final body = methodBody(
+        stripComments(src), 'Future<ExecutionOutcome> soundscapeAndLog(');
     expect(body.contains('soundscapeTrackPath('), isTrue,
         reason: '`soundscapeAndLog` 必须经 `soundscapeTrackPath` 解析轨道');
     expect(body.contains('??='), isFalse,

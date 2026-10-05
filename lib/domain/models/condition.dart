@@ -127,6 +127,9 @@ class TaskCondition {
         requireWifi: j['requireWifi'] as bool? ?? false,
         // 缺键时取默认（true）—— 老任务升级后自动获得通话保护。
         skipInCall: j['skipInCall'] as bool? ?? true,
+        // P2-01：`toJson` 写了 `probabilityPct`，旧 `fromJsonOrNull` 未读 ⇒
+        // 重启/备份恢复后概率门被静默抹掉（变成"必执行"）。补齐读取。
+        probabilityPct: (j['probabilityPct'] as num?)?.toInt(),
       );
     } on Object {
       return null; // 解析失败视为无条件（不阻塞执行）
@@ -156,7 +159,16 @@ class TaskCondition {
       final e = windowEndMin!;
       // windowEndNextDay 影响的是"窗口跨零点"的语义表达；两种写法在
       // 跨零点（s > e）时结果一致，这里统一按 s>e 判定跨天。
-      final inWindow = s <= e ? (cur >= s && cur < e) : (cur >= s || cur < e);
+      //
+      // P2-07：`s == e` 必须是**全天**而不是空窗口。任务编辑器的结束时间下拉里
+      // 「24:00」这一项的取值是 `h * 60 % 1440`（见 task_editor_screen 的
+      // `_condWinEnd`），即 **0**；用户选「00:00–24:00」时 start=0、end=0，
+      // 旧写法 `s <= e ? (cur >= s && cur < e)` 退化成 `cur >= 0 && cur < 0`
+      // —— **恒 false**，任务在全天窗口下反而永不执行。显式区分"全天"与
+      // "零时长"：start==end 按全天处理。
+      final inWindow = s == e
+          ? true
+          : (s < e ? (cur >= s && cur < e) : (cur >= s || cur < e));
       if (!inWindow) return '不在时段窗口内';
     }
     return null;

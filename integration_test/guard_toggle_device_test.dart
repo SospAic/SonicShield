@@ -58,7 +58,10 @@ void main() {
     if (sw.evaluate().isEmpty) {
       // ignore: avoid_print
       print('PROBE RESULT = 守卫页未找到 Switch');
-      return;
+      // P2-28：这里是**假绿路径** —— 找不到控件直接 return 会让用例"通过"，
+      // 守卫开关回归（页面崩 / 路由改名 / 按钮消失）永远无人察觉。
+      // 找不到就意味着这条验证根本没跑，必须硬失败。
+      fail('守卫页未找到 Switch —— 无法验证 BUG-061 的可见性修复，用例不得以"跳过"名义变绿');
     }
     await tester.tap(sw.first);
 

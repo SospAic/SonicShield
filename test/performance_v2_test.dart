@@ -254,7 +254,9 @@ void main() {
   group('MT-内存基准', () {
     test('MT-01 1000 任务物化 1.2 万条（JIT 护栏 ≤16000ms，分配量代理）', () {
       const engine = ScheduleEngine();
-      final now = DateTime(2026, 9, 14, 12);
+      // 同 `performance_test.dart` PT 组：P1-05 起随机窗口是"整窗抽样 + 按
+      // now/end 过滤"，基准起点取午夜才不会把首/末日窗口部分裁掉 ⇒ 稳定 6 条/任务。
+      final now = DateTime(2026, 9, 14);
 
       Task memTask(int i) => Task(
             id: 'mem-$i',

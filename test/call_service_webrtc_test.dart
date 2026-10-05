@@ -226,6 +226,25 @@ void main() {
       expect(video['height'], 480);
     });
 
+    test('CS-07b ★ addTrack 必须带本地流（BUG-077：不带 ⇒ native NPE 崩溃）',
+        () async {
+      // 回归锁：flutter_webrtc 的 Dart 层写死 `'streamIds': [stream?.id]`
+      // （rtc_peerconnection_impl.dart:604）。省略 stream ⇒ 发过去 `[null]`，
+      // Java 侧 `String[null]`，native `nativeAddTrack` 拿 null 调
+      // `JniHelper.getStringBytes` 抛 NPE ⇒ WebRTC `RTC_CHECK(false)` ⇒
+      // SIGABRT（真机 release 实测："发起通话后程序崩溃"，多路同源）。
+      final id = await svc.startCall(peer('EP0012'), store, video: true);
+      expect(id, isNotNull, reason: '前置：本期通话必须已建 PC');
+      final args = rtc.lastArgs('addTrack');
+      expect(args, isNotNull, reason: '必须真的调了 addTrack（本地轨要挂上去）');
+      final ids = args!['streamIds'] as List;
+      expect(ids.length, 1);
+      expect(ids.first, isNotNull,
+          reason: 'streamIds[0] 为 null ⇒ native addTrack 必崩（BUG-077）');
+      expect(ids.first, 'stream-1',
+          reason: '应带上 getUserMedia 返回的本地流 id，而不是 null');
+    });
+
     test('CS-08 已在通话中再呼 → alreadyInCall，且不重复取流', () async {
       await svc.startCall(peer('EP0013'), store);
       rtc.resetObservations();
@@ -779,8 +798,20 @@ void main() {
       expect(svc.currentPhase, CallPhase.ringing);
       expect(svc.isCaller, isFalse);
 
-      // 用户既不接听也不拒接 ⇒ 只能靠被叫自己的振铃上限（`calleeRingTimeout` = 45s）。
-      await Future<void>.delayed(const Duration(seconds: 46));
+      // 用户既不接听也不拒接 ⇒ 只能靠被叫自己的振铃上限（`calleeRingTimeout` = 45s，
+      // `call_lifecycle.dart:28` 的真实 `Timer`，不可注入）。
+      //
+      // ⚠️ 不靠固定 46s 墙钟：内层计时器标称 45s，固定等待只留 1s 余量。门禁在
+      //    `--coverage` + 整层默认并发下会把这类长计时拉长（本机同命令整层耗时实测
+      //    可从 9:41 涨到 14:26），1s 余量根本不够 —— 2026-10-04 门禁实测
+      //    `Actual: CallPhase.ringing`（计时器尚未到点就去断言）。改为**有界轮询到
+      //    收尾真正发生**：只放宽时序余量，判据（到点必须主动上报 `rc.call.missed`
+      //    并落到 idle/missed）一字不动。
+      final deadline = DateTime.now().add(const Duration(seconds: 150));
+      while (svc.currentPhase != CallPhase.idle &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
 
       expect(ringedOut, ['C-41'],
           reason: '被叫到点必须**主动**上报 `rc.call.missed` —— 否则主叫只能单方面等满'
@@ -788,6 +819,6 @@ void main() {
       expect(svc.currentPhase, CallPhase.idle);
       expect(svc.inCall, isFalse);
       expect(svc.lastEndReason, CallEndReason.missed);
-    }, timeout: const Timeout(Duration(seconds: 90)));
+    }, timeout: const Timeout(Duration(seconds: 180)));
   });
 }

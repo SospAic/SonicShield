@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:just_audio/just_audio.dart';
 
 import '../domain/models/action.dart';
+import 'ptt_stream_sink.dart';
 
 /// 播放结果（审计）。
 class PlayResult {
@@ -58,6 +59,23 @@ class PlaybackService {
           : AndroidAudioFocusGainType.gainTransientMayDuck;
 
   AudioPlayer? _player;
+
+  /// 声景多轨播放器登记（P2-08）。
+  ///
+  /// 与主 [_player] 分开存放（声景可能有 N 轨），但必须同样受 [stop] 统一停止：
+  /// 远程「停止指令组」只握有 `PlaybackService` 实例，拿不到 `playSoundscape`
+  /// 里局部创建的各个 `AudioPlayer`。旧实现 `stop()` 只停 `_player`，
+  /// 声景会继续出声直到 `durationMs` 到点 —— 用户"点了停却还在响"。
+  final List<AudioPlayer> _mixPlayers = <AudioPlayer>[];
+
+  /// 正在进行的流式对讲会话数（v2）。
+  ///
+  /// 用于**引用计数**：多个对讲会话共享同一个 [PlaybackService] 实例，
+  /// 只有最后一个会话释放时才把本实例从 [_playing] 登记表摘掉 ——
+  /// 否则第一个会话结束就会让「停止指令组」再也拿不到本实例，
+  /// 第二个会话便停不下来。
+  int _pttStreams = 0;
+
   bool _mixStopped = false;
 
   /// [stop] 已被请求；正在 [_waitPlayWindow] 里等待的 [play] 据此**提前收尾，
@@ -200,10 +218,20 @@ class PlaybackService {
     // 而不通知等待方，play() 仍会等满 maxDurationMs（远程「停止指令组」
     // 在端点侧"点了停却继续出声"的根因之一）。
     _stopRequested = true;
+    // P2-08：`stop()` 是"端点静音"的统一出口（`stopAllPlaying` 也只调它）。
+    // 除了主 [_player]，还必须打断声景混音 —— 否则声景几轨会继续出声到窗口到点。
+    _mixStopped = true;
     try {
       await _player?.stop();
     } on Object {
       // 忽略停止异常：状态自愈。
+    }
+    for (final p in List<AudioPlayer>.of(_mixPlayers)) {
+      try {
+        await p.stop();
+      } on Object {
+        // 忽略停止异常：状态自愈。
+      }
     }
   }
 
@@ -280,14 +308,18 @@ extension PlaybackSoundscape on PlaybackService {
     if (tracks.isEmpty) {
       return const PlayResult(ok: false, message: '声景无轨道');
     }
-    final session = await AudioSession.instance;
-    await session.configure(audioSessionConfigFor(channel));
-
+    // P2-08：登记到统一会话表 —— 否则远程「停止指令组」拿不到本实例，
+    // 声景会继续出声。同时清掉上一次的停止标志（本次是新的混音）。
+    PlaybackService._playing.add(this);
+    _mixStopped = false;
     final players = <AudioPlayer>[];
     try {
+      final session = await AudioSession.instance;
+      await session.configure(audioSessionConfigFor(channel));
       for (final t in tracks) {
         final p = AudioPlayer();
         players.add(p);
+        _mixPlayers.add(p); // P2-08：逐轨登记，stop() 才能统一停止。
         await p.setFilePath(t.path);
         await p.setVolume(t.volume);
         if (t.loop) await p.setLoopMode(LoopMode.one);
@@ -296,25 +328,27 @@ extension PlaybackSoundscape on PlaybackService {
       for (final p in players) {
         unawaited(p.play());
       }
-      // 等待总时长，期间可被 stopSoundscape 打断（通过 _mixStopped 标志）。
+      // 等待总时长，期间可被 stopSoundscape / stop 打断（_mixStopped 标志）。
       while (sw.elapsedMilliseconds < durationMs) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
         if (_mixStopped) break;
       }
-      // 渐出后全停。
-      final fo = fadeOutMs.clamp(0, durationMs);
-      const steps = 12;
-      for (var s = 1; s <= steps; s++) {
-        for (final p in players) {
-          await p.setVolume(p.volume * (1 - s / steps));
+      // 被 stop() 打断时各轨已被统一停掉，无需再渐出（用户要的是立刻静音）；
+      // 正常到点则渐出后全停。
+      if (!_mixStopped) {
+        final fo = fadeOutMs.clamp(0, durationMs);
+        const steps = 12;
+        for (var s = 1; s <= steps; s++) {
+          for (final p in players) {
+            await p.setVolume(p.volume * (1 - s / steps));
+          }
+          await Future<void>.delayed(Duration(milliseconds: fo ~/ steps));
         }
-        await Future<void>.delayed(Duration(milliseconds: fo ~/ steps));
       }
       for (final p in players) {
         await p.stop();
         await p.dispose();
       }
-      _mixStopped = false;
       return PlayResult(ok: true, playedMs: sw.elapsedMilliseconds);
     } catch (e) {
       for (final p in players) {
@@ -324,12 +358,127 @@ extension PlaybackSoundscape on PlaybackService {
           // ignore
         }
       }
-      _mixStopped = false;
       return PlayResult(
           ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
+    } finally {
+      // 无条件清理登记（两条路径都不残留），并复位停止标志 ——
+      // 否则下一次混音一开播就被上一次的标志掐掉（PA-12 锁住的性质）。
+      for (final p in players) {
+        _mixPlayers.remove(p);
+      }
+      _mixStopped = false;
+      PlaybackService._playing.remove(this);
     }
   }
 
   /// 终止当前混音（外部 stop() 或条件变化时调用）。
   void stopSoundscape() => _mixStopped = true;
+}
+
+extension PlaybackPttStream on PlaybackService {
+  /// 开一个流式对讲会话（`PttStreamSink` 的 just_audio 实现）。
+  ///
+  /// 端点侧收到 `ptt.voice{seq}` 分片后逐片落盘，再通过本会话**边收边放**：
+  /// 首片到达即起播、后续无缝续播、末片收尾 —— 把 v1 的「整段说完才播」
+  /// 变成「边说边播」（Zello 式实时对讲的落点）。
+  PttStreamSink openPttStream() => PttPlaybackSession._(this);
+}
+
+/// 对流式对讲会话的 just_audio 实现。
+///
+/// ## 为什么用 `ConcatenatingAudioSource` 而不是"不断换源"
+///
+/// 每个分片是一个**独立文件**，但听感上必须连成一句话。"换播放器 / 换源"
+/// 会在每片之间留下一道可闻的停顿与起播延迟；`ConcatenatingAudioSource` 是
+/// just_audio 官方给出的**动态播放列表**用法（`add()` 可在播放中追加），
+/// 平台侧（ExoPlayer/AVPlayer）会把相邻音源串成一条队列，片间缝隙最小。
+///
+/// ## 与端点静音的接线
+///
+/// 会话的播放器登记进 [PlaybackService] 的混音表（[_mixPlayers]），
+/// 因此远程「停止指令组」的 `stopAllPlaying()` / [PlaybackService.stop]
+/// 能**立刻掐断对讲出声** —— 与声景同一语义（"端点静音"），
+/// 否则用户点了停，对讲还在响。
+class PttPlaybackSession implements PttStreamSink {
+  PttPlaybackSession._(this._service) {
+    _service._mixPlayers.add(_player);
+    _service._pttStreams++;
+    // 登记到静态表 ⇒「停止指令组」的 stopAllPlaying() 能拿到本实例并静音。
+    PlaybackService._playing.add(_service);
+  }
+
+  final PlaybackService _service;
+  final AudioPlayer _player = AudioPlayer();
+  final ConcatenatingAudioSource _source =
+      ConcatenatingAudioSource(children: <AudioSource>[]);
+
+  StreamSubscription<ProcessingState>? _stateSub;
+  bool _started = false;
+  bool _closed = false;
+
+  /// 首片是否已到达并起播（供调用方判定"会话真的开起来了"）。
+  bool get started => _started;
+
+  @override
+  Future<void> append(String path, {double volume = 1.0}) async {
+    if (_closed) return;
+    final src = AudioSource.uri(Uri.file(path));
+    if (!_started) {
+      _started = true;
+      // 申请音频会话/焦点（media 通道）：与 v1 整段播放同一出口
+      // `audioSessionConfigFor`（ATTR-02 锁：配置只允许在这一条路构造）。
+      final session = await AudioSession.instance;
+      await session.configure(audioSessionConfigFor(AudioChannel.media));
+      // ⚠️ 顺序：先入 children（此时 `_player == null` ⇒ 只记列表），
+      // 再 `setAudioSource` 交给平台 —— 反过来会先加载一个空列表。
+      await _source.add(src);
+      await _player.setAudioSource(_source);
+      await _player.setVolume(volume);
+      unawaited(_player.play());
+      _stateSub = _player.processingStateStream.listen((s) {
+        if (s == ProcessingState.completed) _onCompleted = true;
+      });
+      return;
+    }
+    await _source.add(src);
+    // 队列若在中途播空（`completed`）后又收到分片，需从新分片重新起播，
+    // 否则 just_audio 停在 completed 不再出声（"后面几句听不到"）。
+    if (_onCompleted) {
+      _onCompleted = false;
+      await _player.seek(Duration.zero, index: _source.children.length - 1);
+      unawaited(_player.play());
+    }
+  }
+
+  bool _onCompleted = false;
+
+  @override
+  Future<void> end() async {
+    _closed = true;
+    await _stateSub?.cancel();
+    _stateSub = null;
+  }
+
+  @override
+  Future<void> dispose() async {
+    _closed = true;
+    await _stateSub?.cancel();
+    _stateSub = null;
+    try {
+      await _player.stop();
+    } on Object {
+      // 忽略停止异常：状态自愈（与 PlaybackService.stop 同一处置）。
+    }
+    _service._mixPlayers.remove(_player);
+    _service._pttStreams--;
+    if (_service._pttStreams <= 0) {
+      _service._pttStreams = 0;
+      PlaybackService._playing.remove(_service);
+    }
+    try {
+      await _player.dispose();
+    } on Object {
+      // 忽略释放异常。
+    }
+  }
 }

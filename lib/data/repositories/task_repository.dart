@@ -34,11 +34,24 @@ class TaskRepository {
         'asset_ids': jsonEncode(t.assetIds),
       };
 
-  Future<void> upsert(Task t) => _db.db.insert(
-        'tasks',
-        _row(t),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+  /// 写入/更新一条任务（**不使用 REPLACE**）。
+  ///
+  /// ## 为什么必须避开 `ConflictAlgorithm.replace`（P2-02）
+  /// SQLite 的 `INSERT OR REPLACE` 在**主键冲突时先 DELETE 再 INSERT**，
+  /// 而不是原地更新。而 `occurrences.task_id` 是
+  /// `REFERENCES tasks(id) ON DELETE CASCADE` —— 于是**每次编辑任务**
+  /// （同 id 重写）都会把那一条任务**全部历史计划/执行记录级联删掉**：
+  /// 已完成审计消失、冷却基准（`lastDoneFor`）归零、跳过记录丢失。
+  /// 表现为"改个名字，冷却突然不生效了 / 统计里记录没了"。
+  ///
+  /// 因此改为「先 UPDATE，未命中再 INSERT」：两条语句都不触发 DELETE，
+  /// 外键级联不会被误触发，历史完整保留。
+  Future<void> upsert(Task t) async {
+    final row = _row(t);
+    final n =
+        await _db.db.update('tasks', row, where: 'id = ?', whereArgs: [t.id]);
+    if (n == 0) await _db.db.insert('tasks', row);
+  }
 
   /// **批量**写入（单事务 / **单次平台通道往返**）。
   ///
@@ -52,15 +65,18 @@ class TaskRepository {
   /// 使用者看到的是"导入失败"但任务列表里多了一截）。
   ///
   /// 空集合直接返回，不产生任何数据库操作。
+  /// 与单条 [upsert] 同一语义（先 UPDATE 再 INSERT），并保持
+  /// **单事务 / 单次平台通道往返**：批内对每条任务依次排入
+  /// `UPDATE` 与 `INSERT OR IGNORE` —— 已存在则 UPDATE 命中、INSERT 被忽略；
+  /// 不存在则 UPDATE 空转、INSERT 落库。**全程无 DELETE**，
+  /// 因此不会触发 `occurrences` 的 `ON DELETE CASCADE`（P2-02）。
   Future<void> upsertMany(Iterable<Task> items) async {
     final batch = _db.db.batch();
     var n = 0;
     for (final t in items) {
-      batch.insert(
-        'tasks',
-        _row(t),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      final row = _row(t);
+      batch.update('tasks', row, where: 'id = ?', whereArgs: [t.id]);
+      batch.insert('tasks', row, conflictAlgorithm: ConflictAlgorithm.ignore);
       n++;
     }
     if (n == 0) return;

@@ -242,7 +242,15 @@ class _CallViewState extends ConsumerState<_CallView> {
                         FloatingActionButton.large(
                           heroTag: 'accept',
                           backgroundColor: Colors.green,
-                          child: const Icon(Icons.call, color: Colors.white),
+                          child: const Icon(Icons.call,
+                              color: Colors.white,
+                              // P2-31：语义名称，TalkBack/VoiceOver 才能区分接听/拒接。
+                              // ⚠️ 这里**不能**用 `FloatingActionButton.tooltip`：
+                              // 本宿主挂在 `MaterialApp.builder`、位于 Navigator 的
+                              // `Overlay` **之上**，Tooltip 找不到 Overlay 祖先会直接抛
+                              // `RawTooltip widgets require an Overlay widget ancestor`
+                              // （宿主测试 CIO-11 实测）。`Semantics` 无此依赖。
+                              semanticLabel: '接听'),
                           // ⚠️ 这里**必须**走 acceptPending()（用暂存的 invite），
                           // 不能退回"收到 invite 就代为接通"的老回调 ——
                           // 那正是 BUG-056（开关关掉也照样接通）。
@@ -252,7 +260,11 @@ class _CallViewState extends ConsumerState<_CallView> {
                         heroTag: 'decline',
                         backgroundColor: Colors.red,
                         onPressed: _endCall,
-                        child: const Icon(Icons.call_end, color: Colors.white),
+                        child: Icon(Icons.call_end,
+                            color: Colors.white,
+                            // 振铃阶段是"拒绝"，其它阶段是"挂断"（同一按钮两种语义）。
+                            semanticLabel:
+                                phase == CallPhase.ringing ? '拒绝' : '挂断'),
                       ),
                     ],
                   ),

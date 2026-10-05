@@ -370,6 +370,72 @@ void main() {
   });
 
   // ===========================================================================
+  // 6b. 精确闹钟结构化结果（P1-04）——纯函数，宿主可直接断言。
+  //
+  // 旧实现权限不足返回 0，Dart 侧只区分 null/异常 ⇒ "权限被拒"被当成成功。
+  // 这组用例锁住：denied / 部分排布 / 平台不支持三类降级都必须被判为 degraded。
+  // ===========================================================================
+
+  group('NB-I · 精确闹钟结构化结果（P1-04）', () {
+    test('denied=true → degraded，且原因指向可恢复的权限（不是静默成功）', () {
+      final r = AlarmScheduleResult.fromRaw(
+          {'expected': 3, 'scheduled': 0, 'denied': true, 'unsupported': false},
+          expected: 3);
+      expect(r.degraded, isTrue);
+      expect(r.ok, isFalse);
+      expect(r.reason, contains('权限未授予'));
+    });
+
+    test('部分排布 scheduled<expected → degraded 并报出实排数', () {
+      final r = AlarmScheduleResult.fromRaw(
+          {'expected': 5, 'scheduled': 2, 'denied': false, 'unsupported': false},
+          expected: 5);
+      expect(r.degraded, isTrue);
+      expect(r.reason, contains('2/5'));
+    });
+
+    test('全部排布 → 非降级、无降级原因', () {
+      final r = AlarmScheduleResult.fromRaw(
+          {'expected': 2, 'scheduled': 2, 'denied': false, 'unsupported': false},
+          expected: 2);
+      expect(r.degraded, isFalse);
+      expect(r.ok, isTrue);
+      expect(r.reason, isNull);
+    });
+
+    test('原生 error 非空 → degraded 且原因带出异常信息', () {
+      final r = AlarmScheduleResult.fromRaw(
+          {
+            'expected': 1,
+            'scheduled': 0,
+            'denied': false,
+            'unsupported': false,
+            'error': 'SecurityException',
+          },
+          expected: 1);
+      expect(r.degraded, isTrue);
+      expect(r.reason, contains('SecurityException'));
+    });
+
+    test('旧版原生返回 int（成功条数）→ 兼容解析，不被误判为权限拒绝', () {
+      final full = AlarmScheduleResult.fromRaw(3, expected: 3);
+      expect(full.ok, isTrue);
+      expect(full.denied, isFalse);
+
+      final partial = AlarmScheduleResult.fromRaw(1, expected: 3);
+      expect(partial.degraded, isTrue);
+      expect(partial.denied, isFalse, reason: 'int 回执不含权限信息，不得臆断被拒');
+    });
+
+    test('平台未回执（null）→ unsupported 降级，不是静默成功', () {
+      final r = AlarmScheduleResult.fromRaw(null, expected: 4);
+      expect(r.degraded, isTrue);
+      expect(r.unsupported, isTrue);
+      expect(r.reason, contains('不支持'));
+    });
+  });
+
+  // ===========================================================================
   // 7. 振动（v1.9 核心能力）与 FGS 入口 —— 第四十轮补齐。
   //
   // 此前 `vibrate` / `vibrateCommand` / `clearAlarms` / `startMicService` /

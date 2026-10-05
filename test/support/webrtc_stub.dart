@@ -303,7 +303,25 @@ class FakeWebrtc {
         addedCandidates.add('${_asMap(args['candidate'])['candidate']}');
         return null;
       case 'addTrack':
-        // ⚠️ `RTCRtpSenderNative.fromMap` 要求 `track` / `rtpParameters` 齐全：
+        // ⚠️ BUG-080（第七十三轮）：真实插件写死 `'streamIds': [stream?.id]`
+        // （rtc_peerconnection_impl.dart:604）—— 省略 `stream` 参数时发过去的
+        // 就是 `[null]`，Java 侧 `String[null]`、原生 `nativeAddTrack` 取 null
+        // ⇒ NPE ⇒ `RTC_CHECK(false)` ⇒ SIGABRT（**整个进程崩溃**）。
+        //
+        // 本桩**必须复刻这条拒绝**：第 45 轮版本对 addTrack 恒回成功、
+        // 完全不读 `streamIds`，于是"漏传本地流"在宿主上永远是绿的 ——
+        // 这正是「发起通话即崩溃」能逃过多轮宿主测试的根因。桩一旦恒真，
+        // 全绿只证明"实现符合我们自写的模型"，不证明真实契约为真。
+        final ids = args['streamIds'];
+        final streamOk = ids is List &&
+            ids.isNotEmpty &&
+            ids.every((e) => e is String && e.isNotEmpty);
+        if (!streamOk) {
+          throw PlatformException(
+              code: 'addTrackFailed',
+              message: 'streamIds 为空（漏传本地流 ⇒ 原生 NPE）');
+        }
+        // `RTCRtpSenderNative.fromMap` 要求 `track` / `rtpParameters` 齐全：
         // `track` 为空 map ⇒ sender 的 track 为 null（本桩不关心发送侧）。
         return <String, dynamic>{
           'senderId': 'sender-1',

@@ -57,9 +57,20 @@ class NativeBridgePlugin : FlutterPlugin {
 
     companion object {
         const val CHANNEL = "sonic_shield/native"
-        private const val PREFS = "sonic_shield_native"
-        private const val KEY_SHOULD_RUN = "should_run"
+        const val PREFS = "sonic_shield_native"
+        const val KEY_SHOULD_RUN = "should_run"
         private const val KEY_ALARMS = "alarm_times"
+
+        /**
+         * 启用**代次**（P1-03）。每「停止引擎」自增一次，用来给排定的闹钟打标签：
+         * 停止后自增 ⇒ 停止前排出的闹钟全部作废（看门狗接收器逐条核对代次后 no-op）。
+         * 只在**关闭**时自增（不在开启时）——因为开机自启 `BootReceiver` 是
+         * 先读持久化代次再排 kick 闹钟的，若开启时自增会让刚排的 kick 立刻过期。
+         */
+        const val KEY_GENERATION = "active_generation"
+
+        /** 闹钟 Intent 携带的代次 extra（与 [KEY_GENERATION] 对照）。 */
+        const val EXTRA_GENERATION = "generation"
         private const val TAG = "NativeBridge"
     }
 
@@ -173,13 +184,14 @@ class NativeBridgePlugin : FlutterPlugin {
                             result.success(true)
                         }
                         "setServiceShouldRun" -> {
-                            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                                .edit()
-                                .putBoolean(
-                                    KEY_SHOULD_RUN,
-                                    call.argument<Boolean>("value") == true,
-                                )
-                                .apply()
+                            val on = call.argument<Boolean>("value") == true
+                            val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                            val e = prefs.edit().putBoolean(KEY_SHOULD_RUN, on)
+                            // P1-03：关闭时**自增代次**，使停止前排定的闹钟全部作废
+                            // （看门狗接收器核对代次后 no-op）；开启时**不动**代次，
+                            // 以保证 BootReceiver 先排的 kick 闹钟不会立刻过期。
+                            if (!on) e.putInt(KEY_GENERATION, prefs.getInt(KEY_GENERATION, 0) + 1)
+                            e.apply()
                             result.success(true)
                         }
                         "getShouldRun" -> result.success(
@@ -213,11 +225,33 @@ class NativeBridgePlugin : FlutterPlugin {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             alarmManager(ctx).canScheduleExactAlarms()
 
-    private fun scheduleExactAlarms(ctx: Context, times: List<Long>): Int {
-        if (!canScheduleExact(ctx)) return 0
+    /**
+     * 排布精确闹钟并返回**结构化结果**（P1-04）。
+     *
+     * ⚠️ 旧实现权限不足时直接返回 `0`：Dart 侧只区分「null 回执」与「抛异常」，
+     * 把 `0` 当成"排了 0 条"的普通成功 —— 界面继续显示运行中与计划数，而
+     * 系统级定时唤醒根本没排上；服务被系统回收后 15s Timer 不能复活进程。
+     *
+     * 现返回 {expected, scheduled, denied, unsupported, error}：
+     * - `denied`：`SCHEDULE_EXACT_ALARM` 未授予（可跳系统设置恢复）；
+     * - `unsupported`：平台层面不支持（预留；本分支在 Android 上恒 false）；
+     * - `scheduled`：真正排上的条数（逐条 try/catch，失败不再静默吞掉整批）。
+     */
+    private fun scheduleExactAlarms(ctx: Context, times: List<Long>): Map<String, Any> {
+        val result = mutableMapOf<String, Any>(
+            "expected" to times.size,
+            "scheduled" to 0,
+            "denied" to false,
+            "unsupported" to false,
+        )
+        if (!canScheduleExact(ctx)) {
+            result["denied"] = true
+            return result
+        }
         val am = alarmManager(ctx)
         val saved = mutableSetOf<String>()
         var ok = 0
+        var error: String? = null
         for (t in times) {
             val pi = watchdogPendingIntent(ctx, t)
             // ⚠️ 守卫必须是 M(23)，**不是** S(31)。
@@ -228,17 +262,24 @@ class NativeBridgePlugin : FlutterPlugin {
             // 于是"Doze 下可靠唤醒"在低版本上只是文档里的说法（docs/03 §, docs/05 §1.2
             // 都写的是 AllowWhileIdle），实现里并不成立。这是**向下兼容缺口**，不是新特性。
             // else 分支在 minSdk=24 下不可达，保留只为声明"更低的版本只能用 setExact"。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, pi)
-            } else {
-                am.setExact(AlarmManager.RTC_WAKEUP, t, pi)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, pi)
+                } else {
+                    am.setExact(AlarmManager.RTC_WAKEUP, t, pi)
+                }
+                saved.add(t.toString())
+                ok++
+            } catch (e: Exception) {
+                // 逐条捕获：一条失败不再吞掉整批，并把原因如实回报给 Dart 侧。
+                error = e.message ?: e.toString()
             }
-            saved.add(t.toString())
-            ok++
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putStringSet(KEY_ALARMS, saved).apply()
-        return ok
+        result["scheduled"] = ok
+        if (error != null) result["error"] = error
+        return result
     }
 
     private fun clearExactAlarms(ctx: Context) {
@@ -253,8 +294,13 @@ class NativeBridgePlugin : FlutterPlugin {
     }
 
     private fun watchdogPendingIntent(ctx: Context, timeMs: Long): PendingIntent {
+        // P1-03：闹钟 Intent 携带**排布时的启用代次**。接收器拉起服务前会把
+        // 它与当前持久化代次核对，不一致即 no-op（停止引擎后残留的旧闹钟失效）。
+        val gen = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_GENERATION, 0)
         val intent = Intent(ctx, AlarmWatchdogReceiver::class.java)
             .putExtra("time", timeMs)
+            .putExtra(EXTRA_GENERATION, gen)
         val requestCode = ((timeMs / 1000) and 0x7FFFFFFFL).toInt()
         return PendingIntent.getBroadcast(
             ctx, requestCode, intent,
@@ -725,7 +771,7 @@ class NativeBridgePlugin : FlutterPlugin {
                         .setCategory(Notification.CATEGORY_ALARM)
                         .setVisibility(Notification.VISIBILITY_PUBLIC)
                         .setAutoCancel(true)
-                    if (pi != null) b.setFullScreenIntent(pi, true)
+                    if (pi != null && canUseFullScreenIntent(ctx)) b.setFullScreenIntent(pi, true)
                     notif = b.build()
                 } else {
                     @Suppress("DEPRECATION")
@@ -738,7 +784,7 @@ class NativeBridgePlugin : FlutterPlugin {
                         .setCategory(Notification.CATEGORY_ALARM)
                         .setVisibility(Notification.VISIBILITY_PUBLIC)
                         .setAutoCancel(true)
-                    if (pi != null) b.setFullScreenIntent(pi, true)
+                    if (pi != null && canUseFullScreenIntent(ctx)) b.setFullScreenIntent(pi, true)
                     notif = b.build()
                 }
                 nm.notify(9001, notif)
@@ -748,10 +794,21 @@ class NativeBridgePlugin : FlutterPlugin {
             Log.w(TAG, "deviceAlert: notification failed", e)
         }
 
-        // 3. 媒体音量置最大 + 短提示音（跟随媒体流，确保可闻）。
+        // 3. 请求音频焦点 + 媒体音量临时置最大 + 短提示音；3 秒后**还原音量并释放焦点**。
+        //    P2-16：旧实现把媒体音量顶到最大后**从不还原**，也从不申请/释放音频焦点 ——
+        //    用户正在外放的音乐被这条提示音打断后无法按焦点规则恢复，且音量被永久改动。
         try {
             val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            var origMusicVolume = -1
             if (am != null) {
+                origMusicVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                // MAY_DUCK：允许其它音频压低而非被静音，符合"找回提示"的短促语义。
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                )
                 am.setStreamVolume(
                     AudioManager.STREAM_MUSIC,
                     am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
@@ -775,6 +832,24 @@ class NativeBridgePlugin : FlutterPlugin {
                         player.release()
                     } catch (_: Exception) {
                     }
+                    // 还原用户原音量 + 释放焦点，不把"临时最大"留成副作用。
+                    if (am != null) {
+                        if (origMusicVolume >= 0) {
+                            try {
+                                am.setStreamVolume(
+                                    AudioManager.STREAM_MUSIC,
+                                    origMusicVolume,
+                                    0,
+                                )
+                            } catch (_: Exception) {
+                            }
+                        }
+                        @Suppress("DEPRECATION")
+                        try {
+                            am.abandonAudioFocus(null)
+                        } catch (_: Exception) {
+                        }
+                    }
                 }, 3000L)
                 ok = true
             }
@@ -783,6 +858,23 @@ class NativeBridgePlugin : FlutterPlugin {
         }
 
         return ok
+    }
+
+    /**
+     * P2-16：API 34（UPSIDE_DOWN_CAKE）起 `setFullScreenIntent` 受
+     * `NotificationManager.canUseFullScreenIntent()` 约束 —— 非闹钟/来电类应用
+     * 即便声明了 `USE_FULL_SCREEN_INTENT` 也可能被系统/用户关闭。不满足时
+     * **不设置全屏 intent**：退回高优先级横幅（渠道已是 IMPORTANCE_HIGH，仍会
+     * 抬头提醒），而不是塞一个系统不会兑现的全屏请求 —— 那会让"设备找回"
+     * 看起来已全屏、实则只剩一条普通通知。
+     *
+     * 用数字 34 而非 `VERSION_CODES.UPSIDE_DOWN_CAKE`，与本文件 `API_BAKLAVA`
+     * 的既有做法一致，避免 SDK 常量名在不同 compileSdk 下漂移。
+     */
+    private fun canUseFullScreenIntent(ctx: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 34) return true
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        return nm?.canUseFullScreenIntent() ?: false
     }
 
     // ---------- 麦克风前台服务（守卫的 while-in-use 通行证） ----------

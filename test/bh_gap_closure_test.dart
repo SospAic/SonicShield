@@ -17,6 +17,7 @@ import 'package:sonic_shield/remote/kdf_salt_store.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 import 'package:sonic_shield/services/notification_service.dart';
+import 'package:sonic_shield/services/retention_maintenance.dart';
 import 'package:sonic_shield/services/vibrate_session.dart';
 
 import 'support/mqtt_client_stub.dart';
@@ -105,6 +106,92 @@ void main() {
 
     test('G1-04 NotificationService.plugin getter 暴露底层插件实例', () {
       expect(NotificationService.instance.plugin, isNotNull);
+    });
+
+    // P2-10：审查指出两个 `purgeOlderThan` 只有定义、无生产调用入口。
+    // 这是**行为**测试 —— 用真实内存库跑真实 DELETE，断言「该删的删了、
+    // 不该删的留着」，不是源码文本锁。
+    test('G1-05 RetentionMaintenance：日志 90 天 / 已终态计划 7 天，pending 永不删', () async {
+      await TaskRepository(appDb).upsert(makeTask('t1'));
+      final occ = OccurrenceRepository(appDb);
+      final logs = LogRepository(appDb);
+
+      final now = DateTime(2026, 6, 1, 12);
+      int msAgo(Duration d) => now.subtract(d).millisecondsSinceEpoch;
+
+      // 日志：100 天前（应删）、10 天前（应留）。append 用 DateTime.now()，
+      // 无法构造受控时间戳，故直接落库以精确控制 created_at。
+      await appDb.db.insert('exec_logs', {
+        'source': 'test',
+        'action': 'a',
+        'status': 'success',
+        'message': 'old',
+        'created_at': msAgo(const Duration(days: 100)),
+      });
+      await appDb.db.insert('exec_logs', {
+        'source': 'test',
+        'action': 'b',
+        'status': 'success',
+        'message': 'new',
+        'created_at': msAgo(const Duration(days: 10)),
+      });
+
+      // 计划：10 天前 done（应删）、10 天前 pending（必须留 —— 可能正待补执行）、
+      // 3 天前 done（应留，未过期）。
+      await occ.commitAll([
+        PlannedOccurrence(
+          id: 'o-old-done',
+          taskId: 't1',
+          fireAt: DateTime.fromMillisecondsSinceEpoch(
+              msAgo(const Duration(days: 10))),
+          status: OccurrenceStatus.done,
+        ),
+        PlannedOccurrence(
+          id: 'o-old-pending',
+          taskId: 't1',
+          fireAt: DateTime.fromMillisecondsSinceEpoch(
+              msAgo(const Duration(days: 10))),
+          status: OccurrenceStatus.pending,
+        ),
+        PlannedOccurrence(
+          id: 'o-recent-done',
+          taskId: 't1',
+          fireAt: DateTime.fromMillisecondsSinceEpoch(
+              msAgo(const Duration(days: 3))),
+          status: OccurrenceStatus.done,
+        ),
+      ]);
+
+      final r = await RetentionMaintenance(
+        logs: logs,
+        occurrences: occ,
+        now: () => now,
+      ).run();
+
+      expect(r.logsRemoved, 1, reason: '仅 100 天前的日志超过 90 天保留期');
+      expect(r.occurrencesRemoved, 1,
+          reason: '仅 10 天前的 done 超过 7 天；pending 永不清理（可能正待补执行）');
+      expect(r.total, 2);
+
+      // 断言**真实剩余行**（不是只看返回值）。
+      final logRows = await logs.recent(limit: 10);
+      final messages = logRows.map((e) => e['message']).toList();
+      expect(messages, contains('new'));
+      expect(messages, isNot(contains('old')),
+          reason: '超过 90 天的日志必须真的从表里消失');
+
+      final occIds =
+          (await appDb.db.query('occurrences')).map((e) => e['id']).toSet();
+      expect(occIds, {'o-old-pending', 'o-recent-done'},
+          reason: 'pending 与未过期的 done 必须保留');
+
+      // 幂等：再跑一次不产生新的删除。
+      final again = await RetentionMaintenance(
+        logs: logs,
+        occurrences: occ,
+        now: () => now,
+      ).run();
+      expect(again.total, 0);
     });
   });
 

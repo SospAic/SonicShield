@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/remote/call_permission.dart';
 
+import 'support/source_text.dart';
+
 /// BUG-062：「自动接通」在权限被拒时**静默假装开启**的回归锁。
 ///
 /// 原实现 `await [camera, microphone].request();` 把结果**丢弃**，
@@ -65,8 +67,9 @@ void main() {
   // ---- 调用点必须真的用上判定（防"改回丢弃结果"）----
   test('AAP-07 源码锁：_toggleAuto 必须调用 autoAnswerBlockFor', () {
     final src = File('lib/features/remote/call_screen.dart').readAsStringSync();
-    final fn = src.substring(src.indexOf('Future<void> _toggleAuto'));
-    final body = fn.substring(0, fn.indexOf('\n  }'));
+    // 花括号配对取方法体：不再写死 `indexOf('\n  }')`（缩进一变就静默切错，
+    // 见 test/support/source_text.dart / A12）。
+    final body = methodBody(stripComments(src), 'Future<void> _toggleAuto');
     expect(body.contains('autoAnswerBlockFor'), isTrue,
         reason: '没有判定就等于把权限结果丢弃 —— BUG-062 会原样复发');
 
@@ -87,8 +90,8 @@ void main() {
   test('AAP-08 源码锁：对讲入口在权限被拒时必须给提示（不得静默 return）', () {
     final src =
         File('lib/features/remote/remote_screen.dart').readAsStringSync();
-    final fn = src.substring(src.indexOf('Future<void> _pttSheet'));
-    final body = fn.substring(0, fn.indexOf('\n  }'));
+    // 花括号配对取方法体（A12）。
+    final body = methodBody(stripComments(src), 'Future<void> _pttSheet');
     expect(body.contains('showSnackBar'), isTrue,
         reason: '麦克风被拒时若不提示，用户点了「对讲」会毫无反应');
     expect(body.contains('需要麦克风权限'), isTrue);

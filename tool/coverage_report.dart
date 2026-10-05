@@ -53,7 +53,7 @@ import 'dart:io';
 /// 豁免就无法继续赖在白名单里。这保证了白名单**藏不住**退化的代码。
 const Map<String, String> _deviceOnly = <String, String>{
   // ── 引擎 isolate 本体 ────────────────────────────────────────────────
-  // 未覆盖 452/454 行。**唯一**的顶层入口是
+  // 未覆盖 508/516 行。**唯一**的顶层入口是
   // `@pragma('vm:entry-point') engineEntryPoint(ServiceInstance service)`，
   // 它只在 `flutter_background_service` 拉起的**独立 isolate** 里被调用；
   // 函数体第一步就是 `DartPluginRegistrant.ensureInitialized()`，随后
@@ -91,6 +91,10 @@ const Map<String, String> _deviceOnly = <String, String>{
 /// 因此这个清单**藏不住真实的覆盖漏洞** —— 它只能装"确实没有可执行行"的文件。
 const Set<String> _noExecutableLines = <String>{
   'lib/core/constants.dart', // AppMeta/Channels/SchedulerConfig… 全是 static const
+  // 纯抽象接口：整文件只有 `abstract interface class PttStreamSink` 的
+  // 三个方法**签名**（无方法体、无字段初始化），Dart VM 不产生任何覆盖记录。
+  // 具体实现（PttPlaybackSession）在 playback_service.dart 一侧照常计入分母。
+  'lib/services/ptt_stream_sink.dart',
 };
 
 /// 解析 lcov.info → `文件路径(正斜杠) → (LF, LH)`。

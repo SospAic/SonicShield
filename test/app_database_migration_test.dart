@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
+import 'package:sonic_shield/domain/models/task.dart';
 
 /// `AppDatabase` 的**库迁移与辅助面**测试（第四十轮新建）。
 ///
@@ -212,6 +213,85 @@ void main() {
     final repo = OccurrenceRepository(db);
     final deleted = await repo.deletePendingQuietExempt();
     expect(deleted, 0, reason: '补列默认 0 ⇒ 没有任何豁免行可清，但调用本身不得抛');
+  });
+
+  test('MIG-07 v3 老库（user_version=3 但 occurrences 缺 quiet_exempt）→ v4：按列存在性补齐',
+      () async {
+    final dir = newTmpDir();
+    final path = p.join(dir.path, 'sonic_shield.db');
+    // 复刻三机实机现场：v3 刚上线时 `_onUpgrade` 只补了 tasks.quiet_exempt，
+    // occurrences 那条是 BUG-079（第五十三轮）才补的 —— 在那之前升到 v3 的库
+    // 因此永久缺列，且 user_version 已是 3，`oldV < 3` 闸再也进不去。
+    // v3→v4 修复的正是这一类："缺列但版本号已到位"的历史库。
+    final legacy = await openDatabase(
+      path,
+      version: 3,
+      onCreate: (db, v) async {
+        await db.execute(v1Tasks);
+        await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
+        await db.execute(
+            'ALTER TABLE tasks ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
+        await db.execute('''
+          CREATE TABLE occurrences (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            fire_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            volume REAL,
+            duration_ms INTEGER
+          )''');
+        await db.insert('tasks', {
+          'id': 'legacy-1',
+          'name': '老任务',
+          'enabled': 1,
+          'trigger_type': 'dailyAt',
+          'trigger_json': '{"kind":"dailyAt"}',
+          'action_type': 'playAudio',
+          'action_json': '{"kind":"playAudio"}',
+          'created_at': 1,
+          'updated_at': 1,
+        });
+        await db.insert('occurrences', {
+          'id': 'occ-pending',
+          'task_id': 'legacy-1',
+          'fire_at': 1,
+          'status': 'pending',
+        });
+      },
+    );
+    await legacy.close();
+
+    final db = await AppDatabase.open(dir.path);
+    addTearDown(db.close);
+
+    final occCols = {
+      for (final r in await db.db.rawQuery('PRAGMA table_info(occurrences)'))
+        r['name']! as String
+    };
+    expect(occCols, contains('quiet_exempt'),
+        reason: 'v3 缺列库必须被 v4 迁移补齐 —— 否则远程建任务/重算每次抛'
+            'no such column，任务物化整链失败（三机实机取证）');
+    // tasks 列已存在 ⇒ 幂等补列必须空操作（不得抛 duplicate column name）。
+    expect(await taskColumns(db), contains('quiet_exempt'));
+
+    final rows = await db.db.query('occurrences');
+    expect(rows, hasLength(1), reason: '升级不得丢已提交计划');
+    expect(rows.single['quiet_exempt'], 0, reason: '补列默认 0 = 未豁免（fail-safe）');
+
+    // 行为锁：升级后 commitAll 真实可写（修复前这里必抛 no such column）。
+    final occ = OccurrenceRepository(db);
+    await occ.commitAll([
+      PlannedOccurrence(
+          id: 'new-occ',
+          taskId: 'legacy-1',
+          fireAt: DateTime.fromMillisecondsSinceEpoch(999),
+          status: OccurrenceStatus.pending,
+          quietExempt: true),
+    ]);
+    final inserted = await db.db
+        .query('occurrences', where: 'id = ?', whereArgs: ['new-occ']);
+    expect(inserted.single['quiet_exempt'], 1,
+        reason: '补列后带豁免标记的计划必须能落库并读回');
   });
 
   test('MIG-03 通用 JSON 列辅助往返 + inject 单例注入生效', () async {

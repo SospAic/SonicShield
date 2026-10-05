@@ -56,6 +56,23 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             running: state?.running ?? false,
             guardActive: state?.guardActive ?? false,
           ),
+          // P1-04：精确闹钟降级必须在**用户可操作的位置**解释并给恢复入口。
+          // 否则界面继续显示运行中 + 计划数，用户无从知道"进程被杀后不再准点"。
+          if (state?.alarmDiag != null) ...[
+            const SizedBox(height: 12),
+            Card(
+              color: theme.colorScheme.errorContainer,
+              child: ListTile(
+                leading: const Icon(Icons.alarm_off),
+                title: const Text('精确闹钟未完全生效（降级运行）'),
+                subtitle: Text(state!.alarmDiag!),
+                trailing: TextButton(
+                  onPressed: () => NativeBridge.openExactAlarmSettings(),
+                  child: const Text('去授权'),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           const QuickScriptsCard(),
           const SizedBox(height: 12),
@@ -141,7 +158,27 @@ class _EngineCard extends ConsumerWidget {
         onChanged: (v) async {
           final mgr = BackgroundServiceManager.instance;
           if (v) {
-            await requestAllPermissions(ref);
+            // P1-02：合规同意是引擎启动的**唯一准入闸**。此前开启分支从不读
+            // `isComplianceAccepted()`，用户点"不同意"后仍能 `shouldRun=true`
+            // 并 `mgr.start()` —— 合规门不是有效准入闸。未同意则弹出须知，
+            // 拒签一律不启动。
+            final accepted = await ensureComplianceAccepted(context);
+            if (!accepted) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('需先阅读并同意《合规使用须知》才能开启守护')));
+              }
+              return;
+            }
+            final perms = await requestAllPermissions(ref);
+            // P2-16：通知被拒**不再静默** —— 后台提醒/找回通知/执行结果提示会
+            // 全部消失，必须让用户知道"哪儿坏了、怎么修"，否则只会当成功能故障。
+            if (perms.notificationDenied && context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content:
+                      Text('通知权限未授予：后台提醒、设备找回通知与执行结果提示'
+                          '将不会出现。可在「系统设置 → 应用 → 声盾 → 通知」中重新开启')));
+            }
             await NativeBridge.setServiceShouldRun(true);
             // ⚠️ `start()` 的返回值**必须看**：后台服务启动失败时
             // `_svc.startService()` 返回 false 且不抛，旧实现直接忽略它 ——

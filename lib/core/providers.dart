@@ -60,24 +60,15 @@ final taskListProvider =
   final occ = await ref.watch(occurrenceRepoProvider.future);
   final tasks = await repo.listAll();
   final now = DateTime.now();
+  // P2-12：一次 GROUP BY 拿到**所有**任务的最近 pending，替代此前「逐任务各查
+  // 一次 `pendingWithin` + 全局 limit 200」的 N+1 —— 后者任务/计划一多既慢，
+  // 又会因全局截断让部分任务永远显示不出「下次触发」。
+  final next = await occ.nextPendingByTask(now, now.add(const Duration(days: 7)));
   return [
     for (final t in tasks)
-      TaskWithMeta(
-        task: t,
-        nextFireAt: await _nextOf(occ, t.id, now),
-      ),
+      TaskWithMeta(task: t, nextFireAt: next[t.id]),
   ];
 });
-
-Future<DateTime?> _nextOf(
-    OccurrenceRepository occ, String taskId, DateTime now) async {
-  final rows = await occ.pendingWithin(now, now.add(const Duration(days: 7)),
-      limit: 200);
-  for (final r in rows) {
-    if (r.taskId == taskId) return r.fireAt;
-  }
-  return null;
-}
 
 class TaskWithMeta {
   const TaskWithMeta({required this.task, this.nextFireAt});

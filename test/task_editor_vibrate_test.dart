@@ -724,8 +724,11 @@ void main() {
       final start = src.lastIndexOf('case ActionKindChoice.$kind:');
       expect(start, greaterThan(0), reason: '找不到 $kind 分支（改名了？）');
       final rest = src.substring(start);
-      final next = rest.indexOf('\n      case ');
-      return next < 0 ? rest : rest.substring(0, next);
+      // 取到下一个 `case ActionKindChoice.` 为止 —— **不写死缩进**
+      // （原 `indexOf('\n      case ')` 依赖 6 空格缩进，缩进一变就静默切错
+      // 区间；见 test/support/source_text.dart / A12）。
+      final next = RegExp(r'\n[ \t]*case ActionKindChoice\.').firstMatch(rest);
+      return next == null ? rest : rest.substring(0, next.start);
     }
 
     const guards = <String, String>{

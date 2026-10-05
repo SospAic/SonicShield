@@ -84,12 +84,35 @@ void main() {
     });
 
     test('RT-10 内联回执（ping→pong / status.get / logs.recent）也定向', () {
-      final dispatch =
-          methodBody(src, 'Future<void> _dispatch(RcMessage msg, PairedEndpoint peer)');
-      final n = 'targetPeerId: msg.from'.allMatches(dispatch).length;
-      expect(n, greaterThanOrEqualTo(3),
-          reason: 'pong / status / logs 三条内联回执都必须定向；'
-              '少一条就意味着那类数据仍会泄露给同端点的另一台控制器');
+      // A14：原来只数 `targetPeerId: msg.from` 的出现次数（`>= 3`）—— 计数下限
+      // 可被**别处凑数**喂绿：只要 dispatch 里任何位置多一个定向调用就够了，
+      // 真正漏掉 ping / status / logs 中的一条也照样通过。改为**逐分支**点名。
+      final dispatch = methodBody(
+          stripComments(src),
+          'Future<void> _dispatch(RcMessage msg, PairedEndpoint peer)');
+
+      /// 取 `case RcCmd.<cmd>:` 到下一个 `case` 之间的分支体（不写死缩进）。
+      String branchOf(String cmd) {
+        final start = dispatch.indexOf('case RcCmd.$cmd:');
+        expect(start, greaterThan(0), reason: '找不到 $cmd 分支（改名了？）');
+        final rest = dispatch.substring(start);
+        final next = RegExp(r'\n[ \t]*case RcCmd\.').firstMatch(rest);
+        return next == null ? rest : rest.substring(0, next.start);
+      }
+
+      const inline = <String, String>{
+        'ping': 'pong',
+        'statusGet': 'status',
+        'logsRecent': 'logs',
+      };
+      inline.forEach((cmd, evt) {
+        final b = branchOf(cmd);
+        expect(b, contains('RcMessage.now(RcEvt.$evt'),
+            reason: '$cmd 分支应回 RcEvt.$evt');
+        expect(b, contains('targetPeerId: msg.from'),
+            reason: '$cmd → RcEvt.$evt 是响应式回执，必须只回发起方；'
+                '漏掉就意味着那类数据仍会泄露给同端点的另一台控制器');
+      });
     });
 
     test('RT-11 ⚠️ 广播型事件**不得**被顺手定向（心跳定向=在线探测失效）', () {

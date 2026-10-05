@@ -286,6 +286,19 @@ class _StubPlayer extends AudioPlayerPlatform {
     return SetLoopModeResponse();
   }
 
+  /// 动态播放列表追加（流式对讲 v2 用）。
+  ///
+  /// `just_audio_platform_interface` 的默认实现**抛 UnimplementedError**
+  /// （`just_audio_platform_interface.dart:185-189`）—— 不实现它，
+  /// `ConcatenatingAudioSource.add()` 在宿主上会直接炸，流式会话的第二片
+  /// 就永远追加不进去（症状是"只听到第一片"）。
+  @override
+  Future<ConcatenatingInsertAllResponse> concatenatingInsertAll(
+      ConcatenatingInsertAllRequest request) async {
+    fake._record('concatenatingInsertAll', request);
+    return ConcatenatingInsertAllResponse();
+  }
+
   @override
   Future<SetShuffleModeResponse> setShuffleMode(
       SetShuffleModeRequest request) async {

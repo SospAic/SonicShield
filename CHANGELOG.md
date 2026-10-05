@@ -5,6 +5,163 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第七十四轮（2026-10-05）· **对讲机（PTT）v2 全量真流式（控制端边录边按 ADTS 帧切片发送、端点 just_audio `ConcatenatingAudioSource` 边收边放）+ 防复发机制落地（替身边界登记锁 SBL + `webrtc_stub.addTrack` 复刻真实拒绝）；含 `lib/**` 改动，可测面 98.82%（10217/10339），`MIN_COVERED` 10025 → 10209；机器锁 73/73**
+
+**🔴 本轮承接第七十三轮复盘：把「替身吃掉了真实契约」这条系统性失效固化成机器锁，并完成 PTT 流式化**：
+
+- 🔴 **PTT v2 全量真流式**：`ptt.voice` 载荷新增 `seq`(0..N-1) / `last`(bool)；
+  控制端 `controller_service.dart` 用 `record.startStream` **边录边按 ADTS AAC 帧切分**发送
+  （`AdtsChunker` 保证每片覆盖整数个完整帧）；端点 `endpoint_service.dart` 首片 seq=0 即用
+  just_audio `ConcatenatingAudioSource` **边收边放**，末片 `last=true` 收尾。
+  无 `seq` 或未注入 `pttStreamOpener` ⇒ **回落 v1 整段**（向后兼容）。回归锁 EP-06 / PB-04 / RC-16。
+- 🔴 **防复发：替身边界登记锁（SBL）**（`test/substitute_boundary_lock_test.dart`）：
+  ① 登记制 —— `test/support/*_stub.dart` 集合必须与 `_registry` **完全相等**（新增未登记替身 ⇒ 红）；
+  ② 可追溯 —— 每个替身登记 ① 遮蔽的生产文件（须存在）② 驱动它的真实链宿主测试（须真 import）
+  ③ 对应的真机冒烟功能点（非空）。
+- 🔴 **BUG-080 复发锁**：`test/support/webrtc_stub.dart` 的 `addTrack` **复刻真实拒绝**
+  （`streamIds` 含 null/缺失/空 ⇒ `PlatformException('addTrackFailed')`，合法流 ⇒ 回 sender），
+  谁把替身改回「恒回成功」，SBL-02 立刻红。
+
+- 可测面 **98.82%（10217/10339）**；全局（对外诚实数字）**93.88%（10225/10892）**；
+  设备层豁免面 **已覆盖 8 行 / 分母 553 行**（`background_engine.dart` 516 + `main.dart` 37）。
+- 比率阈值 `COVERAGE_MIN` **保持 98.8**；绝对下限 `MIN_COVERED` 10025 → **10209**（只升不降，实测 −8 余量）。
+- **机器锁 73/73**；门禁四步 **RC=0**（analyze `No issues found!` / 功能层 **2284** / 压测 **24** / 覆盖率 ratchet 通过）。
+- 本轮含 `lib/**` 可执行行变化（PTT 流式 + 注入缝）⇒ 可测面分母 10156 → **10339（+183）**、
+  分子 10035 → **10217（+182）**；功能层 2245 → **2284**。
+- ⚠️ **BLOCKED**：iOS / macOS 宿主层、DST 时区专项、A10 决策（详见 `docs/12 §107` / `docs/17 §104`）。
+
+#### 第七十三轮（2026-10-05）· **修复「视频/语音/多路视频通话发起即崩溃」（BUG-080：`addTrack` 省略 stream ⇒ native NPE ⇒ SIGABRT）+ 对讲机（PTT）性能优化（录音参数按语音预算：16 kHz 单声道 24 kbps ⇒ 整段体积 ≈1/5，超 12s 对讲不再被「音频过大」拒发）；含 `lib/**` 改动，可测面 98.81%（10035/10156）；机器锁 73/73**
+
+**🔴 本轮修掉用户报的三条：① 视频/语音通话发起即崩溃；② 多路视频同连崩溃（同一根因）；③ 对讲机反应/播放慢**：
+
+- 🔴 **BUG-080（用户侧「一发起通话就闪退」）**：`flutter_webrtc` 的 Dart 层把 `'streamIds'`
+  **写死**为 `[stream?.id]`（`rtc_peerconnection_impl.dart` 的 `addTrack`）；调用方**省略 stream** 时
+  发的是 `[null]` ⇒ Java 侧收到 `String[null]` ⇒ native `nativeAddTrack` 走
+  `JniHelper.getStringBytes(null)` **抛 NPE** ⇒ WebRTC `CheckException` → `RTC_CHECK(false)` ⇒ **SIGABRT**。
+  **修** = `lib/remote/call_service.dart`（`_createPc()`）与 `lib/remote/multi_call_service.dart`（`connect()`）
+  的 `pc.addTrack(t, local)` **显式带上本地流**并 `await`。回归锁 **CS-07b / MC-07b**。
+  **真机验证**（MI MAX 2 / `5540bc21` / API24）：视频 / 语音 / 多路视频发起后 **PID 不变**、logcat 无 `FATAL`/`SIGABRT`/`NPE`。
+- 🔴 **PTT 性能优化（用户侧「反应和播放速度太慢」）**：v1 只写 `RecordConfig(encoder: aacLc)`，
+  其余吃 `record` 插件**默认值**（128 kbps / 44.1 kHz / **立体声**）⇒ 60 s ≈ **960 KB**，远超
+  `pttMaxBytes=200000` ⇒ **超过约 12 s 的对讲全部被「音频过大」拒发**，且近 1 MB 密文往返 + 落盘 = 慢。
+  改用**宽带单声道**（16 kHz / 24 kbps / AGC / 降噪，行业惯例的语音档）⇒ 60 s ≈ **180 KB**（< 上限），
+  整段体积 ≈ **1/5**；`_playPtt` 落盘去 `flush: true`（仅本进程读一次，无需等 eMMC 真正写完）。
+  回归锁 **RC-16**（锁录音参数 + 硬预算 `60s × 24kbps < 200 KB`）。
+- 🔴 **顺带修复 `scripts/gates.ps1` 丢失 UTF-8 BOM**（`SCR-02` 锁抓到）：无 BOM 时 PS 5.1 按 GBK 解析
+  中文注释 ⇒ **脚本整体崩语法**（本轮首次跑脚本即复现）。已重写为带 BOM。
+
+- 可测面 **98.81%（10035/10156）**；全局（对外诚实数字）**93.79%（10043/10708）**；
+  设备层豁免面 **已覆盖 8 行 / 分母 552 行**（`background_engine.dart` 516 + `main.dart` 36）。
+- 比率阈值 `COVERAGE_MIN` **保持 98.8**；绝对下限 `MIN_COVERED` **保持 10025**（只升不降；本轮未追数字抬比率）。
+- **机器锁 73/73**；门禁四步 **RC=0**（analyze `No issues found!` / 功能层 **2245** / 压测 **24** / 覆盖率 ratchet 通过）。
+- 本轮含 `lib/**` 可执行行变化（崩溃修复 + 录音参数常量）⇒ 可测面分母 10153 → **10156（+3）**、
+  分子 10033 → **10035（+2）**；功能层 2242 → **2245**。
+- ⚠️ **BLOCKED**：iOS / macOS 宿主层、DST 时区专项、A10 决策（详见 `docs/12 §106` / `docs/17 §103`）。
+
+#### 第七十二轮（2026-10-04 夜）· **全功能点用例库（追溯矩阵 56/56 = 100%）+ release 守护锁（R8/proguard 接入、WebRTC 保留、相机探针）；可测面 98.82%（10033/10153），`MIN_COVERED` 9865 → 抬至 10025；机器锁 73/73**
+
+**🔴 本轮把「测试覆盖率 100%」从口号变成机器可判的追溯矩阵，并补上 release 构建与远程视频路径的守护锁**：
+① 全功能点用例库（`test/support/feature_point_inventory.dart`，56 功能点）+ 机器锁（`test/feature_point_coverage_lock_test.dart`）；
+② release R8 守护锁（`test/release_r8_lock_test.dart`：`android/app/proguard-rules.pro` 双星号保 ML Kit + `build.gradle.kts` 显式接入 `proguardFiles`）；
+③ WebRTC 保留锁（`test/release_webrtc_keep_lock_test.dart`）；④ 真机相机探针（`integration_test/camera_probe_test.dart`）。
+
+- 可测面 **98.82%（10033/10153）**；全局（对外诚实数字）**93.80%（10041/10705）**；
+  设备层豁免面 **已覆盖 8 行 / 分母 552 行**（`background_engine.dart` 516 + `main.dart` 36）。
+- 比率阈值 `COVERAGE_MIN` **保持 98.8**；绝对下限 `MIN_COVERED` **9865 → 抬至 10025**（只升不降）。
+- **机器锁 73/73**；门禁四步 **RC=0**（analyze `No issues found!` / 功能层 2242 / 压测 24 / 覆盖率 ratchet 通过）。
+- 🔴 **纯测试侧改动** ⇒ 可测面分母 10153 一字未动、分子 10032 → **10033（+1）**；功能层 2099 → **2242**。
+- ⚠️ **BLOCKED**：iOS / macOS 宿主层、DST 时区专项、A10 决策（详见 `docs/12 §105` / `docs/17 §102`）。
+
+#### 第七十一轮（2026-10-04）· **`docs/50` 全量代码审查整改（P2-10/11/12/16/19/24/33 等）+ 覆盖率哨兵补齐；可测面 98.81%（10032/10153），`MIN_COVERED` 9544 → 抬至 9865；机器锁 73/73**
+
+**🔴 本轮对 `docs/50` 全量代码审查发现的 P2 项做整改（含 `lib/**` 改动）**：P2-10 保留维护 /
+P2-11 取证文件管理 / P2-12 列表批量查询 / P2-16 通知与全屏降级 / P2-19 / P2-24 列表 Future 缓存 / P2-33 等；
+并**补全覆盖率哨兵**（新增 `lib/**` 文件全部纳入分母，分母 9628 → 10153、分子 9552 → 10032）。
+
+- 可测面 **98.81%（10032/10153）**；全局（对外诚实数字）**93.79%（10040/10705）**；
+  设备层豁免面 **已覆盖 8 行 / 分母 552 行**（`background_engine.dart` 516 + `main.dart` 36）。
+- 比率阈值 `COVERAGE_MIN` **保持 98.8**；绝对下限 `MIN_COVERED` **9544 → 抬至 9865**（只升不降）。
+- **机器锁 73/73**；门禁四步 **RC=0**（analyze `No issues found!` / 功能层 2099 / 压测 24 / 覆盖率 ratchet 通过）。
+- ⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 专项、Android 真机、DST 时区专项、A10 决策
+  （真机不在线 ⇒ 模拟器 `sonic_test` 代跑）。
+
+#### 第七十轮（2026-10-03 下午）· **F-3 开机自启修复 + DB v3→v4 幂等补列 + 轮换配对码 UI（docs/25 P1-10）+ A12–A15 测试质量加固；可测面 99.21%（9552/9628，+31 行），MIN_COVERED 抬至 9544**
+
+**🔴 本轮把挂起多轮的 `F-3`（开机自启失效）闭环 —— 并修正上一轮对根因的判断**：
+此前把失效归因为「`BootReceiver` 直接 `startForegroundService` 被 Android 12+/15+ 拒」，本轮实测发现
+**真正的第一根因在插件的默认值**：`flutter_background_service` 的 `AndroidConfiguration.autoStartOnBoot`
+**默认 true**（`platform_interface 5.1.2 configs.dart:73`）⇒ 插件自带 `BootReceiver` 在 `BOOT_COMPLETED`
+直接 `startForegroundService(mediaPlayback)` ⇒ targetSdk=36 上抛
+`ForegroundServiceStartNotAllowedException: FGS type mediaPlayback not allowed to start from BOOT_COMPLETED!`
+⇒ 进程崩溃 + 反复重启。修复分两处：
+
+- **① Dart 侧** `lib/services/background_service_manager.dart`：`AndroidConfiguration` 显式
+  `autoStartOnBoot: false`（关掉插件自带的开机自启）。
+- **② 原生侧** `android/.../BootReceiver.kt`：**不再直接拉起前台服务**，改排一个
+  `KICK_DELAY_MS = 30_000L` 后的**一次性精确闹钟**（`setExactAndAllowWhileIdle`；Android 12+ 未授予
+  `SCHEDULE_EXACT_ALARM` 时降级 `setAndAllowWhileIdle`），由既有 `AlarmWatchdogReceiver` 拉起引擎；
+  排程被拒时经 `SelfHealNotice.failed` **显式留痕**（F-3 / N-3，不静默失败）。
+
+- 🔴 **关键取证（`KICK_DELAY_MS` 为何必须 > 20s）**：API 36 模拟器（adbd 已把应用移出电池白名单、
+  插件自带开机自启已关，即最严苛条件）实测 —— ① `BOOT_COMPLETED` 送达时系统给应用开 **20 秒**临时白名单
+  （logcat `tempAllowListReason:<...BOOT_COMPLETED,duration:20000>`）；② 踢醒闹钟在该窗口**内**触发 ⇒ FGS 启动
+  被**归因回** `code:BOOT_COMPLETED` ⇒ 仍撞 mediaPlayback 禁令 ⇒ **10s 延迟在 5554/5556 必崩**；
+  ③ 闹钟在窗口**之后**触发 ⇒ 归因 `code:ALARM_MANAGER_WHILE_IDLE`（归到 `AlarmWatchdogReceiver` 这条 Intent）
+  ⇒ 绕开禁令 ⇒ **30s 延迟成功**。故取 30s（20s 窗口 + 10s 余量）。
+- ✅ **三机闭环**（emulator-5554/5556/5558）：logcat 均见
+  `Background started FGS: Allowed [... code:ALARM_MANAGER_WHILE_IDLE ...]` +
+  `V/BackgroundService: Starting flutter engine for background service`；`dumpsys activity services` 均
+  `isForeground=true foregroundId=336365 types=0x00000002`（仅 mediaPlayback），**无崩溃、无重启**。
+- ⚠️ **测试流程陷阱（已沉淀）**：`am force-stop` 使应用进入 `stopped=true` ⇒ 系统**不投递 BOOT_COMPLETED**；
+  流程必须先 `monkey -p ... -c android.intent.category.LAUNCHER 1` 启动一次清 `stopped`，再移白名单、再重启。
+
+**🔴 DB v3→v4 幂等补列（修复历史库缺 `occurrences.quiet_exempt`，BUG-079 残留）**：
+
+- **现场**：v3 刚上线时 `_onUpgrade` 只补了 `tasks.quiet_exempt`，`occurrences.quiet_exempt`
+  是第五十三轮（BUG-079）才补的 —— 在修复前升到 v3 的库 `user_version` 已是 3，`oldV < 3`
+  闸再也进不去 ⇒ 列永久缺失 ⇒ `commitAll`（`INSERT INTO occurrences` 带 `quiet_exempt`）每次抛
+  `no such column`，任务物化整链失败（三机实机取证）。
+- **修复**：`app_database.dart` `dbVersion` **3 → 4**，v4 迁移改为**按列存在性幂等补齐**
+  （`_addIntColumnIfMissing`：`PRAGMA table_info` 判存在，`ALTER` 不支持 `IF NOT EXISTS`），
+  对 v1/v2/v3 及全新库都安全。回归锁 `app_database_migration_test.dart` **MIG-07**。
+- **文档**：`docs/07`（数据模型）新增 `dbVersion 3 → 4` 段。
+
+**✅ 轮换配对码 UI（`docs/25 P1-10` 闭环）**：
+
+- 「我的二维码」卡新增「重置配对码」按钮 + **二次确认弹窗**（写明「旧码/旧二维码立即作废 +
+  已配对设备需重扫」）；落盘 `RemoteStore.rotatePairingCode()` 后**就地刷新**接收侧
+  `RcEndpointService.rotateOwnPairingCode()` —— 否则「新码已展示、本机仍用旧码解 ⇒ 扫完即失联」。
+- **回归锁** `pair_qr_screen_test.dart` **PQR-39/40**；文档 `docs/25` P1-10 行标 **✅ 已闭环**。
+
+**🔧 A12–A15 测试质量加固（承接 `_pt/audit/F1-testquality.md` §5-2 / `W5-testquality.md` L113-119）**：
+
+- **A12**：6 处**硬编码缩进切片**（`call_permission_test` AAP-07/08、`soundscape_track_test` SCT-05、
+  `q2_broker_test` QB-08、`rc_protocol_coverage_test` classBody、`task_editor_vibrate_test` branchOf）
+  改用 `test/support/source_text.dart` 公共 helper（`methodBody` / `balancedSlice`）⇒ 不再依赖缩进字面量。
+- **A13**：`assist_session_test.dart` 的 AS-20b 由单文件改为**全仓扫描**（`lib` + `tool`）+ `stripComments`
+  + 哨兵（`scanned > 50`）防「扫了个空目录也判绿」。
+- **A14**：`endpoint_reply_targeting_test.dart` RT-10 由 `greaterThanOrEqualTo(3)` **计数下限**
+  改为**逐分支断言**（`ping→pong` / `status.get→status` / `logs.recent→logs` 各自断言含
+  `RcMessage.now(RcEvt.$evt` 且含 `targetPeerId: msg.from`）⇒ 堵住「别处凑数喂绿」。
+- **A15**：PR 流程立规 —— `docs/17 §100.2` 新增规则「**新增源码锁必须同时提交反面样本用例**」，
+  并新增 `.github/PULL_REQUEST_TEMPLATE.md`（勾选项：断言是否有反面样本 / 是否剥注释 / 是否抬 ratchet）。
+
+- ⚠️ **门禁 ratchet**：可测面 **99.21%（9552/9628）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=9544`
+  —— **本轮含 `lib/**` 改动**（F-3 Dart 侧 + DB v4 幂等补列 + 轮换配对码链）⇒ 可测面分母
+  9597 → **9628（+31）**、分子 9521 → **9552（+31）**，**真实进度 +31 行**；按「只升不降」只抬
+  绝对下限 `MIN_COVERED` **9512 → 9544**（实测 −8 行抖动余量），比率 `COVERAGE_MIN=98.8` 保持
+  （99.21 − 99.2 = 0.01pt < 0.05pt ⇒ 不追数字抬比率）。
+  **算式自洽**：`10118 − 9554 = 564 = 76 + 488` ✅；残差仍 **76 行**（分母/分子同增 31 ⇒ 未覆盖行数不变）。
+- **机器锁 68/68**（`_pt/bt4_locks.txt`，本轮未增删锁）；`flutter analyze` 零问题；
+  功能层 **2099**、压测 **24**。
+- 🔧 **机器锁自纠（本轮附带，不计入增删锁）**：`BAS-90d` 反面样本原**写死全局分母 `10087`**，
+  文档刷到 `10118` 后 `mutateLastSection` 找不到模式 ⇒ **假红**（样本失效而非真漂移）；
+  改为**随活根节派生**（`rootOf(d12).global.fraction` 及其分母 +1，与 `BAS-90a/b/c` 同款修法），
+  机器锁复跑 **68/68** 全绿（用例数不变）。
+- **产物**：`_pt/bt3gate.txt`（门禁 RC=0）/ `_pt/bt4_locks.txt`（机器锁）/ `_pt/bt5_*`（三机 F-3 + 探针）。
+- ❌ 真机 arm64 仍不在线 ⇒ 真机专项**未执行**（如实登记，不用模拟器冒充）。
+- 📌 **待拍板项仅剩 A10**（`rotatedPairingCode` UI 入口本轮已闭环，见上）；**A12–A15 / F-3 本轮已消费**。
+
 #### 第六十九轮（2026-10-03 上午）· **稳态复验轮：覆盖率冲刺（第十二轮）—— 撬开四处「复核不可达」落点 ⇒ 可测面 99.10% → 99.21%（+10 行），绝对下限抬至 9512；设备层第十五轮**
 
 **🔴 本轮把上一轮（第六十八轮）复核判「宿主不可达」的四处落点逐块重验 —— 其中四处被证伪、成功撬开**：
@@ -1496,16 +1653,16 @@
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **机器锁（自述计数）68/68**（`DGC` 55 + `GEC` 5 + version 4 + SCR 4；第六十轮新增
+- **机器锁（自述计数）73/73**（`DGC` 55 + `GEC` 10 + version 4 + SCR 4；第六十轮新增
   `CCL`「★ 当前口径块标题自述轮次」锁 **5 例** ⇒ 补上 `DGC`/`BAS`/`BRL`/`MCL` **四者都抓不到**的第四类漂移
   「权威块标题过期」；第六十四轮新增 🔴 `RCL`「★ 当前口径**活块续作指针**」锁 **5 例** ⇒ 补上「权威块**尾部**
   接力棒指针过期」（`DGC`/`BAS`/`BRL`/`MCL`/`CCL` 与全库审计的结构性盲区）；第六十七轮新增 🔴 `SSL`「HANDOVER 顶部
   『当前状态（第N轮）』快照轮次」锁 **6 例** ⇒ 补上**第六类**漂移「TL;DR 状态快照过期」（六把锁 + 全库审计用语表
   全都不认「当前状态」）；前序第五十九轮已新增 `MCL` 一致锁 **5 例** 盯「自述计数过期」——
   这些锁都由「4 把锁文件内 `test(` 的静态统计」校验，见 `docs/12 §92 / §93 / §97 / §98 / §99 / §100`）。
-- **覆盖率 99.21%（9521/9597）**（门禁口径＝**可测面**）／**全局（对外诚实数字）94.41%（9523/10087）**（2026-10-03 **第六十九轮**干净门禁复验 `_pt/bs3gate.txt`（analyze `No issues found!` ⇒ RC=0），较第六十八轮 **+10 行**（新建 `test/bs_gap_closure_test.dart` 5 例撬开四处第六十八轮复核判「宿主不可达」的落点：端点开关 + 改 broker / 写库失败提示 / 发送失败回到宿主 / 协助注入链，驱动既有未覆盖分支），比率阈值 `COVERAGE_MIN` **保持 98.8**、绝对下限 `MIN_COVERED` **9503 → 抬至 9512**（只升不降）；设备层**第十五轮复验全绿**（`_pt/bs5_*`：集成 7 文件 22 例 + AOT 6 例 + 探针 9/9（CRUD 8/8），`SCRIPT_EXIT rc=0`；真机不在线 ⇒ 模拟器 `sonic_test`））
-  —— 已越过 97% 目标（⚠️ 本行 2026-10-03 **第六十九轮**实测更新；
-  此前「99.10%（9511/9597）」是第六十八轮值、「99.08%（9509/9597）」是第六十七轮值、「98.92%（9493/9597）」是第六十六轮值、「98.81%（9483/9597）」是第六十五轮值、「98.67%（9469/9597）」是第六十四轮值、「98.52%（9455/9597）」是第六十三轮值、「98.36%（9440/9597）」是第六十二轮值、「98.11%（9416/9597）」是第六十一轮值、「97.88%（9394/9597）」是第六十轮值、「97.71%（9377/9597）」是第五十九轮值、
+- **覆盖率 98.82%（10217/10339）**（门禁口径＝**可测面**）／**全局（对外诚实数字）93.88%（10225/10892）**（2026-10-05 **第七十四轮**（对讲机 PTT v2 全量真流式 + 防复发机制 SBL 落地）干净门禁复验（analyze `No issues found!` ⇒ RC=0），本轮**含 `lib/**` 改动** ⇒ 可测面分母 10156 → **10339（+183）**、分子 10035 → **10217（+182）**，比率阈值 `COVERAGE_MIN` **保持 98.8**、绝对下限 `MIN_COVERED` 10025 → **10209**（只升不降）；设备层见 `docs/12 §107` / `docs/17 §104`）
+  —— 已越过 97% 目标（⚠️ 本行 2026-10-05 **第七十四轮**实测更新；
+  此前「98.81%（10035/10156）」是第七十三轮值、「98.82%（10033/10153）」是第七十二轮值、「99.21%（9521/9597）」是第六十九轮值、「99.10%（9511/9597）」是第六十八轮值、「99.08%（9509/9597）」是第六十七轮值、「98.92%（9493/9597）」是第六十六轮值、「98.81%（9483/9597）」是第六十五轮值、「98.67%（9469/9597）」是第六十四轮值、「98.52%（9455/9597）」是第六十三轮值、「98.36%（9440/9597）」是第六十二轮值、「98.11%（9416/9597）」是第六十一轮值、「97.88%（9394/9597）」是第六十轮值、「97.71%（9377/9597）」是第五十九轮值、
   「86.83%（8315/9576）」是第四十轮值、
   「85.69%（8206/9576）」是第三十九轮值、
   「84.49%（8091/9576）」是第三十八轮值、
@@ -1724,7 +1881,7 @@
   **豁免不产生任何新的已覆盖行** —— 可测面百分数被抬高只是口径变化，**不是**补了测试。
   缺口主要为**依赖真实平台能力**（引擎 isolate、WebRTC、MQTT-TLS、音频录制/播放、通知、电量、平台通道）
   与**未触达的 UI 部件**。详见 `docs/21` 第七节的分桶与达标准路线图，本轮明细见 `docs/12 §71`。
-  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=98.8` **且** 绝对覆盖行 `MIN_COVERED=9512`
+  ⚠️ 门禁口径已加固为**双指标**：比率 `COVERAGE_MIN=98.8` **且** 绝对覆盖行 `MIN_COVERED=10209`
   —— 只卡比率会被「分母因安全必需代码变大」稀释掉真实回归
   （74.5 → 73.2 的下调留痕见 `docs/12 §59.7`；73.2 → 74.0 见 `docs/12 §62`；
   74.0 → 74.1 见 `docs/12 §63.9`；74.1 → 78.4 见 `docs/12 §66.5`；78.4 → 79.8 见 `docs/12 §69`；
@@ -1733,7 +1890,7 @@
   87.9 → 88.9 见 `docs/12 §76`；88.9 → 90.4 见 `docs/12 §77`；90.4 → 92.6 见 `docs/12 §78`；
   92.6 → 93.3 见 `docs/12 §79`；**93.3 → 94.8 见 `docs/12 §80`**；
   **94.8 → 95.9 见 `docs/12 §81`**；**95.9 → 96.8 见 `docs/12 §82`**；
-  **96.8 → 97.1 见 `docs/12 §91`**；**97.1 → 97.7 见 `docs/12 §92`**；**97.7 → 97.8 见 `docs/12 §93`**；**97.8 → 98.0 见 `docs/12 §94`**；**98.0 → 98.3 见 `docs/12 §95`**；**98.3 → 98.4 见 `docs/12 §96`**；**98.4 → 98.6 见 `docs/12 §97`**；**98.6 → 98.7 见 `docs/12 §98`**；**98.7 → 98.8 见 `docs/12 §99`**；**98.8 保持（第六十七轮只抬绝对下限 9487 → 9503）见 `docs/12 §100`**；**98.8 / 9503 保持（第六十八轮 +2 行）见 `docs/12 §101`**）。
+  **96.8 → 97.1 见 `docs/12 §91`**；**97.1 → 97.7 见 `docs/12 §92`**；**97.7 → 97.8 见 `docs/12 §93`**；**97.8 → 98.0 见 `docs/12 §94`**；**98.0 → 98.3 见 `docs/12 §95`**；**98.3 → 98.4 见 `docs/12 §96`**；**98.4 → 98.6 见 `docs/12 §97`**；**98.6 → 98.7 见 `docs/12 §98`**；**98.7 → 98.8 见 `docs/12 §99`**；**98.8 保持（第六十七轮只抬绝对下限 9487 → 9503）见 `docs/12 §100`**；**98.8 / 9503 保持（第六十八轮 +2 行）见 `docs/12 §101`**；**98.8 保持（第六十九轮 +10 行，只抬绝对下限 9503 → 9512）见 `docs/12 §102`**；**98.8 保持 / 9512 → 9544（第七十轮含 `lib/**` +31 行）见 `docs/12 §103`**；**98.8 保持 / 9544 → 9865（第七十一轮 `docs/50` 全量审查整改 + 覆盖率哨兵补全，分母纳入新增 `lib/**`）见 `docs/12 §104`**；**98.8 保持 / 9865 → 10025（第七十二轮全功能点用例库 + release 守护锁）见 `docs/12 §105`**；**98.8 保持 / 10025 保持（第七十三轮 BUG-080 修复 + PTT 性能优化）见 `docs/12 §106`**；**98.8 保持 / 10025 → 10209（第七十四轮 PTT v2 流式 + SBL 防复发机制）见 `docs/12 §107`**）。
 
 ### Added（新增）—— 振动能力：随机振动 × 持续振动（docs/20，2026-09-22 轮次）
 

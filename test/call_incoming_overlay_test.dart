@@ -338,4 +338,36 @@ void main() {
         reason: '收场由服务层相位驱动；此处仅证「点了不崩」（真实拒接信令属设备层）');
     await _unmount(tester);
   });
+
+  // =====================================================================
+  // 7 · 无障碍语义（P2-31）：接听/拒接/挂断必须有读屏可播报的名称
+  // =====================================================================
+
+  testWidgets('CIO-11 来电振铃 → 「接听」「拒绝」按钮有语义名称；通话中为「挂断」',
+      (tester) async {
+    // ⚠️ 用 `bySemanticsLabel`（而非 `byTooltip`）：本宿主在 `MaterialApp.builder`
+    // 上、位于 Navigator 的 `Overlay` 之上，`tooltip` 会因找不到 Overlay 祖先而抛异常
+    // （实测：RawTooltip widgets require an Overlay widget ancestor）——
+    // 所以这里必须走无 Overlay 依赖的 `Semantics`/`Icon.semanticLabel`。
+    // 语义树默认不建，需显式开启；必须在用例体内 dispose
+    // （`addTearDown` 晚于 flutter_test 的句柄校验，会被判"A SemanticsHandle was active"）。
+    final semantics = tester.ensureSemantics();
+
+    // 振铃（被叫）：两个入口，语义分别为"接听"与"拒绝"。
+    await _pumpHost(tester, CallPhase.ringing);
+    expect(find.bySemanticsLabel('接听'), findsOneWidget,
+        reason: '接听按钮原来只有图标，读屏无法与拒接区分（P2-31）');
+    expect(find.bySemanticsLabel('拒绝'), findsOneWidget,
+        reason: '振铃阶段同一红按钮语义是"拒绝"');
+    await _unmount(tester);
+
+    // 协商中（非振铃）：同一红按钮语义应为"挂断"。
+    await _pumpHost(tester, CallPhase.connecting);
+    expect(find.bySemanticsLabel('挂断'), findsOneWidget,
+        reason: '非振铃阶段必须播报"挂断"而非"拒绝"');
+    expect(find.bySemanticsLabel('拒绝'), findsNothing);
+    await _unmount(tester);
+
+    semantics.dispose();
+  });
 }

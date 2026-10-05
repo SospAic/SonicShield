@@ -1037,4 +1037,147 @@ void main() {
     await tapSave(tester);
     expect(sent, isNull, reason: '只有 1 个候选仍不满足"随机"语义');
   }, timeout: perTest);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // TEI-A2 · 阶段 A-2 修复回归（P2-04 / P2-05 / P2-06 / P1-06）
+  // 每条在修复前的实现下都会**判红**，因此不是恒真锁。
+  // ══════════════════════════════════════════════════════════════════════
+
+  testWidgets('TEI-A2-1 固定一次：远期日期回填后保存不丢日期（P2-04）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.fixedOnce,
+        trigger: FixedOnceTrigger(at: DateTime(2027, 3, 4, 6, 5)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tapSave(tester);
+    expect(sent, isNotNull);
+    final tr = sent!.trigger;
+    expect(tr, isA<FixedOnceTrigger>());
+    // 修前：保存用"今天/近未来"的日期 + 时刻拼装 → 日期被顶替。
+    expect((tr as FixedOnceTrigger).at, DateTime(2027, 3, 4, 6, 5),
+        reason: '固定一次的日期必须原样保留');
+  }, timeout: perTest);
+
+  testWidgets('TEI-A2-2 随机窗口：跨午夜标志往返保留（P2-05）', (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.randomWindow,
+        trigger: RandomWindowTrigger(
+          dateRange: DateRange(
+              start: DateTime(2027, 1, 1), end: DateTime(2027, 1, 31)),
+          windowStart: const TimeSpec(hour: 20, minute: 0),
+          windowEnd: const TimeSpec(hour: 2, minute: 0),
+          timesPerDay: 2,
+          windowEndNextDay: true,
+        ),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tapSave(tester);
+    final tr = sent!.trigger as RandomWindowTrigger;
+    // 修前：保存恒用默认 false → 20:00–02:00 退化成零长度窗口。
+    expect(tr.windowEndNextDay, isTrue);
+    expect(tr.windowStart.hour, 20);
+    expect(tr.windowEnd.hour, 2);
+  }, timeout: perTest);
+
+  testWidgets('TEI-A2-3 随机指令集：删除首项后剩余候选权重不错位（P2-06）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(tester, remoteSave: (t) async {
+      sent = t;
+      return true;
+    });
+    await tester.tap(chip('随机指令集'));
+    await tester.pump();
+    for (final k in ['＋播放音频', '＋语音播报', '＋通知']) {
+      await tester.tap(find.widgetWithText(ActionChip, k));
+      await tester.pump();
+    }
+    // 把"播放音频"的权重拖到一个**与其它项不同**的值（否则错位不可观测）。
+    final playCard =
+        find.ancestor(of: find.text('播放音频'), matching: find.byType(Card));
+    await dragIt(
+        tester, find.descendant(of: playCard, matching: find.byType(Slider)), 300);
+    final shown = tester
+        .widget<Text>(find.descendant(
+            of: playCard, matching: find.textContaining('权重 ')))
+        .data!;
+    final playWeight = int.parse(RegExp(r'\d+').firstMatch(shown)!.group(0)!);
+    expect(playWeight, greaterThan(3), reason: '前置：拖动后权重必须真的变了');
+
+    // 删除**首项**：平行数组方案会让"语音播报"继承播放项的权重。
+    await tester.tap(find.descendant(
+        of: playCard, matching: find.byIcon(Icons.delete_outline)));
+    await tester.pump();
+
+    await tapSave(tester);
+    final set = sent!.action as ActionSetAction;
+    expect(set.candidates.length, 2);
+    expect(set.candidates[0].action, isA<TtsAction>());
+    expect(set.candidates[1].action, isA<NotifyAction>());
+    expect(set.candidates[0].weight, 3,
+        reason: '语音播报必须保留自己的 3，不能顶到被删播放项的 $playWeight');
+    expect(set.candidates[1].weight, 3);
+  }, timeout: perTest);
+
+  testWidgets('TEI-A2-4 播放：空音源显式告警，选择后可往返（P1-06）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(tester, remoteSave: (t) async {
+      sent = t;
+      return true;
+    });
+    await dbRead(tester, () => AssetRepository(db).upsertMany([
+          AudioAsset(
+              id: 'a1',
+              name: '铃声甲',
+              path: '/p/a1.mp3',
+              createdAt: DateTime(2026, 1, 1)),
+          AudioAsset(
+              id: 'a2',
+              name: '铃声乙',
+              path: '/p/a2.mp3',
+              createdAt: DateTime(2026, 1, 2)),
+        ]));
+
+    // 空音源必须有明确、可读的告警（不静默存下一个必然失败的任务）。
+    expect(find.text('音源：未选择'), findsOneWidget);
+    expect(find.textContaining('无可用音源'), findsWidgets);
+
+    await tester.tap(find.text('音源：未选择'));
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pumpAndSettle();
+    expect(find.text('选择音源'), findsOneWidget);
+    await tester.tap(find.text('全库随机（全选 2 条）'));
+    await tester.pump();
+    await tester.tap(find.text('确定（2）'));
+    await tester.pumpAndSettle();
+    expect(find.text('音源：已选 2 条'), findsOneWidget);
+
+    await tapSave(tester);
+    expect(sent, isNotNull);
+    expect(sent!.assetIds.toSet(), {'a1', 'a2'});
+  }, timeout: perTest);
 }

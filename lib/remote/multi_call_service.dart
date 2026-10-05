@@ -242,7 +242,18 @@ class MultiCallService {
       });
       // 复用同一条本地流：为 N 路各开一次摄像头既耗资源，
       // 也会在部分机型上直接失败（相机被占用）。
-      _localStream?.getTracks().forEach(pc.addTrack);
+      //
+      // ⚠️ BUG-077（与 call_service 同源）：addTrack 必须带上本地流。
+      // flutter_webrtc 的 Dart 层发的是 `'streamIds': [stream?.id]`，
+      // 省略 stream ⇒ 送出 `[null]` ⇒ native `nativeAddTrack` 拿 null 调
+      // `JniHelper.getStringBytes` 抛 NPE ⇒ WebRTC `CheckException`
+      // `RTC_CHECK(false)` ⇒ SIGABRT（多路视频同连一发即崩即此因）。
+      final local = _localStream;
+      if (local != null) {
+        for (final t in local.getTracks()) {
+          await pc.addTrack(t, local);
+        }
+      }
       pc.onTrack = (event) {
         if (event.streams.isNotEmpty) {
           s.remoteStream = event.streams.first;

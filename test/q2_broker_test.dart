@@ -168,13 +168,15 @@ void main() {
       // 只看 getter 本体附近，不靠全文 contains（字段 getter 自己也含该名，
       // 那样这条锁会恒真）。取 `String get broker` 到下一个 `}` 之间的片段。
       final code = stripComments(storeSrc);
-      final i = code.indexOf('String get broker {');
+      const sig = 'String get broker {';
+      final i = code.indexOf(sig);
       expect(i, greaterThan(0),
           reason: 'broker getter 应保持块体形式（含回落判断）');
-      final end = code.indexOf('\n  }', i);
-      expect(end, greaterThan(i));
-      final body = code.substring(i, end);
-      expect(body.contains('brokerHost'), isTrue,
+      // 花括号配对取 getter 体：不再写死 `indexOf('\n  }', i)`（缩进一变就
+      // 静默切错区间，见 test/support/source_text.dart / A12）。
+      final body = balancedSlice(code, i + sig.length - 1);
+      expect(body, isNotNull, reason: 'broker getter 的块体未正常闭合');
+      expect(body!.contains('brokerHost'), isTrue,
           reason: '「未配置自定义 host 时返回原公共地址」的回落必须真的引用 '
               'brokerHost，否则自定义 host 永远不生效（假实现）');
     });

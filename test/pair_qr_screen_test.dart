@@ -775,6 +775,65 @@ void main() {
           reason: '失败不得画成成功');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // docs/25 P1-10：轮换配对码 UI 入口（v1.9）。
+  //
+  // 密钥语义已核对：入站命令由**控制端**用「本机配对码 + 本机 ID」派生密钥
+  // （见 endpoint_service 入站解密），故本机码一变，**所有已配对控制器的旧密钥
+  // 立即失效** —— 这正是"重置"的意义，也决定了它必须二次确认并写明后果。
+  // 本组锁三件事：① 入口在卡上；② 二次确认弹窗把后果说清、取消不改；③ 确认后
+  // 码真的轮换（≠旧码、仍 8 位、界面同步、落盘持久化）。
+  // ---------------------------------------------------------------------------
+  group('PQR 重置配对码（docs/25 P1-10）', () {
+    testWidgets('PQR-39 点「重置配对码」→ 二次确认弹窗写明后果；取消则码不变',
+        (tester) async {
+      final store = await _pump(tester);
+      final before = store.pairingCode;
+      expect(before.length, 8, reason: '前置：本机码必须已就绪');
+
+      expect(find.text('重置配对码'), findsOneWidget,
+          reason: '入口必须在「我的二维码」卡上（此前轮换只有纯函数、无 UI）');
+      await tester.tap(find.text('重置配对码'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('重置配对码？'), findsOneWidget, reason: '必须先二次确认');
+      expect(find.textContaining('旧配对码与旧二维码立即作废'), findsOneWidget,
+          reason: '破坏性动作的后果必须写进弹窗，不能只问一句"确定吗"');
+      expect(find.textContaining('已配对的设备将无法再遥控本机'), findsOneWidget,
+          reason: '密钥按接收方身份派生 ⇒ 已配对控制器会失联，必须明示');
+
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('重置配对码？'), findsNothing, reason: '取消必须关掉弹窗');
+      expect(store.pairingCode, before, reason: '取消必须什么都不改');
+    });
+
+    testWidgets('PQR-40 确认重置 → 码真的轮换（落盘 + 界面同步 + 结果卡片）',
+        (tester) async {
+      final store = await _pump(tester);
+      final before = store.pairingCode;
+
+      await tester.tap(find.text('重置配对码'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('重置'));
+      await tester.pumpAndSettle();
+
+      final after = store.pairingCode;
+      expect(after.length, 8, reason: '新码仍是 8 位（与落盘口径一致）');
+      expect(after, isNot(before), reason: '轮换必须产生不同的码');
+      expect(find.text(after), findsOneWidget,
+          reason: '界面必须同步显示新码 —— 否则用户扫到的还是旧码（扫完即失联）');
+      expect(find.text(before), findsNothing, reason: '旧码必须从界面消失');
+      expect(find.textContaining('配对码已重置'), findsOneWidget,
+          reason: '必须有可见回执，不能静默更换');
+
+      // 持久化：换一个 store 实例读同一份 prefs ⇒ 仍是新码（重启不回落旧码）。
+      final reopened = RemoteStore(await SharedPreferences.getInstance());
+      expect(reopened.pairingCode, after, reason: '轮换必须落盘持久化');
+    });
+  });
 }
 
 /// 只拦 `rc_paired` 的**选择性抛错桩**（PQR-37）。

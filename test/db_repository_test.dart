@@ -154,6 +154,64 @@ void main() {
     });
   });
 
+  // ── P2-02：任务更新语义（REPLACE 级联删历史）──────────────────────
+  //
+  // `INSERT OR REPLACE` 在主键冲突时先 DELETE 再 INSERT，而
+  // `occurrences.task_id REFERENCES tasks(id) ON DELETE CASCADE` ——
+  // 于是"编辑任务"会把该任务**全部历史计划/审计**级联抹掉。
+  // 这两条断言在旧实现（replace）下**必然为红**，因此不是恒真锁。
+  group('P2-02 任务更新不级联删除历史计划', () {
+    test('单条 upsert（同 id 编辑）保留 occurrences 历史', () async {
+      final tasks = TaskRepository(appDb);
+      final occs = OccurrenceRepository(appDb);
+      await tasks.upsert(makeTask('t1'));
+      await occs.commitAll([
+        PlannedOccurrence(
+            id: 't1@done',
+            taskId: 't1',
+            fireAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            status: OccurrenceStatus.done),
+        PlannedOccurrence(
+            id: 't1@pending',
+            taskId: 't1',
+            fireAt: DateTime.fromMillisecondsSinceEpoch(9000),
+            status: OccurrenceStatus.pending),
+      ]);
+      expect(await occs.lastDoneFor('t1'), isNotNull);
+
+      // 编辑任务：同 id 重写（改名 + 改优先级）
+      await tasks.upsert((await tasks.get('t1'))!.copyWith(name: '改名', priority: 9));
+
+      expect((await tasks.get('t1'))!.name, '改名');
+      expect((await tasks.get('t1'))!.priority, 9);
+      expect(await occs.lastDoneFor('t1'), isNotNull,
+          reason: 'REPLACE 先 DELETE 任务 → 级联删掉已完成 occurrence，'
+              '冷却基准 lastDoneFor 归零');
+      final pending = await occs.pendingWithin(
+          DateTime.fromMillisecondsSinceEpoch(0),
+          DateTime.fromMillisecondsSinceEpoch(99999));
+      expect(pending.map((e) => e.id), contains('t1@pending'),
+          reason: '未执行的 pending 计划也必须保留（否则重算前出现空窗）');
+    });
+
+    test('upsertMany（同 id 覆盖）同样保留历史', () async {
+      final tasks = TaskRepository(appDb);
+      final occs = OccurrenceRepository(appDb);
+      await tasks.upsert(makeTask('t2'));
+      await occs.commitAll([
+        PlannedOccurrence(
+            id: 't2@done',
+            taskId: 't2',
+            fireAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            status: OccurrenceStatus.done),
+      ]);
+      await tasks.upsertMany([makeTask('t2').copyWith(name: '导入改名')]);
+      expect((await tasks.get('t2'))!.name, '导入改名');
+      expect(await occs.lastDoneFor('t2'), isNotNull,
+          reason: '批量路径也不得因 REPLACE 级联删除历史');
+    });
+  });
+
   group('OccurrenceRepository', () {
     test('commitAll 幂等：重复提交不产生重复行', () async {
       // 外键约束：先落父任务。
@@ -245,6 +303,67 @@ void main() {
       expect(inRange.map((e) => e.id), ['b', 'c']); // from 排他、to 包含
     });
 
+    // P2-12：任务列表 N+1 + `pendingWithin` 全局 limit 200。
+    // `nextPendingByTask` 用**单条 GROUP BY** 一次取全部任务的最近 pending。
+    test('P2-12 nextPendingByTask：300 任务/计划规模下不漏任务、取最近 pending', () async {
+      final tasks = TaskRepository(appDb);
+      final repo = OccurrenceRepository(appDb);
+      DateTime at(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+
+      const n = 300;
+      await tasks.upsertMany([for (var i = 0; i < n; i++) makeTask('t$i')]);
+      final entries = <PlannedOccurrence>[];
+      for (var i = 0; i < n; i++) {
+        entries.add(PlannedOccurrence(
+            id: 't$i-early',
+            taskId: 't$i',
+            fireAt: at(5000),
+            status: OccurrenceStatus.pending));
+        entries.add(PlannedOccurrence(
+            id: 't$i-late',
+            taskId: 't$i',
+            fireAt: at(9000),
+            status: OccurrenceStatus.pending));
+      }
+      await repo.commitAll(entries);
+
+      final map = await repo.nextPendingByTask(at(1000), at(99999));
+
+      expect(map.length, n,
+          reason: '★ 旧实现「逐任务查 pendingWithin + 全局 limit 200」在第 201 条起'
+              '就会丢任务的「下次触发」；批量聚合必须在 300 任务规模下全覆盖');
+      expect(map['t0'], at(5000), reason: '同一任务多条 pending 必须取**最近**那条');
+      expect(map['t299'], at(5000), reason: '第 300 个任务也必须出现（不被截断）');
+    });
+
+    test('P2-12 nextPendingByTask：窗口外与已终态不计入（同 pendingWithin 边界）', () async {
+      await TaskRepository(appDb).upsertMany([makeTask('t1'), makeTask('t2')]);
+      final repo = OccurrenceRepository(appDb);
+      DateTime at(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+      await repo.commitAll([
+        PlannedOccurrence(
+            id: 'past',
+            taskId: 't1',
+            fireAt: at(500),
+            status: OccurrenceStatus.pending), // 起点之前（from 排他）
+        PlannedOccurrence(
+            id: 'future',
+            taskId: 't1',
+            fireAt: at(5000),
+            status: OccurrenceStatus.pending),
+        PlannedOccurrence(
+            id: 'done',
+            taskId: 't2',
+            fireAt: at(5000),
+            status: OccurrenceStatus.done), // 已终态
+      ]);
+      final map = await repo.nextPendingByTask(at(1000), at(99999));
+      expect(map.containsKey('t1'), isTrue);
+      expect(map['t1'], at(5000), reason: '起点之前的 pending 不应计入（from 排他）');
+      expect(map.containsKey('t2'), isFalse,
+          reason: 'done 不是 pending，不应产生「下次触发」——否则列表显示会被伪造');
+    });
+
     test('任务删除级联：deleteForTask 清理其计划', () async {
       await TaskRepository(appDb).upsert(makeTask('t1'));
       await TaskRepository(appDb).upsert(makeTask('t2'));
@@ -266,6 +385,80 @@ void main() {
           DateTime.fromMillisecondsSinceEpoch(0),
           DateTime.fromMillisecondsSinceEpoch(2000));
       expect(rest.map((e) => e.id), ['b']);
+    });
+  });
+
+  // ── P1-05 / P2-03：计划对账（删未来 pending 再插入，单事务）──────
+  //
+  // 触发器/免打扰设置变更后，旧 pending 已与新定义不符；`commitAll` 的
+  // `ignore` 语义只会保留旧条目（幽灵计划）。`reconcile` 把给定任务的
+  // **未来 pending** 整体替换为本轮重算结果，同时保留 done/failed/skipped
+  // 审计与**已到期 pending**（正由 executeDue 补执行，删掉会漏触发）。
+  group('reconcile 计划对账', () {
+    DateTime at(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+
+    PlannedOccurrence occ(String id, int ms, OccurrenceStatus st,
+            {String task = 't1'}) =>
+        PlannedOccurrence(
+            id: id, taskId: task, fireAt: at(ms), status: st);
+
+    test('替换未来 pending、保留 done、保留已到期 pending', () async {
+      await TaskRepository(appDb).upsert(makeTask('t1'));
+      final repo = OccurrenceRepository(appDb);
+      await repo.commitAll([
+        occ('done', 1000, OccurrenceStatus.done),
+        occ('due', 2000, OccurrenceStatus.pending), // <= now：已到期
+        occ('oldFuture', 5000, OccurrenceStatus.pending), // > now：将被替换
+      ]);
+
+      await repo.reconcile(
+        ['t1'],
+        [
+          occ('new1', 6000, OccurrenceStatus.pending),
+          occ('new2', 7000, OccurrenceStatus.pending),
+        ],
+        at(3000),
+      );
+
+      final ids = (await repo.pendingWithin(at(0), at(99999)))
+          .map((e) => e.id)
+          .toList();
+      expect(ids, containsAll(['due', 'new1', 'new2']));
+      expect(ids, isNot(contains('oldFuture')),
+          reason: '★ 未来 pending 必须被本轮重算结果整体替换 —— '
+              '否则改了触发器/免打扰后仍会残留按旧定义响的幽灵计划（P2-03）');
+      expect(await repo.lastDoneFor('t1'), isNotNull,
+          reason: 'done 是**审计**不是计划，对账不得删除');
+    });
+
+    test('幂等：同批重放不产生重复行', () async {
+      await TaskRepository(appDb).upsert(makeTask('t1'));
+      final repo = OccurrenceRepository(appDb);
+      final entries = [occ('new1', 6000, OccurrenceStatus.pending)];
+      await repo.reconcile(['t1'], entries, at(3000));
+      await repo.reconcile(['t1'], entries, at(3000));
+      final pending = await repo.pendingWithin(at(0), at(99999));
+      expect(pending.where((e) => e.id == 'new1').length, 1);
+    });
+
+    test('只对给定 taskIds 对账，不影响其它任务的未来 pending', () async {
+      final tasks = TaskRepository(appDb);
+      await tasks.upsert(makeTask('t1'));
+      await tasks.upsert(makeTask('t2'));
+      final repo = OccurrenceRepository(appDb);
+      await repo.commitAll([
+        occ('x1', 5000, OccurrenceStatus.pending, task: 't1'),
+        occ('x2', 5000, OccurrenceStatus.pending, task: 't2'),
+      ]);
+
+      await repo.reconcile(['t1'], const [], at(3000));
+
+      final ids = (await repo.pendingWithin(at(0), at(99999)))
+          .map((e) => e.id)
+          .toList();
+      expect(ids, isNot(contains('x1')));
+      expect(ids, contains('x2'),
+          reason: '未纳入对账的任务不得被误删（对账只作用于本轮重算覆盖的任务）');
     });
   });
 

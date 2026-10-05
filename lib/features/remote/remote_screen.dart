@@ -132,26 +132,35 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
 
   Future<void> _toggleEnabled(bool v) async {
     setState(() => _connecting = true);
-    final prefs = await SharedPreferences.getInstance();
-    final store = RemoteStore(prefs);
-    if (v) {
-      if (store.deviceId.isEmpty) {
-        final id = RcCodec.generateDeviceId();
-        await store.setIdentity(id, '声盾-${id.substring(0, 4)}');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final store = RemoteStore(prefs);
+      if (v) {
+        if (store.deviceId.isEmpty) {
+          final id = RcCodec.generateDeviceId();
+          await store.setIdentity(id, '声盾-${id.substring(0, 4)}');
+        }
+        final db = await ref.read(databaseProvider.future);
+        await RcEndpointService.instance.start(store, db);
+      } else {
+        await RcEndpointService.instance.stop();
       }
-      final db = await ref.read(databaseProvider.future);
-      await RcEndpointService.instance.start(store, db);
-    } else {
-      await RcEndpointService.instance.stop();
-    }
-    await store.setEnabled(v);
-    if (!mounted) return;
-    setState(() {
-      _connecting = false;
+      // P1-10 / P2-14：**只在成功路径落盘 enabled**。失败不得留下
+      // "以为已开启"的持久化状态，否则下次启动会"自己开着"。
+      await store.setEnabled(v);
+      if (!mounted) return;
       _enabled = v;
-      _deviceId = store.deviceId;
-      _deviceName = store.deviceName;
-    });
+      await _load();
+    } on Object catch (e) {
+      // P1-10 / P2-14：异常必须可见。旧实现没有 try/finally —— 任一异步异常
+      // 都会让 `_connecting` 永不复位（界面永久"连接中"），且没有任何错误提示。
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('远程模块${v ? '启动' : '停止'}失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _connecting = false);
+    }
   }
 
   Future<void> _addPairDialog() async {

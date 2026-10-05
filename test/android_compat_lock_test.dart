@@ -499,14 +499,30 @@ void main() {
       );
     });
 
-    test('GUARD-09 BootReceiver 的前台服务启动守卫必须是 O(26)', () {
+    test('GUARD-09 BootReceiver 的开机踢醒：精确闹钟守卫 M(23)，授权探测 S(31)', () {
+      // F-3 方案①（第 70 轮）：开机自启**不再**直接 startForegroundService
+      // （Android 12+ 后台启动 FGS 受限、Android 15+ 禁止 BOOT_COMPLETED 启动
+      // mediaPlayback 型 FGS ⇒ 旧写法必被拒且曾经静默），改为排一次性精确闹钟
+      // 复用既有 AlarmWatchdogReceiver 拉起引擎。故本锁的符号从
+      // `startForegroundService` 换成 `setExactAndAllowWhileIdle`。
       checkGuard(
         file: bootKt,
-        symbol: 'startForegroundService',
-        level: 26,
-        reason: '开机自启拉起前台服务：API 26 起必须 startForegroundService。'
-            '该文件用的是**全限定名** android.os.Build.VERSION_CODES.O，'
-            '分析器会剥掉 android.os. 前缀再查表。',
+        symbol: 'setExactAndAllowWhileIdle',
+        level: 23,
+        reason: 'F-3 方案① 的踢醒路径：setExactAndAllowWhileIdle 自 API 23 起可用'
+            '（SDK api-versions.xml: method@23）。锁成 31 会让 API 24–30 静默退到'
+            'setExact（Doze 下被推迟数小时），"开机即恢复"在低版本上就不成立。'
+            '该文件用**全限定名** android.os.Build.VERSION_CODES.M，分析器会剥前缀。',
+      );
+      checkGuard(
+        file: bootKt,
+        symbol: 'canScheduleExactAlarms',
+        level: 31,
+        reason: 'canScheduleExactAlarms 是 API 31(S) 起。未授予 SCHEDULE_EXACT_ALARM '
+            '时排精确闹钟会抛 SecurityException —— 本文件用 '
+            '`SDK_INT < S || am.canScheduleExactAlarms()` 短路，'
+            '未授权时降级为非精确闹钟（不享有 FGS 启动豁免）。'
+            '守卫等级写错会让低版本调用不存在的 API。',
       );
     });
   });

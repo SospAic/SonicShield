@@ -108,7 +108,10 @@ void clearRecordStub() {
 /// 平台层假实现：记录被调用的方法名，按用例给定的返回值作答。
 class FakeRecordPlatform extends RecordPlatform {
   FakeRecordPlatform(
-      {this.hasPermissionResult = false, this.stopPath, this.startError});
+      {this.hasPermissionResult = false,
+      this.stopPath,
+      this.startError,
+      this.streamResult});
 
   /// `hasPermission` 的返回值（默认 false = 平台拒绝录音，与 [stubRecord] 同侧）。
   bool hasPermissionResult;
@@ -119,6 +122,10 @@ class FakeRecordPlatform extends RecordPlatform {
   /// 非 null ⇒ `start()` 抛出该对象（第 49 轮：`_recordEvidence` 的 catch
   /// 兜底路径需要"开始录音就失败"的可编程失败，不能只靠 hasPermission）。
   Object? startError;
+
+  /// 非 null ⇒ `startStream()` 返回它（v2 流式对讲用例：由用例喂 ADTS 帧）。
+  /// null ⇒ 返回空流（默认；覆盖"流已建立但一帧未产出"的边界）。
+  Stream<Uint8List>? streamResult;
 
   /// 被调用的方法名序列 —— 断言"真的走了录音通道"用它，别断言界面文案。
   final List<String> calls = <String>[];
@@ -142,7 +149,7 @@ class FakeRecordPlatform extends RecordPlatform {
       String recorderId, RecordConfig config) async {
     calls.add('startStream');
     _recording = true;
-    return const Stream<Uint8List>.empty();
+    return streamResult ?? const Stream<Uint8List>.empty();
   }
 
   @override
@@ -220,12 +227,14 @@ FakeRecordPlatform installFakeRecordPlatform({
   bool hasPermissionResult = false,
   String? stopPath,
   Object? startError,
+  Stream<Uint8List>? streamResult,
 }) {
   _savedPlatform ??= RecordPlatform.instance;
   final fake = FakeRecordPlatform(
       hasPermissionResult: hasPermissionResult,
       stopPath: stopPath,
-      startError: startError);
+      startError: startError,
+      streamResult: streamResult);
   RecordPlatform.instance = fake;
   return fake;
 }

@@ -162,11 +162,20 @@ void main() {
     });
 
     test('OB-W3 连接建立 / 首连 / 心跳三处都接线了补发', () {
+      // P1-11/12 重构后这三处不再都挤在 `_connect` 内：重连回调收口到
+      // `_onConnected`、心跳收口到 `_startHeartbeat`（都按连接代次绑定）。
+      // 判据改为**逐个方法体**核对 —— 仍要求三处都在，只是位置更内聚，
+      // 因此"缺任何一处 → 某条上线路径不补发"这条约束**不被放松**。
       final connect = methodBody(src, 'Future<void> _connect()');
-      final hits = 'flushAllOutbox(store)'.allMatches(connect).length;
-      expect(hits, greaterThanOrEqualTo(3),
-          reason: 'onConnected（重连）+ connect 后（首连）+ 心跳（瞬时失败重试）'
-              '缺任何一处，某些上线路径就不会补发');
+      final onConnected = methodBody(src, 'void _onConnected(int gen)');
+      final heartbeat = methodBody(src, 'void _startHeartbeat(int gen)');
+
+      expect(connect, contains('flushAllOutbox('),
+          reason: '首连走 connect() 而非 onConnected 回调，必须在此补一次');
+      expect(onConnected, contains('flushAllOutbox('),
+          reason: '重连回调（onConnected）必须补发');
+      expect(heartbeat, contains('flushAllOutbox('),
+          reason: '心跳顺带重试瞬时失败的补发');
       expect(connect, contains('onConnected'));
     });
   });
@@ -275,6 +284,176 @@ void main() {
           reason: '在线路径与暂存路径都要走 encode');
       expect(body, isNot(contains('jsonEncode(out.toJson())')),
           reason: '★ 明文暂存的旧写法必须彻底消失');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // OB-D · 出站新鲜度判据（P1-15 / P2-21 纯函数真值表）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // 这一组是**纯函数**断言（不依赖 MQTT/平台），用来钉住"哪些命令禁止补发、
+  // 补发窗口多长"的分类语义 —— 分类写反了（例如把 `call.end` 当 durable）
+  // 在行为链路上很难被观察到，却能在这里被穷举证伪。
+  group('OB-D 出站新鲜度与补发裁决（P1-15 / P2-21）', () {
+    test('OB-D1 实时信令一律 live 且窗口为 0（stop / PTT / 通话 / ICE 一个不漏）',
+        () {
+      for (final t in const [
+        RcCmd.scriptStop,
+        RcCmd.vibrateStop,
+        RcCmd.pttVoice,
+        RcCmd.callInvite,
+        RcCmd.callAnswer,
+        RcCmd.callCandidate,
+        RcCmd.callEnd,
+      ]) {
+        expect(rcOutboxFreshness(t), RcOutboxFreshness.live, reason: t);
+        expect(rcOutboxTtlMs(t), 0, reason: '$t 必须无补发窗口');
+      }
+    });
+
+    test('OB-D2 瞬时动作使用 10 分钟窗口', () {
+      for (final t in const [
+        RcCmd.soundPlay,
+        RcCmd.deviceAlert,
+        RcCmd.volumeSet,
+      ]) {
+        expect(rcOutboxFreshness(t), RcOutboxFreshness.transient, reason: t);
+        expect(rcOutboxTtlMs(t), rcTransientOutboxTtlMs, reason: t);
+      }
+    });
+
+    test('OB-D3 未登记类型默认 durable（宁可补发也不静默丢弃）', () {
+      expect(rcOutboxFreshness('future.unknown'), RcOutboxFreshness.durable);
+      expect(rcOutboxTtlMs('future.unknown'), rcDurableOutboxTtlMs);
+      expect(rcOutboxFreshness(RcCmd.statusGet), RcOutboxFreshness.durable);
+    });
+
+    test('OB-D4 decideOutboxReplay 真值表（含边界）', () {
+      expect(decideOutboxReplay(type: null, nowMs: 100),
+          RcOutboxReplay.undecodable,
+          reason: 'peek 失败（解不开）⇒ 不可补发');
+      expect(decideOutboxReplay(type: RcCmd.callEnd, nowMs: 100),
+          RcOutboxReplay.liveOnly,
+          reason: '实时信令即便没过期也禁补发（会话早已结束）');
+      expect(
+          decideOutboxReplay(type: RcCmd.soundPlay, expiresAt: 99, nowMs: 100),
+          RcOutboxReplay.expired);
+      expect(
+          decideOutboxReplay(type: RcCmd.soundPlay, expiresAt: 100, nowMs: 100),
+          RcOutboxReplay.replay,
+          reason: '边界：等于截止时刻仍可补发（只有 now > expiresAt 才算过期）');
+      expect(
+          decideOutboxReplay(type: RcCmd.statusGet, nowMs: 100),
+          RcOutboxReplay.replay,
+          reason: '老数据无 expiresAt ⇒ 恒可补发（升级不得清空历史队列）');
+    });
+
+    test('OB-D5 丢弃原因非空且带可读关键词（绝不静默）', () {
+      expect(rcOutboxDropReason(RcOutboxReplay.undecodable), contains('无法解密'));
+      expect(rcOutboxDropReason(RcOutboxReplay.liveOnly), contains('实时'));
+      expect(rcOutboxDropReason(RcOutboxReplay.expired), contains('过期'));
+      expect(rcOutboxDropReason(RcOutboxReplay.replay), isEmpty,
+          reason: '可补发不该有"丢弃原因"');
+    });
+
+    test('OB-D6 peekOutboxType 解出类型；坏密文返回 null（判据非恒真）', () async {
+      const topic = 'sonicshield/v1/dev-a/cmd';
+      final key = await RcCodec.deriveKey('sec-a', 'dev-a|cmd');
+      final wire = await RcCodec.encode(
+          RcMessage.now(RcCmd.soundPlay), key, topic);
+
+      expect(await peekOutboxType(wire, key, topic), RcCmd.soundPlay);
+      expect(await peekOutboxType('not-a-wire', key, topic), isNull);
+      final otherKey = await RcCodec.deriveKey('sec-b', 'dev-a|cmd');
+      expect(await peekOutboxType(wire, otherKey, topic), isNull,
+          reason: '换密钥必须解不开，否则"密钥已变更"这类丢弃永远测不出');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // OB-E · 送达账本（P2-20 纯判据 + 服务接线）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // P2-20 的核心是"把 publish 受理与端点最终回执分开"。账本是纯内存结构，
+  // 这里穷举它最关键的**反例**：迟到/重放/无关的 ack 不得让任何命令通过。
+  group('OB-E 送达账本（P2-20）', () {
+    test('OB-E1 record：在线=publish ⇒ published；离线入队 ⇒ queued', () {
+      final l = RcDeliveryLedger();
+      expect(l.record('a', 'ep', published: true, nowMs: 100).state,
+          RcDeliveryState.published);
+      expect(l.record('b', 'ep', published: false, nowMs: 100).state,
+          RcDeliveryState.queued);
+      expect(l.stateOf('a')!.targetId, 'ep');
+      expect(l.length, 2);
+    });
+
+    test('OB-E2 acceptAck：ok ⇒ acked；失败 ⇒ failed（终态）', () {
+      final l = RcDeliveryLedger();
+      l.record('a', 'ep', published: true, nowMs: 0);
+      expect(l.acceptAck('a', ok: true, nowMs: 1)!.state, RcDeliveryState.acked);
+      l.record('b', 'ep', published: true, nowMs: 0);
+      expect(l.acceptAck('b', ok: false, nowMs: 1)!.state, RcDeliveryState.failed);
+    });
+
+    test('OB-E3 ★ 未知 requestId 的 ack 一律 null（迟到/无关不得凭空通过）', () {
+      final l = RcDeliveryLedger();
+      l.record('a', 'ep', published: true, nowMs: 0);
+      expect(l.acceptAck('ghost', ok: true, nowMs: 1), isNull);
+      expect(l.stateOf('ghost'), isNull,
+          reason: '旧 ack 不得让一条从未发出的命令变成"已送达"');
+      expect(l.stateOf('a')!.state, RcDeliveryState.published,
+          reason: '无关 ack 不得影响其它命令');
+    });
+
+    test('OB-E4 ★ 重复 ack 不得翻转已终态记录', () {
+      final l = RcDeliveryLedger();
+      l.record('a', 'ep', published: true, nowMs: 0);
+      l.acceptAck('a', ok: true, nowMs: 1);
+      expect(l.acceptAck('a', ok: false, nowMs: 2), isNull,
+          reason: '已被确认成功的命令，不能被后到的失败 ack 翻成 failed');
+      expect(l.stateOf('a')!.state, RcDeliveryState.acked);
+    });
+
+    test('OB-E5 过期：acceptAck/expire 双向判过期，此后不再翻转', () {
+      final l = RcDeliveryLedger();
+      l.record('a', 'ep', published: true, nowMs: 0, ttlMs: 50);
+      // 到点后即使没被 expire 扫到，ack 也只会把它推成 expired。
+      expect(l.acceptAck('a', ok: true, nowMs: 51)!.state,
+          RcDeliveryState.expired);
+      l.record('b', 'ep', published: true, nowMs: 0, ttlMs: 50);
+      expect(l.expire(51).map((d) => d.requestId), ['b']);
+      expect(l.stateOf('b')!.state, RcDeliveryState.expired);
+      expect(l.acceptAck('b', ok: true, nowMs: 52), isNull,
+          reason: '过期是终态：迟到 ack 不得把它翻回 acked');
+      expect(l.expire(52), isEmpty, reason: '已终态不再被重复扫描');
+    });
+
+    test('OB-E6 上限淘汰最旧：被淘汰者视为未知（不得被 ack 复活）', () {
+      final l = RcDeliveryLedger(maxEntries: 2);
+      l.record('a', 'ep', published: true, nowMs: 0);
+      l.record('b', 'ep', published: true, nowMs: 0);
+      l.record('c', 'ep', published: true, nowMs: 0);
+      expect(l.stateOf('a'), isNull, reason: '最旧一条被淘汰（内存有界）');
+      expect(l.acceptAck('a', ok: true, nowMs: 1), isNull);
+      expect(l.length, 2);
+      expect(l.stateOf('b')!.state, RcDeliveryState.published);
+    });
+
+    test('OB-E7 ★ 离线 sendTo 只登记为 queued（不得当作已送达）', () async {
+      await store.setIdentity('c' * 16, '控制器');
+      final endpoint = PairedEndpoint(
+        deviceId: 'e' * 16,
+        name: '端点',
+        secret: 'SECRET8E',
+        pairedAt: DateTime(2026, 9, 24),
+      );
+      final msg = RcMessage.now(RcCmd.ping, {});
+      final ok = await RcEndpointService.instance.sendTo(endpoint, msg, store);
+      expect(ok, isFalse, reason: '未连接 ⇒ 走暂存分支');
+      expect(
+          RcEndpointService.instance.debugDeliveryOf(msg.id)!.state,
+          RcDeliveryState.queued,
+          reason: '★ 写进本地 outbox ≠ 送达：UI 不得把它显示成"已执行"');
     });
   });
 }

@@ -129,10 +129,16 @@ class _FakeRepo implements AssetRepository {
   /// `upsertMany` 被调用的次数 —— 断言"**一次**批量写"（BUG-047 的原子性）。
   int saveAllCalls = 0;
 
+  /// `listAll` 被调用的次数 —— P2-24：断言无关 `setState` 不会重复全量查询。
+  int listAllCalls = 0;
+
   final List<String> deletedIds = [];
 
   @override
-  Future<List<AudioAsset>> listAll() async => List.of(items);
+  Future<List<AudioAsset>> listAll() async {
+    listAllCalls++;
+    return List.of(items);
+  }
 
   @override
   Future<Set<String>> nameSet() async => items.map((a) => a.name).toSet();
@@ -373,7 +379,8 @@ void main() {
       ),
     ));
     // 第一帧：FutureBuilder 还没拿到仓储 → 空态；
-    // 冲两次微任务后拿到列表（`_listAssets()` 每次 build 都新建 Future）。
+    // 冲两次微任务后拿到列表（P2-24 后 `_listAssets()` 只在 initState 建一次，
+    // 与旧实现"每次 build 都新建 Future"不同 —— 见 SLB-25）。
     await tester.pump();
     await tester.pump();
   }
@@ -448,8 +455,17 @@ void main() {
       Error.throwWithStackTrace(error!, stack!);
     }
     // 让 `setState` 后的重建与 FutureBuilder 的重读落地。
-    await tester.pump();
-    await tester.pump();
+    //
+    // ⚠️ P2-24 后刷新用的新 future 是在 **body 的 real zone** 里创建的
+    // （`_reloadAssets()` 在异步链尾调用），它的续体挂在**真实**微任务队列上,
+    // 而收尾的 fake `pump()` **排不到**它 —— 必须先真实转一圈（同循环体）
+    // 再 pump，新数据才会落到 widget 树。
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(() async {
+        await Future<void>.delayed(Duration.zero);
+      });
+      await tester.pump();
+    }
   }
 
   /// 排空 SnackBar 队列（每条 4 秒）与页面自己的兜底 Timer。
@@ -588,6 +604,32 @@ void main() {
     expect(tester.takeException(), isNull);
 
     await drainSnacks(tester);
+  }, timeout: _timeout);
+
+  testWidgets('SLB-25 [P2-24] 试听等无关 setState 不重查库；改库后才重查一次',
+      (tester) async {
+    await pumpLib(tester, seed: [asset(id: 'a', name: 'A')]);
+    expect(repo.listAllCalls, 1, reason: '首帧只应查一次列表');
+
+    // 试听只改 `_previewingId`，与列表无关 —— 必须复用已完成的 future。
+    player.gate = Completer<void>();
+    await tester.tap(find.byTooltip('试听'));
+    await tester.pump();
+    expect(repo.listAllCalls, 1,
+        reason: '★ 旧实现把 `_listAssets()` 建在 build 内：每次试听 setState 都会重查 DB'
+            '并解码 tags；列表 Future 必须在无关状态变化时复用（P2-24）');
+
+    player.gate!.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(repo.listAllCalls, 1, reason: '播放完成后的复位同样不该重查');
+
+    // 删除会改变库内容 → 必须换新 future，重查一次。
+    await runReal(tester, deleteCallback(tester));
+    expect(repo.deletedIds, ['a']);
+    expect(repo.listAllCalls, 2,
+        reason: '库内容变化（删除）后必须重查一次，否则列表看不到变化');
+    expect(find.text('A'), findsNothing);
   }, timeout: _timeout);
 
   // ══════════════════════════════════════════════════════════════════════

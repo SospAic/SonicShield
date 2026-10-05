@@ -84,6 +84,9 @@ Future<void> _wireRemoteEndpoint() async {
       );
       return r.ok;
     }
+    // v2 流式对讲：端点"边收边放"的播放会话开缝（`PttStreamSink`）。
+    // 用同一套 PlaybackService ⇒ 与端点静音（远程停止）接线一致。
+    ..pttStreamOpener = playback.openPttStream
     ..ttsHandler = (text, volume) async {
       final tts = FlutterTts();
       try {

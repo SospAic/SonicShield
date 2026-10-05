@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -242,5 +244,52 @@ void main() {
           reason: '松手时没在录音是正常路径，绝不能抛异常');
       expect(find.textContaining('录音中'), findsNothing);
     });
+
+    testWidgets('PTT-09 按下后在权限/启动完成前松手 → 绝不留无人控制的录音（P2-25）',
+        (tester) async {
+      // 可控权限桩：把 requestPermissions 挂起，等我们"松手"后再放行，
+      // 复刻"权限申请比手指松开的动作慢"的真实竞态（弱机型/首次授权必经）。
+      final gate = Completer<void>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(permissionChannel, (call) async {
+        if (call.method == 'requestPermissions') {
+          await gate.future;
+          final ids = (call.arguments as List).cast<int>();
+          return <int, int>{
+            for (final id in ids) id: PermissionStatus.granted.index,
+          };
+        }
+        return null;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(permissionChannel, null);
+      });
+
+      await _pump(tester,
+          endpoints: [_ep('0123456789abcdef', '客厅平板')],
+          selectedEndpointId: '0123456789abcdef');
+
+      await tester.runAsync(() async {
+        final g = await tester.startGesture(tester.getCenter(_micButton));
+        // 等过 kPressTimeout(100ms)：onTapDown 真正触发（`_start()` 开始并卡在权限申请）。
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await g.up(); // 松手 —— 此刻 `_start()` 仍停在权限请求里
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        gate.complete(); // 放行权限：`_start()` 恢复执行
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      });
+      await tester.pumpAndSettle();
+
+      // 修 P2-25 之前：`_send()` 因 `_recording == false` 早退，随后 `_start()`
+      // 继续走到 `pttStart()` —— 一段无人控制的录音要到 60s 上限才自动发送。
+      expect(rec.calls, isNot(contains('hasPermission')),
+          reason: '手指已松开就不该再拉起录音（`pttStart()` 未被调用）——'
+              '否则就是无人控制的录音（P2-25）');
+      expect(find.text('录音启动失败'), findsNothing);
+      expect(find.textContaining('录音中'), findsNothing,
+          reason: '松手后界面必须停在待机，不能进入录音态');
+      expect(tester.takeException(), isNull);
+    }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }

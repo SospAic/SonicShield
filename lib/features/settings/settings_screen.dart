@@ -21,6 +21,8 @@ import '../../services/native_bridge.dart';
 import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
 
+import 'evidence_screen.dart';
+
 /// 设置页：电源模式 / 免打扰时段 / 保活引导 / 合规信息。
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -463,6 +465,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: const Icon(Icons.download),
             title: const Text('导入任务（JSON）'),
             onTap: _importTasks,
+          ),
+          const Divider(height: 32),
+          Text('录音取证', style: Theme.of(context).textTheme.titleMedium),
+          ListTile(
+            leading: const Icon(Icons.folder_special),
+            title: const Text('取证文件管理'),
+            subtitle: const Text('浏览 / 导出 / 手动清理；取证文件永不自动删除'),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const EvidenceScreen()),
+            ),
           ),
           const Divider(height: 32),
           ListTile(

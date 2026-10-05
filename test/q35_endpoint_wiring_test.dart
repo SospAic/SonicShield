@@ -211,9 +211,16 @@ Future<void> _connect() async {
     });
 
     test('Q1-04 控制端消费回执并落盘对端盐（同文件内，无需越界）', () {
-      final rp = methodBody(src, 'RcMessage request, {');
-      expect(rp.contains('_savePeerSalt('), isTrue);
-      expect(rp.contains("ack['kdfsalt']"), isTrue);
+      // P1-13 重构后，"消费回执 → 落对端盐"从 `requestPairing` 的**内联等待**
+      // 下沉到回执关联真源 `_tapAck`：这样**迟到**的 ack（8s UI 窗口之外）
+      // 也能完成绑定与落盐 —— 若仍锁在 `requestPairing` 里，反而会把
+      // "只认 8 秒内回执"的旧缺陷重新锁死。判据意图不变：
+      // **ack 里的 kdfsalt 必须被解出来落盘**。
+      final tap = methodBody(src, 'Future<void> _tapAck(');
+      expect(tap.contains('RcEvt.ack'), isTrue,
+          reason: '落盐发生在 ack 消费点，不是任意消息');
+      expect(tap.contains('_savePeerSalt('), isTrue);
+      expect(tap.contains("msg.payload['kdfsalt']"), isTrue);
 
       final save = methodBody(src, 'Future<void> _savePeerSalt(');
       expect(save.contains('base64Decode('), isTrue);

@@ -30,6 +30,19 @@ import 'package:sonic_shield/services/playback_service.dart';
 
 import 'support/just_audio_stub.dart';
 
+/// 宿主**墙钟上界**（⚠️ 只作"反挂死"护栏，**不是时长判据**）。
+///
+/// `play()` 返回的 `playedMs` 是 Stopwatch 实测的
+/// **「前置 await（取音频会话 → 载入 → 设音量/循环 → 起播）+ 等待窗口」总和**，
+/// 不是纯窗口时长。门禁在 `--coverage` + 整层默认并发下，插桩与本机 CPU 争用
+/// 会把每个 `Future.delayed` 拉长数倍 —— 2026-10-04 门禁实测：target=300ms 的
+/// 用例返回 **1550ms**（5.2×），PA-02/PA-03 的旧上界 `<1000` 因此偶发假红。
+///
+/// 纪律：**时长判据只用下界**（`>= target` 那侧 —— 证明确实等了窗口，而不是
+/// 立刻返回 / 取了 maxDurationMs(0)）；上界只留一个足够宽的护栏，真正的
+/// "挂死"由用例默认超时（30s）兜底。放松上界**不放宽**任何业务判据。
+const int _playWallCeilingMs = 8000;
+
 void main() {
   // ★ 必须先初始化 binding：`AudioSession` 的**构造器**会调用
   //   `_channel.setMethodCallHandler(...)`（`audio_session/src/core.dart:150`），
@@ -99,7 +112,8 @@ void main() {
       expect(r.ok, isTrue);
       expect(r.playedMs, greaterThanOrEqualTo(250),
           reason: 'target = 文件时长 300ms，不能取 maxDurationMs(0)');
-      expect(r.playedMs, lessThan(1000));
+      expect(r.playedMs, lessThan(_playWallCeilingMs),
+          reason: '反挂死护栏（含前置 await，详见文件头说明）');
     });
 
     test('PA-03 文件时长未知（duration==null）⇒ 回落 maxDurationMs', () async {
@@ -113,7 +127,8 @@ void main() {
 
       expect(r.ok, isTrue);
       expect(r.playedMs, greaterThanOrEqualTo(80));
-      expect(r.playedMs, lessThan(1000), reason: '不许挂到"文件自然结束"');
+      expect(r.playedMs, lessThan(_playWallCeilingMs),
+          reason: '反挂死护栏（不许挂到"文件自然结束"，但含前置 await；详见文件头）');
     });
 
     test('PA-04 loopFill ⇒ 先 setLoopMode(one) 填充，收尾复位 off', () async {
@@ -153,6 +168,19 @@ void main() {
       expect(r.ok, isTrue);
       // [0] = 激活期恢复 1.0；[1] = 渐强的起点（playback_service.dart:130 的 volume*0.05）。
       expect(audio.volumes[1], closeTo(0.04, 1e-9));
+
+      // ⚠️ `_rampUp` 是 **unawaited**（playback_service.dart:131），且它跑在播放窗口
+      //    之外：窗口（400ms）与渐强（200ms）虽然标称同时起步，但渐强要排 40 个
+      //    `Future.delayed`、窗口只排 8 个 —— 门禁在 `--coverage` + 整层默认并发下，
+      //    前者的实际延迟被拉长得更多，窗口结束时渐强可能只爬到一半
+      //    （2026-10-04 门禁实测末值 **0.363**，远未到 0.8）。
+      //    判据要的是"**终点**兑现目标音量"，所以有界轮询到渐强末步真正落地再断言 ——
+      //    确定性，且不放松任何业务判据（反而把"渐强真的爬到终点"锁得更死）。
+      final rampDeadline = DateTime.now().add(const Duration(seconds: 5));
+      while (audio.volumes.last < 0.79 &&
+          DateTime.now().isBefore(rampDeadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
       expect(audio.volumes.last, closeTo(0.8, 1e-9),
           reason: '_rampUp 末步 = 0.05 + 0.95 = 1.0 ⇒ 恰好目标音量');
       expect(audio.volumes.length, greaterThan(10), reason: '确实是"线性爬升"');
@@ -196,23 +224,33 @@ void main() {
     });
 
     test('PA-08 stop() 打断 ⇒ 如实报失败（不是"播完了"）且循环复位', () async {
-      audio.fileDuration = const Duration(seconds: 5);
+      // 窗口标称 60s、文件更长（600s）⇒ "提前打断"与"等满窗口"之间留出 60s 的
+      // 判别余量：即便覆盖率插桩把每个 `Future.delayed` 拉长数倍，也不会把两者
+      // 混为一谈（旧版 5s 窗口 + 固定 150ms 墙钟等待就栽在这里）。
+      audio.fileDuration = const Duration(seconds: 600);
       final svc = PlaybackService();
       final fut = svc.play(
         path: p1,
         channel: AudioChannel.alarm,
         volume: 0.6,
-        maxDurationMs: 5000,
+        maxDurationMs: 60000,
       );
 
-      await Future<void>.delayed(const Duration(milliseconds: 150));
+      // ⚠️ 不靠固定墙钟等待"前置步骤跑完" —— 覆盖率插桩 + 整层默认并发占满 CPU 时，
+      //    前置 `AudioSession.configure` / `setFilePath` / `play` 会被拉长到未知毫秒数，
+      //    固定 150ms 可能落在**起播之前**（于是压根没打断、等满窗口）。
+      //    轮询到平台侧确实已起播再 stop —— 确定性，且业务语义不变（反而更准）。
+      while (audio.countOf('play') == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
       await svc.stop();
       final r = await fut;
 
       expect(r.ok, isFalse,
           reason: '报成功会让控制端以为这段声音已正常播完（docs/17 §45 语义）');
       expect(r.message, contains('已终止'));
-      expect(r.playedMs, lessThan(2000), reason: '停止后必须立刻收尾，不许等满 5s');
+      expect(r.playedMs, lessThan(60000),
+          reason: '停止后必须立刻收尾，不许等满 60s 窗口');
       // 停止路径同样不额外设置循环模式（收尾那次 off 排在 `player.stop()` 之后 ⇒ 观测不到）。
       expect(audio.countOf('setLoopMode'), 1);
     });
@@ -265,22 +303,28 @@ void main() {
     test('PA-11 stopSoundscape() ⇒ 提前打断等待窗口，仍如实报成功', () async {
       audio.fileDuration = const Duration(seconds: 30);
       final svc = PlaybackService();
+      // 窗口标称 60s ⇒ 与"提前打断"之间留出 60s 判别余量（理由同 PA-08）。
       final fut = svc.playSoundscape(
         tracks: const <SoundscapeTrackInput>[
           SoundscapeTrackInput(path: 'cov_pa11.mp3'),
         ],
-        durationMs: 5000,
+        durationMs: 60000,
         channel: AudioChannel.media,
         fadeOutMs: 0,
       );
 
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      // ⚠️ 轮询到平台侧确实已起播（多轨是 `unawaited(p.play())`）再打断 —— 不再靠
+      //    固定 300ms 墙钟：门禁实测那条固定等待被拉长后，"提前打断"根本没被驱动，
+      //    playSoundscape 便一路等满窗口（旧版 5s）⇒ `playedMs < 2000` 假红。
+      while (audio.countOf('play') == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
       svc.stopSoundscape();
       final r = await fut;
 
       expect(r.ok, isTrue);
-      expect(r.playedMs, lessThan(2000),
-          reason: 'stopSoundscape 必须让等待窗口提前收尾（250ms 轮询）');
+      expect(r.playedMs, lessThan(60000),
+          reason: 'stopSoundscape 必须让 60s 等待窗口提前收尾（250ms 轮询），不许等满窗口');
     });
 
     test('PA-12 playSoundscape：只坏一轨 ⇒ 走 catch，两轨都被释放', () async {
@@ -331,7 +375,15 @@ void main() {
         volume: 0.5,
         maxDurationMs: 400,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      // ⚠️ 不靠固定墙钟等待"前置步骤跑完" —— 覆盖率插桩 + 整层默认并发占满
+      //    CPU 时，`AudioSession.configure` / `setFilePath` / `play` 这些 await
+      //    会被拉长到远超 120ms，于是 dispose() 可能落在**起播之前**，把
+      //    play() 的 setup 打断成失败（2026-10-04 门禁实测 PA-13 偶发红）。
+      //    判据要的是"播放中释放"，所以轮询到平台侧**确实已起播**再释放 ——
+      //    确定性、且业务语义不变（反而更准）。
+      while (audio.countOf('play') == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
 
       await svc.dispose(); // 不得抛出
       final afterFirst = audio.countOf('disposePlayer');
@@ -345,6 +397,36 @@ void main() {
       await svc.dispose();
       expect(audio.countOf('disposePlayer'), afterFirst,
           reason: '字段已清空，二次 dispose 不许重复打到平台');
+    });
+
+    test('PA-14 [P2-08] stop()/stopAllPlaying() 统一停止声景多轨并登记', () async {
+      audio.fileDuration = const Duration(seconds: 30);
+      final svc = PlaybackService();
+      final fut = svc.playSoundscape(
+        tracks: const <SoundscapeTrackInput>[
+          SoundscapeTrackInput(path: 'cov_pa14_a.mp3'),
+          SoundscapeTrackInput(path: 'cov_pa14_b.mp3'),
+        ],
+        durationMs: 60000,
+        channel: AudioChannel.media,
+        fadeOutMs: 0,
+      );
+      // 等到两轨都起播（多轨是 `unawaited(p.play())`）。
+      while (audio.countOf('play') < 2) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      // 声景实例必须登记到统一会话表 —— 否则远程「停止指令组」拿不到它，
+      // 声景会继续出声到窗口到点（旧实现的根因）。
+      expect(await PlaybackService.stopAllPlaying(), 1,
+          reason: '声景必须登记；不登记 ⇒ 停止指令组扑空、声景继续出声');
+
+      final r = await fut;
+      expect(r.ok, isTrue,
+          reason: '被 stop 打断仍如实报"已停止"（与 stopSoundscape 同语义）');
+      expect(r.playedMs, lessThan(60000),
+          reason: 'stop() 必须立刻打断 60s 等待窗口，不许等满');
+      // 各轨的原生播放器必须被交还（不再"只停主播放器、声景轨泄漏"）。
+      expect(audio.countOf('disposePlayer'), greaterThanOrEqualTo(2));
     });
   });
 }

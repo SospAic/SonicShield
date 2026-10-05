@@ -194,3 +194,82 @@ class NativeBridge {
 abstract final class ChannelsMethod {
   static const channel = 'sonic_shield/native';
 }
+
+/// 精确闹钟**排布结果**（P1-04）。
+///
+/// 为什么需要它：原生旧实现权限不足时直接返回 `0`，Dart 侧只区分「null 回执」
+/// 与「抛异常」，把 `0` 当成普通的"排了 0 条"成功 —— 界面继续显示运行中与
+/// 计划数，而系统级定时唤醒根本没排上（进程被回收后不再准点）。结构化结果让
+/// 「权限被拒」「部分排布」「平台不支持」三类降级都可见、可展示、可恢复。
+class AlarmScheduleResult {
+  const AlarmScheduleResult({
+    required this.expected,
+    required this.scheduled,
+    required this.denied,
+    required this.unsupported,
+    this.error,
+  });
+
+  /// 期望排布的条数。
+  final int expected;
+
+  /// 实际排上的条数。
+  final int scheduled;
+
+  /// 精确闹钟特殊权限未授予（Android 12+ `SCHEDULE_EXACT_ALARM`）。
+  final bool denied;
+
+  /// 本平台根本没有这条通道（iOS/桌面/旧版原生）。
+  final bool unsupported;
+
+  /// 逐条排布时的原生异常信息（无异常为 null）。
+  final String? error;
+
+  /// 是否发生降级（权限被拒 / 平台不支持 / 部分排布 / 排布异常）。
+  bool get degraded =>
+      denied || unsupported || error != null || scheduled < expected;
+
+  bool get ok => !degraded;
+
+  /// 面向 UI 与审计的降级原因；未降级时为 null。
+  String? get reason {
+    if (denied) return '精确闹钟权限未授予：进程被杀后不保证准点唤醒，可在系统设置中恢复';
+    if (unsupported) return '本平台不支持精确闹钟：仅进程存活时可执行';
+    if (error != null) return '精确闹钟排布异常：$error';
+    if (scheduled < expected) {
+      return '精确闹钟仅排布 $scheduled/$expected：部分计划在进程被杀后不保证触发';
+    }
+    return null;
+  }
+
+  /// 解析原生回执（纯函数，便于宿主断言）。
+  ///
+  /// - `Map`：新版原生结构化字段；
+  /// - `num`：**旧版原生**返回的"成功条数"，按兼容解析（不被误判为权限拒绝）；
+  /// - 其他/`null`：平台未回执 → 归为 `unsupported` 降级。
+  static AlarmScheduleResult fromRaw(Object? raw, {required int expected}) {
+    if (raw is Map) {
+      return AlarmScheduleResult(
+        expected: (raw['expected'] as num?)?.toInt() ?? expected,
+        scheduled: (raw['scheduled'] as num?)?.toInt() ?? 0,
+        denied: raw['denied'] == true,
+        unsupported: raw['unsupported'] == true,
+        error: raw['error'] as String?,
+      );
+    }
+    if (raw is num) {
+      return AlarmScheduleResult(
+        expected: expected,
+        scheduled: raw.toInt(),
+        denied: false,
+        unsupported: false,
+      );
+    }
+    return AlarmScheduleResult(
+      expected: expected,
+      scheduled: 0,
+      denied: false,
+      unsupported: true,
+    );
+  }
+}

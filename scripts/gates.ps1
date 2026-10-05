@@ -1,4 +1,4 @@
-﻿﻿# =====================================================================
+﻿# =====================================================================
 # 声盾 SonicShield —— 统一门禁脚本（v1.9.0-alpha 同步版，落实 HANDOVER §6.11）
 #
 # ⚠️ 本文件与 scripts/gates.sh 必须是**同一套判据**。历史上 .ps1 停在「3 步、
@@ -12,13 +12,21 @@
 #   .\scripts\gates.ps1                  # analyze + 功能(+覆盖率) + 压测 + 覆盖率ratchet
 #   .\scripts\gates.ps1 -WithDevice      # + 设备端全套（检测到模拟器/真机时）
 #   .\scripts\gates.ps1 -WithAot         # + AOT 绝对验收（flutter drive --profile）
+#   $env:ALLOW_DEVICE_SKIP = '1'         # 无 adb/无设备时**显式**放行跳过设备层（默认 BLOCKED/RC=3）
 #   $env:COVERAGE_MIN = '98.8'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
-#   $env:MIN_COVERED  = '9512'           # 可覆盖"绝对覆盖行"下限（同上）
+#   $env:MIN_COVERED  = '10209'          # 可覆盖"绝对覆盖行"下限（同上）
 #   第 45 轮（2026-09-28）：90.4 / 8680 → 92.6 / 8892（可测面 92.82% / 8898 分子 − 6 行余量）。
 #   第 66 轮（2026-10-02）：98.7 / 9477 → 98.8 / 9487（可测面 98.92% / 9493 分子 − 6 行余量）；
 #   第 67 轮（2026-10-03）：MIN_COVERED 9487 → 9490 → 9503（可测面 99.08% / 9509 分子 − 6 行余量；COVERAGE_MIN 保持 98.8）。
 #   第 68 轮（2026-10-03）：MIN_COVERED 9503 → 9503（保持；可测面 99.10% / 9511 分子 − 8 行余量；COVERAGE_MIN 保持 98.8）。
 #   第 69 轮（2026-10-03）：MIN_COVERED 9503 → 9512（可测面 99.20% / 9520 分子 − 8 行余量；COVERAGE_MIN 保持 98.8）。
+#   第 70 轮（2026-10-03）：MIN_COVERED 9512 → 9544（可测面 99.21% / 9552 分子 − 8 行余量；COVERAGE_MIN 保持 98.8）。
+#   第 71 轮（2026-10-04）：MIN_COVERED 9544 → 9865（含 lib/** 改动、分母 9628 → 10153；COVERAGE_MIN 保持 98.8）。docs/50 全量审查整改轮。
+#   第 72 轮（2026-10-04 夜）：MIN_COVERED 9865 → 10025（可测面 98.82% / 10033 分子 − 8 行余量；纯测试侧改动、
+#                            分母 10153 一字未动；COVERAGE_MIN 保持 98.8）。全功能点用例库 + release 守护锁轮。
+#   第 73 轮（2026-10-05）：MIN_COVERED 10025 保持（可测面 98.81% / 10035 分子 − 10 行余量；COVERAGE_MIN 保持 98.8）。
+#   第 74 轮（2026-10-05）：MIN_COVERED 10025 → 10209（可测面 98.82% / 10217 分子 − 8 行余量；含 lib/** 改动、
+#                            分母 10156 → 10339；COVERAGE_MIN 保持 98.8）。PTT v2 真流式 + 替身边界冒烟防复发轮。
 #   $env:SKIP_COVERAGE = '1'             # 只在排查覆盖率工具本身时用
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
 # ⚠️ 覆盖率阈值是 **ratchet 地板，只升不降，不是目标值**：
@@ -77,8 +85,17 @@ Write-Host "=== 门禁 2/4: 功能层（--exclude-tags perf，顺带产出 cover
 $covFlag = @()
 if ($env:SKIP_COVERAGE -ne '1') { $covFlag = @('--coverage') }
 $funcConc = @()
+# ⚠️ PS 5.1 下原生命令写 stderr（`flutter test` 的启动/环境提示，如
+#    `Flutter failed to delete file …`、构建横幅）会被全局 `$ErrorActionPreference
+#    = 'Stop'` 当成**终止错误**，于是整段门禁在判定之前就中断 —— 连
+#    `[FAIL] 功能层` 与后续 3/4、4/4 步都不打印（2026-10-04 实测）。
+#    局部降为 Continue 只影响这几条原生调用的错误策略，判据（是否
+#    "All tests passed" / 是否 VM 资源耗尽）与 .sh 完全一致。
+$prevEapFunc = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 flutter test --exclude-tags perf @covFlag @funcConc 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
     Tee-Object -Variable out | Select-Object -Last 1
+$ErrorActionPreference = $prevEapFunc
 $joined = ($out -join "`n")
 if ($joined -match "All tests passed") {
     Write-Host "[PASS] 功能层" -ForegroundColor Green
@@ -90,8 +107,10 @@ if ($joined -match "All tests passed") {
         $fail++
     } else {
         $funcConc = @("--concurrency=$retryConc")
+        $ErrorActionPreference = 'Continue'   # 同上：原生 stderr 不得中断门禁
         flutter test --exclude-tags perf @covFlag @funcConc 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
             Tee-Object -Variable out2 | Select-Object -Last 1
+        $ErrorActionPreference = $prevEapFunc
         $joined2 = ($out2 -join "`n")
         if ($joined2 -match "All tests passed") {
             Write-Host "[PASS] 功能层（降并发重跑确认，并发=$retryConc）" -ForegroundColor Green
@@ -111,8 +130,10 @@ if ($joined -match "All tests passed") {
 }
 
 Write-Host "=== 门禁 3/4: 压测层（--tags perf --concurrency=1，必须单并发）===" -ForegroundColor Cyan
+$ErrorActionPreference = 'Continue'   # 同上：原生 stderr 不得中断门禁
 flutter test --tags perf --concurrency=1 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
     Tee-Object -Variable out | Select-Object -Last 1
+$ErrorActionPreference = 'Stop'
 if (($out -join "`n") -match "All tests passed") {
     Write-Host "[PASS] 压测层" -ForegroundColor Green
 } else {
@@ -132,15 +153,22 @@ if (($out -join "`n") -match "All tests passed") {
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
     $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.8' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '9512' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '10209' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。
         Write-Host "[BLOCKED] 覆盖率：找不到 coverage/lcov.info（功能层可能没跑成）" -ForegroundColor Yellow
         $blocked = $true
     } else {
+        # ⚠️ PS 5.1 下原生命令写 stderr（`dart run` 的 "Running build hooks..."）
+        # 会被上方的 `$ErrorActionPreference = 'Stop'` 当成**终止错误**，
+        # 于是第 4 步在 Windows 上**根本没执行到判定**就中断（2026-10-04 实测）。
+        # 局部降为 Continue 只影响这一条原生调用的错误策略，判据与 .sh 完全一致。
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         $out = dart run tool/coverage_report.dart "--gate=$covMin" "--min-covered=$minCov" 2>&1 |
             ForEach-Object { $_ -replace "`r", "`n" }
+        $ErrorActionPreference = $prevEap
         ($out | Select-String -Pattern '全局|可测面|门禁|不可信' | Select-Object -First 6) |
             ForEach-Object { Write-Host "  $_" }
         $joined = ($out -join "`n")
@@ -162,7 +190,10 @@ if ($env:SKIP_COVERAGE -ne '1') {
 
 # ---------- 设备端（可选）：integration_test/ 不在默认门禁内（BUG-045 洞） ----------
 if ($WithDevice) {
-    $devices = (adb devices) | Select-String "device`$"
+    # P2-28：无 adb / 无设备时**默认 BLOCKED**（未执行 ≠ 通过），
+    # 只有显式 $env:ALLOW_DEVICE_SKIP = '1' 才放行跳过 —— 与 gates.sh 同语义。
+    $adbOk = [bool](Get-Command adb -ErrorAction SilentlyContinue)
+    $devices = if ($adbOk) { (adb devices) | Select-String "device`$" } else { $null }
     if ($devices) {
         $dev = ($devices -split "`t")[0]
         Write-Host "=== 门禁: 设备冒烟（app_smoke_test，3 例）on $dev ===" -ForegroundColor Cyan
@@ -181,7 +212,13 @@ if ($WithDevice) {
             Write-Host "[PASS] 设备桥接" -ForegroundColor Green
         } else { Write-Host "[FAIL] 设备桥接" -ForegroundColor Red; $fail++ }
     } else {
-        Write-Host "[SKIP] 设备端门禁：adb devices 为空" -ForegroundColor Yellow
+        if ($env:ALLOW_DEVICE_SKIP -eq '1') {
+            Write-Host "[SKIP] 设备端门禁：无 adb 或无可连设备；ALLOW_DEVICE_SKIP=1 显式放行跳过" -ForegroundColor Yellow
+        } else {
+            Write-Host "[BLOCKED] 设备端门禁：无 adb 或无可连设备 —— 用户明确要求 -WithDevice 却无法执行。" -ForegroundColor Yellow
+            Write-Host "          未执行 ≠ 通过：接上真机/启动模拟器后重跑，或显式 `$env:ALLOW_DEVICE_SKIP='1' 承认「跳过设备层」。" -ForegroundColor Yellow
+            $blocked = $true
+        }
     }
 }
 

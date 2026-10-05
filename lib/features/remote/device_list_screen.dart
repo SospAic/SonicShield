@@ -71,6 +71,15 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     });
   }
 
+  /// 打开扫码配对页，**返回后重新载入**设备列表。
+  ///
+  /// P2-13：本页在 `IndexedStack` 中会被保留，`initState` 只跑一次；扫码成功
+  /// 写盘后返回若不显式 `_load()`，列表会停留在配对前的快照（新设备看不到）。
+  Future<void> _openPairing() async {
+    await context.push('/remote/pair-qr');
+    if (mounted) await _load();
+  }
+
   Future<void> _connect(PairedEndpoint e) async {
     final store = await _store();
     await store.selectEndpoint(e.deviceId);
@@ -117,8 +126,11 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除这台设备？'),
-        content: Text('将移除「${e.displayName}」的配对信息。'
-            '重新连接需要再次扫码配对。'),
+        content: Text('将移除「${e.displayName}」的配对信息，并立即终止它名下的'
+            '在途作业（指令组 / 通话）。重新连接需要再次扫码配对。\n\n'
+            '⚠️ 撤销强度说明（P1-01）：所有控制端共用同一个配对码；'
+            '若该码曾被泄露，仅删除设备不足以阻止伪造发送方。'
+            '需要彻底失效时，请到「扫码配对」页使用「重置配对码」。'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -285,7 +297,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
             tooltip: '扫码配对新设备',
-            onPressed: () => context.push('/remote/pair-qr'),
+            onPressed: _openPairing,
           ),
         ],
       ),
@@ -311,7 +323,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
               ),
               const SizedBox(height: 16),
               FilledButton.icon(
-                onPressed: () => context.push('/remote/pair-qr'),
+                onPressed: _openPairing,
                 icon: const Icon(Icons.qr_code_scanner),
                 label: const Text('扫码配对'),
               ),

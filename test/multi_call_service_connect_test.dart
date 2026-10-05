@@ -180,6 +180,23 @@ void main() {
       expect(constraints['video'], isFalse);
       expect(sent.single.payload['video'], isFalse);
     });
+
+    test('MC-07b ★ addTrack 必须带本地流（BUG-077：多路同连一发即崩同源）',
+        () async {
+      // 与 CS-07b 同一条链：flutter_webrtc Dart 层 `'streamIds': [stream?.id]`
+      // 省略 stream ⇒ `[null]` ⇒ native `nativeAddTrack` 的
+      // `JniHelper.getStringBytes(null)` NPE ⇒ WebRTC `RTC_CHECK(false)` ⇒ SIGABRT。
+      // 多路视频同连走的就是 `MultiCallService.connect` 这条建立路径。
+      final ok = await svc.connect(peer('EP09'), store, video: true);
+      expect(ok, isTrue);
+      final args = rtc.lastArgs('addTrack');
+      expect(args, isNotNull, reason: '必须真的调了 addTrack（否则本地轨没挂上）');
+      final ids = args!['streamIds'] as List;
+      expect(ids.length, 1);
+      expect(ids.first, isNotNull,
+          reason: 'streamIds[0] 为 null ⇒ native addTrack 必崩（BUG-077）');
+      expect(ids.first, 'stream-1');
+    });
   });
 
   // ══════════════════════════ 事件路由 ══════════════════════════

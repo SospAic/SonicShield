@@ -11,21 +11,20 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-10-03 第六十九轮）**：v1.9.0-alpha（`+17`），
-功能层 **2096/2096** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（`_pt/bs3gate.txt`：可测面 **99.21%（9521/9597）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED` **抬至 9512**）；
-机器学习锁 **68/68**（`_pt/bs4_locks.txt`；含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例**）。
-🔴 **本轮产出 = 覆盖率冲刺（第十二轮）**：**新建 `test/bs_gap_closure_test.dart` 5 例**撬开四处第六十八轮复核判「宿主不可达」的落点
-（`remote_screen.dart` 端点开关首开 + 已在线改 broker / `task_editor_screen.dart` 保存任务写库失败提示 / `script_builder_screen.dart` 指令组发送失败回到宿主 / `endpoint_service.dart` 协助注入链）。
-⇒ **可测面 99.10% → 99.21%（+10 行 / 残差 86 → 76）**，比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED` **抬至 9512**（ratchet 只升不降）。
-残差逐行归类见 `_pt/covgap.py` / `_pt/covblocks.py` 输出；**100% 仍不可达**的量化裁决见 `docs/12 §102.5`。
-详见 `docs/12 §102` / `docs/17 §99`。
-**设备层（第十五轮复验全绿）**：真机不在线 ⇒ 启用模拟器 `sonic_test`（API 36 / x86_64）⇒ 集成 **7 文件 22 例** + **AOT 6 例** + **远程命令 9/9（CRUD 8/8）** —— **十五轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69）**同编排全绿，`SCRIPT_EXIT rc=0`。
+**当前状态（2026-10-05 第七十四轮）**：v1.9.0-alpha（`+17`），
+功能层 **2284/2284** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（可测面 **98.82%（10217/10339）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=10209`）；
+机器学习锁 **73/73**（`_pt/bt4_locks.txt`；含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例**；`GEC` 10 例含新增 CI ratchet / 设备层 BLOCKED 一致锁）。
+🔴 **本轮产出 = 对讲机（PTT）v2 全量真流式 + 防复发机制落地（替身边界登记锁 SBL）**（含 `lib/**` 改动）：① PTT v2 流式 —— `ptt.voice` 载荷新增 `seq`/`last`，控制端 `record.startStream` 边录边按 ADTS AAC 帧切分发送（`AdtsChunker` 保证每片覆盖整数个完整帧），端点首片即用 just_audio `ConcatenatingAudioSource` 边收边放、末片收尾，无 `seq` 或未注入 `pttStreamOpener` 回落 v1 整段（回归锁 EP-06 / PB-04 / RC-16）；② 🔴 **防复发机制（直接回答第七十三轮复盘）** —— `test/support/webrtc_stub.dart` 的 `addTrack` **复刻真实拒绝**（`streamIds` 含 null/缺失/空 ⇒ `PlatformException`，合法流才回 sender）+ 新建 `test/substitute_boundary_lock_test.dart`（**SBL 登记制机器锁**：`test/support/*_stub.dart` 集合须与 `_registry` 完全相等，且每个替身须登记「遮蔽的生产文件 / 驱动它的真实链宿主测试 / 真机冒烟功能点」）；③ 本轮含 `lib/**` 改动 ⇒ 可测面分母 10156 → **10339（+183）**、分子 10035 → **10217（+182）**，可测面 **98.82%（10217/10339）**，`MIN_COVERED` 10025 → **10209**（只升不降）。
+⚠️ **BLOCKED**：iOS / macOS 宿主层、DST 时区专项、A10 决策（真机 arm64 矩阵 / 无线真机执行见 `docs/12 §107`）。
+残差逐行归类见 `_pt/covgap.py` / `_pt/covblocks.py` 输出；**100% 仍不可达**的量化裁决见 `docs/12 §104.1`。
+详见 `docs/12 §107` / `docs/17 §104`。
+**设备层（第十六轮复验全绿）**：真机不在线 ⇒ 三机模拟器（API 36 / x86_64，`emulator-5554/5556/5558`）复验 **F-3 开机自启**（`isForeground=true types=0x00000002`）+ **集成 7 文件 22 例** + **AOT 6 例** + **远程命令 9/9（CRUD 8/8）** —— **十六轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69/70）**同编排全绿。
 ✅ **中继加固（`docs/17 §86.2`）继续有效**：本轮宿主锁/门禁作业均自带 `exec 1>>_pt/<轮次>_progress.log` + `trap ... EXIT`，正常写出 `.done`。
 BUG-078 / BUG-079 修复**未回归**。
 **多模拟器裁决**：双机并发 Gradle 不可行 ⇒ **通路分工**形态（`docs/17 §83.2`）。
-**覆盖率：门禁口径（可测面）99.21%（9521/9597）／对外诚实数字（全局）94.41%（9523/10087）**（**+10 行**）——
-双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=9512`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102`）。
-⚠️ 自第三十六轮续四起启用**设备层豁免 490 行**（`background_engine.dart` 454 + `main.dart` 36）⇒ 两个口径**不再相等**；
+**覆盖率：门禁口径（可测面）98.82%（10217/10339）／对外诚实数字（全局）93.88%（10225/10892）**（**本轮含 `lib/**` 改动，分母 10156 → 10339（+183）、分子 10035 → 10217（+182）**）——
+双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=10209`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102` / `§103` / `§104` / `§105` / `§106` / `§107`）。
+⚠️ 自第三十六轮续四起启用**设备层豁免 553 行**（`background_engine.dart` 516 + `main.dart` 37）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
 ① **新建** `test/support/just_audio_stub.dart`（照 `just_audio_platform_interface 4.6.0` 的 `JustAudioPlatform` / `AudioPlayerPlatform` 写；`JustAudioPlatform.instance` 是**静态可写单例** ⇒ `tearDown` 必须**还原原实例**，否则污染同进程其它测试文件；另把该包显式加进 `dev_dependencies` 以过 `depend_on_referenced_packages`）；
@@ -2675,30 +2674,30 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第六十九轮** · 🔴 覆盖率冲刺（第十二轮）—— 新建 `test/bs_gap_closure_test.dart` 5 例撬开四处第六十八轮复核判「宿主不可达」的落点（`remote_screen.dart` 端点开关首开 + 已在线改 broker / `task_editor_screen.dart` 保存任务写库失败提示 / `script_builder_screen.dart` 指令组发送失败回到宿主 / `endpoint_service.dart` 协助注入链）⇒ 可测面 **99.10% → 99.21%（+10 行）**，比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED` **抬至 9512**；产物 `_pt/bs3gate.txt`（宿主）+ `_pt/bs4_locks.txt`（机器锁）+ `_pt/bs5_*`（设备层）；设备层**第十五轮复验全绿**（22 例 + AOT 6 例 + 探针 9/9）
+## ★ 当前口径（**第七十四轮** · 🔴 对讲机（PTT）**v2 全量真流式**（控制端 `record.startStream` 边录边按 ADTS AAC 帧切片发送；端点 just_audio `ConcatenatingAudioSource` 边收边放、末片收尾；无 `seq` 回落 v1）+ 🔴 **防复发机制落地**（`webrtc_stub.addTrack` 复刻真实拒绝 + `test/substitute_boundary_lock_test.dart` 替身边界登记锁 SBL）—— **本轮含 `lib/**` 改动 ⇒ 可测面分母 10156 → 10339（+183）、分子 10035 → 10217（+182）**，可测面 **98.82%（10217/10339）**，`COVERAGE_MIN=98.8` **保持** / `MIN_COVERED` 10025 → **10209**（只升不降）；机器锁 **73/73**；设备层（真机 arm64 矩阵 / 无线真机）见 `docs/12 §107`
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
-> 第四十五轮按纪律回刷；第四十六~六十八轮逐轮回刷为实测值。
+> 第四十五轮按纪律回刷；第四十六~七十轮逐轮回刷为实测值。
 > 第六十轮**自纠**：本块标题曾**停在第五十八轮**（块体已刷到第五十九轮）⇒ 新增 `CCL` 锁盯住。
 
 | 项 | 实测 |
 |---|---|
-| `bash scripts/gates.sh`（**4 步**，干净环境） | **RC=0 全绿**（`_pt/bs3gate.txt`） |
-| 1/4 analyze | `No issues found!`（ran in 10.3s） |
-| 2/4 功能层 | **2096**（全绿；2091 → 2096 = **覆盖率冲刺第十二轮 5 例**） |
+| `bash scripts/gates.sh`（**4 步**，干净环境） | **RC=0 全绿**（`_pt/bt3gate.txt`） |
+| 1/4 analyze | `No issues found!` |
+| 2/4 功能层 | **2284**（全绿） |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 99.21%（9521/9597）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=9512`（**真实进度 +10 行** ⇒ 比率阈值保持、绝对下限抬 9 行） |
-| 全局（对外诚实数字） | **94.41%（9523/10087）** |
-| **设备层** | ✅ **第十五轮复验**（`_pt/bs5_*`）：真机不在线 ⇒ 启用模拟器 `sonic_test`（API 36 / x86_64），端口 `emulator-5554` —— 集成 7 文件 **22 例** + AOT **6 例** + 远程命令 **9/9（CRUD 8/8）**，`SCRIPT_EXIT rc=0` ⇒ **十五轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69）全绿** |
-| 🔴 本轮缺陷 | **未抓修产品缺陷**（纯测试增量 + 文档漂移修复，`lib/**` 一字未动）；第 50/53 轮的 BUG-078 / BUG-079 经后续轮次复验确认**修复未回归** |
-| 🔴 本轮实质产出 | ①🔴 **覆盖率冲刺（第十二轮）5 例**（`lib/**` 一字未动，新建 `test/bs_gap_closure_test.dart`）：**BS-01/BS-02** 端点开关首开 + 已在线改 broker（`remote_screen.dart:138-143 / 326-329`）／**BS-03** 保存任务写库失败提示（`task_editor_screen.dart:1339`）／**BS-04** 指令组发送失败回到宿主（`script_builder_screen.dart:187`）／**BS-05** `RcAssistHost.onCommand` 协助注入链（`endpoint_service.dart:341`）；**可测面 99.10% → 99.21%（+10 行，残差 86 → 76）**，`COVERAGE_MIN` 保持 98.8、`MIN_COVERED` 抬至 9512；②🔴 **逐块重验第六十八轮「三块不可达」裁决** —— 其中四处被证伪、成功撬开（教训：**「复核不可达」也可能判窄，须逐块实测**）；③⚠️ **±1 行覆盖抖动已登记**（`pair_qr_screen.dart:155` 本轮退化 ⇒ 净增 +10 而非 +11）；④🔧 **修掉 `docs/00` 一处既有枚举错位**（`§94 = 第六十三轮` ⇒ 应为第六十一轮，补回 §94/§95/§96 三条） |
-| 反漂移抽查 | 7 落点**逐位含有** `9521/9597` 与 `9523/10087`；`_pt/bg_drift_audit.py` 复跑见 `_pt/bs_drift_audit.txt`（**零命中**） |
-| 机器锁（DGC / GEC / version / SCR） | ✅ **68/68**（`_pt/bs4_locks.txt`，LOCKS_RC=0；`doc_gate_consistency_test.dart` 55 = `DGC` 13 + `BAS` 11 + `BRL` 10 + `MCL` 5 + `CCL` 5 + `RCL` 5 + 🔴 **`SSL` 6**） |
-| 真实进度 | **+10 行**（可测面 9511 → 9521）；功能层 **+5 例**（2091 → 2096），压测持平 **24** |
-| 续作入口 | **`docs/12 §102` / `docs/17 §99`（接力棒 §99.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
+| 4/4 覆盖率 ratchet | **可测面 98.82%（10217/10339）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=10209`（含 `lib/**` 改动 ⇒ 分母 +183、分子 +182） |
+| 全局（对外诚实数字） | **93.88%（10225/10892）** |
+| **设备层** | 见 `docs/12 §107`（真机 arm64 矩阵 + 无线真机执行全功能点用例；未在线者如实登记为**未执行**，不伪造通过） |
+| 🔴 本轮缺陷 | **无新增用户侧缺陷**；第 50/53/73 轮 BUG-078 / BUG-079 / BUG-080 经复验确认**修复未回归**；本轮把「替身吃掉真实契约」这条系统性失效固化成机器锁（SBL） |
+| 🔴 本轮实质产出 | ①🔴 **PTT v2 全量真流式**（`ptt.voice` 增 `seq`/`last`；控制端 `record.startStream` + `AdtsChunker` 边录边切；端点 just_audio `ConcatenatingAudioSource` 边收边放；无 `seq` 回落 v1；回归锁 EP-06 / PB-04 / RC-16）；②🔴 **防复发机制**（`test/support/webrtc_stub.dart` 的 `addTrack` 复刻真实拒绝 + 新建 `test/substitute_boundary_lock_test.dart` SBL 登记制机器锁：替身集合 = `_registry`、每个替身登记「遮蔽的生产文件 / 真实链宿主测试 / 真机冒烟功能点」）；③ `lib/services/ptt_stream_sink.dart` 纯抽象接口（`@visibleForTesting` 注入缝） |
+| 反漂移抽查 | 7 落点**逐位含有** `10217/10339` 与 `10225/10892`；`_pt/bg_drift_audit.py` 复跑（**零命中**） |
+| 机器锁（DGC / GEC / version / SCR） | ✅ **73/73**（LOCKS_RC=0；`doc_gate_consistency_test.dart` 55 = `DGC` 13 + `BAS` 11 + `BRL` 10 + `MCL` 5 + `CCL` 5 + `RCL` 5 + 🔴 **`SSL` 6**；`GEC` 10） |
+| 真实进度 | **可测面 +182 行**（10035 → 10217）；功能层 **2284**、压测 **24** —— 本轮价值在 **PTT 流式化 + 防复发机制（SBL）** |
+| 续作入口 | **`docs/12 §107` / `docs/17 §104`（接力棒 §104.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
 
-**本轮做了什么**（稳态轮模板 §81.3 五步）：①探设备（真机仍不在线）⇒ 宿主门禁**先行**（干净无带载），设备层随后在模拟器上跑**第十二轮复验**（跑完 `adb emu kill`）；②宿主机器锁 **62/62** + 全量门禁 **RC=0**（`_pt/bp3gate.txt`）；③反漂移 7 落点逐位核对（`9493/9597`、`9495/10087`）；④待拍板项继续挂起；⑤记忆层同步 + 战报。**本轮实质产出 = 覆盖率冲刺（第九轮）4 例 ⇒ 可测面 98.81% → 98.92%（+10 行），阈值抬至 98.8 / 9487。**
+**本轮做了什么**：①开工四态（`git status --short` 判四态）；②承接第七十三轮复盘，🔴 **把「替身吃掉真实契约」固化成机器锁** —— `test/support/webrtc_stub.dart` 的 `addTrack` 复刻真实拒绝（`streamIds` 含 null/缺失/空 ⇒ `PlatformException`；合法流才回 sender），新建 `test/substitute_boundary_lock_test.dart`（**SBL 登记制机器锁**：`test/support/*_stub.dart` 集合须与 `_registry` 完全相等；每个替身登记「遮蔽的生产文件（须存在）/ 驱动它的真实链宿主测试（须真 import）/ 真机冒烟功能点（非空）」）；③🔴 **对讲机（PTT）v2 全量真流式** —— `ptt.voice` 载荷新增 `seq`(0..N-1)/`last`(bool)；控制端 `controller_service.dart` 用 `record.startStream` 边录边按 ADTS AAC 帧切分发送（`AdtsChunker` 保证每片覆盖整数个完整帧，`len<7` 为非法防御分支）；端点 `endpoint_service.dart` 首片 seq=0 即用 just_audio `ConcatenatingAudioSource` 边收边放、末片 `last=true` 收尾；无 `seq` 或未注入 `pttStreamOpener` ⇒ **回落 v1 整段**（向后兼容）；`lib/services/ptt_stream_sink.dart` 为纯抽象接口（注入缝，已入 `tool/coverage_report.dart` 白名单）；回归锁 EP-06 / PB-04 / RC-16；④宿主全量门禁 **RC=0**（analyze / 功能层 **2284** / 压测 **24** / ratchet）+ 机器锁 **73/73**；⑤反漂移 7 落点逐位核对（`10217/10339`、`10225/10892`）。**本轮含 `lib/**` 改动 ⇒ 分母 10156 → 10339（+183）、分子 10035 → 10217（+182），`COVERAGE_MIN=98.8` 保持 / `MIN_COVERED` 10025 → 10209。**
 
 **★ 新增长期规则**
 - 🔴 **开工必查工作树**（第六十一轮新增）：`git status --short` 先判**四态**（可续做 / 未完成 / 坏产物 / 无关）。
@@ -2712,6 +2711,11 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 - 🔴 **`RCL` 锁盯「★ 块**尾部**的接力棒指针」**（第六十四轮新增）：`HANDOVER.md` 末尾 `## ★ 当前口径` 活块的
   **行锚点**（`续作入口 … 接力棒 §X`）与**块尾**（`**接力棒**：…§X`）必须指向**同一节**；
   ★ 块自称「以本块为准」⇒ 块尾指针过期会让下一轮照着**旧 §** 读接力棒（`docs/12 §97.3`）。
+- 🔴 **`SBL` 锁盯「替身边界登记」**（第七十四轮新增，直接回答第七十三轮 BUG-080 复盘）：`test/support/*_stub.dart`
+  集合必须与 `test/substitute_boundary_lock_test.dart` 的 `_registry` **完全相等**；每个替身必须登记
+  ① 遮蔽的**生产文件**（须存在）② 驱动它的**真实链宿主测试**（须真 import 该替身）③ 对应的**真机冒烟功能点**（非空）。
+  ⇒ **新增/改名/删除替身 = 必须同步登记**；替身必须**复刻真实插件契约**（如 `webrtc_stub.addTrack`
+  漏传 stream ⇒ 必须拒绝），**严禁「恒回成功」**（否则「漏传契约参数」这类缺陷会像 BUG-080 一样在宿主上永远绿）。
 - 🔴 **`BRL` 锁依赖「最新轮次」真源**：`CHANGELOG.md` **最上面那条** `#### 第N轮` 标题 = 当前轮次。
   ⇒ **每轮必须在 CHANGELOG 顶部先加本轮小节**（否则凡自称「最近一次全绿门禁」的落点会集体判红）。
 - 🔴 **`BRL`/`BAS`/`MCL`/`CCL` 的能力边界相同**：只保证「**文档之间互相一致**」；真源仍是**文本**，
@@ -2731,11 +2735,11 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   多模拟器 = 通路分工（不做双机并发 Gradle）/ 带载门禁作废 / Gradle 超时 ≥ 2700s /
   环境三件套（JAVA_HOME + ANDROID_HOME + WITH_DEVICE）/ 持久化类型位必配迁移 / `MSYS_NO_PATHCONV`。
 
-**未闭环**：① 🟡 真机（MIUI arm64）仍不在线 —— 真机专项（厂商确认框 / 降级链 / BUG-075 扫码流）合并等待设备；
-② 🟡 A10/A12–A15、F-3 保活待拍板、`rotatedPairingCode` 无 UI 入口（用户拍板前不擅自实现）；
-③ 🟡 可测面残差 **76 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减（十二轮 +27/+51/+17/+22/+24/+15/+14/+14/+10/+13/+2/+9）。
+**未闭环**：① 🟡 真机 arm64 专项（厂商确认框 / 降级链 / BUG-075 扫码流）需设备在线方可执行；
+② 🟡 仅剩 **A10**（用户未回复 ⇒ **继续挂起**）；
+③ 🟡 可测面残差 **122 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减。
 
-**接力棒**：`docs/17 §99.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBT*`**）。
+**接力棒**：`docs/17 §104.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBX*`**）。
 
 **历史（第五十三轮，已被超越）**：用户指令「多模拟器全部通路」⇒ 设备功能 22/22 + AOT 6 例 +
 远程命令 9/9（CRUD 8/8）；🔴 **抓修 BUG-079**（DB 迁移 v2→v3 漏补 `occurrences.quiet_exempt`

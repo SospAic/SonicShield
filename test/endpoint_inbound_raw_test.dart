@@ -284,16 +284,42 @@ void main() {
           reason: '离线哨兵不是"解密失败"，不得记成错码噪声');
     });
 
-    test('IR-10 解不开 ⇒ 静默返回（evt 主题**刻意不审计**）', () async {
+    test('IR-10 点名来源解不开 ⇒ 按来源限频审计（P2-22，不再静默）', () async {
+      // ⚠️ 必须用**本轮从未成功过**的来源：同来源若先成功过，会被"最近成功"
+      // 抑制（那正是 IR-20 要验证的）。服务是单例，`_peerEvtOkAt` 跨用例存活。
+      const src = 'IR10CTRL00000000';
       final bad = await RcCodec.deriveKey('WRONGCODE', '$ownId|evt');
-      final wire = await RcCodec.encode(inbound(RcEvt.ack), bad, evtTopic(ctrlId));
+      final wire = await RcCodec.encode(inbound(RcEvt.ack), bad, evtTopic(src));
       final seen = await collect(() async {
-        await svc.debugHandleRaw(evtTopic(ctrlId), wire);
+        await svc.debugHandleRaw(evtTopic(src), wire);
       });
-      expect(seen, isEmpty);
+      expect(seen, isEmpty, reason: '解不开就不得广播给 UI');
+      expect(await countLogs(action: 'decode.fail'), 1,
+          reason: 'P2-22：该来源从未成功 ⇒ 必须留痕（此前是静默 return，'
+              '用户分不清"网络不通 / 对端离线 / 密钥不一致"）');
+
+      // 同来源再来一次（限频窗内）⇒ 不再写第二条。
+      await svc.debugHandleRaw(evtTopic(src), wire);
+      expect(await countLogs(action: 'decode.fail'), 1,
+          reason: '按来源 10s 限频：错误配置会被反复补发，不限频会把审计刷爆');
+    });
+
+    test('IR-20 该来源最近成功过 ⇒ 广播副本噪声不再审计（P2-22 抑制）', () async {
+      const src = 'IR20CTRL00000000';
+      // 先成功一次（合法 ack）⇒ 记下"最近成功"时刻。
+      final ok = inbound(RcEvt.ack, payload: {'ok': true, 'for': 'ir20000000'});
+      await collect(() async {
+        await svc.debugHandleRaw(evtTopic(src), await sealEvt(ok, src));
+      });
+      expect(await countLogs(action: 'decode.fail'), 0, reason: '前提：这次是成功的');
+
+      // 随后一条解不开（模拟"别人那份广播副本"）⇒ 因最近成功过而被抑制。
+      final bad = await RcCodec.deriveKey('WRONGCODE', '$ownId|evt');
+      final wire = await RcCodec.encode(inbound(RcEvt.ack), bad, evtTopic(src));
+      await svc.debugHandleRaw(evtTopic(src), wire);
       expect(await countLogs(action: 'decode.fail'), 0,
-          reason: '广播型事件"每个已配对端点各一份密文"，解不开别人那份是正常现象；'
-              '在这里记会变成每 60s 一条的噪声');
+          reason: '该来源整体链路是通的 ⇒ 期间解不开是正常的广播副本噪声，'
+              '记它会让健康设备每 60s（心跳）写一条，淹掉真正的故障');
     });
 
     test('IR-11 协助会合主题走**独立命名空间**：既不解密也不广播', () async {
@@ -367,6 +393,47 @@ void main() {
           reason: '配对请求是**一次性在线握手**：失败要当场说，'
               '暂存进 outbox 等对端上线再补发毫无意义');
     });
+
+    test('IR-21 ★ 迟到的 ack（超过 UI 窗口）仍完成绑定与落盐（P1-13）', () async {
+      svc.debugSendTo = (ep, msg, st, enqueueOnFail) async => true;
+      final req = inbound(RcCmd.pairRequest, payload: {'deviceId': ctrlId});
+      final salt = KdfSaltStore.newSalt();
+      // 先以极短超时结束 UI 等待（模拟弱网下 8s 内没回音）。
+      final out = await svc.requestPairing(peer, store, req,
+          timeout: const Duration(milliseconds: 40));
+      expect(out.confirmed, isFalse, reason: '超时对 UI 仍是明确结论');
+      expect(salts.saltFor(ctrlId), isNull, reason: '前提：此刻还没收到 ack');
+
+      // ack 在此之后才到达。
+      final ack = inbound(RcEvt.ack,
+          payload: {'ok': true, 'for': req.id, 'kdfsalt': base64Encode(salt)});
+      await svc.debugHandleRaw(evtTopic(ctrlId), await sealEvt(ack, ctrlId));
+
+      expect(salts.saltFor(ctrlId), salt,
+          reason: '★ P1-13 的红灯：旧实现超时后取消订阅，迟到 ack 无人消费 ⇒ '
+              '盐不落盘 ⇒ 双方盐版本不一致（配对显示成功、之后所有回执都解不开）');
+    });
+
+    test('IR-22 乱序/无关 ack 不得完成当前配对（P1-13 / P2-20 反例）', () async {
+      svc.debugSendTo = (ep, msg, st, enqueueOnFail) async => true;
+      final req = inbound(RcCmd.pairRequest, payload: {'deviceId': ctrlId});
+      final salt = KdfSaltStore.newSalt();
+      final fut = svc.requestPairing(peer, store, req,
+          timeout: const Duration(milliseconds: 150));
+
+      // 一条 `for` 指向**别的**命令的回执先到 —— 不得满足本次等待、不得落盐。
+      final stale = inbound(RcEvt.ack, payload: {
+        'ok': true,
+        'for': 'someOtherId01',
+        'kdfsalt': base64Encode(salt),
+      });
+      await svc.debugHandleRaw(evtTopic(ctrlId), await sealEvt(stale, ctrlId));
+      expect(salts.saltFor(ctrlId), isNull,
+          reason: '被"别人的回执"绑定 = 盐版本可能从头就错，且无法察觉');
+
+      final out = await fut;
+      expect(out.confirmed, isFalse, reason: '无关/迟到的 ack 不得让本次配对通过');
+    });
   });
 
   // ═══════════════════════════════════════════════ D · 处理器异常兜底（BUG-051）
@@ -423,6 +490,48 @@ void main() {
           reason: '连审计都失败必须被看见，不能静默吞掉');
       expect(seen, hasLength(1),
           reason: '异常不得外泄出 _handleRaw（外泄会打断 MQTT updates 监听）');
+    });
+  });
+
+  // ═══════════════════════════════════════════════ E · 入站去重（P1-17）
+
+  group('IR-E 入站去重：原子登记（P1-17）', () {
+    test('IR-18 同一 QoS1 密文重复投递 → 副作用只 1 次 + 稳定回执（不再是 decode.fail）',
+        () async {
+      final wire = await sealCmd(inbound(RcCmd.ping));
+      final first = await collect(() async {
+        await svc.debugHandleRaw(cmdTopic(), wire);
+      });
+      final second = await collect(() async {
+        await svc.debugHandleRaw(cmdTopic(), wire);
+      });
+      expect(first, hasLength(1), reason: '首次必须真的执行并广播');
+      expect(second, isEmpty, reason: '重复投递绝不能再执行/广播副作用');
+      // 关键区分度：旧实现把"重复"当成"解密失败"（decode.fail），
+      // 新实现必须回一条稳定 ack（宿主无 broker ⇒ 落为出站丢弃审计）。
+      expect(
+          await countLogs(
+              action: RcEvt.ack, status: 'skipped', contains: '出站消息未发出'),
+          1,
+          reason: '重复的 QoS1 必须重发 ack，否则控制端仍会等到超时');
+      expect(await countLogs(action: 'decode.fail'), 0,
+          reason: '重复 ≠ 解密失败 —— 旧实现会把它记成 decode.fail，误导排查');
+    });
+
+    test('IR-19 并发同 ID 投递 → 广播副作用严格 1 次（查重+预占同同步段）',
+        () async {
+      final wire = await sealCmd(inbound(RcCmd.ping));
+      // 三条同时启动（不 await 前者）⇒ 会在解密 await 处交错；
+      // 旧的"decode 只读查重 / 调用方后写"拆两步下，两条都可能在预占前通过查重。
+      final seen = await collect(() async {
+        await Future.wait([
+          svc.debugHandleRaw(cmdTopic(), wire),
+          svc.debugHandleRaw(cmdTopic(), wire),
+          svc.debugHandleRaw(cmdTopic(), wire),
+        ]);
+      });
+      expect(seen, hasLength(1),
+          reason: '★ 并发重投下副作用必须严格 1 次（P1-17 的核心）');
     });
   });
 }

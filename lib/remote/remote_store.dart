@@ -280,6 +280,23 @@ class RemoteStore {
     return code;
   }
 
+  /// 轮换本机配对码并持久化，返回新码（8 位、无连字符，与 [pairingCode] 同格式）。
+  ///
+  /// ⚠️ **密钥语义（docs/25 P1-10 要求先核对再动）**：入站命令由控制端用
+  /// `deriveKey(本机配对码, '{本机ID}|cmd')` 加密（见 `endpoint_service` 入站解密），
+  /// 因此本机配对码一变，**所有已配对控制器的旧密钥立即失效** —— 它们必须
+  /// **重新扫码**才能再次遥控本机。这正是"重置"的意图（配对码疑似泄露时吊销），
+  /// 所以 UI 必须二次确认并显式告知；出站事件反向派生（用**控制器**的配对码），
+  /// 不受本机码轮换影响，故端点仍能收到旧控制器的回执请求。
+  ///
+  /// 只做落盘，不碰网络：刷新接收侧缓存由
+  /// `RcEndpointService.rotateOwnPairingCode` 负责（否则"扫完即失联"）。
+  Future<String> rotatePairingCode() async {
+    final next = RcCodec.rotatedPairingCode(pairingCode).replaceAll('-', '');
+    await _prefs.setString(_kPairCode, next);
+    return next;
+  }
+
   /// 读取配对表。
   ///
   /// **始终返回可变的新列表**（含空表）。历史上空表返回 `const []`，
@@ -445,16 +462,37 @@ extension RemoteStoreScripts on RemoteStore {
     }
   }
 
-  Future<void> enqueue(String wire, String endpointId) async {
+  /// 队列硬上限（P2-21）：超过时丢弃**最旧**的条目。
+  static const int maxOutboxEntries = 200;
+
+  /// 入队一条待发密文。
+  ///
+  /// [ttlMs]（P1-15）：该条目的新鲜度窗口（毫秒）。> 0 时写入 `expiresAt`
+  /// （`at + ttlMs`），补发路径据此判定"是否还值得补发"；`null`/`0` 表示
+  /// 无 TTL（恒可补发，兼容旧调用与测试）。
+  ///
+  /// 返回**被超限丢弃的条目**（P2-21）：此前是**静默** `removeRange`，
+  /// 于是"队列满了、最旧那条被挤掉"完全不留痕 —— 使用者只看到"命令没执行"。
+  /// 调用方拿到非空列表后**必须**写审计，绝不静默丢命令。
+  Future<List<Map<String, dynamic>>> enqueue(String wire, String endpointId,
+      {int? ttlMs}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
     final list = outbox()
       ..add({
         'id': _newOutboxId(),
         'endpointId': endpointId,
         'wire': wire,
-        'at': DateTime.now().millisecondsSinceEpoch
+        'at': now,
+        if (ttlMs != null && ttlMs > 0) 'expiresAt': now + ttlMs,
       });
-    if (list.length > 200) list.removeRange(0, list.length - 200);
+    final dropped = <Map<String, dynamic>>[];
+    if (list.length > maxOutboxEntries) {
+      final n = list.length - maxOutboxEntries;
+      dropped.addAll(list.take(n));
+      list.removeRange(0, n);
+    }
     await _prefs.setString(RemoteStore._kOutbox, jsonEncode(list));
+    return dropped;
   }
 
   static String _newOutboxId() =>
@@ -506,4 +544,13 @@ extension RemoteStoreScripts on RemoteStore {
 String outboxKeyOf(Map<String, dynamic> m) {
   final id = m['id'];
   return id is String && id.isNotEmpty ? id : '${m['at']}|${m['wire']}';
+}
+
+/// 一条待发命令的新鲜度截止时刻（毫秒）；无 `expiresAt` 返回 null（P1-15）。
+///
+/// 老数据（升级前写入）没有该字段 ⇒ null ⇒ 视为"无 TTL"。这条兼容是刻意的：
+/// 不能因为升级而把历史暂存命令一次性判为过期丢掉。
+int? outboxExpiresAtOf(Map<String, dynamic> m) {
+  final v = m['expiresAt'];
+  return v is num ? v.toInt() : null;
 }

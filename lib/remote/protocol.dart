@@ -54,10 +54,26 @@ class RcMessage {
         'from': from
       };
 
+  /// 解析信封；**空/缺失 ID 一律 fail closed 返回 null**（P2-26）。
+  ///
+  /// ## 为什么空 ID 必须被协议入口拒绝
+  ///
+  /// 旧实现把缺失 ID 静默解析成 `''`，而去重链（[RcCodec.decode] 的
+  /// `msg.id.isNotEmpty &&` 与 `reserveInboundId` 的空串早返回）对空 ID
+  /// **不查重、不预占**。正常发送器（[RcMessage.now]）恒生成 12 位随机 ID，
+  /// 所以这只会命中 malformed / 旧客户端报文 —— 但 QoS1 的**重投**会把同一条
+  /// 空 ID 报文重复投来，而每次都会重新执行播放 / 立即运行 / 指令组等
+  /// **非幂等副作用**（"去重表形同虚设"）。
+  ///
+  /// 因此判据收在唯一的解密入口：拿不到可用去重键，就**当作解不开**丢弃，
+  /// 而不是放进业务链路。对应回归锁：`test/remote_crypto_test.dart` 的
+  /// "空 ID fail closed" 组。
   static RcMessage? tryParse(Map<String, dynamic> j) {
     if (j['v'] != 1 || j['type'] is! String) return null;
+    final id = j['id'];
+    if (id is! String || id.isEmpty) return null;
     return RcMessage(
-      id: j['id'] as String? ?? '',
+      id: id,
       ts: (j['ts'] as num?)?.toInt() ?? 0,
       type: j['type'] as String,
       payload: (j['payload'] as Map?)?.cast<String, dynamic>() ?? const {},
@@ -140,8 +156,13 @@ abstract final class RcCmd {
   /// 终止当前指令组执行（携带 scriptId；'*' 表示终止任意当前执行）。
   static const scriptStop = 'script.stop';
 
-  /// 对讲机（v1 整段模式，参考微信语音；v2 升级流式）：
-  /// ptt.voice {voiceId, durationMs, audioB64(aac, 端到端加密信封内)}
+  /// 对讲机（v2 流式：边录边发，参考 Zello；v1 整段模式向后兼容）：
+  /// - v2 分片：ptt.voice {voiceId, seq(0..N-1), last(bool), fromName,
+  ///   audioB64(ADTS aac 分片，端到端加密信封内) | 省略表示该片无音频}
+  ///   首片 `seq=0` 即让端点**边收边放**；末片 `last=true` 收尾（可无音频，
+  ///   仅作终止信号 —— 取消/停录时也补发一帧 `last=true` 让端点收尾）。
+  /// - v1 整段：ptt.voice {voiceId, durationMs, audioB64}（无 `seq` 字段）。
+  /// 端点判据：payload 含 `seq` **且**已装配流式开缝 ⇒ 走 v2；否则回落 v1。
   static const pttVoice = 'ptt.voice';
 
   /// 视频通话（v1.4，WebRTC + MQTT 信令，docs/16）：
@@ -333,11 +354,41 @@ final class RcCodec {
       if (msg == null) return null;
       final skew = (DateTime.now().millisecondsSinceEpoch - msg.ts).abs();
       if (skew > maxSkewMs) return null; // 重放/时钟漂移保护
-      if (msg.id.isNotEmpty && seenIds.containsKey(msg.id)) return null;
+      // P2-26：能走到这里说明 ID 必非空（tryParse 已拒绝空 ID），故去重恒生效。
+      if (seenIds.containsKey(msg.id)) return null;
       return msg;
     } on Object {
       return null; // 解密失败（密钥不符/篡改）→ 静默丢弃
     }
+  }
+
+  /// 入站去重的**原子登记**（P1-17）：把"查重"与"预占"并进**同一个无 await
+  /// 的同步段**。
+  ///
+  /// ## 为什么不能拆成两步
+  /// 入站链路要**解密之后**才拿得到消息 ID（cmd 主题连发送方都不在主题里）。
+  /// 旧实现把判断拆在 `decode`（只读查重，`:336`）与调用方的 `_rememberSeen`
+  /// （后写）两处，中间隔着 `await` —— 异步 stream 回调并不因前一回调返回
+  /// Future 就天然串行，于是同一条 QoS1 命令在第一次处理完成前重投/并发到达时，
+  /// **两次都能通过查重**，播放/立即运行/指令组等副作用重复执行。
+  ///
+  /// 本函数把两者合进一个同步段：单 isolate 下同步段对同 isolate 的一切重入
+  /// 是原子的（与引擎 `replanning` / `executing` 守卫成立的前提同源）。
+  ///
+  /// 返回 `true` = 首次见到（已预占，可继续执行副作用）；`false` = 重复
+  /// （不得执行任何副作用）。空 ID 不参与去重、恒返回 `true`（协议入口另有
+  /// P2-26 的"拒绝空 ID"把关，这里不把空串污染进去）。
+  static bool reserveInboundId(
+    Map<String, int> seen,
+    String id,
+    int nowMs, {
+    int windowMs = 10 * 60 * 1000,
+  }) {
+    if (id.isEmpty) return true;
+    if (seen.containsKey(id)) return false;
+    seen[id] = nowMs;
+    seen.removeWhere((_, t) => nowMs - t > windowMs);
+    return true;
   }
 
   /// 生成配对码：8 位 Base32（Crockford 风格去易混字符），≈40bit 熵。
@@ -376,6 +427,159 @@ final class RcCodec {
   static String generateDeviceId() =>
       List.generate(16, (_) => '0123456789abcdef'[Random.secure().nextInt(16)])
           .join();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// P2-20：出站命令的送达状态账本（判据与接线分离）
+// ══════════════════════════════════════════════════════════════════════
+//
+// 旧实现 `sendTo` 在 `publishMessage` 之后**立刻 return true**，把
+// "MQTT 客户端受理了"当成"对端执行完了" —— UI 于是把四种语义混为一谈：
+// "写进本地 outbox" / "publish 已受理" / "broker QoS ack" / "端点最终回执"。
+// 这正是"UI 成功语义偏乐观"的根因：弱网下 publish 成功、端点却从没收到。
+//
+// 这里把状态显式分档，并把"关联"（correlation）做实：每条命令以自身
+// [RcMessage.id] 为 requestId，端点回执以 `payload['for'] == requestId` 对齐。
+// 账本为**纯内存、无副作用**，宿主测试可直接穷举"迟到/重放/无关的 ack
+// 不得让任何命令通过"这一反例判据。
+
+/// 一条出站命令的送达状态（P2-20）。
+enum RcDeliveryState {
+  /// 未连接 ⇒ 只写进本地 outbox，等端点上线补发（**尚未离开本机**）。
+  queued,
+
+  /// 已交给 MQTT 客户端发布（**不等** broker QoS ack，更不等端点回执）。
+  published,
+
+  /// 收到端点最终回执且成功（`rc.ack {for, ok: true}`）。
+  acked,
+
+  /// 端点明确回执失败（`ok: false`）。
+  failed,
+
+  /// 超过期限仍无回执（由 [RcDeliveryLedger.expire] 扫描得到）。
+  expired,
+}
+
+/// 出站命令等待端点回执的期限（P2-20）：超时即标记 `expired`，
+/// 让"UI 一直转圈"变成"明确结论"。
+const int rcDeliveryAckTimeoutMs = 30 * 1000;
+
+/// 一条出站命令的送达记录（P2-20）。
+class RcDelivery {
+  const RcDelivery({
+    required this.requestId,
+    required this.targetId,
+    required this.createdAtMs,
+    required this.state,
+    this.expiresAtMs,
+  });
+
+  /// 关联键（correlation）：与端点回执 `payload['for']` 对齐。
+  final String requestId;
+
+  /// 目标端点 deviceId。
+  final String targetId;
+
+  final int createdAtMs;
+
+  /// 等待回执的截止时刻；null = 无期限。
+  final int? expiresAtMs;
+
+  final RcDeliveryState state;
+
+  /// 是否为终态（此后不再被任何回执翻转）。
+  bool get isTerminal =>
+      state == RcDeliveryState.acked ||
+      state == RcDeliveryState.failed ||
+      state == RcDeliveryState.expired;
+
+  RcDelivery copyWith({RcDeliveryState? state}) => RcDelivery(
+        requestId: requestId,
+        targetId: targetId,
+        createdAtMs: createdAtMs,
+        expiresAtMs: expiresAtMs,
+        state: state ?? this.state,
+      );
+}
+
+/// 出站命令的**送达账本**（P2-20）：把"sendTo 返回 true"与"端点最终回执"分开。
+///
+/// * 迟到/重放的 ack（requestId 未知或记录已终态）**不得**让任何命令通过；
+/// * 过期命令被 [expire] 扫成 `expired`，此后 ack 不再翻转它。
+class RcDeliveryLedger {
+  RcDeliveryLedger({this.maxEntries = 256});
+
+  /// 上限：超限淘汰**最旧**一条（内存账本，不参与持久化）。
+  final int maxEntries;
+  final Map<String, RcDelivery> _byId = <String, RcDelivery>{};
+  final List<String> _order = <String>[];
+
+  int get length => _byId.length;
+
+  RcDelivery? stateOf(String requestId) => _byId[requestId];
+
+  /// 登记一次出站。[published] 为 true ⇒ 已 publish；false ⇒ 仅入 outbox。
+  RcDelivery record(
+    String requestId,
+    String targetId, {
+    required bool published,
+    required int nowMs,
+    int? ttlMs,
+  }) {
+    final r = RcDelivery(
+      requestId: requestId,
+      targetId: targetId,
+      createdAtMs: nowMs,
+      expiresAtMs: ttlMs == null || ttlMs <= 0 ? null : nowMs + ttlMs,
+      state: published ? RcDeliveryState.published : RcDeliveryState.queued,
+    );
+    if (_byId.containsKey(requestId)) _order.remove(requestId);
+    _byId[requestId] = r;
+    _order.add(requestId);
+    while (_order.length > maxEntries) {
+      _byId.remove(_order.removeAt(0));
+    }
+    return r;
+  }
+
+  /// 接收一条端点回执：返回**被更新的记录**；以下情况一律返回 `null`
+  /// （迟到/重放/无关的 ack **不得**让新命令通过 —— P2-20 的反例判据）：
+  /// * requestId 未知（从未登记 / 已被淘汰）；
+  /// * 记录已终态（重复 ack）；
+  /// * 记录已过期（即使 `expire` 还没扫到）。
+  RcDelivery? acceptAck(
+    String requestId, {
+    required bool ok,
+    required int nowMs,
+  }) {
+    final cur = _byId[requestId];
+    if (cur == null || cur.isTerminal) return null;
+    if (cur.expiresAtMs != null && nowMs > cur.expiresAtMs!) {
+      final expired = cur.copyWith(state: RcDeliveryState.expired);
+      _byId[requestId] = expired;
+      return expired;
+    }
+    final next = cur.copyWith(
+        state: ok ? RcDeliveryState.acked : RcDeliveryState.failed);
+    _byId[requestId] = next;
+    return next;
+  }
+
+  /// 扫描过期记录，返回本次**新过期**的那些。
+  List<RcDelivery> expire(int nowMs) {
+    final out = <RcDelivery>[];
+    for (final id in _order) {
+      final cur = _byId[id];
+      if (cur == null || cur.isTerminal) continue;
+      if (cur.expiresAtMs != null && nowMs > cur.expiresAtMs!) {
+        final expired = cur.copyWith(state: RcDeliveryState.expired);
+        _byId[id] = expired;
+        out.add(expired);
+      }
+    }
+    return out;
+  }
 }
 
 /// 扫码配对 URI（v1.5）：

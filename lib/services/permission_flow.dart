@@ -17,9 +17,17 @@ Future<bool> isComplianceAccepted() async =>
     (await SharedPreferences.getInstance()).getBool(_kComplianceAccepted) ??
     false;
 
-Future<void> showComplianceGateOnce(BuildContext context, WidgetRef ref) async {
-  if (await isComplianceAccepted()) return;
-  if (!context.mounted) return;
+/// 合规准入闸（P1-02）：返回"用户现在是否已同意"。
+///
+/// 这是**引擎启动的唯一准入层**：首启引导与引擎开关都走这里。
+/// 旧实现里"不同意"只写了一个 `false`，而引擎开关**从不读它**，
+/// 于是用户明确拒签《合规使用须知》后仍能开启自动化 —— 合规门形同虚设。
+///
+/// 与首启引导的区别只是调用方：本函数在"未同意"时**必然弹出**须知
+/// （可重读），返回用户当次的选择；已同意则直接返回 true，不再打扰。
+Future<bool> ensureComplianceAccepted(BuildContext context) async {
+  if (await isComplianceAccepted()) return true;
+  if (!context.mounted) return false;
   final accepted = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -58,15 +66,49 @@ Future<void> showComplianceGateOnce(BuildContext context, WidgetRef ref) async {
     ),
   );
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setBool(_kComplianceAccepted, accepted ?? false);
+  // 只在**明确同意**时写 true；拒绝/关闭一律写 false，准入闸保持关闭。
+  await prefs.setBool(_kComplianceAccepted, accepted == true);
+  return accepted == true;
+}
+
+/// 首次启动引导：未同意才弹一次，已同意直接跳过（不再打扰）。
+Future<void> showComplianceGateOnce(BuildContext context, WidgetRef ref) async {
+  await ensureComplianceAccepted(context);
+}
+
+/// 一站式权限申请的结果（P2-16）。
+///
+/// ⚠️ 为什么需要它：旧实现 `await Permission.notification.request()` **丢弃了
+/// 返回值** —— Android 13+ 用户拒绝通知后，引擎照常"开启"、计划照常排布，
+/// 但后台提醒、设备找回通知与执行结果提示**全都不会出现**，而界面没有任何
+/// 降级说明，用户只会认定"功能坏了"。把两项结果回传给调用方，由调用方在
+/// 用户可操作的位置给出**可执行的**降级提示（去系统设置重开）。
+class PermissionRequestOutcome {
+  const PermissionRequestOutcome({
+    required this.notification,
+    required this.microphone,
+  });
+
+  final PermissionStatus notification;
+  final PermissionStatus microphone;
+
+  /// 通知未授予（含"拒绝"与"永久拒绝"）—— 后台提醒会静默缺失。
+  bool get notificationDenied =>
+      notification.isDenied || notification.isPermanentlyDenied;
+
+  /// 麦克风未授予 —— 守卫/录音取证不可用。
+  bool get microphoneDenied =>
+      microphone.isDenied || microphone.isPermanentlyDenied;
 }
 
 /// 一站式权限申请（开启引擎前调用）。
-Future<void> requestAllPermissions(WidgetRef ref) async {
-  // 通知（Android 13+ / iOS）
-  await Permission.notification.request();
+///
+/// 返回各项权限的**真实结果**（而非静默丢弃）：调用方据此给出降级反馈。
+Future<PermissionRequestOutcome> requestAllPermissions(WidgetRef ref) async {
+  // 通知（Android 13+ / iOS）—— 结果必须回传（P2-16）。
+  final notification = await Permission.notification.request();
   // 麦克风（守卫/取证）
-  await Permission.microphone.request();
+  final microphone = await Permission.microphone.request();
   // 精确闹钟（Android 12+ 特殊权限）
   final exact = await NativeBridge.exactAlarmSupported();
   if (exact) {
@@ -79,6 +121,10 @@ Future<void> requestAllPermissions(WidgetRef ref) async {
   if (!await NativeBridge.isIgnoringBatteryOptimizations()) {
     await NativeBridge.requestIgnoreBatteryOptimizations();
   }
+  return PermissionRequestOutcome(
+    notification: notification,
+    microphone: microphone,
+  );
 }
 
 /// 厂商保活引导：识别品牌并给出操作指引 + 深链跳转。

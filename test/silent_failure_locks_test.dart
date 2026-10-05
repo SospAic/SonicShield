@@ -45,7 +45,13 @@ import 'support/source_text.dart';
 /// | 文件 | 触发场景 |
 /// |---|---|
 /// | `packages/native_bridge/.../AlarmWatchdogReceiver.kt` | 通道B 精确闹钟唤醒引擎被平台拒 |
-/// | `android/app/src/main/kotlin/.../BootReceiver.kt` | Android 15+ 禁止 `BOOT_COMPLETED` 启动 `mediaPlayback`/`dataSync` 型 FGS |
+/// | `android/app/src/main/kotlin/.../BootReceiver.kt` | Android 15+ 禁止 `BOOT_COMPLETED` 启动 `mediaPlayback`/`dataSync` 型 FGS ⇒ 方案① 已改为排精确闹钟（见下） |
+///
+/// **F-3 方案①（第 70 轮）**：`BootReceiver` 不再直接 `startForegroundService`
+/// （Android 12+ 后台启动 FGS 受限、Android 15+ 对 `BOOT_COMPLETED` 直接拒绝），
+/// 改为排一次性精确闹钟、复用既有 `AlarmWatchdogReceiver` 拉起引擎。因此
+/// `SLS-10` 的锚点从 `startForegroundService` 改为 `setExactAndAllowWhileIdle`，
+/// 对应的反面样本 `SLX-90k` 也同步换成"排了闹钟但 catch 静默"的形状。
 ///
 /// Kotlin **不在 `flutter analyze` 范围、宿主测试也不编译 Kotlin**（BUG-074），
 /// 因此只能源码文本锁（与 `android_compat_lock_test.dart` 同法）。锁的是
@@ -85,6 +91,20 @@ void main() {
           'packages/native_bridge/android/src/main/kotlin/com/sonicshield/'
           'native_bridge/SelfHealNotice.kt')
       .readAsStringSync());
+  // P2-33：精确闹钟权限重新授予的自动重排接收器（Kotlin 源码，同上只能文本锁）。
+  final exactGrantKt = stripComments(File(
+          'packages/native_bridge/android/src/main/kotlin/com/sonicshield/'
+          'native_bridge/ExactAlarmPermissionReceiver.kt')
+      .readAsStringSync());
+  // P2-33 的注册载体：接收器必须在清单里声明 action，否则广播永远送不进来。
+  final pluginManifest = File(
+          'packages/native_bridge/android/src/main/AndroidManifest.xml')
+      .readAsStringSync();
+  // P2-16：`device.alert` 原生实现（全屏 intent 闸门 / 音频焦点申请与释放 / 音量还原）。
+  final nativePluginKt = stripComments(File(
+          'packages/native_bridge/android/src/main/kotlin/com/sonicshield/'
+          'native_bridge/NativeBridgePlugin.kt')
+      .readAsStringSync());
 
   // ══════════════════════════════════════════════ 行为锁：F1 守卫采流异常留痕
   group('SLB 行为锁（宿主可实例化）', () {
@@ -123,7 +143,8 @@ void main() {
   });
 
   // ══════════════════════════════════════════════ 源码锁 + 非恒真证明
-  _sourceLocks(engineSrc, tasksSrc, watchdogKt, bootKt, selfHealKt);
+  _sourceLocks(engineSrc, tasksSrc, watchdogKt, bootKt, selfHealKt,
+      exactGrantKt, pluginManifest, nativePluginKt);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -238,10 +259,13 @@ String? judgeOnGuardStreamError(String src) {
 }
 
 /// [F4] `pushExactAlarms`：异常 → failed；回执 null → skipped。不得空 catch。
+///
+/// [P1-04 加强] 除 null/异常两态外，还必须**解析结构化结果**并把降级回投给 UI：
+/// 旧实现把"权限被拒返回 `0`"当成普通成功，界面照常显示运行中，系统级唤醒却没排上。
 String? judgePushExactAlarms(String src) {
   final i = src.indexOf('Future<void> pushExactAlarms');
   if (i < 0) return '锚点丢失：pushExactAlarms 被删除';
-  final body = src.substring(i, (i + 1000).clamp(0, src.length));
+  final body = src.substring(i, (i + 1400).clamp(0, src.length));
   if (!body.contains("invokeMethod('setExactAlarms'")) {
     return '锚点丢失：setExactAlarms 调用不在函数体内';
   }
@@ -251,6 +275,14 @@ String? judgePushExactAlarms(String src) {
   if (!body.contains("status: 'skipped'") ||
       !body.contains('进程被杀后不再补触发')) {
     return 'null 回执分支没有写 skipped 审计并说明后果';
+  }
+  if (!body.contains('AlarmScheduleResult.fromRaw') ||
+      !body.contains('res.degraded')) {
+    return '★ P1-04：没有解析结构化排布结果 —— 权限被拒/部分排布会被当成成功'
+        '（界面显示运行中，系统级唤醒却没排上）';
+  }
+  if (!body.contains('alarmDiag =')) {
+    return '★ P1-04：降级原因没有回投到 alarmDiag（UI 拿不到"为什么/怎么办"）';
   }
   if (!body.contains('on Object catch (e)') ||
       !body.contains("status: 'failed'") ||
@@ -273,6 +305,63 @@ String? judgeClearAllAlarms(String src) {
   }
   if (!body.contains('残留过期闹钟')) {
     return '审计文案没有说明后果（"可能残留过期闹钟"是定位泄漏的唯一线索）';
+  }
+  return null;
+}
+
+/// [P1-03] `service.on('stop')` 必须**对称撤销**原生精确闹钟。
+///
+/// 旧实现停止时只取消 Dart 层守卫/播放器就 `stopSelf()`，`AlarmManager` 里
+/// 排定的闹钟仍在 ⇒ 到点由 `AlarmWatchdogReceiver` 重新拉起前台服务并执行
+/// 到期任务，用户以为"已关闭"、系统却再次运行（docs/50 §4.1 P1-03）。
+/// 判定：`stop` 监听器体内、`stopSelf()` **之前**必须出现 `await clearAllAlarms();`。
+String? judgeStopClearsAlarms(String src) {
+  final i = src.indexOf("service.on('stop')");
+  if (i < 0) return '锚点丢失：stop 通道被删除';
+  final scope = src.substring(i, (i + 3200).clamp(0, src.length));
+  final stopSelf = scope.indexOf('service.stopSelf()');
+  if (stopSelf < 0) return '锚点丢失：stop 监听器里不再 stopSelf';
+  if (!scope.substring(0, stopSelf).contains('await clearAllAlarms();')) {
+    return '★ 停止时只停 Dart 层守卫/播放器、没有 clearAllAlarms() ⇒ '
+        'AlarmManager 里排定的闹钟仍在，到点由看门狗重新拉起引擎并执行任务 —— '
+        '用户以为"已关闭"，系统却再次运行（P1-03）';
+  }
+  return null;
+}
+
+/// [P2-15] 引擎 stop 必须**对称撤下**麦克风前台服务通行证。
+///
+/// `MicGuardService` 是独立 sticky service，Dashboard 关闭引擎走 `mgr.stop()`；
+/// 若停止路径不调 `stopMicService()`，原生 FGS 与常驻通知会残留（dumpsys 可见），
+/// 与"引擎已关"的界面语义不一致。判定：`stop` 监听器体内、`stopSelf()` 之前
+/// 必须出现 `invokeMethod('stopMicService')`。
+String? judgeStopStopsMicService(String src) {
+  final i = src.indexOf("service.on('stop')");
+  if (i < 0) return '锚点丢失：stop 通道被删除';
+  final scope = src.substring(i, (i + 3200).clamp(0, src.length));
+  final stopSelf = scope.indexOf('service.stopSelf()');
+  if (stopSelf < 0) return '锚点丢失：stop 监听器里不再 stopSelf';
+  if (!scope.substring(0, stopSelf).contains("invokeMethod('stopMicService')")) {
+    return '★ 停止路径没有 stopMicService() ⇒ 引擎已关但麦克风前台服务与'
+        '常驻通知残留，dumpsys 与界面不一致（P2-15）';
+  }
+  return null;
+}
+
+/// [P1-03] 看门狗接收器在拉起引擎前必须核对 `should_run` 与启用代次。
+///
+/// Dart 侧 `stop` 的 `clearAllAlarms()` 只能清掉**已知**闹钟；系统级残留 /
+/// "关闭→重启"竞态仍可能送进一条旧闹钟广播。接收器是最后一道闸：只有
+/// `should_run==true` 且闹钟携带的代次等于当前持久化代次时，才允许 `startForegroundService`。
+String? judgeWatchdogGenerationGate(String src) {
+  final i = src.indexOf('class AlarmWatchdogReceiver');
+  if (i < 0) return '锚点丢失：AlarmWatchdogReceiver 被删除';
+  final scope = src.substring(i, (i + 1600).clamp(0, src.length));
+  if (!scope.contains('KEY_SHOULD_RUN')) {
+    return '★ 接收器没有核对 should_run ⇒ 引擎已关闭时残留闹钟仍会拉起（P1-03）';
+  }
+  if (!scope.contains('EXTRA_GENERATION') || !scope.contains('KEY_GENERATION')) {
+    return '★ 接收器没有核对启用代次 ⇒ "关闭→重启"竞态下旧闹钟会复活引擎（P1-03）';
   }
   return null;
 }
@@ -338,21 +427,26 @@ String? judgeOpenEditorSnack(String src) {
   return null;
 }
 
-/// [N-3 / F-3] 自恢复路径的 `catch` **不得静默**：拉起前台服务失败时，
+/// [N-3 / F-3] 自恢复路径的 `catch` **不得静默**：拉起引擎失败时，
 /// 除 logcat 外必须经 `SelfHealNotice.failed(...)` 留一条用户可见痕迹。
 ///
 /// 适用两个文件（形状同构，故共用一个判定器）：
-/// - `packages/native_bridge/.../AlarmWatchdogReceiver.kt`（N-3，看门狗闹钟）
-/// - `android/app/src/main/kotlin/.../BootReceiver.kt`（F-3，开机自启）
-String? judgeSelfHealNotSilent(String src) {
-  final i = src.indexOf('startForegroundService');
+/// - `packages/native_bridge/.../AlarmWatchdogReceiver.kt`（N-3 看门狗闹钟）
+///   → 锚点是 `startForegroundService`（它自己直接拉起前台服务）。
+/// - `android/app/src/main/kotlin/.../BootReceiver.kt`（F-3 开机自启）
+///   → 锚点是 `setExactAndAllowWhileIdle`：方案① 已把开机自启从"直接
+///   startForegroundService"改成"排一次性精确闹钟，复用看门狗接收器"，
+///   故启动符号随之改变（[anchor] 参数化）。
+String? judgeSelfHealNotSilent(String src,
+    {String anchor = 'startForegroundService'}) {
+  final i = src.indexOf(anchor);
   if (i < 0) {
-    return '锚点丢失：不再有 startForegroundService —— 自恢复路径被删除或改名，'
+    return '锚点丢失：不再有 $anchor —— 自恢复路径被删除或改名，'
         '本锁会因此空转';
   }
   final c = src.indexOf('catch (e: Exception)', i);
   if (c < 0) {
-    return '锚点丢失：启动调用之后找不到 `catch (e: Exception)`。'
+    return '锚点丢失：启动调用（$anchor）之后找不到 `catch (e: Exception)`。'
         '若异常不再被捕获，接收器会直接崩（比静默更糟）';
   }
   final body = src.substring(c, (c + 600).clamp(0, src.length));
@@ -363,6 +457,78 @@ String? judgeSelfHealNotSilent(String src) {
   if (!body.contains('Log.w(')) {
     return 'catch 里丢了 logcat 留痕（开发者排查线索也没了）；'
         '通知在 Android 13+ 可能被用户拒绝而静默丢弃，两条留痕缺一不可';
+  }
+  return null;
+}
+
+/// [P2-33] 精确闹钟权限**重新授予**后的自动重排接收器必须成立且不滥用 FGS。
+///
+/// 用户在系统设置里撤销「闹钟和提醒」授权时，系统会取消该应用所有未来精确闹钟；
+/// 再次授予后已排闹钟**不会自动恢复** —— 引擎若仍在跑就长期处于"计划看着有、
+/// 系统级唤醒为空集"的降级态。旧实现没有处理
+/// `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED`。
+///
+/// ⚠️ 本锁只保证**代码形状**；`撤销 → 重授予 → 不手动重开即恢复排布` 的
+/// 真实行为**只能靠 API 31+ 设备验证**（宿主门禁不构建 Android ⇒ BLOCKED）。
+String? judgeExactRegrantReceiver(String kotlin, String manifest) {
+  final i = kotlin.indexOf('class ExactAlarmPermissionReceiver');
+  if (i < 0) return '锚点丢失：ExactAlarmPermissionReceiver 被删除';
+  final scope = kotlin.substring(i);
+  if (!scope.contains('ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED')) {
+    return '未按权限恢复 action 过滤（系统仅在授予时派发该 action）';
+  }
+  if (!scope.contains('KEY_SHOULD_RUN')) {
+    return '★ 未核对 should_run ⇒ 用户关着引擎时，一次系统级重授权也会拉起前台服务（P1-03 同族）';
+  }
+  if (!scope.contains('EXTRA_GENERATION') || !scope.contains('KEY_GENERATION')) {
+    return '★ 未携带当前持久化代次 ⇒ 看门狗会把它当旧代次闹钟 no-op，重排静默失效';
+  }
+  if (!scope.contains('AlarmWatchdogReceiver')) {
+    return '未复用看门狗一次性闹钟踢醒（Android 12+ 后台直接 startForegroundService 会被拒）';
+  }
+  if (!scope.contains('SelfHealNotice.failed(')) {
+    return '★ 排程失败只写 logcat ⇒ 用户与审计看不见（N-3 / F-3 同族静默）';
+  }
+  if (!manifest.contains('ExactAlarmPermissionReceiver')) {
+    return '★ 清单未注册接收器 ⇒ 系统广播永远送不进来，重授权自动重排形同不存在';
+  }
+  if (!manifest.contains('SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED')) {
+    return '★ 清单未声明该 action 的 intent-filter ⇒ 接收器收不到广播';
+  }
+  return null;
+}
+
+/// [P2-16] `device.alert` 原生实现必须"全屏降级可见、音频副作用可还原"。
+///
+/// 旧实现把媒体音量顶到最大后**从不还原**，也从不申请/释放音频焦点；且无论
+/// API 34+ 是否允许都硬塞 `setFullScreenIntent` —— 系统不兑现时只剩一条普通通知，
+/// 用户却以为"设备找回"已全屏。本锁核对三件事：
+/// 1. 全屏 intent 必须过 `canUseFullScreenIntent(ctx)` 闸门（不满足时退回高优先级横幅）；
+/// 2. 必须**申请**音频焦点（否则打断别人播放却不受焦点规则协调）；
+/// 3. 必须**释放**焦点并还原原音量（否则"临时最大音量"变成永久副作用）。
+///
+/// ⚠️ 只锁**代码形状**；`API 34+ 拒绝全屏、无媒体播放时提示音与音量还原`的真实
+/// 行为只能靠真机验证（宿主门禁不构建 Android ⇒ BLOCKED）。
+String? judgeDeviceAlertDegrade(String kotlin) {
+  final i = kotlin.indexOf('private fun deviceAlert(');
+  if (i < 0) return '锚点丢失：deviceAlert 被删除';
+  final end = kotlin.indexOf('private fun canUseFullScreenIntent', i);
+  final body = end > i ? kotlin.substring(i, end) : kotlin.substring(i);
+  if (!body.contains('setFullScreenIntent(')) {
+    return '锚点丢失：deviceAlert 里找不到 setFullScreenIntent 调用';
+  }
+  if (!body.contains('canUseFullScreenIntent(ctx)')) {
+    return '★ setFullScreenIntent 未过 canUseFullScreenIntent 闸门 ⇒ API 34+ '
+        '系统不兑现时仍宣称全屏，用户以为已生效（P2-16 旧缺陷）';
+  }
+  if (!body.contains('requestAudioFocus(')) {
+    return '★ 未申请音频焦点 ⇒ 打断用户正在播放的音频却不受焦点规则协调（P2-16）';
+  }
+  if (!body.contains('abandonAudioFocus(')) {
+    return '★ 申请了焦点却从不释放 ⇒ 其它应用无法按焦点规则恢复播放（P2-16）';
+  }
+  if (!body.contains('origMusicVolume') || !body.contains('setStreamVolume(')) {
+    return '★ 把媒体音量顶到最大后未还原 ⇒ 用户音量被永久改动（P2-16 旧缺陷）';
   }
   return null;
 }
@@ -391,7 +557,8 @@ String? judgeSelfHealNoticeReal(String src) {
 // ══════════════════════════════════════════════════════════════════════════
 
 void _sourceLocks(String engineSrc, String tasksSrc, String watchdogKt,
-    String bootKt, String selfHealKt) {
+    String bootKt, String selfHealKt, String exactGrantKt, String pluginManifest,
+    String nativePluginKt) {
   group('SLS 源码文本锁（引擎隔离 / 结构不可达处）', () {
     test('SLS-01 [F2] guard.errors 订阅接线与生命周期对称取消', () {
       final v = judgeGuardErrWiring(engineSrc);
@@ -438,13 +605,38 @@ void _sourceLocks(String engineSrc, String tasksSrc, String watchdogKt,
       expect(v, isNull, reason: '$v');
     });
 
-    test('SLS-10 [F-3] BootReceiver 开机自启被拒 → SelfHealNotice 留痕', () {
-      final v = judgeSelfHealNotSilent(bootKt);
+    test('SLS-10 [F-3] BootReceiver 开机自启排程失败 → SelfHealNotice 留痕', () {
+      final v = judgeSelfHealNotSilent(bootKt, anchor: 'setExactAndAllowWhileIdle');
       expect(v, isNull, reason: '$v');
     });
 
     test('SLS-11 [N-3/F-3] SelfHealNotice 必须真的发通知（不是换个地方静默）', () {
       final v = judgeSelfHealNoticeReal(selfHealKt);
+      expect(v, isNull, reason: '$v');
+    });
+
+    test('SLS-12 [P1-03] 引擎 stop 必须对称撤销原生精确闹钟', () {
+      final v = judgeStopClearsAlarms(engineSrc);
+      expect(v, isNull, reason: '$v');
+    });
+
+    test('SLS-13 [P1-03] 看门狗接收器拉起前必须核对 should_run 与启用代次', () {
+      final v = judgeWatchdogGenerationGate(watchdogKt);
+      expect(v, isNull, reason: '$v');
+    });
+
+    test('SLS-14 [P2-15] 引擎 stop 必须对称撤下麦克风前台服务通行证', () {
+      final v = judgeStopStopsMicService(engineSrc);
+      expect(v, isNull, reason: '$v');
+    });
+
+    test('SLS-15 [P2-33] 精确闹钟重授权接收器：核对 should_run/代次 + 清单注册', () {
+      final v = judgeExactRegrantReceiver(exactGrantKt, pluginManifest);
+      expect(v, isNull, reason: '$v');
+    });
+
+    test('SLS-16 [P2-16] device.alert 原生：全屏过闸门 + 音频焦点申请/释放 + 音量还原', () {
+      final v = judgeDeviceAlertDegrade(nativePluginKt);
       expect(v, isNull, reason: '$v');
     });
   });
@@ -576,21 +768,26 @@ void _sourceLocks(String engineSrc, String tasksSrc, String watchdogKt,
               '不是"锚点丢失"）—— 否则锁对真实回归无效');
     });
 
-    test('SLX-90k [F-3] 开机自启只写 logcat（修复前旧形状）→ 判红', () {
+    test('SLX-90k [F-3] 开机自启排程只写 logcat（方案① 前的静默形状）→ 判红', () {
       const old = '''
         try {
-            val svc = Intent(context, BackgroundService::class.java)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                context.startForegroundService(svc)
+            val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val at = System.currentTimeMillis() + 10_000L
+            val pi = PendingIntent.getBroadcast(context, 0x0B07, intent, flags)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
             } else {
-                context.startService(svc)
+                am.setExact(AlarmManager.RTC_WAKEUP, at, pi)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "boot restart blocked: \${e.message}")
+            Log.w(TAG, "boot kick blocked: \${e.message}")
         }
 ''';
-      expect(judgeSelfHealNotSilent(old), isNotNull,
-          reason: '★ F-3 修复前的形状必须被判红');
+      expect(
+          judgeSelfHealNotSilent(old, anchor: 'setExactAndAllowWhileIdle'), isNotNull,
+          reason: '★ F-3 方案① 若只搬了机制（startForegroundService → 精确闹钟）'
+              '却把 catch 又写成静默，锁必须判红 —— 否则"换了个地方静默"'
+              '会被当成已修复');
     });
 
     test('SLX-90l [N-3/F-3] 只 Log.w 的 SelfHealNotice 空壳 → 判红', () {
@@ -603,6 +800,121 @@ void _sourceLocks(String engineSrc, String tasksSrc, String watchdogKt,
 ''';
       expect(judgeSelfHealNoticeReal(stub), isNotNull,
           reason: '★ 把静默换个函数名不算修复：必须真的发通知，否则锁是假的');
+    });
+
+    test('SLX-90m [P1-03] stop 只停守卫/播放器、不清理闹钟（旧形状）→ 判红', () {
+      const old = '''
+        service.on('stop').listen((_) async {
+          await guard.stop();
+          await playback.stop();
+          await broadcast(running: false);
+          await service.stopSelf();
+        });
+''';
+      expect(judgeStopClearsAlarms(old), isNotNull,
+          reason: '★ 停止不清闹钟的旧形状必须判红 —— 否则"引擎关不掉"回归无人拦');
+    });
+
+    test('SLX-90n [P1-03] 接收器无 should_run/代次校验（旧形状）→ 判红', () {
+      const old = '''
+        class AlarmWatchdogReceiver : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                context.startForegroundService(svc)
+            }
+        }
+''';
+      expect(judgeWatchdogGenerationGate(old), isNotNull,
+          reason: '★ 无闸门校验的旧形状必须判红，否则残留闹钟复活引擎无人拦');
+    });
+
+    test('SLX-90o [P1-04] 只看 null/异常、把 0 当成功（旧形状）→ 判红', () {
+      const old = '''
+        Future<void> pushExactAlarms(List<int> times) async {
+          try {
+            final n = await native.invokeMethod('setExactAlarms', {'times': times});
+            if (n == null) {
+              await logs.append(status: 'skipped', message: '进程被杀后不再补触发（仅通道A生效）');
+            }
+          } on Object catch (e) {
+            await logs.append(status: 'failed', message: '精确闹钟排布失败（仅通道A生效）：\$e');
+          }
+        }
+''';
+      expect(judgePushExactAlarms(old), isNotNull,
+          reason: '★ P1-04 修复前的形状必须被判红：权限被拒返回 0 会被当成成功，'
+              '否则"精确闹钟没排上却显示运行中"回归无人拦');
+    });
+
+    test('SLX-90p [P2-15] stop 清了闹钟但没撤麦克风 FGS（半修复）→ 判红', () {
+      const old = '''
+        service.on('stop').listen((_) async {
+          await guard.stop();
+          await playback.stop();
+          await clearAllAlarms();
+          await broadcast(running: false);
+          await service.stopSelf();
+        });
+''';
+      expect(judgeStopStopsMicService(old), isNotNull,
+          reason: '★ 只清闹钟不撤麦克风通行证 = 原生 FGS/通知残留，锁必须判红');
+    });
+
+    test('SLX-90q [P2-33] 重授权接收器无闸门 / 清单未注册 → 判红', () {
+      // (a) 直接拉起前台服务、不核对 should_run/代次（旧形状）。
+      const noGate = '''
+        class ExactAlarmPermissionReceiver : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action != ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED) return
+                context.startForegroundService(Intent(context, Svc::class.java))
+            }
+        }
+''';
+      expect(judgeExactRegrantReceiver(noGate, ''), isNotNull,
+          reason: '★ 无闸门的旧形状必须判红，否则"用户关着引擎却被重授权拉起"无人拦');
+      // (b) Kotlin 齐全但清单未注册 ⇒ 广播送不进来（证明清单检查非恒真）。
+      const goodKt = '''
+        class ExactAlarmPermissionReceiver : BroadcastReceiver() {
+            KEY_SHOULD_RUN
+            EXTRA_GENERATION KEY_GENERATION
+            AlarmWatchdogReceiver
+            SelfHealNotice.failed(ctx, "x")
+            ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED
+        }
+''';
+      expect(judgeExactRegrantReceiver(goodKt, ''), isNotNull,
+          reason: '★ 清单未注册时判绿 = 清单检查恒真，锁是假的');
+    });
+
+    test('SLX-90r [P2-16] 旧 deviceAlert：全屏不过闸门 / 无音频焦点 / 不还原音量 → 判红',
+        () {
+      // (a) 旧形状：硬塞全屏 intent，音量顶最大后不还原，也不碰音频焦点。
+      const old = '''
+        private fun deviceAlert(ctx: Context, message: String): Boolean {
+            val b = Notification.Builder(ctx, "ch")
+            if (pi != null) b.setFullScreenIntent(pi, true)
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.setStreamVolume(AudioManager.STREAM_MUSIC,
+                am.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0)
+            return true
+        }
+''';
+      expect(judgeDeviceAlertDegrade(old), isNotNull,
+          reason: '★ P2-16 修复前的形状必须判红：全屏不受闸门、音量被永久改动、'
+              '打断他人播放却不受焦点规则协调');
+
+      // (b) 半修复：全屏过了闸门，也申请/释放了焦点，却仍不还原音量。
+      //     证明"音量还原"这条判定不是恒真（否则会漏掉真实的音量副作用回归）。
+      const noRestore = '''
+        private fun deviceAlert(ctx: Context, message: String): Boolean {
+            if (pi != null && canUseFullScreenIntent(ctx)) b.setFullScreenIntent(pi, true)
+            am.requestAudioFocus(null, AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            am.abandonAudioFocus(null)
+            return true
+        }
+''';
+      expect(judgeDeviceAlertDegrade(noRestore), isNotNull,
+          reason: '★ 申请了焦点却不还原音量必须判红，否则"音量还原"检查恒真');
     });
   });
 }

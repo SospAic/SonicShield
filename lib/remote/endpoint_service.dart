@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:battery_plus/battery_plus.dart';
 import 'package:geolocator/geolocator.dart';
@@ -25,6 +26,7 @@ import '../domain/scheduling/schedule_engine.dart';
 import '../services/background_service_manager.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
+import '../services/ptt_stream_sink.dart';
 import 'call_lifecycle.dart';
 import 'call_service.dart';
 import 'assist.dart';
@@ -62,6 +64,30 @@ class RcEndpointService {
   bool _running = false;
   final _seen = <String, int>{};
   Timer? _hb;
+
+  // ---------------- P1-10/11/12：连接生命周期 ----------------
+  //
+  // 旧实现把"重连"三处分散：MQTT 库的 `autoReconnect`（不可观测/不可控）、
+  // `_scheduleReconnect` 的固定 10s `Timer`（引用不保存 ⇒ 无法取消），
+  // 以及心跳 `Timer`（断连时自毁且**不再重建**）。三者互不知情 ⇒ 现场表现为
+  // "端点在跑，但断一次网后再也不恢复"（P1-11 根因）。
+  //
+  // 现在收敛为**唯一 owner**：本服务自己持有一个可取消的重连 `Timer` +
+  // 指数退避（Full Jitter）+ 重试预算；每次连接领取一个**代次**（generation），
+  // 心跳与重连回调都按代次判定 —— 旧代次的迟到回调一律 no-op，杜绝
+  // "两次连接同时驱动一套心跳"。
+
+  /// 唯一重连定时器（可取消；`stop()` / 新一次 `_connect` 都会取消它）。
+  Timer? _retry;
+
+  /// 退避策略（指数退避 + Full Jitter + 重试预算）。生产用默认真源。
+  RcReconnectPolicy _reconnect = RcReconnectPolicy();
+
+  /// 连接代次：每次 `_connect` 自增；回调据此判定自己是否仍是最新一代。
+  int _connGen = 0;
+
+  /// 当前连接阶段快照（UI 据此区分"已启用"与"在线"）。
+  RcConnState _conn = const RcConnState(RcConnPhase.stopped);
 
   /// Q10：各发送方最近**被放行**命令的时间戳（滑窗限流的内存表）。
   ///
@@ -141,6 +167,26 @@ class RcEndpointService {
   /// 复用同一个限频器类：它的行为是通用的「按 key 开窗」）。
   final DecodeFailThrottle _rejectFlood = DecodeFailThrottle();
 
+  /// 点名 peer evt 解密失败审计的限频器（P2-22）：按**来源 deviceId** 限频。
+  ///
+  /// 与 [_decodeFail]（按主题）**分开**：evt 主题里"每条广播各一份密文"共用
+  /// 同一个主题串，若复用同一限频器，一个来源的噪声会把另一个来源的故障藏起来。
+  final DecodeFailThrottle _peerEvtFail = DecodeFailThrottle();
+
+  /// 每个来源**最近一次成功解密 evt** 的时刻（P2-22 噪声抑制）。
+  final Map<String, int> _peerEvtOkAt = <String, int>{};
+
+  /// 进行中的配对请求登记（P1-13）：requestId → 端点 deviceId + UI 等待者。
+  ///
+  /// 为什么需要它：8 秒 UI 超时后旧实现取消订阅，迟到的 ack 再也无人消费 ⇒
+  /// `kdfsalt` 不落盘 ⇒ 双方盐版本不一致，表现为"配对显示成功、之后所有回执
+  /// 与信令都解不开"。登记把"等待"与"绑定"解耦：ack 到达时（**无论迟到多久**）
+  /// 都由 [_tapAck] 完成绑定。
+  final Map<String, _PendingPair> _pendingPairs = <String, _PendingPair>{};
+
+  /// 出站命令送达账本（P2-20）：区分"入 outbox / 已 publish / 端点最终回执"。
+  final RcDeliveryLedger _delivery = RcDeliveryLedger();
+
   /// 解密成功的消息广播（控制器 UI 消费回执：rc.tasks/rc.status/rc.pong…）。
   final _rcEvtCtrl = StreamController<Map<String, dynamic>>.broadcast();
   Stream<Map<String, dynamic>> get events => _rcEvtCtrl.stream;
@@ -148,6 +194,24 @@ class RcEndpointService {
   // 能力注入（由 UI/引擎层提供；端点不直接依赖播放单例）。
   Future<bool> Function(String path, double volume, int durationMs,
       {bool loop})? playHandler;
+
+  /// 流式对讲会话的开缝（v2，装配期由 `main.dart` 注入 `PlaybackService`）。
+  ///
+  /// 为 `null`（或来报不含 `seq`）时，`ptt.voice` 一律走 v1 整段路径
+  /// [playHandler] —— 保证与旧对端的向后兼容，也让"没装配播放能力"的失败
+  /// 分支继续如实回执。
+  PttStreamSink Function()? pttStreamOpener;
+
+  /// 流式对讲会话表：voiceId → 会话（v2）。
+  final Map<String, _PttStreamSession> _pttStreams = <String, _PttStreamSession>{};
+
+  /// 末片到达后，分片文件与播放会话的保留时长。
+  ///
+  /// 对讲是**一次性**语音：末片收尾后，播放器还要把已在队列里的分片放完，
+  /// 因此不能立刻删文件。保留一段足够长的窗口再清理（同时兜底"末片丢失"
+  /// 造成的会话泄漏）。抽成可写静态字段是为了让宿主用例把它压到 0，
+  /// 不必真等 90 秒。
+  static Duration pttStreamKeepAlive = const Duration(seconds: 90);
   Future<String?> Function(String presetCategory)? resolvePresetHandler;
   Future<void> Function(String text, double volume)? ttsHandler;
   Future<void> Function(List<int> pattern)? vibrateHandler;
@@ -224,6 +288,16 @@ class RcEndpointService {
     _ownCode = code;
   }
 
+  /// 本机配对码轮换后**就地刷新接收侧密钥输入**（docs/25 P1-10）。
+  ///
+  /// 为什么不能只落盘：`_ownCode` 是接收侧解密密钥的输入之一，入站处理器
+  /// **每条消息**都重新读它派生密钥。若只改 SharedPreferences 而不刷新缓存，
+  /// 控制端扫到的新码加密后本机仍用旧码解 ⇒ **"重置完立即失联"**，比不重置更糟。
+  /// 反过来，正因为读取发生在每条消息上，这里赋值**无需重连 broker 即时生效**。
+  ///
+  /// 生产调用点：`pair_qr_screen` 的「重置配对码」（二次确认后）。
+  void rotateOwnPairingCode(String code) => _ownCode = code;
+
   /// 直接驱动一次**入站原始报文**（等价于 broker 投递到 `client.updates`
   /// 监听器的那一刻）。
   ///
@@ -247,6 +321,10 @@ class RcEndpointService {
   @visibleForTesting
   Future<void> debugHandleRaw(String topic, String wire) =>
       _handleRaw(topic, wire);
+
+  /// 读取一条出站命令的**送达状态**（P2-20 宿主断言用）。
+  @visibleForTesting
+  RcDelivery? debugDeliveryOf(String requestId) => _delivery.stateOf(requestId);
 
   /// MQTT 客户端工厂替身（第四十八轮新增）。
   ///
@@ -279,9 +357,25 @@ class RcEndpointService {
 
   bool get isRunning => _running;
 
+  /// 连接生命周期快照（P1-10）：UI 据此区分"已启用"（[isRunning]）与"在线"
+  /// （[RcConnPhase.online]）—— 旧的 `isRunning` 两者混为一谈，于是"开关是开的、
+  /// 实际已经断连"在界面上看起来完全正常。
+  RcConnState get connState => _conn;
+
+  /// 注入退避策略（宿主测试用：把 baseDelay 压到毫秒级并固定随机源）。
+  @visibleForTesting
+  void debugSetReconnectPolicy(RcReconnectPolicy policy) {
+    _reconnect = policy;
+  }
+
+  /// 直接读取当前代次（宿主测试断言"旧代次回调 no-op"用）。
+  @visibleForTesting
+  int get debugConnGen => _connGen;
+
   Future<void> start(RemoteStore store, AppDatabase db) async {
     if (_running) return;
     _running = true;
+    _reconnect.reset();
     _store = store;
     _db = db;
     // Q1.B：装配每设备盐存储（注入过就沿用 —— 宿主测试的 seam）。
@@ -348,9 +442,20 @@ class RcEndpointService {
 
   Future<void> stop() async {
     _running = false;
+    // P1-12：作废当前代次 ⇒ 任何在途的 onConnected/onDisconnected/重连回调
+    // 都会因代次不符而 no-op（否则它们在 stop 之后又把连接拉起来）。
+    _connGen++;
+    // v2：对讲会话持有的播放器与分片必须随服务停止一并释放，否则"停用远程
+    // 遥控"后麦克风/扬声器资源与临时文件继续驻留。
+    await _closeAllPttStreams();
+    _retry?.cancel();
+    _retry = null;
     _hb?.cancel();
+    _conn = const RcConnState(RcConnPhase.stopped);
     RcScriptExecutor.instance.stop();
     _activeScriptOwner = null;
+    // P1-13：清空配对登记（其中的 waiter 不会再有 ack 来唤醒，留着只会悬挂）。
+    _pendingPairs.clear();
     // 先终止协助会话（此刻 _client 仍在，才能发出 close 并退订会合主题）。
     await RcAssistHost.instance.close(reason: 'local', silent: true);
     await AssistJoinClient.instance.leave(silent: true);
@@ -423,6 +528,14 @@ class RcEndpointService {
     final store = _store!;
     final deviceId = store.deviceId;
     if (deviceId.isEmpty) return;
+    if (!_running) return;
+
+    // P1-12：领取本代次，并取消任何在途重连定时器（唯一 owner ⇒ 任一时刻只有
+    // 一个重连计划在跑；`_connect` 自身既是首连也是重连的唯一入口）。
+    final gen = ++_connGen;
+    _retry?.cancel();
+    _retry = null;
+    _conn = _conn.copyWith(phase: RcConnPhase.connecting, clearRetry: true);
 
     // ---- C-13（P0）：强制 TLS 8883，且**不**提供 onBadCertificate ----
     //
@@ -449,15 +562,23 @@ class RcEndpointService {
           ..port = store.brokerPort ?? RemoteStore.defaultBrokerPort
           ..secure = true
           ..keepAlivePeriod = 30
-          ..autoReconnect = true
-          ..resubscribeOnAutoReconnect = true
+          // ---- P1-12：关掉库自带的自动重连，重连由本服务**独占** ----
+          //
+          // 保留 `autoReconnect = true` 会让重连有**两条 owner**：库自己按
+          // 内部节奏重连，同时 `_scheduleReconnect` 的 Timer 也去连一次 ——
+          // 两条路径互不知情，可能出现"同一 clientId 两个连接"（broker 侧
+          // 后连的把先连的踢掉，反复抖动）且**无法退避/无预算**。
+          // `mqtt_client-10.11.11` 源码事实：`onDisconnected` **仅在
+          // autoReconnect=false 时**被调用（line 225-227）—— 关掉它，才能拿到
+          // "连接已断"这个事件，从而由自己驱动带退避的重连。
+          ..autoReconnect = false
+          ..resubscribeOnAutoReconnect = false
           ..logging(on: false);
-    // 连接建立（含自动重连）后：补订 + **冲刷离线暂存命令**。
+    // 连接建立（含首次与重连）后：补订 + **冲刷离线暂存命令**。
     // 补发挂在"连接可用"这一刻，正是 UI 承诺的"端点上线后自动执行"。
-    client.onConnected = () {
-      unawaited(refreshSubscriptions());
-      unawaited(flushAllOutbox(store));
-    };
+    client.onConnected = () => _onConnected(gen);
+    // P1-12：断连事件（仅 autoReconnect=false 时回调）→ 交给唯一 owner 排重连。
+    client.onDisconnected = () => _onDisconnected(gen);
 
     final connectMsg = MqttConnectMessage()
         .withClientIdentifier(deviceId)
@@ -485,12 +606,14 @@ class RcEndpointService {
 
     try {
       await client.connect();
-    } on Object {
-      _scheduleReconnect();
+    } on Object catch (e) {
+      _conn = _conn.copyWith(lastError: '$e');
+      _scheduleReconnect(gen);
       return;
     }
     if (client.connectionStatus?.state != MqttConnectionState.connected) {
-      _scheduleReconnect();
+      _conn = _conn.copyWith(lastError: '连接后状态非 connected');
+      _scheduleReconnect(gen);
       return;
     }
     client.updates!.listen((c) async {
@@ -515,10 +638,52 @@ class RcEndpointService {
     // 首次连接走的是 connect() 而非 onConnected 回调（后者只在**重连**时触发），
     // 因此这里必须再补一次，否则"启动时就有暂存命令"的场景永远不补发。
     unawaited(flushAllOutbox(store));
+    // P1-10/11：标记在线（重置退避预算 + 重建心跳，代次绑定）。
+    _markOnline(gen);
+  }
 
+  /// 连接可用（首连成功或重连成功）的统一收口。
+  ///
+  /// ⚠️ 代次不符一律 no-op：一次迟到的旧连接回调**不得**把当前（更新的）
+  /// 连接状态覆盖掉，否则心跳会被旧代次取消、新代次又不重建（P1-11 的复发形态）。
+  void _onConnected(int gen) {
+    if (!_running || gen != _connGen) return;
+    unawaited(refreshSubscriptions());
+    unawaited(flushAllOutbox(_store!));
+    _markOnline(gen);
+  }
+
+  /// 连接断开（仅 `autoReconnect=false` 时由库回调）→ 交给唯一 owner 排重连。
+  void _onDisconnected(int gen) {
+    if (gen != _connGen) return;
+    _hb?.cancel();
+    if (!_running) return;
+    _conn = _conn.copyWith(lastError: '连接已断开');
+    _scheduleReconnect(gen);
+  }
+
+  /// 标记在线：重置退避预算、记 lastConnected、重建心跳（代次绑定）。
+  void _markOnline(int gen) {
+    if (!_running || gen != _connGen) return;
+    _reconnect.reset();
+    _conn = RcConnState(
+      RcConnPhase.online,
+      lastConnectedAt: DateTime.now().millisecondsSinceEpoch,
+    );
+    _startHeartbeat(gen);
+  }
+
+  /// 心跳：把"订阅补齐 + 补发暂存 + 周期心跳"三件事绑定到**连接代次**。
+  ///
+  /// ⚠️ P1-11 根因：旧心跳体在断连时 `t.cancel()` 且**没有任何地方重建它** ⇒
+  /// 断一次网后订阅不再补齐、补发不再重试（"端点在跑，但再也收不到东西"）。
+  /// 现在心跳由 [_markOnline] 在**每次连接成功**时重建，且旧代次的计时器
+  /// 因代次不符自行退出，不会与新代次的心跳并发。
+  void _startHeartbeat(int gen) {
     _hb?.cancel();
     _hb = Timer.periodic(const Duration(seconds: 60), (t) {
       if (!_running ||
+          gen != _connGen ||
           _client?.connectionStatus?.state != MqttConnectionState.connected) {
         t.cancel();
         return;
@@ -527,7 +692,7 @@ class RcEndpointService {
       unawaited(refreshSubscriptions());
       // 心跳顺带重试补发：`onConnected` 只在连接**状态跳变**时触发，
       // 而补发可能因为那一刻的瞬时失败（broker 限流等）没走完。
-      unawaited(flushAllOutbox(store));
+      unawaited(flushAllOutbox(_store!));
       unawaited(_send(RcMessage.now(RcEvt.heartbeat)));
     });
   }
@@ -563,10 +728,34 @@ class RcEndpointService {
     }
   }
 
-  void _scheduleReconnect() {
+  /// 排定一次重连（唯一 owner）。
+  ///
+  /// ## P1-12：为什么必须由本服务独占，而不是交给库
+  ///
+  /// - **可取消**：`Timer` 引用保存在 [_retry]，`stop()` 与新一次 `_connect`
+  ///   都会取消它 ⇒ 不会出现"关了服务，10 秒后又被一条僵尸定时器连上 broker"。
+  /// - **有退避与预算**：[RcReconnectPolicy] 给指数退避 + Full Jitter，并在
+  ///   连续失败达预算后进入 [RcConnPhase.failed]（停止空转），成功即重置。
+  ///   旧实现是**固定 10s 无上限**：broker 长时间不可用时每 10s 一条无意义连接，
+  ///   且永不停手。
+  /// - **代次绑定**：[fromGen] 不符即 no-op —— 若在这段延迟里已经由别处
+  ///   发起了新连接，本次计划作废（避免双连接）。
+  void _scheduleReconnect(int fromGen) {
     if (!_running) return;
-    Timer(const Duration(seconds: 10), () {
-      if (_running) _connect();
+    if (fromGen != _connGen) return;
+    final delay = _reconnect.nextDelay();
+    if (delay == null) {
+      // 重试预算耗尽：停止空转，进入 failed（UI 可提示"网络异常，请检查设置"）。
+      // 不自动无限重试 —— 那只是把"网络不通"变成持续的无效连接尝试。
+      _conn = _conn.copyWith(phase: RcConnPhase.failed, clearRetry: true);
+      return;
+    }
+    final at = DateTime.now().add(delay).millisecondsSinceEpoch;
+    _conn = _conn.copyWith(phase: RcConnPhase.retrying, nextRetryAt: at);
+    _retry?.cancel();
+    _retry = Timer(delay, () {
+      if (!_running || fromGen != _connGen) return;
+      unawaited(_connect());
     });
   }
 
@@ -613,9 +802,12 @@ class RcEndpointService {
     // 发送方身份要**解密之后**才可见，所以这里无法做单次精确查找。
     //
     // 于是把「null（未存盐的旧控制端，走 v1 无盐路径）+ 每个已配对控制端的
-    // 存盐」作为候选逐一试解。AES-GCM 带认证，试错不会产生任何副作用
-    // （decode 的 seenIds 只读、不写）。首项恒为 null ⇒ 全无存盐时与今天
-    // **逐字节等价**（兼容铁律）。
+    // 存盐」作为候选逐一试解。AES-GCM 带认证，试错不会产生任何副作用。
+    // 首项恒为 null ⇒ 全无存盐时与今天**逐字节等价**（兼容铁律）。
+    //
+    // ⚠️ **去重不在这里做**（P1-17）：`decode` 只读 seen set 判断重复，而它到
+    // 调用方的预占之间隔着 `await` ⇒ 并发重投会双通过。改由下方 [`reserveInboundId`]
+    // 在解密成功后用**一个同步段**完成"查重 + 预占"，先于准入/限流/副作用。
     final salts = <List<int>?>[null];
     for (final p in store.paired()) {
       final s = _saltStore?.saltFor(p.deviceId);
@@ -624,7 +816,7 @@ class RcEndpointService {
     RcMessage? decoded;
     for (final salt in salts) {
       final key = await RcCodec.deriveKey(ownCode, '$ownId|cmd', salt: salt);
-      decoded = await RcCodec.decode(wire, key, topic, seenIds: _seen);
+      decoded = await RcCodec.decode(wire, key, topic);
       if (decoded != null) break;
     }
     final msg = decoded;
@@ -637,7 +829,15 @@ class RcEndpointService {
       await _auditDecodeFail(topic);
       return;
     }
-    _rememberSeen(msg.id);
+    // ---- P1-17：原子去重（解密确认后、准入/限流/副作用前）----
+    // `reserveInboundId` 的查重 + 预占在同一个无 await 的同步段内完成 ⇒ 单
+    // isolate 原子。重复投递**不得再执行副作用**，但必须给出**稳定回执**，
+    // 否则控制端仍会等到超时（且旧实现会把重复记成 decode.fail，误导排查）。
+    if (!RcCodec.reserveInboundId(
+        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+      await _ack(msg, true, data: '重复投递（已处理）');
+      return;
+    }
     // ---- 授权撤销兜底（P0，A3 §2「撤销」）----
     //
     // 旧准入**只有一条**：能用「本机配对码 + {本机ID}|cmd」解密成功。而配对码
@@ -743,20 +943,89 @@ class RcEndpointService {
     RcMessage? decoded;
     for (final salt in <List<int>?>[null, _saltStore?.saltFor(peerId)]) {
       final key = await RcCodec.deriveKey(ownCode, '$ownId|evt', salt: salt);
-      decoded = await RcCodec.decode(wire, key, topic, seenIds: _seen);
+      decoded = await RcCodec.decode(wire, key, topic);
       if (decoded != null) break;
     }
     final msg = decoded;
-    if (msg == null) return;
-    _rememberSeen(msg.id);
+    if (msg == null) {
+      // P2-22：此前这里**静默 return** ⇒ 盐/配对码不一致（对端重装、配对码
+      // 轮换、旧盐残留）时，控制端永远收不到回执、端点日志里一条都没有，
+      // 用户分不清"网络不通 / 对端离线 / 密钥不一致"。
+      //
+      // ⚠️ 但**不能无条件记**：一条广播事件是"每个已配对控制器各一份密文"
+      // 发到**同一** evt 主题的，本机解不开**别人**那一份是**正常现象**；
+      // 无条件记会变成每 60s（心跳）一条的噪声（旧注释担心的正是这个）。
+      // 故按来源**双重抑制**，见 [_auditPeerEvtDecodeFail]。
+      await _auditPeerEvtDecodeFail(peerId);
+      return;
+    }
+    // P2-22：记下该来源最近一次成功解密的时刻（噪声抑制的真源）。
+    _rememberPeerEvtOk(peerId);
+    // P1-17：与 cmd 路径同源 —— 原子查重 + 预占（同步段）后再广播，
+    // 防止并发重投把同一条回执/信令重复推给 UI。
+    if (!RcCodec.reserveInboundId(
+        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+      return;
+    }
+    // P1-13 / P2-20：把"配对绑定"与"送达终态"从广播里分出来单独推进。
+    await _tapAck(msg);
     _broadcast(msg, peerId: peerId, peerName: _peerName(peerId));
   }
 
-  void _rememberSeen(String id) {
-    if (id.isEmpty) return;
+  /// 回执到达时的**关联处理**（P1-13 配对绑定 + P2-20 送达账本）。
+  ///
+  /// 与 [_broadcast] 分开的理由：广播是"把消息推给 UI"，关联是"把状态推向
+  /// 终态" —— 两者失败互不牵连（UI 拿不到不该让绑定失败，反之亦然）。
+  ///
+  /// ⚠️ 配对绑定**不看 8 秒 UI 窗口**：只要 requestId 仍登记在 [_pendingPairs]，
+  /// 迟到的 ack 也能完成落盐（P1-13）。重复/无关的 ack 因 requestId 不在登记表
+  /// 或已终态而成为 no-op（P2-20 的反例判据）。
+  Future<void> _tapAck(RcMessage msg) async {
+    if (msg.type != RcEvt.ack) return;
+    final forId = msg.payload['for'];
+    if (forId is! String || forId.isEmpty) return;
+    final ok = msg.payload['ok'] == true;
+    // ---- P1-13：配对 ack 幂等落地（迟到也生效）----
+    final pair = _pendingPairs.remove(forId);
+    if (pair != null) {
+      if (ok) await _savePeerSalt(pair.endpointId, msg.payload['kdfsalt']);
+      if (!pair.waiter.isCompleted) pair.waiter.complete(msg.payload);
+    }
+    // ---- P2-20：把 broker/端点最终回执与"已 publish"分开记账 ----
+    // 未知/已终态/已过期的 requestId 一律 no-op（迟到/重放不得翻转新命令）。
+    _delivery.acceptAck(forId, ok: ok,
+        nowMs: DateTime.now().millisecondsSinceEpoch);
+  }
+
+  /// 点名 peer evt 解密失败的**按来源双重抑制**审计（P2-22）。
+  ///
+  /// 抑制规则（缺一不可）：
+  /// 1. **最近成功抑制**：该来源"最近成功过且未超 [rcPeerEvtNoiseWindowMs]
+  ///    （10 分钟）" ⇒ 整体链路是通的，期间解不开多半是广播副本噪声，不记；
+  /// 2. **按来源限频**：其余情况按来源 10s 一条，避免错误配置下被反复补发刷爆。
+  Future<void> _auditPeerEvtDecodeFail(String peerId) async {
+    final db = _db;
+    if (db == null || peerId.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    _seen[id] = now;
-    _seen.removeWhere((_, t) => now - t > 10 * 60 * 1000);
+    if (!peerEvtFailWorthAudit(lastOkMs: _peerEvtOkAt[peerId], nowMs: now)) {
+      return;
+    }
+    if (!_peerEvtFail.allow(peerId, now)) return;
+    try {
+      await LogRepository(db).append(
+          source: 'remote',
+          action: 'decode.fail',
+          status: 'failed',
+          message: '密钥不匹配（对端可能重装或配对码不一致）· 来源 ${_peerName(peerId)}');
+    } on Object {
+      // 审计本身失败不再递归挣扎。
+    }
+  }
+
+  /// 记下某来源最近一次成功解密 evt 的时刻（P2-22 噪声抑制的真源）。
+  void _rememberPeerEvtOk(String peerId) {
+    if (peerId.isEmpty) return;
+    _peerEvtOkAt[peerId] = DateTime.now().millisecondsSinceEpoch;
   }
 
   void _broadcast(RcMessage msg, {String peerId = '', String peerName = ''}) {
@@ -861,14 +1130,45 @@ class RcEndpointService {
           await _ack(msg, false, data: toggleDeny);
           return;
         }
+        // ---- P1-16：与本地开关走**同一任务变更用例** ----
+        // 旧实现只改 enabled 位。后果：停用任务的旧 pending + 原生闹钟仍会照常
+        // 触发；启用一条近期有限任务时，若全局 pending 数高于后台续算阈值，它可能
+        // 长期不生成 occurrence（唯一计划时刻已过 ⇒ 静默漏执行），而回执只确认
+        // "已启用"，让控制端误以为排程已生效。补齐三步：
+        // ①写状态；②使该任务过期 pending 失效并按新状态重物化；③请求引擎立即
+        // 重排（含原生精确闹钟通道）。
         await tasks.setEnabled(id, enabled);
+        final dropped = await occ.deletePendingForTask(id);
+        var planned = 0;
+        if (enabled) {
+          final fresh = await tasks.get(id);
+          if (fresh != null) planned = await _rematerialize(fresh, occ);
+        }
+        var replanRequested = true;
+        try {
+          await BackgroundServiceManager.instance.replan();
+        } on Object catch (e) {
+          // 引擎未运行/服务调用失败**不得静默**：状态位已改，但排程可能没跟上，
+          // 必须留痕，且回执据实区分"已启用"与"已排程"。
+          replanRequested = false;
+          await logs.append(
+              source: 'remote',
+              action: 'task.toggle',
+              status: 'failed',
+              taskId: id,
+              message: 'by ${peer.name} · 请求引擎重排失败：$e');
+        }
         await logs.append(
             source: 'remote',
             action: 'task.toggle',
             status: 'success',
             taskId: id,
-            message: 'by ${peer.name}');
-        await _ack(msg, true);
+            message: 'by ${peer.name} · ${enabled ? '启用' : '停用'}'
+                ' · 清理 $dropped 条旧计划 · 新计划 $planned 条'
+                '${replanRequested ? '' : ' · 重排请求失败'}');
+        await _ack(msg, true,
+            data: '${enabled ? 'enabled' : 'disabled'};planned=$planned'
+                ';replan=${replanRequested ? 'requested' : 'failed'}');
       case RcCmd.taskSkipNext:
         final id = msg.payload['taskId'] as String?;
         if (id == null || id.isEmpty) {
@@ -933,7 +1233,12 @@ class RcEndpointService {
           await _ack(msg, false, data: '无匹配脚本');
         }
       case RcCmd.pttVoice:
-        await _playPtt(msg, peer, logs);
+        // v2 分片（带 seq）且已装配流式开缝 ⇒ 边收边放；否则走 v1 整段路径。
+        if (msg.payload.containsKey('seq') && pttStreamOpener != null) {
+          await _onPttVoiceStream(msg, peer, logs);
+        } else {
+          await _playPtt(msg, peer, logs);
+        }
       case RcCmd.callInvite:
         await _handleCallInvite(msg, peer);
       case RcCmd.callAnswer:
@@ -1978,7 +2283,11 @@ class RcEndpointService {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final path = '${dir.path}/ptt_${const Uuid().v4()}.m4a';
-      await File(path).writeAsBytes(base64Decode(audioB64), flush: true);
+      // ⚠️ 不 `flush: true`：那是一次 fsync，而这份音频**只本进程读一次**
+      //    （紧接着交给播放器），落盘后 OS page cache 立即可见 —— 无需等
+      //    eMMC 真正写完。旧机上一次 fsync 可达数十毫秒，正是"收到后迟迟
+      //    不出声"里可以省掉的一段。
+      await File(path).writeAsBytes(base64Decode(audioB64));
       await NotificationService.instance
           .showEvent(title: '声盾 · 对讲', body: '来自 $from 的语音');
       final ok = await play(path, 1.0, 0);
@@ -2017,6 +2326,128 @@ class RcEndpointService {
           'reason': why,
         }),
         targetPeerId: msg.from));
+  }
+
+  // ---------------- 对讲机 v2：流式分片（边收边放） ----------------
+
+  /// 流式接收一条 `ptt.voice{seq, last}` 分片。
+  ///
+  /// 会话以 `voiceId` 为键：首片（`seq==0`）开会话并起播，中间片续播，
+  /// 末片（`last==true`）收尾并回 `rc.ptt{ok:true}`。任一片解码/落盘/播放
+  /// 失败都会**销毁会话 + 走 [_pttFailed]**（不静默、不假成功）。
+  ///
+  /// ⚠️ 与 v1 的关键差别：v1 要等整段到齐才出声；v2 首片到达即出声，
+  /// 这是"反应太慢"的正解 —— 但回执语义随之变为"已接收并开始播放"，
+  /// 由末片统一回执（分片级不回执，避免每条分片都发一条 evt 放大流量）。
+  Future<void> _onPttVoiceStream(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final voiceId = msg.payload['voiceId'] as String? ?? '';
+    final from = msg.payload['fromName'] as String? ?? peer.name;
+    final audioB64 = msg.payload['audioB64'] as String?;
+    final seq = (msg.payload['seq'] as num?)?.toInt() ?? 0;
+    final last = msg.payload['last'] as bool? ?? false;
+    if (voiceId.isEmpty) {
+      await _pttFailed(msg, logs, from, '缺少 voiceId');
+      return;
+    }
+    try {
+      var session = _pttStreams[voiceId];
+      final hasAudio = audioB64 != null && audioB64.isNotEmpty;
+      if (!hasAudio && session == null) {
+        // 首条就无音频 ⇒ 与 v1 同一判据，如实失败。
+        await _pttFailed(msg, logs, from, '缺少 audioB64');
+        return;
+      }
+      if (seq == 0 && session != null) {
+        // 同一 voiceId 重开（QoS1 重投 / 对端重录）：丢弃旧会话再开新的。
+        await _closePttStream(voiceId, deleteFiles: true);
+        session = null;
+      }
+      if (session == null) {
+        final dir = await getApplicationDocumentsDirectory();
+        session = _PttStreamSession(
+            sink: pttStreamOpener!(), from: msg.from, dir: dir);
+        _pttStreams[voiceId] = session;
+        // 首片即登记"空闲超时"：即便对端中途崩了、或不再补末片，也能被回收。
+        _touchPttStreamCleanup(voiceId, session);
+        await NotificationService.instance
+            .showEvent(title: '声盾 · 对讲', body: '来自 $from 的语音');
+      }
+      if (hasAudio) {
+        final path = '${session.dir.path}/ptt_${voiceId}_$seq.aac';
+        await File(path).writeAsBytes(base64Decode(audioB64));
+        session.files.add(path);
+        await session.sink.append(path, volume: 1.0);
+        session.nextSeq = seq + 1;
+        // 每片都顺延空闲计时：活跃传输期间不会被误收。
+        _touchPttStreamCleanup(voiceId, session);
+      }
+      if (last) {
+        await session.sink.end();
+        await logs.append(
+            source: 'remote',
+            action: 'ptt.play',
+            status: 'success',
+            message: 'from $from · 流式 ${session.files.length} 片');
+        unawaited(_send(
+            RcMessage.now(RcEvt.pttAck, {
+              'voiceId': voiceId,
+              'ok': true,
+              'chunks': session.files.length,
+            }),
+            targetPeerId: msg.from));
+      }
+    } on Object catch (e) {
+      await _closePttStream(voiceId, deleteFiles: true);
+      await _pttFailed(msg, logs, from, '$e');
+    }
+  }
+
+  /// 重置某会话的"空闲超时"计时器（活跃分发期间不断顺延）。
+  ///
+  /// 一旦静默超过 [pttStreamKeepAlive] —— 无论是正常末片、对端中途崩溃、
+  /// 还是取消后不再补帧 —— 都会关闭会话并清理分片，**不会留下悬挂会话**。
+  void _touchPttStreamCleanup(String voiceId, _PttStreamSession session) {
+    session.idle?.cancel();
+    session.idle = Timer(pttStreamKeepAlive, () {
+      // 只清理**同一个**会话：期间若 voiceId 被重开，新会话不受影响。
+      if (identical(_pttStreams[voiceId], session)) {
+        unawaited(_closePttStream(voiceId, deleteFiles: true));
+      }
+    });
+  }
+
+  /// 关闭并（可选）删除某会话的全部分片。
+  Future<void> _closePttStream(String voiceId,
+      {required bool deleteFiles}) async {
+    final session = _pttStreams.remove(voiceId);
+    if (session == null) return;
+    session.idle?.cancel();
+    session.idle = null;
+    try {
+      await session.sink.dispose();
+    } on Object {
+      // 释放失败不影响清理分片：异常吞掉，状态自愈。
+    }
+    if (deleteFiles) {
+      // ⚠️ 必须先复制再遍历：清理期间若有在飞的分片 handler 仍在对
+      // `session.files` 追加，直接迭代会抛 ConcurrentModificationError
+      // （第七十四轮实测到的真实竞态：stop 与在飞 handler 并发）。
+      for (final p in List<String>.of(session.files)) {
+        try {
+          await File(p).delete();
+        } on Object {
+          // 文件可能已被系统清理：忽略。
+        }
+      }
+    }
+  }
+
+  /// 关闭**全部**流式对讲会话（服务停止 / 撤销配对时清场）。
+  Future<void> _closeAllPttStreams() async {
+    for (final id in _pttStreams.keys.toList(growable: false)) {
+      await _closePttStream(id, deleteFiles: true);
+    }
   }
 
   /// 通用回执：**定向**发回命令发起方（R-6，避免跨控制器泄露）。
@@ -2269,7 +2700,33 @@ class RcEndpointService {
         // 现在与在线路径用**同一段** topic/key/encode，保证存进去的就是
         // 补发时能解开的形态。
         final wireForLater = await RcCodec.encode(out, key, topic);
-        await store.enqueue(wireForLater, endpoint.deviceId);
+        // P1-15：按**消息类型**分新鲜度，实时信令**根本不入队**。
+        //
+        // 为什么是"不入队"而不是"入队后在补发时丢掉"：outbox 的契约是
+        // "端点上线后自动执行"，而 `script.stop` / `call.end` 这类实时信令
+        // 在端点重新上线时**早已没有要停/要挂的对象** —— 存进去只会
+        //   ① 占位并在队列满时把可补发的命令挤掉（maxOutboxEntries 硬上限），
+        //   ② 让 UI 的"待发 N 条"虚高、误导使用者。
+        // 所以当场留痕告知"这条没能送达"，而不是假装它会执行。
+        //
+        // P2-21：超限丢弃必须**留痕**（此前静默 removeRange）。
+        if (rcOutboxFreshness(out.type) == RcOutboxFreshness.live) {
+          await _auditOutboxDrop(endpoint, rcOutboxDropReason(RcOutboxReplay.liveOnly));
+        } else {
+          final dropped = await store.enqueue(wireForLater, endpoint.deviceId,
+              ttlMs: rcOutboxTtlMs(out.type));
+          // P2-20：入 outbox ⇒ 登记为 queued（**尚未离开本机**，不得当作已送达）。
+          _delivery.record(out.id, endpoint.deviceId,
+              published: false,
+              nowMs: DateTime.now().millisecondsSinceEpoch,
+              ttlMs: rcDeliveryAckTimeoutMs);
+          for (final d in dropped) {
+            await _auditOutboxDrop(
+                endpoint,
+                '出站队列超限（>{RemoteStore.maxOutboxEntries}）：丢弃最旧一条'
+                '（${d['endpointId']}）');
+          }
+        }
       }
       return false;
     }
@@ -2277,6 +2734,12 @@ class RcEndpointService {
     final builder = MqttClientPayloadBuilder()..addString(wire);
     client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
         retain: false);
+    // P2-20：publish 受理 ⇒ published。**这不等于端点已执行** —— 端点最终
+    // 回执到达时由 [_tapAck] 推成 acked/failed，UI 才能区分"发出去了"与"做到了"。
+    _delivery.record(out.id, endpoint.deviceId,
+        published: true,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        ttlMs: rcDeliveryAckTimeoutMs);
     return true;
   }
 
@@ -2303,57 +2766,53 @@ class RcEndpointService {
     RcMessage request, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    // P1-13：先登记本次配对请求（requestId → 端点），并回收过期登记。
+    _prunePendingPairs();
+    final pending =
+        _PendingPair(endpoint.deviceId, DateTime.now().millisecondsSinceEpoch);
+    _pendingPairs[request.id] = pending;
     // ⚠️ 配对请求是**盐的引导报文**（对端此刻可能还没有盐，或本机持有上一轮
     // 的旧盐）—— 必须走 v1，否则"对端重装后本机仍持旧盐"时配对请求根本解不开。
     final sent = await sendTo(endpoint, request, store,
         enqueueOnFail: false, withSalt: false);
     if (!sent) {
+      _pendingPairs.remove(request.id);
       return const PairConfirmOutcome(false,
           '已在本机配对；但未能通知对端（本机端点服务未开启或 MQTT 未连接）'
           '—— 请开启「远程遥控」开关后重试，或在对端也扫一次本机二维码');
     }
-    final ack = await _awaitAck(request.id, timeout);
+    final ack = await _awaitAck(pending, timeout);
     if (ack == null) {
+      // ⚠️ **不撤销登记**（P1-13）：8 秒只是 UI 提示窗口，**不是**密钥绑定
+      // 窗口。迟到的 ack 到达时 [_tapAck] 仍会落盐 —— 否则"配对显示成功、
+      // 之后所有回执/信令都解不开"（半连接）。登记由 [_prunePendingPairs] 兜底回收。
       return const PairConfirmOutcome(false,
           '对方尚未确认配对：请在对端也扫一次本机二维码（配对需双向）');
     }
+    // 盐的落盘已在 [_tapAck] 完成（对迟到/按时两种 ack 一视同仁），这里只读结论。
     final ok = ack['ok'] == true;
-    // ---- Q1.B：落盘对端随配对成功回执下发的每设备盐 ----
-    //
-    // 只在**配对成功**（`ok`）时落盘，且**原样**使用对端下发的盐：本机此后
-    // 发给该端点的全部消息（`sendTo` / `flushOutbox`）都用它派生，对端则用
-    // 同一份盐解密。缺字段 / 非法 Base64 一律**不动已有盐**（见 [_savePeerSalt]）。
-    if (ok) await _savePeerSalt(endpoint.deviceId, ack['kdfsalt']);
     final data = ack['data']?.toString() ?? '';
     return PairConfirmOutcome(
         ok, ok ? '对端已确认配对' : (data.isEmpty ? '对端拒绝了配对请求' : data));
   }
 
-  /// 等待 `for == [forId]` 的 `rc.ack`；超时返回 null。
-  ///
-  /// 直接听 [events]（已解密并广播的事件流）而不是再开一路 MQTT：
-  /// 回执的解密、去重、时间窗校验都已由 `_handlePeerEvent` 完成。
-  Future<Map<String, dynamic>?> _awaitAck(
-      String forId, Duration timeout) async {
-    final completer = Completer<Map<String, dynamic>?>();
-    late final StreamSubscription<Map<String, dynamic>> sub;
-    Timer? timer;
-    void finish(Map<String, dynamic>? v) {
-      if (!completer.isCompleted) completer.complete(v);
-    }
+  /// 回收过期未完成的配对登记（P1-13）：弱网 ack 可能迟到，但登记不能无限增长。
+  void _prunePendingPairs() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _pendingPairs
+        .removeWhere((_, p) => now - p.createdAtMs > rcPairPendingTtlMs);
+  }
 
-    sub = events.listen((m) {
-      if (m['type'] != RcEvt.ack) return;
-      final p = rcPayloadOf(m);
-      if (p['for'] != forId) return;
-      finish(p);
-    });
-    timer = Timer(timeout, () => finish(null));
+  /// 等待本次配对请求的 UI 结果；超时返回 null。
+  ///
+  /// ⚠️ **绑定与落盐不在这里**：由 [_tapAck] 在**收到回执时**完成（含迟到回执），
+  /// 因此 8 秒超时不再等于"密钥状态终止"（P1-13）。这里只负责把结果交回 UI。
+  Future<Map<String, dynamic>?> _awaitAck(
+      _PendingPair pending, Duration timeout) async {
     try {
-      return await completer.future;
-    } finally {
-      await sub.cancel();
-      timer.cancel();
+      return await pending.waiter.future.timeout(timeout);
+    } on TimeoutException {
+      return null;
     }
   }
 
@@ -2381,16 +2840,28 @@ class RcEndpointService {
         salt: _saltStore?.saltFor(endpoint.deviceId));
     var sent = 0;
     final done = <Map<String, dynamic>>[];
+    final now = DateTime.now().millisecondsSinceEpoch;
     for (final m in store.outboxFor(endpoint.deviceId)) {
       final wire = m['wire'] as String?;
       if (wire == null) {
         done.add(m); // 坏条目（缺 wire）：留着只会卡队列
         continue;
       }
+      // P1-15 / P2-21：先判**该不该补发**（实时信令 / 是否过期），再决定重放。
+      // 必须先解密拿到 `type` —— 判据只看类型与过期时刻，与内容无关。
+      final type = await peekOutboxType(wire, key, topic);
+      final verdict = decideOutboxReplay(
+          type: type, expiresAt: outboxExpiresAtOf(m), nowMs: now);
+      if (verdict != RcOutboxReplay.replay) {
+        done.add(m); // 丢弃，避免永久卡住队列后面的命令
+        await _auditOutboxDrop(endpoint, rcOutboxDropReason(verdict));
+        continue;
+      }
       final reEnc = await prepareOutboxReplay(wire, key, topic);
       if (reEnc == null) {
         done.add(m); // 解不开 = 永远发不出，丢弃并留痕
-        await _auditOutboxDrop(endpoint, '暂存命令无法解密（密钥已变更？）');
+        await _auditOutboxDrop(
+            endpoint, rcOutboxDropReason(RcOutboxReplay.undecodable));
         continue;
       }
       final builder = MqttClientPayloadBuilder()..addString(reEnc);
@@ -2616,6 +3087,32 @@ class DecodeFailThrottle {
     _lastAt[topic] = nowMs;
     return true;
   }
+}
+
+/// 点名 peer evt 解密失败的"最近成功"抑制窗口（P2-22，10 分钟）。
+const int rcPeerEvtNoiseWindowMs = 10 * 60 * 1000;
+
+/// 点名 peer evt 解密失败是否**值得审计**（P2-22 纯判据）。
+///
+/// 该来源**从未成功**或**最近一次成功已超过 [rcPeerEvtNoiseWindowMs]** ⇒ 值得记；
+/// 反之（最近成功过）= 整体链路是通的，期间解不开多半是"广播副本"噪声，不记。
+bool peerEvtFailWorthAudit({int? lastOkMs, required int nowMs}) =>
+    lastOkMs == null || nowMs - lastOkMs >= rcPeerEvtNoiseWindowMs;
+
+/// 配对登记的最长存活时间（P1-13）：弱网下 ack 可能迟到，但不能无限增长。
+const int rcPairPendingTtlMs = 10 * 60 * 1000;
+
+/// 一次进行中的配对请求（P1-13）。
+///
+/// `waiter` 供 [RcEndpointService._awaitAck] 等 UI 结果；注册表里的登记**不因
+/// 8 秒超时而撤销** —— 迟到 ack 到达时 `_tapAck` 仍会落盐并 complete 它。
+class _PendingPair {
+  _PendingPair(this.endpointId, this.createdAtMs)
+      : waiter = Completer<Map<String, dynamic>?>();
+
+  final String endpointId;
+  final int createdAtMs;
+  final Completer<Map<String, dynamic>?> waiter;
 }
 
 /// 指令组**终态**事件载荷（R-4，纯函数）。
@@ -2994,4 +3491,300 @@ Future<List<int>?> ensureSaltForDevice(
   final salt = store.saltFor(deviceId) ?? KdfSaltStore.newSalt();
   await store.saveSalt(deviceId, salt);
   return salt;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// P1-10 / P1-12：连接生命周期状态机 + 重连退避（判据与接线分离）
+// ══════════════════════════════════════════════════════════════════════
+//
+// 与项目通则一致（见上「可测的纯裁决」）：把"连接处于什么阶段 / 下一次该等多久"
+// 抽成**不依赖 MQTT 实例**的纯类型，于是宿主测试能穷举断言 + 变异证伪；
+// 服务里只留"取状态 → 调判据 → 定时/重连 → 记账"。旧实现里这段是私有的、
+// 依赖真连 broker 才能到达 ⇒ 只能靠真机取证（P1-12 的退避/预算尤其如此）。
+
+/// 连接生命周期阶段（P1-10）。
+///
+/// UI 必须靠它区分「已启用」（服务在跑）与「在线」（真的连上了）——
+/// 旧的 `isRunning` 把两者混为一谈，"开关是开的、实际已经断连"在界面上
+/// 看起来完全正常，使用者无从判断。
+enum RcConnPhase {
+  /// 服务未启动。
+  stopped,
+
+  /// 正在建立连接（首连或重连中）。
+  connecting,
+
+  /// 已连接：可收发。
+  online,
+
+  /// 连接失败，退避等待中（下一次重试时刻见 [RcConnState.nextRetryAt]）。
+  retrying,
+
+  /// 已连接但部分能力不可用（预留：订阅/补发部分失败时的降级态）。
+  degraded,
+
+  /// 重试预算耗尽：停止空转，等待外部干预（改设置 / 重新开启）。
+  failed,
+}
+
+/// 连接状态快照（不可变，供 UI 渲染）。
+class RcConnState {
+  const RcConnState(
+    this.phase, {
+    this.lastConnectedAt,
+    this.nextRetryAt,
+    this.lastError = '',
+  });
+
+  final RcConnPhase phase;
+
+  /// 最近一次成功连接的时刻（毫秒；从未连上为 null）。
+  final int? lastConnectedAt;
+
+  /// [RcConnPhase.retrying] 时的下一次重试时刻（毫秒）。
+  final int? nextRetryAt;
+
+  /// 最近一次连接失败的原因（人读字符串；无失败为空串）。
+  final String lastError;
+
+  /// 是否在线（唯一可靠的"能收发"判据 —— 注意与 [phase] 等价，勿用
+  /// `phase != stopped` 代替：那会把"重连中"误当成"可用"）。
+  bool get online => phase == RcConnPhase.online;
+
+  /// 是否"服务已启用但当前不在线"（UI 提示"正在重连…"的条件）。
+  bool get enabledButOffline =>
+      phase != RcConnPhase.stopped && phase != RcConnPhase.online;
+
+  RcConnState copyWith({
+    RcConnPhase? phase,
+    int? lastConnectedAt,
+    int? nextRetryAt,
+    String? lastError,
+    bool clearRetry = false,
+  }) =>
+      RcConnState(
+        phase ?? this.phase,
+        lastConnectedAt: lastConnectedAt ?? this.lastConnectedAt,
+        nextRetryAt: clearRetry ? null : (nextRetryAt ?? this.nextRetryAt),
+        lastError: lastError ?? this.lastError,
+      );
+}
+
+/// 重连退避策略（P1-12）：**指数退避 + Full Jitter + 重试预算**。
+///
+/// ## 为什么是这三样
+///
+/// - **指数退避**：broker 长时间不可用时，固定间隔（旧的 10s）会持续产生
+///   无效连接尝试；指数增长把压力降下来。
+/// - **Full Jitter**（AWS 推荐形状）：延迟取 `random(min, capped)` 而不是
+///   恒定值 —— 大量设备同时掉线时若都用同一条退避曲线，会在同一时刻
+///   集体重连，把刚恢复的 broker **再次打垮**（惊群）。抖动把重连时刻打散。
+/// - **重试预算**：连续失败 [maxAttempts] 次后返回 null（进入
+///   [RcConnPhase.failed] 而非永久空转）。成功即 [reset]。
+///
+/// **可注入 [Random]**：单测用固定种子 ⇒ 抖动区间可被断言，而不是"随机"。
+/// ⚠️ `minDelay` 是**下限**而非 0：纯 full jitter 的 `random(0, cap)`
+/// 可能抽到 0ms ⇒ 立刻重连（退避形同虚设）。下限保证每次重试至少等一会儿。
+class RcReconnectPolicy {
+  RcReconnectPolicy({
+    this.baseDelay = const Duration(seconds: 2),
+    this.maxDelay = const Duration(minutes: 2),
+    this.minDelay = const Duration(milliseconds: 500),
+    this.maxAttempts = 8,
+    Random? random,
+  }) : _random = random ?? Random();
+
+  /// 退避基数（第 0 次延迟的**上界**基数：`base * 2^attempt`）。
+  final Duration baseDelay;
+
+  /// 单次延迟上界（指数增长到此为止）。
+  final Duration maxDelay;
+
+  /// 单次延迟下界（防止 jitter 抽到 0 ⇒ 退避失效）。
+  final Duration minDelay;
+
+  /// 连续失败预算：超过后 [nextDelay] 返回 null（进入 failed）。
+  final int maxAttempts;
+
+  final Random _random;
+
+  int _attempt = 0;
+
+  /// 当前累计的连续失败次数（成功连接后由调用方 [reset]）。
+  int get attempt => _attempt;
+
+  /// 连接成功：清零预算，让下一次断线重新从最小退避开始。
+  void reset() => _attempt = 0;
+
+  /// 计算下一次重连延迟；预算耗尽返回 null。
+  ///
+  /// 第 `n` 次调用（`n` 从 0 起）的上界为 `min(baseDelay * 2^n, maxDelay)`，
+  /// 实际返回 `random(minDelay, 上界)`（上界 ≤ minDelay 时直接返回上界）。
+  Duration? nextDelay() {
+    if (_attempt >= maxAttempts) return null;
+    final expMs = baseDelay.inMilliseconds * (1 << _attempt);
+    final capped =
+        expMs > maxDelay.inMilliseconds ? maxDelay.inMilliseconds : expMs;
+    _attempt++;
+    final lo = minDelay.inMilliseconds;
+    if (capped <= lo) return Duration(milliseconds: capped);
+    return Duration(milliseconds: lo + _random.nextInt(capped - lo + 1));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// P1-15 / P2-21：出站暂存（outbox）的新鲜度与补发裁决（判据与接线分离）
+// ══════════════════════════════════════════════════════════════════════
+//
+// outbox 承诺的是"端点上线后自动执行"，但**不是所有命令都该被补发**：
+// 一条几小时前的 `script.stop` / `call.end` 补发出去，不是"可靠"，而是
+// 对着早已结束的会话乱喊 —— 陈旧动作甚至有害。`prepareOutboxReplay` 把旧
+// 命令重新签成"刚发出"解决的是**密码包过窗**，不等于**业务授权仍有效**
+// （这正是 P1-15 指出的两个问题被混为一谈）。
+//
+// 与项目通则一致：把"该不该补发 / 补发窗口多长"抽成不依赖 MQTT 实例的
+// **纯函数**，宿主测试可穷举断言 + 变异证伪；服务里只留
+// "取类型 → 调判据 → 执行 / 丢弃并记账"。
+
+/// 出站暂存条目的**新鲜度类别**（P1-15）。
+enum RcOutboxFreshness {
+  /// 实时信令：会话时效极短（PTT / 通话 / ICE / stop）。
+  /// 端点上线时该会话早已结束 ⇒ **禁止补发**。
+  live,
+
+  /// 瞬时动作：只有短窗口内补发才有意义（声音提示 / 找回告警 / 音量）。
+  transient,
+
+  /// 状态收敛类：较长时间内补发仍正确（配置、查询、任务 CRUD）。
+  durable,
+}
+
+/// 实时信令集合：过期即无意义、补发有害（P1-15 / P2-21）。
+const Set<String> rcLiveOutboxTypes = {
+  RcCmd.pttVoice,
+  RcCmd.callInvite,
+  RcCmd.callAnswer,
+  RcCmd.callCandidate,
+  RcCmd.callEnd,
+  RcCmd.scriptStop,
+  RcCmd.vibrateStop,
+  RcCmd.pairRequest,
+};
+
+/// 瞬时动作集合：短 TTL 内补发仍有意义。
+const Set<String> rcTransientOutboxTypes = {
+  RcCmd.soundPlay,
+  RcCmd.deviceAlert,
+  RcCmd.volumeSet,
+};
+
+/// 瞬时动作的补发窗口（10 分钟）。
+const int rcTransientOutboxTtlMs = 10 * 60 * 1000;
+
+/// 状态收敛类的补发窗口（24 小时）。
+const int rcDurableOutboxTtlMs = 24 * 60 * 60 * 1000;
+
+/// 判定某命令类型的补发新鲜度。
+///
+/// 未登记的类型一律按 [RcOutboxFreshness.durable] 处理：新协议命令在明确
+/// 归类前**宁可多补发一次**也不静默丢弃 —— 丢命令比补一条陈旧的状态查询更糟。
+RcOutboxFreshness rcOutboxFreshness(String type) {
+  if (rcLiveOutboxTypes.contains(type)) return RcOutboxFreshness.live;
+  if (rcTransientOutboxTypes.contains(type)) return RcOutboxFreshness.transient;
+  return RcOutboxFreshness.durable;
+}
+
+/// 入队时该写入的 TTL（毫秒）。实时类返回 0（无窗口 ⇒ 不入队/不补发）。
+int rcOutboxTtlMs(String type) {
+  switch (rcOutboxFreshness(type)) {
+    case RcOutboxFreshness.live:
+      return 0;
+    case RcOutboxFreshness.transient:
+      return rcTransientOutboxTtlMs;
+    case RcOutboxFreshness.durable:
+      return rcDurableOutboxTtlMs;
+  }
+}
+
+/// 补发前对一条暂存命令的**裁决**（P1-15 / P2-21）。
+enum RcOutboxReplay {
+  /// 可以补发（重盖时间戳与 ID 后投出）。
+  replay,
+
+  /// 密文解不开（密钥已变更 / 损坏）⇒ 丢弃。
+  undecodable,
+
+  /// 实时信令 ⇒ 禁止补发，丢弃。
+  liveOnly,
+
+  /// 已过新鲜度窗口 ⇒ 丢弃。
+  expired,
+}
+
+/// 决定一条暂存命令**该不该补发**。
+///
+/// [type] 为 null 视为不可解密（调用方 peek 失败）；[expiresAt] 为 null 表示
+/// 无 TTL（老数据兼容 ⇒ 恒可补发，不能因升级把历史命令一次性判死）。
+RcOutboxReplay decideOutboxReplay({
+  String? type,
+  int? expiresAt,
+  required int nowMs,
+}) {
+  if (type == null) return RcOutboxReplay.undecodable;
+  if (rcOutboxFreshness(type) == RcOutboxFreshness.live) {
+    return RcOutboxReplay.liveOnly;
+  }
+  if (expiresAt != null && nowMs > expiresAt) return RcOutboxReplay.expired;
+  return RcOutboxReplay.replay;
+}
+
+/// 丢弃暂存命令时的**用户可见原因**（写进审计，绝不静默）。
+String rcOutboxDropReason(RcOutboxReplay verdict) {
+  switch (verdict) {
+    case RcOutboxReplay.undecodable:
+      return '暂存命令无法解密（密钥已变更？）';
+    case RcOutboxReplay.liveOnly:
+      return '实时命令禁止补发（会话时效已过）';
+    case RcOutboxReplay.expired:
+      return '暂存命令已过期（超过补发窗口）';
+    case RcOutboxReplay.replay:
+      return '';
+  }
+}
+
+/// 解密一条暂存密文、只取回其命令类型（忽略时间窗）。
+///
+/// 与 [prepareOutboxReplay] 的区别：这里**只读类型**用于裁决，不做重编码。
+/// 时间窗放到极大：要的是"这条当年是什么命令"，不是"它还新不新"。
+Future<String?> peekOutboxType(
+    String wire, List<int> key, String topic) async {
+  final msg = await RcCodec.decode(wire, key, topic,
+      maxSkewMs: const Duration(days: 3650).inMilliseconds);
+  return msg?.type;
+}
+
+/// 流式对讲会话（v2）：一个 `voiceId` 对应一个播放会话 + 一批分片文件。
+///
+/// 会话状态由 [RcEndpointService._onPttVoiceStream] 读写，
+/// [RcEndpointService._closePttStream] 负责释放播放会话并按需删除分片文件。
+class _PttStreamSession {
+  _PttStreamSession({required this.sink, required this.from, required this.dir});
+
+  /// 播放会话（`PlaybackService` 侧实现；未注入开缝时不会构造到此处）。
+  final PttStreamSink sink;
+
+  /// 发起方 deviceId（回执定向用）。
+  final String from;
+
+  /// 分片落盘目录（`getApplicationDocumentsDirectory`）。
+  final Directory dir;
+
+  /// 已落盘的分片文件名（清理时逐个删除）。
+  final List<String> files = <String>[];
+
+  /// 期望的下一个分片序号（诊断用；MQTT 同主题保序，正常无需重排）。
+  int nextSeq = 0;
+
+  /// 空闲超时计时器（每片顺延；静默超时即回收，防悬挂会话）。
+  Timer? idle;
 }

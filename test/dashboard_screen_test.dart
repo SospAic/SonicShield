@@ -48,6 +48,7 @@ void main() {
     required EngineState? last,
     required Stream<EngineState>? stateStream,
     bool complianceAccepted = true,
+    PermissionStatus notificationStatus = PermissionStatus.granted,
   }) async {
     SharedPreferences.setMockInitialValues({
       if (complianceAccepted) 'compliance_accepted_v1': true,
@@ -58,7 +59,7 @@ void main() {
     BackgroundServiceManager.stateForTest = stateStream;
 
     final requests = stubPermissions({
-      Permission.notification: PermissionStatus.granted,
+      Permission.notification: notificationStatus,
       Permission.microphone: PermissionStatus.granted,
     });
     // 原生通道另一侧：宿主无真正实现，未桩时 `invokeMethod` 在部分平台会
@@ -233,5 +234,139 @@ void main() {
         reason: '点击必须真的打开保活引导 BottomSheet（line 177）');
     expect(find.textContaining('通用步骤'), findsOneWidget,
         reason: 'generic 厂商保活引导内容必须渲染（证明 sheet 真的 build）');
+  });
+
+  testWidgets('DBS-09 未同意合规 → 开启开关不启动引擎且提示（P1-02）',
+      (tester) async {
+    var started = false;
+    BackgroundServiceManager.startHook = () async {
+      started = true;
+      return true;
+    };
+    BackgroundServiceManager.invokeHook = (_, __) async {};
+    await pump(
+      tester,
+      last: const EngineState(running: false, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: false, pendingCount: 0)),
+      complianceAccepted: false,
+    );
+    // 首启引导：未同意必然弹出须知对话框，先明确拒签，使准入闸保持关闭。
+    await tester.pumpAndSettle();
+    expect(find.text('使用前必读 · 合规红线'), findsOneWidget,
+        reason: '未同意时首启必须弹出须知（else 准入闸无从生效）');
+    await tester.tap(find.text('不同意'));
+    await tester.pumpAndSettle();
+
+    // 现在从"关闭"切到"开"——应被合规闸拦下，不得启动。
+    await tester.ensureVisible(find.byType(Switch));
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    // 开关的 true 分支再次弹须知（合规是唯一准入层）；再次拒签。
+    expect(find.text('使用前必读 · 合规红线'), findsOneWidget,
+        reason: 'onChanged(true) 必须先过 ensureComplianceAccepted（未同意必弹）');
+    await tester.tap(find.text('不同意'));
+    await tester.pumpAndSettle();
+
+    expect(started, isFalse,
+        reason: '未同意《合规使用须知》绝不能启动引擎（P1-02 核心：合规门必须是准入闸）');
+    expect(find.text('需先阅读并同意《合规使用须知》才能开启守护'), findsOneWidget,
+        reason: '拒签后必须给出明确提示，而非静默弹回开关');
+  });
+
+  testWidgets('DBS-10 已同意合规 → 开启开关真的启动引擎（对照，证明 DBS-09 非恒真）',
+      (tester) async {
+    var started = false;
+    BackgroundServiceManager.startHook = () async {
+      started = true;
+      return true;
+    };
+    BackgroundServiceManager.invokeHook = (_, __) async {};
+    await pump(
+      tester,
+      last: const EngineState(running: false, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: false, pendingCount: 0)),
+      complianceAccepted: true,
+    );
+    await tester.ensureVisible(find.byType(Switch));
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(started, isTrue,
+        reason: '已同意合规时开关必须真的启动引擎 —— 与 DBS-09 形成区分度，'
+            '证明测试不是"永远不启动"的恒真断言');
+    expect(find.text('需先阅读并同意《合规使用须知》才能开启守护'), findsNothing);
+  });
+
+  testWidgets('DBS-11 精确闹钟降级 → 渲染降级卡片与恢复入口（P1-04）',
+      (tester) async {
+    const s = EngineState(
+      running: true,
+      pendingCount: 2,
+      alarmDiag: '精确闹钟降级：预期 3，实排 1（未授权或系统限制）',
+    );
+    await pump(tester, last: s, stateStream: Stream.value(s));
+    expect(find.text('精确闹钟未完全生效（降级运行）'), findsOneWidget,
+        reason: 'alarmDiag!=null 必须在用户可操作位置解释降级（否则用户以为准点）');
+    expect(find.textContaining('精确闹钟降级：预期 3，实排 1'), findsOneWidget,
+        reason: '降级原因必须原样透出，用户才能判断该去授权');
+    expect(find.text('去授权'), findsOneWidget,
+        reason: '降级必须给恢复入口（跳转精确闹钟系统设置）');
+  });
+
+  testWidgets('DBS-12 无降级 → 不渲染降级卡片（对照，证明 DBS-11 非恒真）',
+      (tester) async {
+    const s = EngineState(running: true, pendingCount: 2);
+    await pump(tester, last: s, stateStream: Stream.value(s));
+    expect(find.text('精确闹钟未完全生效（降级运行）'), findsNothing,
+        reason: 'alarmDiag==null（精确闹钟正常）时不得渲染降级卡片，'
+            '否则降级告警会常驻而失去意义');
+  });
+
+  testWidgets('DBS-13 通知权限被拒 → 开启时给出降级提示（P2-16，不再静默）',
+      (tester) async {
+    var started = false;
+    BackgroundServiceManager.startHook = () async {
+      started = true;
+      return true;
+    };
+    BackgroundServiceManager.invokeHook = (_, __) async {};
+    await pump(
+      tester,
+      last: const EngineState(running: false, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: false, pendingCount: 0)),
+      notificationStatus: PermissionStatus.denied,
+    );
+    await tester.ensureVisible(find.byType(Switch));
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+
+    expect(started, isTrue,
+        reason: '通知被拒不阻断引擎启动（它只影响提醒可见性）—— 启动归启动');
+    expect(find.textContaining('通知权限未授予'), findsOneWidget,
+        reason: '★ 通知被拒必须显式告知后果与恢复路径，'
+            '否则后台提醒全消失而用户只当功能坏了（P2-16）');
+  });
+
+  testWidgets('DBS-14 通知权限已授予 → 不弹降级提示（对照，证明 DBS-13 非恒真）',
+      (tester) async {
+    var started = false;
+    BackgroundServiceManager.startHook = () async {
+      started = true;
+      return true;
+    };
+    BackgroundServiceManager.invokeHook = (_, __) async {};
+    await pump(
+      tester,
+      last: const EngineState(running: false, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: false, pendingCount: 0)),
+      notificationStatus: PermissionStatus.granted,
+    );
+    await tester.ensureVisible(find.byType(Switch));
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+
+    expect(started, isTrue);
+    expect(find.textContaining('通知权限未授予'), findsNothing,
+        reason: '通知已授予时不得弹出降级提示 —— 否则该提示会常驻，'
+            '与 DBS-13 形成区分度，证明判据非恒真');
   });
 }

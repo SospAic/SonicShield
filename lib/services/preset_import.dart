@@ -1,6 +1,42 @@
+import 'dart:io';
+
 import 'package:uuid/uuid.dart';
 
 import '../data/repositories/task_repository.dart';
+
+/// 原子落盘（P2-23）：先写 `<finalPath>.part`，全部写完再 `rename` 到最终路径。
+///
+/// ## 为什么
+///
+/// 批量导入的回滚只能删**已登记**的最终路径；而 `materialize` 若"边写边抛"
+/// （磁盘满、源文件读一半失败、`length()` 取字节数时失败），最终路径要么留下
+/// **半截可见文件**、要么根本没走到登记那一步 —— 回滚会漏掉它。
+///
+/// 写 `.part` 临时件再原子 rename 后：**失败时最终路径永不出现**，全部残留
+/// 都集中在 `.part` 上并由本函数删除；成功则是一次同文件系统内的 rename，
+/// 不会出现"被看见的半截文件"。原子 rename 也保证下游（DB 记录）读到的
+/// 永远是完整文件。
+///
+/// 失败时**原样抛出原异常**：清理是尽力而为，不得掩盖真实原因（与
+/// [AssetLibraryImporter] 的回滚语义一致）。
+Future<void> atomicWrite(
+  String finalPath,
+  Future<void> Function(String tmpPath) write,
+) async {
+  final tmpPath = '$finalPath.part';
+  try {
+    await write(tmpPath);
+    await File(tmpPath).rename(finalPath);
+  } catch (_) {
+    try {
+      final tmp = File(tmpPath);
+      if (await tmp.exists()) await tmp.delete();
+    } catch (_) {
+      // 尽力而为：清理失败不得掩盖原始异常。
+    }
+    rethrow;
+  }
+}
 
 /// 一条待导入音源的「来源描述」。
 ///

@@ -29,6 +29,7 @@ import 'condition_env.dart';
 import 'notification_service.dart';
 import 'native_bridge.dart';
 import 'playback_service.dart';
+import 'retention_maintenance.dart';
 import 'sound_guard_service.dart';
 import 'vibrate_session.dart';
 
@@ -41,6 +42,7 @@ class EngineState {
     this.lastAction,
     this.guardActive = false,
     this.guardError,
+    this.alarmDiag,
   });
 
   final bool running;
@@ -57,6 +59,13 @@ class EngineState {
   /// 就等于把失败静默掉（BUG-061 判据）。
   final String? guardError;
 
+  /// 精确闹钟（通道B）**降级原因**（P1-04）；正常或未尝试时为 null。
+  ///
+  /// 与 [guardError] 同形：排布数量不足/权限被拒时，若不上报，界面会继续
+  /// 显示"运行中 + 计划数"，用户无从知道"进程被杀后不再准点"。回投后
+  /// UI 在可操作位置解释并提供"精确闹钟权限"入口（可恢复）。
+  final String? alarmDiag;
+
   Map<String, Object?> toMap() => {
         'running': running,
         'pendingCount': pendingCount,
@@ -64,7 +73,46 @@ class EngineState {
         'lastAction': lastAction,
         'guardActive': guardActive,
         'guardError': guardError,
+        'alarmDiag': alarmDiag,
       };
+}
+
+/// 动作执行的**统一结果语义**（P1-07）。
+///
+/// 为什么需要它：此前动作 helper（`playAndLog` / `ttsAndLog` / `recordAndLog`
+/// / `soundscapeAndLog`）返回 `void`，而 [runSingle] 对播放/TTS/录音/声景分支
+/// **固定 `return true`** —— 于是"播放缺文件""TTS 超时""录音失败"这些
+/// **真实失败**在 occurrence / 远程 ack 里全被记成成功（日志说失败、计划说成功）。
+/// 现在三态（success/failed/skipped）从 helper 一路带上调用方、Occurrence 与
+/// 远程回执，语义只有一处真源。
+enum ExecutionStatus { success, failed, skipped }
+
+class ExecutionOutcome {
+  const ExecutionOutcome._(this.status, this.reason);
+
+  /// 动作确实完成。
+  const ExecutionOutcome.success() : this._(ExecutionStatus.success, null);
+
+  /// 动作**做错了 / 没做到**（缺音源、TTS 超时、录音异常、原生拒绝…）。
+  const ExecutionOutcome.failed(String reason)
+      : this._(ExecutionStatus.failed, reason);
+
+  /// 动作**没做**，但这不是错误（平台无该能力、概率/条件未命中）。
+  /// 与 failed 的区别决定 occurrence 记 skipped 还是 failed。
+  const ExecutionOutcome.skipped(String reason)
+      : this._(ExecutionStatus.skipped, reason);
+
+  final ExecutionStatus status;
+  final String? reason;
+
+  /// 正向语义：只有 **failed** 算失败；skipped 不算失败（与既有
+  /// `runAction` 布尔语义下"平台无能力仍返回 true"保持一致）。
+  bool get ok => status != ExecutionStatus.failed;
+  bool get isFailure => status == ExecutionStatus.failed;
+  bool get isSkipped => status == ExecutionStatus.skipped;
+
+  @override
+  String toString() => 'ExecutionOutcome($status${reason == null ? '' : ': $reason'})';
 }
 
 /// 一条声景轨道要播哪条音源（**纯决策，便于断言**）。
@@ -117,6 +165,37 @@ Future<void> _engineBody(ServiceInstance service) async {
   final tasksRepo = TaskRepository(db);
   final occs = OccurrenceRepository(db);
   final logs = LogRepository(db);
+
+  // P2-10：保留策略维护（docs/07 §4「数据生命周期」）。两个 `purgeOlderThan`
+  // 此前只有定义、无生产调用入口 —— 长期运行会让日志与历史计划只增不减。
+  // 每次引擎启动跑一次即可：清理是**幂等**的（已删的再判一次为 0），且引擎
+  // 只在守护开启/看门狗唤醒时启动，天然形成"低频维护"节奏。
+  // 维护不是核心执行路径 —— 失败只留一条审计，**绝不阻断引擎启动**。
+  try {
+    final removed =
+        await RetentionMaintenance(logs: logs, occurrences: occs).run();
+    if (removed.total > 0) {
+      await logs.append(
+        source: 'maintenance',
+        action: 'retention',
+        status: 'success',
+        message: '清理过期日志 ${removed.logsRemoved} 条、'
+            '历史计划 ${removed.occurrencesRemoved} 条',
+      );
+    }
+  } on Object catch (e) {
+    try {
+      await logs.append(
+        source: 'maintenance',
+        action: 'retention',
+        status: 'failed',
+        message: '$e',
+      );
+    } on Object {
+      // 连审计都写不进：维护本就不阻断启动，此处不再上抛。
+    }
+  }
+
   final playback = PlaybackService();
   final guard = SoundGuardService();
   const native = MethodChannel(Channels.method);
@@ -181,6 +260,10 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 守卫启动失败原因（随每次 `state` 广播回投给 UI）。
   /// 成功启动 / 主动关闭时清空 —— 否则 UI 会一直拿着一条过期的错误。
   String? guardError;
+
+  /// 精确闹钟（通道B）降级原因（P1-04），随每次 `state` 广播回投给 UI。
+  /// 排布正常时清空 —— 与 [guardError] 同为"失败必须可见"的载体。
+  String? alarmDiag;
 
   /// 守卫"延时执行"的待发定时器（v1.10 编排增强）。
   ///
@@ -303,7 +386,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 声景混音：逐轨解析路径（assetId 优先，其次预置分类随机），多轨叠加。
   ///
   /// ⚠️ 解析不到的轨道**直接跳过**，绝不拿别的音源顶上（见 [soundscapeTrackPath]）。
-  Future<void> soundscapeAndLog(
+  Future<ExecutionOutcome> soundscapeAndLog(
       Task task, SoundscapeAction sc, String source) async {
     final tracks = <SoundscapeTrackInput>[];
     var unresolved = 0;
@@ -322,16 +405,17 @@ Future<void> _engineBody(ServiceInstance service) async {
           SoundscapeTrackInput(path: path, volume: t.volume, loop: t.loop));
     }
     if (tracks.isEmpty) {
+      final reason = sc.tracks.isEmpty
+          ? '无可解析的音轨'
+          : '${sc.tracks.length} 轨全部无法解析'
+              '（点名的音源已不存在），已跳过而非改播其它音源';
       await logs.append(
           source: source,
           action: 'soundscape',
           status: 'failed',
           taskId: task.id,
-          message: sc.tracks.isEmpty
-              ? '无可解析的音轨'
-              : '${sc.tracks.length} 轨全部无法解析'
-                  '（点名的音源已不存在），已跳过而非改播其它音源');
-      return;
+          message: reason);
+      return ExecutionOutcome.failed(reason);
     }
     // 部分轨解析不到也要留痕：否则用户听的是"少了轨的声景"却以为配置没生效。
     if (unresolved > 0) {
@@ -356,6 +440,9 @@ Future<void> _engineBody(ServiceInstance service) async {
         taskId: task.id,
         durationMs: r.playedMs,
         message: '${tracks.length} 轨 · ${r.message ?? ''}');
+    return r.ok
+        ? const ExecutionOutcome.success()
+        : ExecutionOutcome.failed(r.message ?? '声景播放失败');
   }
 
   Future<String?> pickAssetFor(Task task) async {
@@ -370,7 +457,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     return paths[rng.nextInt(paths.length)];
   }
 
-  Future<void> playAndLog(Task task, PlayAudioAction p, double volume,
+  Future<ExecutionOutcome> playAndLog(Task task, PlayAudioAction p, double volume,
       int durationMs, String source) async {
     final path = await pickAssetFor(task);
     if (path == null) {
@@ -380,7 +467,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'failed',
           taskId: task.id,
           message: '无可用音源');
-      return;
+      return const ExecutionOutcome.failed('无可用音源');
     }
     final r = await playback.play(
       path: path,
@@ -400,9 +487,12 @@ Future<void> _engineBody(ServiceInstance service) async {
         volume: volume,
         durationMs: r.playedMs,
         message: r.message);
+    return r.ok
+        ? const ExecutionOutcome.success()
+        : ExecutionOutcome.failed(r.message ?? '播放失败');
   }
 
-  Future<void> ttsAndLog(Task task, TtsAction t, String source) async {
+  Future<ExecutionOutcome> ttsAndLog(Task task, TtsAction t, String source) async {
     final tts = FlutterTts();
     try {
       // 整体超时保护：无 TTS 引擎的平台（如 AOSP 镜像）speak/setLanguage
@@ -416,6 +506,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'success',
           taskId: task.id,
           volume: t.volume);
+      return const ExecutionOutcome.success();
     } catch (e) {
       await logs.append(
           source: source,
@@ -423,6 +514,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'failed',
           taskId: task.id,
           message: e.toString());
+      return ExecutionOutcome.failed(e.toString());
     } finally {
       try {
         await tts.stop().timeout(const Duration(seconds: 3));
@@ -432,7 +524,8 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
   }
 
-  Future<void> recordAndLog(Task task, int seconds, String source) async {
+  Future<ExecutionOutcome> recordAndLog(
+      Task task, int seconds, String source) async {
     final rec = AudioRecorder();
     try {
       // ⚠️ **不再用 `rec.hasPermission()` 做准入判定**（真机取证 + 与
@@ -458,8 +551,10 @@ Future<void> _engineBody(ServiceInstance service) async {
       // 取证哈希链（v1.3）：文件 SHA-256 入审计，供导出时校验完整性。
       var sha256Hex = '';
       try {
-        final bytes = await File(path).readAsBytes();
-        sha256Hex = sha256.convert(bytes).toString();
+        // ⚠️ 走**流式**哈希（P2-09）：`readAsBytes()` 会把整段录音全量载入内存，
+        // 长录音（分钟级）在低配机上足以触发 OOM —— 而取证文件恰恰可能很长。
+        sha256Hex =
+            (await sha256.bind(File(path).openRead()).first).toString();
       } on Object {
         // 文件不可读时保留空哈希（审计仍记录路径与时间）
       }
@@ -481,6 +576,7 @@ Future<void> _engineBody(ServiceInstance service) async {
             ? '已保存到应用私有目录（文件不可读，完整性哈希未生成）'
             : '已保存到应用私有目录（含完整性哈希）',
       );
+      return const ExecutionOutcome.success();
     } catch (e) {
       await logs.append(
           source: source,
@@ -488,23 +584,67 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'failed',
           taskId: task.id,
           message: e.toString());
+      return ExecutionOutcome.failed(e.toString());
+    } finally {
+      // ⚠️ P2-09：`AudioRecorder` 此前**从不 dispose**，异常路径也不保证 stop。
+      // 录音器持有麦克风句柄，不释放会持续占用系统音频资源（守卫/通话被拒）。
+      // 用 try/finally 尽力停录并释放，且**不覆盖**已有错误。
+      try {
+        await rec.stop();
+      } on Object {
+        // 已停止或未开始时忽略
+      }
+      try {
+        await rec.dispose();
+      } on Object {
+        // 释放失败不影响审计
+      }
     }
+  }
+
+  /// 统一的执行前裁决（条件 → 概率），供**声音**与**远程立即执行**两个入口复用。
+  ///
+  /// 定时入口 `executeDue` 因重入/乐观置状态的结构约束，把同样两条门**同序**
+  /// 内联实现（见其函数体）。三处判据一致：先确定性条件、再随机概率门。
+  /// 返回 null = 通过；否则写审计并返回未通过原因。
+  Future<String?> admitExecution(Task task, ConditionEnv env, String source,
+      {String? occurrenceId}) async {
+    final condFail = conditionFailedIn(task, env);
+    if (condFail != null) {
+      await logs.append(
+          source: source,
+          action: 'condition',
+          status: 'skipped',
+          taskId: task.id,
+          occurrenceId: occurrenceId,
+          message: condFail);
+      return condFail;
+    }
+    final gateFail = probabilityGateMissed(task);
+    if (gateFail != null) {
+      await logs.append(
+          source: source,
+          action: 'probability',
+          status: 'skipped',
+          taskId: task.id,
+          occurrenceId: occurrenceId,
+          message: gateFail);
+      return gateFail;
+    }
+    return null;
   }
 
   /// 动作执行统一串行 await：保证 occurrence 状态与审计日志严格一致
   /// （此前 fire-and-forget 在 TTS 挂起时导致日志永远缺失——BUG-011 关联）。
-  Future<bool> runSingle(Task task, ActionConfig cfg, double volume,
+  Future<ExecutionOutcome> runSingle(Task task, ActionConfig cfg, double volume,
       int durationMs, String source, {String? occurrenceId}) async {
     switch (cfg) {
       case final PlayAudioAction p:
-        await playAndLog(task, p, volume, durationMs, source);
-        return true;
+        return playAndLog(task, p, volume, durationMs, source);
       case final SoundscapeAction sc:
-        await soundscapeAndLog(task, sc, source);
-        return true;
+        return soundscapeAndLog(task, sc, source);
       case final TtsAction t:
-        await ttsAndLog(task, t, source);
-        return true;
+        return ttsAndLog(task, t, source);
       case final NotifyAction n:
         await NotificationService.instance
             .showEvent(title: n.title, body: n.body);
@@ -513,7 +653,7 @@ Future<void> _engineBody(ServiceInstance service) async {
             action: 'notify',
             status: 'success',
             taskId: task.id);
-        return true;
+        return const ExecutionOutcome.success();
       case final VibrateAction v:
         // FR-34 口径修正（v1.9，docs/20 §2.3）：无振动能力时**不再静默**。
         // 旧实现 `on Object { /* 静默 */ }` 会让"到点了但没震"完全无迹可寻，
@@ -527,7 +667,7 @@ Future<void> _engineBody(ServiceInstance service) async {
               taskId: task.id,
               occurrenceId: occurrenceId,
               message: '无振动能力：${vibrateDegradations(caps, v).join('；')}');
-          return true;
+          return const ExecutionOutcome.skipped('无振动能力');
         }
         try {
           // ⚠️ 必须**检查回执**，不能只看"有没有抛异常"。
@@ -545,6 +685,7 @@ Future<void> _engineBody(ServiceInstance service) async {
                 status: 'success',
                 taskId: task.id,
                 occurrenceId: occurrenceId);
+            return const ExecutionOutcome.success();
           } else {
             // 不写成 failed：命令本身没错，是**这个平台没实现这条通道**。
             // 如实标注"平台未确认"，并保留原生回执值以便诊断。
@@ -555,6 +696,7 @@ Future<void> _engineBody(ServiceInstance service) async {
                 taskId: task.id,
                 occurrenceId: occurrenceId,
                 message: '平台未确认振动（原生回执=$ack）：本平台可能未实现该通道');
+            return ExecutionOutcome.skipped('平台未确认振动（原生回执=$ack）');
           }
         } on Object {
           await logs.append(
@@ -564,18 +706,17 @@ Future<void> _engineBody(ServiceInstance service) async {
               taskId: task.id,
               occurrenceId: occurrenceId,
               message: '原生调用失败（桥不可用或被拒绝）');
+          return const ExecutionOutcome.failed('原生调用失败（桥不可用或被拒绝）');
         }
-        return true;
       case final RecordEvidenceAction rec:
-        await recordAndLog(task, rec.seconds, source);
-        return true;
+        return recordAndLog(task, rec.seconds, source);
       // ---- v1.9 振动（docs/20 §4/§7）----
       // 两类都交给 VibrateSession：它负责能力探测、降级明示、分片续发与
       // S1–S4 失效安全。`volume` 在振动语义下是**强度**，`durationMs` 是总时长，
       // 两者都由物化期敲定（"计划即审计"）。
       case final RandomVibrateAction _:
       case final ContinuousVibrateAction _:
-        return vibrate.start(
+        final vStarted = await vibrate.start(
           occurrenceId: occurrenceId ?? '${task.id}@runtime',
           taskId: task.id,
           action: cfg,
@@ -583,6 +724,9 @@ Future<void> _engineBody(ServiceInstance service) async {
           amplitude: volume.clamp(0.0, 1.0),
           source: source,
         );
+        return vStarted
+            ? const ExecutionOutcome.success()
+            : const ExecutionOutcome.failed('振动未启动（见审计）');
       case final CompositeAction c:
         return runSingle(task, c.primary, volume, durationMs, source,
             occurrenceId: occurrenceId);
@@ -601,7 +745,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   }
 
   /// 动作执行器（顶层分派，全部写审计日志）。
-  Future<bool> runAction(
+  Future<ExecutionOutcome> runAction(
       Task task, double volume, int durationMs, String source,
       {String? occurrenceId}) async {
     lastAction = '${task.name} · ${task.actionType.label}';
@@ -625,7 +769,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           status: 'failed',
           taskId: task.id,
           message: e.toString());
-      return false;
+      return ExecutionOutcome.failed(e.toString());
     }
   }
 
@@ -647,6 +791,7 @@ Future<void> _engineBody(ServiceInstance service) async {
           lastAction: lastAction,
           guardActive: guard.isRunning,
           guardError: guardError,
+          alarmDiag: alarmDiag,
         ).toMap());
   }
 
@@ -661,14 +806,31 @@ Future<void> _engineBody(ServiceInstance service) async {
     try {
       final n = await native.invokeMethod('setExactAlarms', {'times': times});
       if (n == null) {
+        alarmDiag = '本平台未实现精确闹钟：进程被杀后不再补触发（仅通道A生效）';
         await logs.append(
             source: 'schedule',
             action: 'alarms',
             status: 'skipped',
             message: '原生未回执精确闹钟排布：本平台可能未实现该通道，'
                 '进程被杀后不再补触发（仅通道A生效）');
+        return;
+      }
+      // P1-04：解析**结构化结果**。旧实现只看 null/异常，把"权限被拒返回 0"
+      // 当成普通成功 —— 界面照常显示运行中与计划数，系统级唤醒却没排上。
+      final res = AlarmScheduleResult.fromRaw(n, expected: times.length);
+      if (res.degraded) {
+        alarmDiag = res.reason;
+        await logs.append(
+            source: 'schedule',
+            action: 'alarms',
+            status: 'failed',
+            message: '精确闹钟降级：${res.reason}'
+                '（预期 ${res.expected}，实排 ${res.scheduled}）');
+      } else {
+        alarmDiag = null;
       }
     } on Object catch (e) {
+      alarmDiag = '精确闹钟排布失败（仅通道A生效）：$e';
       await logs.append(
           source: 'schedule',
           action: 'alarms',
@@ -738,16 +900,17 @@ Future<void> _engineBody(ServiceInstance service) async {
         allowQuietExempt: allowExempt,
       );
       final newEntries = <PlannedEntry>[];
+      final taskIds = <String>[];
       for (final t in all) {
         if (t.triggerType == TriggerType.soundTriggered) continue;
+        taskIds.add(t.id);
         newEntries.addAll(engine.materialize(t, now));
       }
-      if (newEntries.isEmpty) {
-        await clearAllAlarms();
-        await broadcast();
-        return;
-      }
-      await occs.commitAll([
+      // 计划**对账**（P1-05 / P2-03）：把每个任务的**未来 pending** 整体替换为
+      // 本轮重算结果。种子只由「任务 id + 定义版本 + 当地日期」决定 ⇒ 未变更的
+      // 任务是幂等的；改过触发器/免打扰窗口的任务，其旧幽灵计划在此被撤销。
+      // 紧随其后的 `pushExactAlarms` 按新计划重排原生闹钟（两通道不脱节）。
+      await occs.reconcile(taskIds, [
         for (final e in newEntries)
           PlannedOccurrence(
             id: e.occurrenceId,
@@ -758,7 +921,12 @@ Future<void> _engineBody(ServiceInstance service) async {
             durationMs: e.durationMs,
             quietExempt: e.quietExempted,
           ),
-      ]);
+      ], now);
+      if (newEntries.isEmpty) {
+        await clearAllAlarms();
+        await broadcast();
+        return;
+      }
       final alarmTimes = newEntries
           .take(SchedulerConfig.maxNativeAlarmsPerTask)
           .map((e) => e.fireAt.millisecondsSinceEpoch)
@@ -845,9 +1013,12 @@ Future<void> _engineBody(ServiceInstance service) async {
         // （`task.dart:146`），`fromRow` 的 `values.byName` 与既有断言/持久化完全
         // 兼容；正向语义不变 —— 正常路径下这一行紧接着就被下面那行覆盖。
         await occs.markStatus(o.id, OccurrenceStatus.failed);
-        final ok = await runAction(
+        final outcome = await runAction(
             task, o.volume ?? 0.8, o.durationMs ?? 0, 'schedule',
             occurrenceId: o.id);
+        // P1-07：终态由**真实执行结果**决定（缺失音源/TTS 超时/录音失败
+        // 现在会如实落 failed，不再因 helper 返回 void 而被记成成功）。
+        final ok = outcome.ok;
         await occs.markStatus(
             o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
         // 夜间独立豁免审计（v1.9，docs/20 §8.2 约束 2）：**不得静默生效**。
@@ -897,13 +1068,19 @@ Future<void> _engineBody(ServiceInstance service) async {
             message: '计划中的任务已不存在或已停用，已跳过（不改播其它任务）');
         continue;
       }
-      await runAction(t, 0.8, 0, 'sound');
+      // 概率门已在 onSoundEvent 的候选裁决（admitExecution）中生效；
+      // 此处只执行并如实落终态（P1-07）。
+      final occId = '${t.id}@sound@${at.millisecondsSinceEpoch}';
+      final outcome =
+          await runAction(t, 0.8, 0, 'sound', occurrenceId: occId);
       await occs.commitAll([
         PlannedOccurrence(
-          id: '${t.id}@sound@${at.millisecondsSinceEpoch}',
+          id: occId,
           taskId: t.id,
           fireAt: at,
-          status: OccurrenceStatus.done,
+          status: outcome.isFailure
+              ? OccurrenceStatus.failed
+              : OccurrenceStatus.done,
         ),
       ]);
     }
@@ -921,7 +1098,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     // 同样只读一次平台状态（与 executeDue 同理）。
     final env = RoundConditionEnv(read: readConditionEnv);
 
-    // 第一步：先算出**真正够格**的候选（冷却 + 条件都通过），
+    // 第一步：先算出**真正够格**的候选（冷却 + 条件 + 概率都通过），
     // 再交给编排决策 —— 否则"随机挑一个"可能挑中一个本来会被跳过的任务。
     final ready = <String>[];
     for (final t
@@ -931,16 +1108,10 @@ Future<void> _engineBody(ServiceInstance service) async {
       final cooldown =
           Duration(seconds: math.max(cfg.cooldownSec, t.cooldownSec));
       if (last != null && at.difference(last) < cooldown) continue;
-      final condFail = conditionFailedIn(t, await env.value);
-      if (condFail != null) {
-        await logs.append(
-            source: 'sound',
-            action: 'condition',
-            status: 'skipped',
-            taskId: t.id,
-            message: condFail);
-        continue;
-      }
+      // P1-07：声音入口此前**绕过概率门**（只有定时入口有）——改用统一裁决
+      // 管线（条件 → 概率），与 executeDue / 远程立即执行同判据。
+      final denied = await admitExecution(t, await env.value, 'sound');
+      if (denied != null) continue;
       ready.add(t.id);
     }
 
@@ -1080,6 +1251,30 @@ Future<void> _engineBody(ServiceInstance service) async {
     guardErrSub = null;
     await guard.stop();
     await playback.stop();
+    // P2-15：**对称撤下**麦克风前台服务通行证。`MicGuardService` 是独立
+    // sticky service，而 Dashboard 关闭引擎走的是 `mgr.stop()` —— 若只停
+    // Dart 层守卫，原生 FGS 与常驻通知会残留（dumpsys 可见），与"引擎已关"
+    // 的界面语义不一致。同时清掉 `guard_enabled`：通行证已被撤，若还持久化
+    // "下次自启守卫"，下次引擎启动会在**没有前台通行证**的情况下尝试采音
+    //（违反 Android 11+ while-in-use），必然失败并报错 —— 停止方向走安全侧，
+    // 守卫须由用户在前台显式重新开启（届时会重新申请通行证）。
+    guardEnabled = false;
+    await prefs.setBool('guard_enabled', false);
+    try {
+      await native.invokeMethod('stopMicService');
+    } on Object catch (e) {
+      await logs.append(
+          source: 'guard',
+          action: 'micService',
+          status: 'failed',
+          message: '停止麦克风前台服务失败（可能残留守卫通知）：$e');
+    }
+    // P1-03：**对称撤销**原生精确闹钟。旧实现只停 Dart 层守卫/播放器就
+    // `stopSelf()`，AlarmManager 里排定的闹钟仍在 ⇒ 到点由
+    // `AlarmWatchdogReceiver` 重新拉起前台服务并执行到期任务 ——
+    // 用户以为"已关闭"，系统却再次运行。这里与 start/replan 的排布路径对称清理，
+    // 并由看门狗接收器在拉起前再校验启用态/代次（双保险）。
+    await clearAllAlarms();
     // ⚠️ **必须在 `stopSelf()` 之前回投 `running:false`**。
     // 旧实现从不回投停止状态，且 `broadcast()` 把 `running` 写死成 `true` ⇒
     // UI 的 `isRunning` 永远停在 true（引擎已经死了，再没人能广播），
@@ -1156,22 +1351,47 @@ Future<void> _engineBody(ServiceInstance service) async {
               taskId: task.id,
               message: condFail);
         } else {
-          // 物化期的音量/时长由调度器确定；远程立即执行取动作区间中点，
-          // 保持"计划即审计"语义（volume/duration 落库到 occurrence）。
-          final (vol, dur) = _nominalParams(task);
-          ok = await runAction(task, vol, dur, 'remote');
-          message = ok ? '已执行' : '执行失败';
-          await occs.commitAll([
-            PlannedOccurrence(
-              id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
-              taskId: task.id,
-              fireAt: DateTime.now(),
-              status: ok ? OccurrenceStatus.done : OccurrenceStatus.failed,
-              volume: vol,
-              durationMs: dur,
-            ),
-          ]);
-          lastAction = '${task.name} · 远程立即执行';
+          // P1-07：远程立即执行也必须过**概率门**（此前只有定时入口有）——
+          // 否则"设了 30% 概率"对远程点击毫无约束。
+          final gateFail = probabilityGateMissed(task);
+          if (gateFail != null) {
+            message = '概率未命中：$gateFail';
+            await logs.append(
+                source: 'remote',
+                action: 'probability',
+                status: 'skipped',
+                taskId: task.id,
+                message: gateFail);
+            await occs.commitAll([
+              PlannedOccurrence(
+                id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
+                taskId: task.id,
+                fireAt: DateTime.now(),
+                status: OccurrenceStatus.skipped,
+              ),
+            ]);
+          } else {
+            // 物化期的音量/时长由调度器确定；远程立即执行取动作区间中点，
+            // 保持"计划即审计"语义（volume/duration 落库到 occurrence）。
+            final (vol, dur) = _nominalParams(task);
+            final outcome = await runAction(task, vol, dur, 'remote');
+            // P1-07：回执区分真实成败（缺音源/TTS 超时不再回"已执行"）。
+            ok = outcome.ok;
+            message = ok ? '已执行' : (outcome.reason ?? '执行失败');
+            await occs.commitAll([
+              PlannedOccurrence(
+                id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
+                taskId: task.id,
+                fireAt: DateTime.now(),
+                status: outcome.isFailure
+                    ? OccurrenceStatus.failed
+                    : OccurrenceStatus.done,
+                volume: vol,
+                durationMs: dur,
+              ),
+            ]);
+            lastAction = '${task.name} · 远程立即执行';
+          }
         }
       }
     } on Object catch (e) {

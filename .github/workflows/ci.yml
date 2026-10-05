@@ -26,6 +26,12 @@ jobs:
       - name: Unit tests
         run: flutter test --coverage
 
+      # 覆盖率 ratchet（P2-27）：与本地 `scripts/gates.sh` 门禁 4/4 **同判据同阈值**
+      # （98.8 / 10209，由 test/gate_entrypoint_consistency_test.dart GEC-06 机器锁定）。
+      # 只降不升：跌破即 exit 1 让 PR 变红，避免"全绿但覆盖分数下降"。
+      - name: Coverage ratchet
+        run: dart run tool/coverage_report.dart --gate=98.8 --min-covered=10209
+
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
@@ -50,8 +56,41 @@ jobs:
           cache: true
 
       - run: flutter pub get
+
+      # P1-14：正式 Release 必须用真 keystore 签名，禁止静默回退 debug 签名。
+      # 从 Secrets 恢复 android/key.properties + keystore；缺失时留空，
+      # 让下方 REQUIRE_RELEASE_SIGNING=1 的构建 fail-closed。
+      - name: Restore release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::未配置 ANDROID_KEYSTORE_BASE64，Release 构建将 fail-closed（P1-14）"
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/app/release.keystore
+          cat > android/key.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
       - name: Build APK
+        env:
+          # 无正式 keystore 时该 flag 让 Gradle 直接失败（fail-closed），
+          # 与 android/app/build.gradle.kts 的 P1-14 判据一致。
+          REQUIRE_RELEASE_SIGNING: "1"
         run: flutter build apk --release
+
+      - name: Verify APK signing certificate
+        run: |
+          BT=$(ls "$ANDROID_HOME"/build-tools | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs \
+            build/app/outputs/flutter-apk/app-release.apk
 
       - uses: actions/upload-artifact@v4
         with:
@@ -94,3 +133,48 @@ jobs:
             flutter test integration_test/app_smoke_test.dart
             flutter test integration_test/native_bridge_test.dart
             flutter test integration_test/assist_e2e_test.dart
+
+  # iOS 构建（macOS runner = 无 Mac 硬件时唯一的编译环境）。
+  #
+  # 产物是**未签名**的 .ipa，供 Windows 侧用 Sideloadly / 爱思助手 +
+  # 免费 Apple ID 重新签名后侧载到 iPhone（免费号签名 7 天有效，需每周重签）。
+  # 之所以 `--no-codesign`：签名需要你的证书/描述文件，不应放进仓库 Secrets；
+  # 侧载工具会用自己的 Apple ID 重签，故这里只负责"能编译出可用的 app 包"。
+  ios-build:
+    runs-on: macos-latest
+    needs: analyze-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.3
+          channel: stable
+          cache: true
+
+      - name: Show toolchain
+        run: |
+          flutter --version
+          pod --version || true
+
+      - run: flutter pub get
+
+      # 首次构建时 Flutter 会按 ios/Runner.xcodeproj 的部署目标生成 ios/Podfile 并 pod install。
+      - name: Build iOS (release, unsigned)
+        run: flutter build ios --release --no-codesign
+
+      # 手工打包成未签名 .ipa（Sideloadly/AltStore 接受未签名 IPA，自行重签）：
+      # iphoneos/Runner.app → Payload/Runner.app → zip。
+      - name: Package unsigned IPA
+        run: |
+          cd build/ios/iphoneos
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R Runner.app Payload/
+          zip -qry "$GITHUB_WORKSPACE/sonic_shield-unsigned.ipa" Payload
+          ls -lh "$GITHUB_WORKSPACE/sonic_shield-unsigned.ipa"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonicshield-ios-ipa
+          path: sonic_shield-unsigned.ipa

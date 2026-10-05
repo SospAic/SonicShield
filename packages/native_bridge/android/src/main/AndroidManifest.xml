@@ -21,5 +21,16 @@
         <receiver
             android:name=".AlarmWatchdogReceiver"
             android:exported="false" />
+
+        <!-- P2-33：精确闹钟权限**重新授予**后自动重排（系统仅在授予时派发该 action）。
+             只在 serviceShouldRun 为真时经看门狗闹钟重建计划；撤销授权不触发本接收器。 -->
+        <receiver
+            android:name=".ExactAlarmPermissionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action
+                    android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

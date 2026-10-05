@@ -9,10 +9,10 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 
-/// 对讲机整页（v1.6，v1 整段模式）：
-/// 选择端点 → 按住说话（≤60s，AAC）→ 松开自动加密发送 →
-/// 端点自动播放并回执（BUG-046：`rc.pttAck` 现已消费渲染）。
-/// v2 路线：Opus 流式分片（Zello 式实时）。
+/// 对讲机整页（v1.6；v2 起为**流式**）：
+/// 选择端点 → 按住说话（≤60s，AAC）→ **边录边分包加密发送** →
+/// 端点**边收边放**（首片到达即出声）→ 末片收尾并回执
+/// （BUG-046：`rc.pttAck` 现已消费渲染）。
 class PttTab extends StatefulWidget {
   const PttTab({super.key});
 
@@ -28,6 +28,14 @@ class _PttTabState extends State<PttTab> {
   Timer? _ticker;
   String? _lastResult;
   StreamSubscription<Map<String, dynamic>>? _ackSub;
+
+  /// 手指是否仍按在麦克风上（P2-25）。
+  ///
+  /// `_start()` 要跨"请求麦克风权限 → `pttStart()`"两段 await；用户若在它们
+  /// 完成前松手，`_send()` 因 `_recording == false` 直接返回，随后 `_start()`
+  /// 仍会把录音拉起来 —— 一段**无人控制**的录音要到 60s 上限才自动发送。
+  /// 用本标志在 await 之后复核"是否仍按住"，已松手则撤销启动。
+  bool _pressing = false;
 
   @override
   void initState() {
@@ -49,7 +57,7 @@ class _PttTabState extends State<PttTab> {
     _ticker?.cancel();
     unawaited(_ackSub?.cancel());
     // 录音中直接离开页面会把麦克风一直占着 —— 释放路径必须兜底。
-    if (_recording) unawaited(RcControllerService.instance.pttCancel());
+    if (_recording) unawaited(RcControllerService.instance.pttCancelStream());
     super.dispose();
   }
 
@@ -75,10 +83,26 @@ class _PttTabState extends State<PttTab> {
       messenger.showSnackBar(const SnackBar(content: Text('需要麦克风权限')));
       return;
     }
+    // P2-25：权限申请期间用户可能已松手 → 不再开始录音。
+    if (!_pressing) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    final store = RemoteStore(prefs);
+    final ep = endpointById(_endpoints, _selectedId);
+    if (ep == null) {
+      messenger.showSnackBar(const SnackBar(content: Text('端点已不存在（可能已解配对）')));
+      return;
+    }
     final controller = RcControllerService.instance;
-    final ok = await controller.pttStart();
+    final ok = await controller.pttStartStream(ep, store);
     if (!ok) {
       messenger.showSnackBar(const SnackBar(content: Text('录音启动失败')));
+      return;
+    }
+    // P2-25：`pttStartStream()` 期间松手 → 录音流已拉起但无人控制，必须撤销，
+    // 否则这段录音要等到 60s 上限才自动收尾。
+    if (!_pressing || !mounted) {
+      await controller.pttCancelStream();
       return;
     }
     _ticker = Timer.periodic(const Duration(seconds: 1), (t) {
@@ -96,22 +120,14 @@ class _PttTabState extends State<PttTab> {
     _ticker?.cancel();
     if (!_recording) return;
     setState(() => _recording = false);
-    final prefs = await SharedPreferences.getInstance();
-    final store = RemoteStore(prefs);
-    final ep = endpointById(_endpoints, _selectedId);
-    if (ep == null) {
-      // 端点在别处被解配对 —— 明确告知，不要崩（BUG-060）。
-      if (mounted) setState(() => _lastResult = '端点已不存在（可能已解配对）');
-      return;
-    }
-    final r = await RcControllerService.instance.pttStopAndSend(ep, store);
+    final r = await RcControllerService.instance.pttStopStream();
     if (mounted) setState(() => _lastResult = r.message);
   }
 
   Future<void> _cancel() async {
     _ticker?.cancel();
     final controller = RcControllerService.instance;
-    await controller.pttCancel();
+    await controller.pttCancelStream();
     if (mounted) {
       setState(() {
         _recording = false;
@@ -154,9 +170,18 @@ class _PttTabState extends State<PttTab> {
           child: Column(
             children: [
               GestureDetector(
-                onTapDown: (_) => _start(),
-                onTapUp: (_) => _send(),
-                onTapCancel: () => _cancel(),
+                onTapDown: (_) {
+                  _pressing = true;
+                  _start();
+                },
+                onTapUp: (_) {
+                  _pressing = false;
+                  _send();
+                },
+                onTapCancel: () {
+                  _pressing = false;
+                  _cancel();
+                },
                 child: CircleAvatar(
                   radius: 52,
                   backgroundColor:
@@ -189,7 +214,7 @@ class _PttTabState extends State<PttTab> {
             child: Text(
               '对讲语音与遥控命令走同一端到端加密通道（AES-256-GCM），'
               'broker 不可见内容；音频仅由接收端在本地播放并审计留痕。'
-              'v2 将升级 Opus 流式分片（250ms 实时对讲）。',
+              'v2 流式：边说边发、边收边放（约 0.5 秒一片）。',
               style: TextStyle(fontSize: 12),
             ),
           ),

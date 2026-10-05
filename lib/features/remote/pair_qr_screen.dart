@@ -221,6 +221,57 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
       '${PairQrProtocol.prefix}$_deviceId/${Uri.encodeComponent(_deviceName)}/'
       '$_pairCode';
 
+  /// 重置（轮换）本机配对码（docs/25 P1-10，v1.9）。
+  ///
+  /// ## 为什么必须二次确认、并把后果写在弹窗里
+  ///
+  /// 入站命令的密钥由**控制端**用「本机配对码 + 本机 ID」派生（见
+  /// `RcEndpointService` 入站解密），所以本机码一换，**所有已配对控制器的旧密钥
+  /// 立即失效** —— 它们必须重新扫码才能再遥控本机。这是"重置"的应有之义
+  /// （配对码疑似泄露时吊销），但对用户是**破坏性**动作，不能一键触发、
+  /// 更不能静默：因此弹窗写清"旧码/旧二维码作废 + 已配对设备需重扫"。
+  ///
+  /// ## 为什么必须同时刷新接收侧缓存
+  ///
+  /// 只落盘而不刷新 `RcEndpointService._ownCode` 会**比不重置更糟**：本页会立刻
+  /// 展示新码，控制端据此加密，而端点仍用旧码解密 ⇒ 扫完即失联。故落盘后
+  /// 立即调用 [RcEndpointService.rotateOwnPairingCode]（就地生效，无需重连）。
+  Future<void> _onResetPairCode() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重置配对码？'),
+        content: const Text('重置后：\n'
+            '• 旧配对码与旧二维码立即作废；\n'
+            '• 已配对的设备将无法再遥控本机，需重新扫码配对。\n\n'
+            '仅在配对码可能泄露时才需要重置。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('重置'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    final next = await store.rotatePairingCode();
+    // 就地刷新接收侧缓存 —— 否则"新码已展示、本机仍用旧码解"（见方法注释）。
+    RcEndpointService.instance.rotateOwnPairingCode(next);
+    if (!mounted) return;
+    setState(() {
+      _pairCode = next;
+      _result = '配对码已重置：$next\n'
+          '旧码 / 旧二维码已作废；已配对设备需重新扫码才能遥控本机。';
+      _resultWarn = false;
+    });
+  }
+
   // ⚠️ 这里**曾经**有一份 `parseUri` 的完整拷贝，与
   // `PairQrProtocol.parseUri`（lib/remote/protocol.dart）逐行相同。
   // 两份"配对码解析器"是隐患：一旦其中一侧改了长度/前缀校验，
@@ -608,6 +659,12 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
                       const SizedBox(height: 6),
                       const Text('对端扫码即与本机配对（物理在场 = 授权确认）',
                           style: TextStyle(fontSize: 12)),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.autorenew),
+                        label: const Text('重置配对码'),
+                        onPressed: _onResetPairCode,
+                      ),
                     ],
                   ],
                 ),

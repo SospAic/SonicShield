@@ -382,4 +382,19 @@ void main() {
             '（call_lifecycle.dart:91-92）');
     expect(find.text('连接中…'), findsNothing);
   });
+
+  // ================= 无障碍语义（P2-31） =================
+
+  testWidgets('CSP-12 主叫挂断按钮具备读屏可播报的语义名称（P2-31）',
+      (tester) async {
+    CallService.instance.setPhaseForTest(CallPhase.connecting);
+    addTearDown(() => CallService.instance.setPhaseForTest(CallPhase.idle));
+
+    await pumpCall(tester, endpoints: [ep('0123456789abcdef', '客厅平板')]);
+
+    // 修 P2-31 之前：挂断是纯图标 FAB，无 tooltip/Semantics ⇒
+    // TalkBack/VoiceOver 只会播报"按钮"，用户无法分辨其作用。
+    expect(find.byTooltip('挂断'), findsOneWidget,
+        reason: '图标按钮必须有语义名称，否则读屏用户无法识别"挂断"');
+  });
 }

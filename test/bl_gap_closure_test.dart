@@ -105,20 +105,12 @@ void main() {
         (tester) async {
       stubPermissions({Permission.microphone: PermissionStatus.granted});
 
-      // `pttStopAndSend` 会 `File(path).exists()` —— 给一个**真实存在的**临时文件，
-      // 让执行走到"时长判定"那一步（否则会停在"未录到音频"）。
-      final f = File('${Directory.systemTemp.createTempSync('bl_ptt').path}/a.m4a')
-        ..writeAsBytesSync(List<int>.filled(64, 7));
-      rec.stopPath = f.path;
-
       await pumpPtt(tester,
           endpoints: [ep('0123456789abcdef', '客厅平板')],
           selected: '0123456789abcdef');
 
-      // ★ 整条手势必须跑在 `runAsync` 里：
-      //   ① `pttStart()` 里 `Directory.systemTemp.createTemp` 是**真实 dart:io**，
-      //      fake-async 里永不完成；
-      //   ② `Timer.periodic` 因此是**真实计时器**，只有一个真实秒才算一拍。
+      // ★ 整条手势必须跑在 `runAsync` 里：`Timer.periodic` 在真实 zone 下才是
+      //   **真实计时器**，只有一个真实秒才算一拍。
       // ⚠️ 60 秒这一拍之前**没有**任何 UI 出口能触发 `_send()` —— 这正是要补的分支。
       await tester.runAsync(() async {
         final g = await tester.startGesture(tester.getCenter(micButton()));
@@ -131,13 +123,15 @@ void main() {
       });
       await tester.pumpAndSettle();
 
-      expect(rec.calls, contains('start'),
-          reason: '按住必须真的开始录音，而不是只改界面状态');
+      // v2：录音走 `startStream`（边录边发），到点由 `pttStopStream` 收尾。
+      expect(rec.calls, contains('startStream'),
+          reason: '按住必须真的开始流式录音，而不是只改界面状态');
       expect(rec.calls, contains('stop'),
           reason: '满 60 秒必须真的把录音通道关掉 —— 否则麦克风被一直占着');
-      // 计时从 `pttStart()` 起算早于计时器建立 ⇒ 到点时时长必然**超过** 60 秒上限。
-      expect(find.text('超过 60 秒上限'), findsOneWidget,
-          reason: '超时必须如实说"超过 60 秒上限"，不能静默丢弃这段录音');
+      // 流已建立但（宿主里）一帧都没产出 ⇒ 必须如实说"未录到音频"，
+      // 不能假装发送成功、也不能静默丢弃这段录音。
+      expect(find.text('未录到音频'), findsOneWidget,
+          reason: '一帧未产出时必须如实报告，不能静默丢弃或假成功');
       expect(tester.takeException(), isNull);
     }, timeout: const Timeout(Duration(seconds: 180)));
 

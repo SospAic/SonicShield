@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 // ignore: depend_on_referenced_packages -- flutter_background_service 的传递依赖，同上
 import 'package:flutter_background_service_platform_interface/flutter_background_service_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/vibrate_caps.dart';
@@ -424,6 +425,11 @@ void main() {
       BackgroundServiceManager.stateForTest = null;
     });
     setUp(() {
+      // P1-02：`start()` 现在把「已同意合规」作为唯一准入层（未同意直接返回
+      // false、不触达平台）。本组多数用例（BGS10/BGS11 等）要验证的是
+      // 「同意之后」的平台调用契约，故显式置为已同意；合规门本身另由
+      // dashboard_screen_test DBS-09/DBS-10 覆盖。
+      SharedPreferences.setMockInitialValues({'compliance_accepted_v1': true});
       fake.invokes.clear();
       BackgroundServiceManager.lastForTest = null;
     });
@@ -432,6 +438,15 @@ void main() {
       final cfg = fake.androidCfg!;
       expect(cfg.isForegroundMode, isTrue);
       expect(cfg.autoStart, isFalse, reason: '由用户显式开启（合规与功耗）');
+      // F-3 方案①（第 70 轮）：插件的 autoStartOnBoot **默认 true**
+      // （platform_interface 5.1.2 configs.dart:73），会让插件自带 BootReceiver
+      // 在开机时直接 startForegroundService(mediaPlayback)；Android 15+ 禁止
+      // 从 BOOT_COMPLETED 启动该类型 ⇒ 进程被 ForegroundServiceStartNotAllowed
+      // 打死并反复重启（API 36 实测）。开机恢复改由本工程 BootReceiver 排
+      // 精确闹钟完成，故这里必须显式为 false。
+      expect(cfg.autoStartOnBoot, isFalse,
+          reason: '必须显式关掉插件自带的开机自启（其默认值是 true，'
+              '会在 Android 15+ 上以 mediaPlayback 类型从 BOOT_COMPLETED 启动 FGS 而被系统打死）');
       expect(cfg.notificationChannelId, NotificationChannels.service);
       expect(cfg.foregroundServiceTypes, contains(AndroidForegroundType.mediaPlayback));
       // F-2（第 35 轮）：dataSync 型 FGS 在 Android 15+ 有「24h 内累计 6h」上限，

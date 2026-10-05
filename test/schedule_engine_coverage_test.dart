@@ -14,7 +14,11 @@ void main() {
       {String id = 'cov-1',
       QuietPolicy quiet = QuietPolicy.skip,
       int cooldown = 300}) {
-    final now = DateTime.now();
+    // ⚠️ P1-05 起随机种子 = `taskId#updatedAt`（`ScheduleEngine._seedKey`）。
+    // 若这里用 `DateTime.now()`，同一条用例每次运行都会抽到**另一批**时刻，
+    // "恰好 3 条"的断言随之随机红绿（2026-10-04 实测偶发失败）。任务定义在
+    // 用例里本就是常量 ⇒ 版本时间戳也必须是常量，判据才可复现。
+    final version = DateTime(2026, 9, 1);
     return Task(
       id: id,
       name: '覆盖用例',
@@ -28,8 +32,8 @@ void main() {
       cooldownSec: cooldown,
       quietPolicy: quiet,
       priority: 0,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: version,
+      updatedAt: version,
     );
   }
 
@@ -128,15 +132,21 @@ void main() {
     });
 
     test('shift 策略：深夜点平移至免打扰结束点 07:00', () {
-      final now = DateTime(2026, 9, 12, 0);
+      // P1-05 起随机窗口按**完整窗口**抽样、再按 now 过滤（不再把抽样起点裁到
+      // now）。旧的 20:00-02:00 窗口下，抽到 20:00-24:00 的点会被 now 过滤，
+      // 一旦两点都落在午夜前就会得到空列表 → 断言"是否非空"变成掷骰子。
+      // 这里把窗口整体放进免打扰时段且晚于 now：23:00-01:00 跨午夜，全部落在
+      // 默认 22:00-07:00 内 ⇒ 每个抽样点都命中免打扰，一律平移至结束点 07:00，
+      // 用例因此完全确定。
+      final now = DateTime(2026, 9, 11, 22);
       final t = taskFor(
         RandomWindowTrigger(
           dateRange: DateRange(
               start: DateTime(2026, 9, 11), end: DateTime(2026, 9, 11)),
-          windowStart: const TimeSpec(hour: 20),
-          windowEnd: const TimeSpec(hour: 2),
+          windowStart: const TimeSpec(hour: 23),
+          windowEnd: const TimeSpec(hour: 1),
           timesPerDay: 2,
-          minGap: const Duration(minutes: 60),
+          minGap: const Duration(minutes: 30),
           windowEndNextDay: true,
         ),
         quiet: QuietPolicy.shift,
@@ -145,6 +155,7 @@ void main() {
       expect(list, isNotEmpty);
       for (final e in list) {
         expect(e.fireAt.hour, 7, reason: '平移目标应为 07:00: ${e.fireAt}');
+        expect(e.fireAt.day, 12, reason: '跨午夜窗口的平移落点是次日 07:00');
       }
     });
 

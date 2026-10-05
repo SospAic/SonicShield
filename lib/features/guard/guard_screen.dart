@@ -106,6 +106,8 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
   Future<void> _onToggleGuard(bool v) async {
     final scaffold = ScaffoldMessenger.of(context);
     final mgr = BackgroundServiceManager.instance;
+    // P2-16：捕获一站式权限申请的结果，以便在通知被拒时给出降级提示。
+    PermissionRequestOutcome? perms;
     final outcome = await toggleGuard(
       wanted: v,
       engineRunning: mgr.isRunning,
@@ -115,7 +117,7 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
         // 前台启动麦克风类型 FGS（Android 11+ while-in-use 通行证，
         // 使守卫在后台合法使用麦克风；docs/05 §1.4）。
         await NativeBridge.startMicService();
-        await requestAllPermissions(ref);
+        perms = await requestAllPermissions(ref);
       },
       stopMicService: NativeBridge.stopMicService,
       setGuard: (enabled) => mgr.setGuard(enabled, micGranted: enabled),
@@ -128,6 +130,11 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     setState(() {});
     if (!outcome.ok) {
       scaffold.showSnackBar(SnackBar(content: Text(outcome.text)));
+    } else if (perms?.notificationDenied ?? false) {
+      // P2-16：守卫已开启，但通知被拒 ⇒ 后台提醒/告警通知不会出现，明确告知。
+      scaffold.showSnackBar(const SnackBar(
+          content: Text('通知权限未授予：后台提醒与告警通知将不会出现。'
+              '可在「系统设置 → 应用 → 声盾 → 通知」中重新开启')));
     }
   }
 

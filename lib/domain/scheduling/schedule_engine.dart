@@ -109,9 +109,9 @@ class ScheduleEngine {
       case final WeeklyTrigger t:
         raw = _weekly(t, now, end);
       case final RandomWindowTrigger t:
-        raw = _randomWindow(task.id, t, now, end);
+        raw = _randomWindow(task, t, now, end);
       case final RandomIntervalTrigger t:
-        raw = _randomInterval(task.id, t, now, end);
+        raw = _randomInterval(task, t, now, end);
       case SoundTrigger():
         return const []; // 声音触发不进时间计划，由守卫服务实时驱动
     }
@@ -258,8 +258,29 @@ class ScheduleEngine {
     return out;
   }
 
+  /// 计划**版本键**（P1-05）：`taskId` + 任务定义版本（`updatedAt`）。
+  ///
+  /// 只要任务定义没变，同一天的重算就得到**同一批时刻**；一旦用户/远程改了
+  /// 定义（触发器、动作、时长… 落库都会刷新 `updatedAt`），当天的随机计划
+  /// 整体重采样 —— 于是"改计划 = 换一批时刻"，而不会新旧混叠。
+  String _seedKey(Task task) =>
+      '${task.id}#v${task.updatedAt.millisecondsSinceEpoch}';
+
+  /// 随机窗口物化（P1-05：确定性重算）。
+  ///
+  /// ## 为什么必须"整窗抽样、事后按 now 过滤"
+  /// 旧实现把抽样起点裁到 `now`（`clampedStart = max(winStart, now)`），
+  /// 于是 [sampleInWindow] 的**窗口长度**成了 `now` 的函数 —— 同一天每续算一次
+  /// （`now` 前进）就重采样出**另一批**时刻；再叠加 `commitAll` 的 `ignore`
+  /// 语义（旧的留着、新的追加），当天候选总数与最小间隔都不再受
+  /// `timesPerDay/minGap` 约束（docs/50 §4.1 P1-05）。
+  ///
+  /// 现在种子只由「任务 id + 定义版本 + 当地日期」决定、抽样窗口恒为**完整窗口**，
+  /// `now` 只用于最后过滤 —— 重算得到的是同一批时刻的**子集**，已提交条目 id
+  /// 不变，配合 `OccurrenceRepository.reconcile` 的"未来 pending 整体替换"
+  /// 即可保证"计划是可重算投影"。
   List<DateTime> _randomWindow(
-      String taskId, RandomWindowTrigger t, DateTime now, DateTime end) {
+      Task task, RandomWindowTrigger t, DateTime now, DateTime end) {
     final out = <DateTime>[];
     for (final day in t.dateRange.days()) {
       final winStart = t.windowStart.on(day);
@@ -267,26 +288,27 @@ class ScheduleEngine {
             t.windowEndNextDay ? const Duration(days: 1) : Duration.zero,
           );
       if (winEnd.isBefore(winStart)) continue;
-      final clampedStart = winStart.isBefore(now) ? now : winStart;
-      if (winEnd.isBefore(clampedStart)) continue;
-      final rng = Random(planSeed(taskId, day));
-      final window = winEnd.difference(clampedStart);
+      final rng = Random(planSeed(_seedKey(task), day));
       final offsets = sampleInWindow(
         n: t.timesPerDay,
-        window: window,
+        window: winEnd.difference(winStart),
         minGap: t.minGap,
         rng: rng,
       );
       for (final off in offsets) {
-        final at = clampedStart.add(off);
+        final at = winStart.add(off);
         if (_inRange(at, now, end)) out.add(at);
       }
     }
     return out;
   }
 
+  /// 随机间隔物化（P1-05：同 [_randomWindow] 的"整日生成 + 事后过滤"）。
+  ///
+  /// 旧实现以 `max(dayStart, now)` 为游标起点 ⇒ 游标序列随 `now` 变化，
+  /// 同一天的间隔计划在每次续算后都不一致。
   List<DateTime> _randomInterval(
-      String taskId, RandomIntervalTrigger t, DateTime now, DateTime end) {
+      Task task, RandomIntervalTrigger t, DateTime now, DateTime end) {
     final out = <DateTime>[];
     for (final day in t.dateRange.days()) {
       final dayStart = t.activeStart.on(day);
@@ -295,13 +317,13 @@ class ScheduleEngine {
                 ? const Duration(days: 1)
                 : Duration.zero,
           );
-      final clamped = dayStart.isBefore(now) ? now : dayStart;
-      if (!dayEnd.isAfter(clamped)) continue;
-      final rng = Random(planSeed('$taskId#interval', day));
-      var cursor = clamped;
+      if (!dayEnd.isAfter(dayStart)) continue;
+      final rng = Random(planSeed('${_seedKey(task)}#interval', day));
+      var cursor = dayStart;
       var count = 0;
       while (cursor.isBefore(dayEnd) && count < t.maxPerDay) {
-        // 首点在活动窗口内随机，其后按随机间隔推进。
+        // 首点在活动窗口内随机，其后按随机间隔推进 —— **从窗口起点**推进，
+        // 与 now 无关；now 只在下面 `_inRange` 过滤。
         final gap = Duration(
           milliseconds: nextIntBetween(
             rng,
@@ -310,9 +332,9 @@ class ScheduleEngine {
           ),
         );
         cursor = count == 0
-            ? clamped.add(Duration(
+            ? dayStart.add(Duration(
                 milliseconds: rng.nextInt(
-                dayEnd.difference(clamped).inMilliseconds ~/
+                dayEnd.difference(dayStart).inMilliseconds ~/
                         (t.maxPerDay <= 1 ? 1 : t.maxPerDay) +
                     1,
               )))

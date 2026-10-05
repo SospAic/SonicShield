@@ -53,6 +53,8 @@ void main() {
     String? selected,
     bool embedded = false,
     List<DeviceGroup> groups = const [],
+    // P2-13：允许注入自定义配对页（默认是只显示文案的桩页）。
+    Widget Function(BuildContext ctx)? pairPage,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final store = RemoteStore(await SharedPreferences.getInstance());
@@ -79,7 +81,8 @@ void main() {
             builder: (_, __) => DeviceListScreen(embedded: embedded)),
         GoRoute(
             path: '/remote/pair-qr',
-            builder: (_, __) =>
+            builder: (ctx, __) =>
+                pairPage?.call(ctx) ??
                 const Scaffold(body: Center(child: Text('PAIR-QR-PAGE')))),
       ],
     );
@@ -239,6 +242,12 @@ void main() {
     // 对话框必须说清"重新连接要再扫码" —— 这是不可逆操作。
     expect(find.text('删除这台设备？'), findsOneWidget);
     expect(find.textContaining('重新连接需要再次扫码配对'), findsOneWidget);
+    // P1-01：撤销强度边界必须对用户可见（共享配对码 ⇒ 删除≠密码学撤销），
+    // 并给出可执行的更强手段入口（重置配对码）。
+    expect(find.textContaining('撤销强度说明'), findsOneWidget,
+        reason: '把"删除列表"说成"已彻底撤权"是夸大承诺（P1-01）');
+    expect(find.textContaining('重置配对码'), findsOneWidget,
+        reason: '只说局限不给下一步，用户没有可执行的更强手段');
 
     await tester.tap(find.widgetWithText(FilledButton, '删除'));
     await tester.pumpAndSettle();
@@ -521,5 +530,43 @@ void main() {
     expect(find.text('建组'), findsOneWidget, reason: '取消勾选后按钮必须回到禁用态');
     expect(tester.widget<TextButton>(createGroupBtn()).onPressed, isNull,
         reason: '还有 0 台勾选却仍可建组 ⇒ 能建出一个空组');
+  });
+
+  // ---------------- 配对返回刷新（P2-13） ----------------
+
+  testWidgets('DLSW-23 扫码配对返回后列表自动刷新，新设备立即可见（P2-13）',
+      (tester) async {
+    // 注入一个"配对成功就落盘并返回"的配对页，复刻真实扫码页的行为。
+    await pump(
+      tester,
+      pairPage: (ctx) => Scaffold(
+        body: Center(
+          child: Builder(
+            builder: (c) => FilledButton(
+              onPressed: () async {
+                final s = RemoteStore(await SharedPreferences.getInstance());
+                await s.addPaired(ep('ep-new', name: '新配对设备'));
+                if (c.mounted) Navigator.of(c).pop();
+              },
+              child: const Text('模拟配对成功'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // 前置：配对前是空态。
+    expect(find.text('还没有保存的设备'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, '扫码配对'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('模拟配对成功'));
+    await tester.pumpAndSettle();
+
+    // 修 P2-13 之前：`IndexedStack` 保留本页、`initState` 只跑一次，
+    // 返回后列表停在配对前的空态快照 —— 用户看不到刚配好的设备。
+    expect(find.text('新配对设备'), findsOneWidget,
+        reason: '配对写盘后返回必须 reload，否则列表停在旧快照（P2-13）');
+    expect(find.text('还没有保存的设备'), findsNothing);
   });
 }

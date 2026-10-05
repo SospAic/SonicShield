@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/constants.dart';
 import '../../core/providers.dart';
+import '../../data/repositories/task_repository.dart' show AudioAsset;
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
 import '../../remote/rc_script.dart';
@@ -125,9 +126,26 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   DateTime _endDate = DateTime.now().add(const Duration(days: 7));
   TimeOfDay _winStart = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _winEnd = const TimeOfDay(hour: 21, minute: 0);
+
+  /// 随机窗口**跨午夜**（P2-05）：结束时刻落在次日（如 20:00–02:00）。
+  /// 曾经不回填这个标志 → 编辑一个跨午夜任务再保存就退化成"空窗口"。
+  bool _winEndNextDay = false;
   int _timesPerDay = 3;
   int _minGapMin = 30;
   int _maxGapMin = 120;
+
+  /// 固定一次的**日期**（P2-04，只回填时刻会丢日期）。
+  ///
+  /// 新建时默认取「今天，但若默认时刻已过则顺延到明天」——保证默认值本身
+  /// **不是过去时刻**（保存路径对过去的固定一次会显式拒绝）。
+  late DateTime _fixedOnceDate = _defaultFixedOnceDate();
+
+  DateTime _defaultFixedOnceDate() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final at = DateTime(today.year, today.month, today.day, _time.hour, _time.minute);
+    return at.isAfter(now) ? today : today.add(const Duration(days: 1));
+  }
 
   // 动作参数（随机时长/音量）
   double _volMin = 0.5, _volMax = 1.0;
@@ -184,9 +202,19 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   bool _condWifi = false;
   int _condProbability = 100; // 概率门（100=必执行，v1.8）
 
-  // 随机指令集（v1.8）：候选动作种类 + 对应权重（平行数组）。
-  final List<RcStepKind> _setCandidates = [];
-  final List<double> _setWeights = [];
+  // 随机指令集（v1.8）：候选动作种类 + 权重。
+  //
+  // ⚠️ P2-06：曾经是 `_setCandidates` / `_setWeights` 两条**平行数组**，
+  // 删除候选项时只删了种类这一条、没删权重 → 剩余候选的权重整体错位
+  // （删掉第 2 项后，第 3 项的权重顶到第 2 项上）。改为**单一列表**，
+  // 种类与权重天然绑定，删除/编辑都不可能错位。
+  final List<({RcStepKind kind, double weight})> _setItems = [];
+
+  /// 播放类动作**点名**的音源 id 集合（P1-06）。
+  ///
+  /// 空集合意味着"到点必然失败（无可用音源）"——保存时会给出明确提示，
+  /// 不再像以前那样让用户毫无察觉地存下一个必然失败的播放任务。
+  final Set<String> _assetIds = {};
 
   /// 不可在编辑器中表示、需**原样保留**的子动作（复合 / 声景 / 嵌套动作组）。
   ///
@@ -295,6 +323,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       // 夜间独立豁免（v1.9）：**必须回填**，否则"打开编辑器再保存"
       // 会把用户已开的豁免静默关掉（保存路径显式写 `_quietExempt`）。
       _quietExempt = t.quietExempt;
+      // 音源池回填（P1-06）：不回填的话，"打开编辑器再保存"会把已点名的
+      // 音源整体清空 —— 与"编辑即静默改配置"同类错误。
+      _assetIds
+        ..clear()
+        ..addAll(t.assetIds);
       // 条件层回填（v1.3；v1.7 新增字段）。
       final c = t.condition;
       if (c != null) {
@@ -308,6 +341,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       }
       final tr = t.trigger;
       if (tr is FixedOnceTrigger) {
+        // P2-04：必须同时回填**日期**，只取时刻会把远期任务悄悄改成"今天"。
+        _fixedOnceDate = DateTime(tr.at.year, tr.at.month, tr.at.day);
         _time = TimeOfDay.fromDateTime(tr.at);
       } else if (tr is DailyTrigger) {
         _time = TimeOfDay(hour: tr.time.hour, minute: tr.time.minute);
@@ -323,6 +358,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             TimeOfDay(hour: tr.windowEnd.hour, minute: tr.windowEnd.minute);
         _timesPerDay = tr.timesPerDay;
         _minGapMin = tr.minGap.inMinutes;
+        // P2-05：跨午夜标志必须回填，否则 20:00–02:00 的窗口会被当成
+        // "同日 20:00–02:00"（零长度），保存后计划为空。
+        _winEndNextDay = tr.windowEndNextDay;
         _startDate = tr.dateRange.start;
         _endDate = tr.dateRange.end;
       } else if (tr is RandomIntervalTrigger) {
@@ -349,16 +387,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _scFadeOutSec = a.fadeOutSec;
         _actionKind = ActionKindChoice.soundscape;
       } else if (a is ActionSetAction) {
-        _setCandidates.clear();
-        _setWeights.clear();
+        _setItems.clear();
         _setPreserved.clear();
         for (final c in a.candidates) {
           final k = _kindOfCandidate(c.action);
           if (k == null) {
             _setPreserved.add(c); // 不可编辑：原样保留，保存时不丢
           } else {
-            _setCandidates.add(k);
-            _setWeights.add(c.weight);
+            _setItems.add((kind: k, weight: c.weight));
           }
         }
         _actionKind = ActionKindChoice.randomFrom;
@@ -674,6 +710,10 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     ];
   }
 
+  /// 本地日期渲染（`yyyy-MM-dd`），供固定一次日期项显示。
+  String _fmtDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
   String _condWinText() {
     if (_condWinStart == null || _condWinEnd == null) return '不限';
     String hm(int m) =>
@@ -697,6 +737,22 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       case TriggerType.weeklyAt:
         return [
           const SizedBox(height: 8),
+          // P2-04：固定一次必须能选**日期**（原先只有时刻，保存时日期被顶替）。
+          if (_type == TriggerType.fixedOnce)
+            ListTile(
+              leading: const Icon(Icons.calendar_today),
+              title: Text('日期：${_fmtDate(_fixedOnceDate)}'),
+              subtitle: const Text('固定一次只在所选日期的该时刻触发'),
+              onTap: () async {
+                final d = await showDatePicker(
+                  context: ctx,
+                  initialDate: _fixedOnceDate,
+                  firstDate: DateTime.now().subtract(const Duration(days: 1)),
+                  lastDate: DateTime.now().add(const Duration(days: 3650)),
+                );
+                if (d != null) setState(() => _fixedOnceDate = d);
+              },
+            ),
           ListTile(
             leading: const Icon(Icons.access_time),
             title: Text('时刻：${_time.format(ctx)}'),
@@ -749,6 +805,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                 if (t != null) setState(() => _winEnd = t);
               },
             ),
+            // P2-05：跨午夜窗口（如 20:00–02:00）必须显式声明并回填；
+            // 否则"结束早于开始"会被当成零长度窗口，计划为空。
+            SwitchListTile(
+              title: const Text('窗口跨午夜（结束在次日）'),
+              subtitle: const Text('例如 20:00–02:00：结束时刻落在第二天'),
+              value: _winEndNextDay,
+              onChanged: (v) => setState(() => _winEndNextDay = v),
+            ),
             _IntStepper(
               label: '每日随机次数',
               value: _timesPerDay,
@@ -789,8 +853,69 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     }
   }
 
+  /// 音源选择入口（P1-06）。
+  ///
+  /// 播放类动作的效果完全取决于"点名了哪些音源"：空集合在引擎侧直接
+  /// 判 `无可用音源` 失败（FR-02，**刻意不改成随机兜底**）。因此这里要么
+  /// 让用户显式选，要么把"未选 = 必然失败"讲清楚。
+  Widget _assetPickerTile(BuildContext ctx) {
+    final empty = _assetIds.isEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ListTile(
+          leading: Icon(empty ? Icons.error_outline : Icons.library_music,
+              color: empty ? Theme.of(ctx).colorScheme.error : null),
+          title: Text(empty ? '音源：未选择' : '音源：已选 ${_assetIds.length} 条'),
+          subtitle: Text(empty
+              ? '未点名音源，到点将因「无可用音源」失败'
+              : '命中后从已选音源中等概率随机一条'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _pickAssets(),
+        ),
+        if (empty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text('请至少选择一条音源（或点击对话框里的“全库随机”全选当前音源库）。',
+                style: TextStyle(
+                    fontSize: 12, color: Theme.of(ctx).colorScheme.error)),
+          ),
+      ],
+    );
+  }
+
+  /// 打开音源多选对话框（**按需读库**：只有点开时才触发一次查询，
+  /// 避免给每个编辑器用例都塞一次异步 DB 往返）。
+  Future<void> _pickAssets() async {
+    List<AudioAsset> all;
+    try {
+      final repo = await ref.read(assetRepoProvider.future);
+      all = await repo.listAll();
+    } on Object catch (e) {
+      if (mounted) _toast(context, '音源库读取失败：$e');
+      return;
+    }
+    if (!mounted) return;
+    if (all.isEmpty) {
+      _toast(context, '音源库为空：请先在「声音」页导入音源，否则播放任务无法执行');
+      return;
+    }
+    final picked = await showDialog<Set<String>>(
+      context: context,
+      builder: (_) => _AssetPickerDialog(assets: all, selected: _assetIds),
+    );
+    if (picked != null && mounted) {
+      setState(() => _assetIds
+        ..clear()
+        ..addAll(picked));
+    }
+  }
+
   List<Widget> _actionInputs(BuildContext ctx) {
     final playInputs = [
+      // P1-06：播放类动作必须能点名音源；未选时**显式**告知"到点必然失败"。
+      _assetPickerTile(ctx),
+      const Divider(height: 8),
       _RangeSliderTile(
         label: '随机音量',
         min: 0,
@@ -1191,12 +1316,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       const SizedBox(height: 8),
       Text('候选动作（命中后按权重随机选一执行）', style: Theme.of(ctx).textTheme.bodySmall),
       const SizedBox(height: 4),
-      if (_setCandidates.isEmpty)
+      if (_setItems.isEmpty)
         const Card(
             child: Padding(
                 padding: EdgeInsets.all(12),
                 child: Text('从下方添加至少 2 个候选动作（每个可设权重）。'))),
-      for (var i = 0; i < _setCandidates.length; i++)
+      for (var i = 0; i < _setItems.length; i++)
         Card(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -1204,31 +1329,32 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               children: [
                 Row(
                   children: [
-                    Icon(_setIcon(_setCandidates[i]),
+                    Icon(_setIcon(_setItems[i].kind),
                         size: 18, color: Theme.of(ctx).colorScheme.primary),
                     const SizedBox(width: 6),
-                    Text(_setLabel(_setCandidates[i]),
+                    Text(_setLabel(_setItems[i].kind),
                         style: const TextStyle(fontSize: 13)),
                     const Spacer(),
                     IconButton(
                         icon: const Icon(Icons.delete_outline, size: 18),
-                        onPressed: () =>
-                            setState(() => _setCandidates.removeAt(i))),
+                        // P2-06：单一列表删除，种类与权重不可能错位。
+                        onPressed: () => setState(() => _setItems.removeAt(i))),
                   ],
                 ),
                 Row(
                   children: [
                     const SizedBox(width: 8),
-                    Text('权重 ${_setWeights[i].round()}',
+                    Text('权重 ${_setItems[i].weight.round()}',
                         style: const TextStyle(fontSize: 11)),
                     Expanded(
                       child: Slider(
-                        value: _setWeights[i],
+                        value: _setItems[i].weight,
                         min: 0,
                         max: 10,
                         divisions: 10,
-                        label: _setWeights[i].round().toString(),
-                        onChanged: (v) => setState(() => _setWeights[i] = v),
+                        label: _setItems[i].weight.round().toString(),
+                        onChanged: (v) => setState(() => _setItems[i] =
+                            (kind: _setItems[i].kind, weight: v)),
                       ),
                     ),
                   ],
@@ -1248,7 +1374,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             ),
           ),
         ),
-      if (_setCandidates.length < 8)
+      if (_setItems.length < 8)
         Wrap(
           spacing: 6,
           runSpacing: 6,
@@ -1258,8 +1384,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                 avatar: Icon(icon, size: 16),
                 label: Text('＋$label', style: const TextStyle(fontSize: 12)),
                 onPressed: () => setState(() {
-                  _setCandidates.add(k);
-                  _setWeights.add(3);
+                  _setItems.add((kind: k, weight: 3));
                 }),
               ),
           ],
@@ -1349,10 +1474,15 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     TriggerConfig trigger;
     switch (_type) {
       case TriggerType.fixedOnce:
-        final base = now.add(const Duration(minutes: 5));
-        trigger = FixedOnceTrigger(
-            at: DateTime(
-                base.year, base.month, base.day, _time.hour, _time.minute));
+        // P2-04：用回填/选择的**日期** + 时刻拼成完整 DateTime，不再拿
+        // "今天 +5 分钟所在的那一天"顶替 —— 编辑远期任务时日期会丢。
+        final at = DateTime(_fixedOnceDate.year, _fixedOnceDate.month,
+            _fixedOnceDate.day, _time.hour, _time.minute);
+        if (!at.isAfter(now)) {
+          if (mounted) _toast(context, '固定一次的时间必须晚于当前时间，请重新选择日期/时刻');
+          return null;
+        }
+        trigger = FixedOnceTrigger(at: at);
       case TriggerType.dailyAt:
         trigger = DailyTrigger(
             time: TimeSpec(hour: _time.hour, minute: _time.minute));
@@ -1371,6 +1501,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           windowEnd: TimeSpec(hour: _winEnd.hour, minute: _winEnd.minute),
           timesPerDay: _timesPerDay,
           minGap: Duration(minutes: _minGapMin),
+          // P2-05：跨午夜标志必须随保存带出，否则 20:00–02:00 变空窗口。
+          windowEndNextDay: _winEndNextDay,
         );
       case TriggerType.randomInterval:
         trigger = RandomIntervalTrigger(
@@ -1412,15 +1544,15 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       case ActionKindChoice.randomFrom:
         // 同理：`ActionSetAction` 要求 2–12 个候选（1 个候选谈不上"随机"，
         // 0 个会在 `pick()` 里越界）。
-        if (_setCandidates.length + _setPreserved.length < 2) {
+        if (_setItems.length + _setPreserved.length < 2) {
           if (mounted) _toast(context, '随机指令集至少需要 2 个候选动作');
           return null;
         }
         action = ActionSetAction(candidates: [
-          for (var i = 0; i < _setCandidates.length; i++)
+          for (final it in _setItems)
             ActionSetCandidate(
-              weight: _setWeights[i],
-              action: switch (_setCandidates[i]) {
+              weight: it.weight,
+              action: switch (it.kind) {
                 RcStepKind.play => PlayAudioAction(
                     volumeMin: _volMin,
                     volumeMax: _volMax,
@@ -1516,7 +1648,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       trigger: trigger,
       actionType: actionTypeOfChoice(_actionKind),
       action: action,
-      assetIds: _editing?.assetIds ?? const [],
+      // P1-06：使用编辑器里点名的音源（回填自 `_editing.assetIds`，
+      // 新建默认空 —— 保存前会就"空音源必然失败"给出明确提示）。
+      assetIds: _assetIds.toList(),
       cooldownSec: _editing?.cooldownSec ?? 300,
       quietPolicy: _editing?.quietPolicy ?? QuietPolicy.skip,
       // 夜间独立豁免（v1.9）：
@@ -1703,6 +1837,92 @@ class _RangeSliderTile extends StatelessWidget {
           labels: RangeLabels(format(start), format(end)),
           onChanged: (v) => onChanged(v.start, v.end),
         ),
+      ],
+    );
+  }
+}
+
+/// 音源多选对话框（P1-06）：可搜索名称/标签，可一键“全库随机”（全选）。
+class _AssetPickerDialog extends StatefulWidget {
+  const _AssetPickerDialog({required this.assets, required this.selected});
+
+  final List<AudioAsset> assets;
+  final Set<String> selected;
+
+  @override
+  State<_AssetPickerDialog> createState() => _AssetPickerDialogState();
+}
+
+class _AssetPickerDialogState extends State<_AssetPickerDialog> {
+  late final Set<String> _picked = {...widget.selected};
+  String _query = '';
+
+  List<AudioAsset> get _filtered {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return widget.assets;
+    return widget.assets
+        .where((a) =>
+            a.name.toLowerCase().contains(q) ||
+            a.tags.any((t) => t.toLowerCase().contains(q)))
+        .toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = _filtered;
+    return AlertDialog(
+      title: const Text('选择音源'),
+      content: SizedBox(
+        width: 420,
+        height: 420,
+        child: Column(
+          children: [
+            TextField(
+              decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search), hintText: '搜索名称 / 标签'),
+              onChanged: (v) => setState(() => _query = v),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                icon: const Icon(Icons.select_all, size: 18),
+                label: Text('全库随机（全选 ${widget.assets.length} 条）'),
+                onPressed: () => setState(() => _picked
+                  ..clear()
+                  ..addAll(widget.assets.map((a) => a.id))),
+              ),
+            ),
+            Expanded(
+              child: items.isEmpty
+                  ? const Center(child: Text('没有匹配的音源'))
+                  : ListView(
+                      children: [
+                        for (final a in items)
+                          CheckboxListTile(
+                            dense: true,
+                            value: _picked.contains(a.id),
+                            title: Text(a.name),
+                            subtitle: a.tags.isEmpty
+                                ? null
+                                : Text(a.tags.join(' · '),
+                                    style: const TextStyle(fontSize: 11)),
+                            onChanged: (v) => setState(() => v == true
+                                ? _picked.add(a.id)
+                                : _picked.remove(a.id)),
+                          ),
+                      ],
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.of(context).pop(_picked),
+            child: Text('确定（${_picked.length}）')),
       ],
     );
   }
