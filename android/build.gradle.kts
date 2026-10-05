@@ -26,6 +26,14 @@ subprojects {
                     sourceCompatibility = JavaVersion.VERSION_17
                     targetCompatibility = JavaVersion.VERSION_17
                 }
+                // 统一子项目（含 Flutter 插件）的 compileSdk：AGP 的 AAR 元数据校验
+                // （checkDebugAarMetadata / checkReleaseAarMetadata）要求「依赖方」的
+                // compileSdk 不低于「被依赖方」声明的值。老插件自带低 compileSdk，
+                // 而其依赖（如 flutter_plugin_android_lifecycle）要求 36，会让
+                // `:file_picker:checkDebugAarMetadata` 判红。只升不降，避免误伤高版本插件。
+                if ((compileSdkVersion?.toIntOrNull() ?: 0) < 36) {
+                    compileSdkVersion(36)
+                }
             }
         }
         project.tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>()
