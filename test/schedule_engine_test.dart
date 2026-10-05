@@ -189,23 +189,33 @@ void main() {
         DateRange(start: DateTime(2026, 9, 12), end: DateTime(2026, 9, 12));
 
     test('随机窗口：now 前进后重算，结果必须是早批的子集', () {
-      final t = _task(RandomWindowTrigger(
-        dateRange: range,
-        windowStart: const TimeSpec(hour: 9),
-        windowEnd: const TimeSpec(hour: 21),
-        timesPerDay: 4,
-        minGap: const Duration(minutes: 60),
-      ));
+      final t = _task(
+        RandomWindowTrigger(
+          dateRange: range,
+          windowStart: const TimeSpec(hour: 9),
+          windowEnd: const TimeSpec(hour: 21),
+          timesPerDay: 4,
+          minGap: const Duration(minutes: 60),
+        ),
+        // ⚠️ 必须固定「定义版本」：种子 = f(任务 id, updatedAt, 当地日期)。
+        // `_task` 默认用 `DateTime.now()` ⇒ 种子每次运行都变 ⇒ 采样时刻随机，
+        // 断言随之飘（2026-10-05 CI 实测：4 个时刻恰好都早于 15:00 ⇒ late 空 ⇒ 假红）。
+        updatedAt: DateTime(2026, 9, 12, 7),
+      );
       final early = engine
           .materialize(t, DateTime(2026, 9, 12, 8))
           .map((e) => e.fireAt)
           .toSet();
+      expect(early, hasLength(4), reason: '08:00 应得到整窗 4 条');
+
+      // now 由**实际采样结果**推出（第 2 条之后 1 分钟）：既确保确实过滤掉已过时刻，
+      // 又确保仍有剩余 ⇒ 「非空 + 严格子集」的断言与随机种子无关，不再 flaky。
+      final sorted = early.toList()..sort();
       final late = engine
-          .materialize(t, DateTime(2026, 9, 12, 15))
+          .materialize(t, sorted[1].add(const Duration(minutes: 1)))
           .map((e) => e.fireAt)
           .toSet();
-      expect(early, hasLength(4), reason: '08:00 应得到整窗 4 条');
-      expect(late, isNotEmpty);
+      expect(late, isNotEmpty, reason: 'now 落在窗口内且未到末条 ⇒ 必须仍有剩余');
       expect(
         late.difference(early),
         isEmpty,
