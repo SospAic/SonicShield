@@ -135,6 +135,13 @@ jobs:
         with:
           api-level: 34
           arch: x86_64
+          # ⚠️ 必须显式指定 profile：不指定时 avdmanager 会造出遗留的
+          # **320x640 mdpi** 皮肤（2026-10-05 run 37328681568 实测
+          # `androidboot.qemu.skin=320x640`），它比任何在售机型都小 ——
+          # 于是「远程」页在该尺寸下误报 RenderFlex overflow 48px，
+          # 而真机（Mi 14 Pro / MI MAX 2）复现不出。集成测试应跑在
+          # 有代表性的机型档位上，否则测的是一个没人用的屏幕。
+          profile: pixel_6
           script: |
             adb install -r -t build/app/outputs/flutter-apk/app-debug.apk
             adb shell pm grant com.sonicshield.sonic_shield android.permission.POST_NOTIFICATIONS || true
