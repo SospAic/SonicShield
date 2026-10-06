@@ -142,6 +142,14 @@ jobs:
           # 而真机（Mi 14 Pro / MI MAX 2）复现不出。集成测试应跑在
           # 有代表性的机型档位上，否则测的是一个没人用的屏幕。
           profile: pixel_6
+          # 2026-10-06 run 37444491481 实测：模拟器能起来、APK 也能装（streamed install
+          # 2.9s），但 QEMU2 报 `detected a hanging thread 'QEMU2 main loop' /
+          # 'QEMU2 CPU0/CPU1 thread'` 后 adb 变 `device offline` ⇒ 整 job 假红。
+          # 这是托管 runner 的虚拟化/图形栈不稳，不是本项目代码问题（本机 API 36
+          # 模拟器同一套用例 11/11 全绿）。故显式走无窗口 + 软件渲染 + 冷启动，
+          # 并放宽启动超时，降低挂死概率。
+          emulator-options: -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot
+          emulator-boot-timeout: 900
           script: |
             adb install -r -t build/app/outputs/flutter-apk/app-debug.apk
             adb shell pm grant com.sonicshield.sonic_shield android.permission.POST_NOTIFICATIONS || true
