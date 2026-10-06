@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:sqflite/sqflite.dart';
 import 'package:sonic_shield/domain/models/task.dart';
+import 'package:sonic_shield/domain/scheduling/counter_plan_materializer.dart';
 
 import '../db/app_database.dart';
 
@@ -95,6 +96,35 @@ class TaskRepository {
 
   Future<void> delete(String id) =>
       _db.db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+
+  // ---- 反击计划（v2.0）----
+  //
+  // 计划任务 id 形如 `counter:{planId}:{key}`（见 `CounterPlanMaterializer`）。
+  // 读取/删除都按**前缀范围**而不是 `LIKE`：LIKE 的 `_`/`%` 是通配符，
+  // 而 planId 允许含 `_`（归一化时保留），用 LIKE 会误伤其它计划。
+
+  /// 某计划当前已落库的任务 id（用于对账/展示）。
+  Future<List<String>> counterTaskIds(String planId) async {
+    final p = CounterPlanMaterializer.taskIdPrefix(planId);
+    final rows = await _db.db.query(
+      'tasks',
+      columns: ['id'],
+      where: 'id >= ? AND id < ?',
+      whereArgs: [p, '$p\uffff'],
+    );
+    return rows.map((r) => r['id'] as String).toList();
+  }
+
+  /// 删除某计划的**全部**计划任务（下线/重新导入前清场）。
+  ///
+  /// ⚠️ 只删 `counter:{planId}:` 命名空间内的行，绝不触碰手动任务。
+  /// 外键 `occurrences.task_id → tasks.id ON DELETE CASCADE` 会把它们的
+  /// 未执行计划一并带走（这正是我们要的：旧计划不该变成幽灵）。
+  Future<int> deleteCounterTasks(String planId) async {
+    final p = CounterPlanMaterializer.taskIdPrefix(planId);
+    return _db.db.delete('tasks',
+        where: 'id >= ? AND id < ?', whereArgs: [p, '$p\uffff']);
+  }
 }
 
 /// 音源仓储。

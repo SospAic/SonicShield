@@ -1,12 +1,18 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
 import 'data/db/app_database.dart';
+import 'data/repositories/api_config_store.dart';
 import 'domain/models/action.dart';
+import 'domain/models/tts_voice.dart';
 import 'remote/call_service.dart';
 import 'remote/endpoint_service.dart';
 import 'remote/remote_store.dart';
@@ -14,7 +20,9 @@ import 'remote/script_executor.dart';
 import 'services/background_service_manager.dart';
 import 'services/native_bridge.dart';
 import 'services/notification_service.dart';
+import 'services/online_tts_client.dart';
 import 'services/playback_service.dart';
+import 'services/tts_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -72,6 +80,18 @@ Future<void> main() async {
 ///    长期离线（收不到命令、无法自动接通）。此处按状态自动拉起。
 Future<void> _wireRemoteEndpoint() async {
   final playback = PlaybackService();
+  final prefs = await SharedPreferences.getInstance();
+  final apiCfg = ApiConfigStore(prefs);
+
+  // v2.0：语音播报统一走 `TtsService` —— 按音色 id 决定用**系统 TTS**（离线）
+  // 还是**在线语音**（含东北话，需配置 Key）。两条路都在这里装配成闭包，
+  // 于是"选哪条路、失败报什么"的决策留在可测的 `tts_service.dart`，
+  // 本文件只承担平台胶水（FlutterTts 实例 / 临时文件 / 播放器）。
+  final tts = TtsService(
+    speakSystem: _speakSystemTts,
+    speakOnline: (text, volume, voiceName) =>
+        _speakOnlineTts(text, volume, voiceName, apiCfg, playback),
+  );
 
   RcEndpointService.instance
     ..playHandler = (path, volume, durationMs, {loop = false}) async {
@@ -87,22 +107,10 @@ Future<void> _wireRemoteEndpoint() async {
     // v2 流式对讲：端点"边收边放"的播放会话开缝（`PttStreamSink`）。
     // 用同一套 PlaybackService ⇒ 与端点静音（远程停止）接线一致。
     ..pttStreamOpener = playback.openPttStream
-    ..ttsHandler = (text, volume) async {
-      final tts = FlutterTts();
-      try {
-        // 超时保护：无 TTS 引擎的平台 speak/setLanguage 可能永不回调。
-        await tts.setVolume(volume).timeout(const Duration(seconds: 8));
-        await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
-        await tts.speak(text).timeout(const Duration(seconds: 15));
-      } on Object {
-        // 无 TTS 引擎平台静默降级（审计由调用方记录）。
-      } finally {
-        try {
-          await tts.stop().timeout(const Duration(seconds: 3));
-        } on Object {
-          // 清理失败不影响主流程。
-        }
-      }
+    // v2.0：携带 `voiceId`。`TtsService.say` 内部把"空文本/在线未配置/委托抛错"
+    // 一律收敛成失败结果，**不向外抛** —— 指令组执行链路不会因一次播报失败而中断。
+    ..ttsHandler = (text, volume, {String voiceId = ''}) async {
+      await tts.say(text, voiceId: voiceId, volume: volume);
     }
     // ⚠️ 箭头函数**必须加括号**：`..a = (x) => f(x)` 的 body 是 `expression`，
     // 而级联也是 expression —— 不括起来，`=>` 会一路把后面的 `..vibrateActionHandler`
@@ -120,9 +128,92 @@ Future<void> _wireRemoteEndpoint() async {
         BackgroundServiceManager.instance
             .runVibrateStep(action: action, occurrenceId: occurrenceId));
 
-  final prefs = await SharedPreferences.getInstance();
   final store = RemoteStore(prefs);
   if (store.enabled && store.deviceId.isNotEmpty) {
     await RcEndpointService.instance.start(store, await AppDatabase.open());
+  }
+}
+
+/// 系统 TTS（离线）播报：音量 + 语言 + **按关键词猜音色** + 喊话。
+///
+/// ## 两条与旧实现的差异
+///
+/// 1. **不再吞掉异常**：旧实现把 `speak` 的失败 catch 掉当没发生，端点照样写
+///    success 审计（"喊了"和"没喊成"在日志里长得一样）。现在异常如实上抛，
+///    由 `TtsService` 收敛成失败结果。
+/// 2. **音色可挑**：`getVoices()` 拿到的语音列表交给可测的
+///    `TtsVoices.pickSystemVoice` 匹配；**匹配不到不失败**（交给系统默认音色）——
+///    机型上装没装对应引擎不归我们管，这属于降级不属于错误。
+Future<void> _speakSystemTts(
+    String text, double volume, List<String> match) async {
+  final tts = FlutterTts();
+  try {
+    // 超时保护：无 TTS 引擎的平台 speak/setLanguage 可能永不回调。
+    await tts.setVolume(volume).timeout(const Duration(seconds: 8));
+    await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
+    if (match.isNotEmpty) {
+      try {
+        final voices = await tts.getVoices.timeout(const Duration(seconds: 8));
+        final picked = TtsVoices.pickSystemVoice(voices, match);
+        if (picked != null) {
+          await tts.setVoice(picked).timeout(const Duration(seconds: 8));
+        }
+      } on Object {
+        // 音色匹配是**增强**：拿不到语音列表/设置失败都不该让播报失败。
+      }
+    }
+    await tts.speak(text).timeout(const Duration(seconds: 15));
+  } finally {
+    try {
+      await tts.stop().timeout(const Duration(seconds: 3));
+    } on Object {
+      // 清理失败不影响主流程。
+    }
+  }
+}
+
+/// 在线语音（含东北话）播报的平台胶水：只提供"临时文件 + 播放器"两个原语，
+/// 编排逻辑（合成→落盘→播放→清理）在可测的 `OnlineTtsSpeaker` 里。
+///
+/// 返回**是否真的发声**（`false` 覆盖：未配置 / 合成失败 / 播放失败）。
+Future<bool> _speakOnlineTts(
+  String text,
+  double volume,
+  String voiceName,
+  ApiConfigStore cfg,
+  PlaybackService playback,
+) async {
+  if (!cfg.onlineTtsConfigured) return false;
+  final client = OnlineTtsClient(
+    client: http.Client(),
+    endpoint: cfg.ttsEndpoint,
+    apiKey: cfg.ttsApiKey,
+  );
+  final speaker = OnlineTtsSpeaker(
+    client: client,
+    sink: TtsAudioSink(
+      writeTemp: (bytes, ext) async {
+        final dir = await getTemporaryDirectory();
+        final f = File(
+            '${dir.path}/tts_${DateTime.now().microsecondsSinceEpoch}.$ext');
+        await f.writeAsBytes(bytes, flush: true);
+        return f.path;
+      },
+      deleteTemp: (path) => File(path).delete(),
+      play: (path, vol) async =>
+          (await playback.play(
+        // `play` 会 await 整个播放窗口，因此随后的删除是安全的。
+        path: path,
+        channel: AudioChannel.media,
+        volume: vol,
+        maxDurationMs: 60000,
+      ))
+              .ok,
+    ),
+  );
+  try {
+    return await speaker.speak(text, voiceName, volume);
+  } finally {
+    client.close();
   }
 }

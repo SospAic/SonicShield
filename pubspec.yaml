@@ -42,6 +42,10 @@ dependencies:
   # 注：不引入 workmanager——计划滚动由引擎 Timer + 原生精确闹钟完成（docs/05），
   #     其旧版依赖 Flutter v1 embedding，已与新 Flutter 不兼容。
 
+  # ---- 网络（v2.0：DeepSeek 一键生成 / 在线语音音色）----
+  # 仅用于显式配置的外部 AI/语音接口（默认关闭，不配置则不发起任何请求）。
+  http: ^1.2.2
+
   # ---- 系统能力 ----
   permission_handler: ^11.3.1
   battery_plus: ^6.0.2              # 电量/充电状态（电源管理输入）

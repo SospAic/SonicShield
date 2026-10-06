@@ -43,6 +43,10 @@ abstract final class TaskWire {
   /// 文本类字段上限（TTS 文案 / 通知标题正文）。
   static const maxTextLen = 500;
 
+  /// 音色 id 长度上限（v2.0）。稳定短标识 ≤ 32，留一倍余量只为挡畸形超长串；
+  /// 未知 id 由 `TtsVoices.byId` 回落默认音色，不在此做白名单。
+  static const maxVoiceIdLen = 64;
+
   /// 录音取证时长上限（秒）。
   static const maxRecordSec = 1800;
 
@@ -294,6 +298,9 @@ abstract final class TaskWire {
         final m = Map<String, dynamic>.from(j);
         m['text'] = _clip(j['text'] as String? ?? '', maxTextLen);
         m['volume'] = _clampD(j['volume'], 0, 1, 0.8);
+        // v2.0 音色 id：只夹长度，不做白名单（未知 id 由 `TtsVoices.byId` 回落）。
+        m['voiceId'] =
+            _clip(j['voiceId'] as String? ?? '', maxVoiceIdLen);
         return m;
       case 'notify':
         final m = Map<String, dynamic>.from(j);

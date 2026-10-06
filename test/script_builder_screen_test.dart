@@ -221,6 +221,147 @@ void main() {
       expect(_order(tester), ['播报「请注意，声盾远程指令」']);
     });
 
+    testWidgets('SBS-06b 编辑语音播报音色：选择落到 params，重开保持（v2.0）',
+        (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '语音播报');
+
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      // 音色**必须是下拉**（而不是第二个输入框）：SBS-06/07 依赖
+      // `AlertDialog` 里恰好一个 `TextField` 做 `enterText`/读值；
+      // 多一个输入框会让它们以 "Too many elements" 假红。
+      expect(
+          find.descendant(
+              of: find.byType(AlertDialog), matching: find.byType(TextField)),
+          findsOneWidget,
+          reason: '音色不能是输入框');
+      expect(find.byType(DropdownButton<String>), findsOneWidget);
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          '',
+          reason: '默认 = 系统默认（不带 voiceId）');
+
+      // 选一个系统音色（离线可用，不依赖在线配置）。
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('系统默认男声（男）').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      // 重开：音色仍选中 ⇒ 说明真的写进了 params，而不是只活在对话框里。
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          'sys_zh_male');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('SBS-06c 编辑语音播报音色：选在线东北话音色 → 落进 params 并保持（v2.0）',
+        (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '语音播报');
+
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      // 在线音色项带「·在线」后缀，与系统音色区分。
+      await tester.tap(find.text('小北（东北话·女）（女·在线）').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      // 重开读回 params：音色真的写进了 `step.params['voiceId']`。
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          'az_db_female_xiaobei',
+          reason: '在线（东北话）音色必须落进 params.voiceId');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('SBS-06d 编辑语音播报音色：选系统女声 → 落进 params 并保持（v2.0）',
+        (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '语音播报');
+
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('系统默认女声（女）').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          'sys_zh_female',
+          reason: '系统音色必须落进 params.voiceId');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('SBS-06e 选回「系统默认（自动）」→ 旧 voiceId 被清掉，不残留（v2.0）',
+        (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '语音播报');
+
+      // 先选一个在线东北话音色。
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('云彪（东北话·男）（男·在线）').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      // 前置：确认刚选的在线的确落进了 params。
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          'az_db_male_yunbiao');
+      // 再改回系统默认。
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('系统默认（自动）').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确定'));
+      await tester.pumpAndSettle();
+
+      // 重开：回落到系统默认（空值）—— 旧 voiceId 不能被继续发出去（静默失效）。
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+      expect(
+          tester
+              .widget<DropdownButton<String>>(find.byType(DropdownButton<String>))
+              .value,
+          '',
+          reason: '改回默认必须删掉 voiceId，而不是把旧音色留在 params 里');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+    });
+
     testWidgets('SBS-08a 编辑「录音取证」：初始值是当前秒数，改完跟着变',
         (tester) async {
       await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);

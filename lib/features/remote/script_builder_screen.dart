@@ -7,6 +7,7 @@ import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/script_executor.dart';
+import '../../domain/models/tts_voice.dart';
 
 /// 远程指令组装器：把 play/tts/notify/vibrate/record/delay 组装为序列，
 /// 一键发送至已配对端点（端点收到后立即执行，通知栏可随时终止）。
@@ -118,6 +119,30 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
         builder: (ctx) => _VibrateStepDialog(params: s.params),
       );
       if (out != null && mounted) setState(() => s.params = out);
+      return;
+    }
+
+    // 语音播报步自 v2.0 起**可指定音色**（协议 `tts {text, volume, voiceId?}`，
+    // `endpoint_service` 已消费 `voiceId`），走专用对话框（文本 + 音色下拉）。
+    if (s.kind == RcStepKind.tts) {
+      final out = await showDialog<_TtsStepResult>(
+        context: context,
+        builder: (ctx) => _TtsStepDialog(
+          text: s.params['text']?.toString() ?? '',
+          voiceId: s.params['voiceId']?.toString() ?? '',
+        ),
+      );
+      if (out == null || !mounted) return;
+      setState(() {
+        s.params['text'] = out.text;
+        // 选回「系统默认」时**必须删键**，否则旧的 voiceId 会留在 params 里
+        // 被继续发出去（用户以为改回了默认，实际还是旧音色——静默失效）。
+        if (out.voiceId.isEmpty) {
+          s.params.remove('voiceId');
+        } else {
+          s.params['voiceId'] = out.voiceId;
+        }
+      });
       return;
     }
 
@@ -336,6 +361,97 @@ class _TextStepDialogState extends State<_TextStepDialog> {
               onPressed: () => Navigator.pop(context), child: const Text('取消')),
           FilledButton(
               onPressed: () => Navigator.pop(context, _ctrl.text),
+              child: const Text('确定')),
+        ],
+      );
+}
+
+/// 语音播报步骤的编辑结果：文本 + 音色 id。
+class _TtsStepResult {
+  const _TtsStepResult(this.text, this.voiceId);
+
+  final String text;
+
+  /// 空串 = 系统默认（自动挑），对应协议里**不带** `voiceId` 字段。
+  final String voiceId;
+}
+
+/// 「语音播报」步骤编辑对话框（v2.0）：播报文本 + 音色下拉。
+///
+/// ⚠️ 音色**必须**用 `DropdownButton`，不能加第二个 `TextField`：既有用例
+/// （SBS-06/07）在 `AlertDialog` 里用 `find.byType(TextField)` **无作用域**地
+/// 取「唯一的那个框」来 `enterText` 与读值；再多一个输入框会让
+/// `tester.widget<TextField>` 抛 "Too many elements"。下拉不参与文本输入，
+/// 天然不与之冲突。
+///
+/// 控制器由本对话框自己持有并释放（BUG-064；`await showDialog` 返回 ≠ 已下树）。
+class _TtsStepDialog extends StatefulWidget {
+  const _TtsStepDialog({required this.text, required this.voiceId});
+
+  final String text;
+  final String voiceId;
+
+  @override
+  State<_TtsStepDialog> createState() => _TtsStepDialogState();
+}
+
+class _TtsStepDialogState extends State<_TtsStepDialog> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.text);
+
+  /// 未知 id（外部导入的脏数据）回落到「系统默认」，避免 Dropdown 断言。
+  late String _voiceId = TtsVoices.all.any((v) => v.id == widget.voiceId)
+      ? widget.voiceId
+      : '';
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('编辑步骤 · 语音播报'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _ctrl,
+              decoration: const InputDecoration(labelText: '播报文本'),
+            ),
+            const SizedBox(height: 12),
+            const Text('音色', style: TextStyle(fontSize: 12)),
+            DropdownButton<String>(
+              isExpanded: true,
+              value: _voiceId,
+              items: [
+                const DropdownMenuItem(value: '', child: Text('系统默认（自动）')),
+                for (final d in TtsDialect.values) ...[
+                  DropdownMenuItem(
+                    enabled: false,
+                    value: '__header_${d.name}',
+                    child: Text(d.label, style: const TextStyle(fontSize: 12)),
+                  ),
+                  for (final v in TtsVoices.all.where((v) => v.dialect == d))
+                    DropdownMenuItem(
+                      value: v.id,
+                      child: Text(
+                          '${v.name}（${v.gender.label}${v.isOnline ? '·在线' : ''}）'),
+                    ),
+                ],
+              ],
+              onChanged: (v) => setState(() => _voiceId = v ?? ''),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(
+                  context, _TtsStepResult(_ctrl.text, _voiceId)),
               child: const Text('确定')),
         ],
       );

@@ -161,11 +161,15 @@ class TtsAction extends ActionConfig {
   const TtsAction(
       {required this.text,
       this.volume = 0.8,
-      this.channel = AudioChannel.media});
+      this.channel = AudioChannel.media,
+      this.voiceId = ''});
 
   final String text;
   final double volume;
   final AudioChannel channel;
+
+  /// 音色 id（v2.0，见 `TtsVoices`）。空串 = 系统默认音色（向后兼容旧数据）。
+  final String voiceId;
 
   factory TtsAction.fromJson(Map<String, dynamic> j) => TtsAction(
         text: j['text'] as String? ?? '',
@@ -173,11 +177,17 @@ class TtsAction extends ActionConfig {
         channel: (j['channel'] as String?) == 'alarm'
             ? AudioChannel.alarm
             : AudioChannel.media,
+        voiceId: j['voiceId'] as String? ?? '',
       );
 
   @override
-  Map<String, dynamic> toJson() =>
-      {'kind': 'tts', 'text': text, 'volume': volume, 'channel': channel.name};
+  Map<String, dynamic> toJson() => {
+        'kind': 'tts',
+        'text': text,
+        'volume': volume,
+        'channel': channel.name,
+        'voiceId': voiceId,
+      };
 }
 
 class NotifyAction extends ActionConfig {

@@ -136,6 +136,44 @@ void main() {
     expect(shareCalls.any((c) => c.method == 'shareFiles'), isTrue,
         reason: '导出=原样分享源文件，不改动源文件');
   });
+
+  testWidgets('EVD-07 分享抛错 → 明确「导出失败」，不静默吞掉', (tester) async {
+    // 平台侧分享失败（无可用分享目标 / 通道异常）时，catch 必须给可读回执，
+    // 而不是让用户以为"点了导出却没反应"。
+    messenger().setMockMethodCallHandler(kShare, (call) async {
+      throw PlatformException(code: 'share_unavailable');
+    });
+    final store = _FakeStore([f('share_boom.evidence.m4a')]);
+    await pumpEvidence(tester, store);
+
+    await tester.tap(find.byTooltip('导出'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('导出失败：'), findsOneWidget);
+  });
+
+  testWidgets('EVD-08 未注入 store → 自建基于文档目录的仓库（默认真实路径也能列空）',
+      (tester) async {
+    final docs = Directory.systemTemp.createTempSync('evd_docs_');
+    const kPathProvider = MethodChannel('plugins.flutter.io/path_provider');
+    addTearDown(() {
+      messenger().setMockMethodCallHandler(kPathProvider, null);
+      if (docs.existsSync()) docs.deleteSync(recursive: true);
+    });
+    messenger().setMockMethodCallHandler(kPathProvider, (call) async {
+      if (call.method == 'getApplicationDocumentsDirectory') return docs.path;
+      return null;
+    });
+
+    // 生产形态：不传 store ⇒ `_store()` 自建 EvidenceStore(directory: docs)。
+    await tester.pumpWidget(const MaterialApp(home: EvidenceScreen()));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('录音取证文件'), findsOneWidget);
+    expect(find.textContaining('暂无录音取证文件'), findsOneWidget,
+        reason: '空目录也必须正常渲染空态，而不是卡在加载/报错');
+  });
 }
 
 /// 内存版取证仓库替身（`extends` 以便基类后续新增成员时不编译报错）。

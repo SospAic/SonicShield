@@ -1,14 +1,140 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/db/app_database.dart';
+import '../data/repositories/api_config_store.dart';
+import '../data/repositories/counter_plan_store.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
+import '../domain/models/action.dart';
 import '../domain/models/task.dart';
+import '../domain/models/tts_voice.dart';
 import '../services/background_service_manager.dart';
+import '../services/counter_plan_service.dart';
+import '../services/deepseek_service.dart';
+import '../services/online_tts_client.dart';
+import '../services/playback_service.dart';
+import '../services/tts_service.dart';
 
 /// 全局单例数据库（main 阶段 open；UI 层只读句柄）。
 final databaseProvider = FutureProvider<AppDatabase>((_) => AppDatabase.open());
+
+/// `SharedPreferences`（v2.0）：外部接口配置、反击计划持久化共用同一实例。
+final sharedPrefsProvider =
+    FutureProvider<SharedPreferences>((_) => SharedPreferences.getInstance());
+
+/// 外部 AI / 在线语音接口配置。
+final apiConfigStoreProvider = FutureProvider<ApiConfigStore>((ref) async =>
+    ApiConfigStore(await ref.watch(sharedPrefsProvider.future)));
+
+/// DeepSeek 一键生成服务（含默认 http.Client）。
+final deepseekServiceProvider = FutureProvider<DeepSeekService>((ref) async {
+  final cfg = await ref.watch(apiConfigStoreProvider.future);
+  return DeepSeekService(client: http.Client(), config: cfg);
+});
+
+/// 统一 TTS 入口（v2.0）：供设置页「试听」按音色走系统 TTS / 在线语音。
+///
+/// 与 `main.dart` / `background_engine.dart` 的设备层装配同源：都是把
+/// 「FlutterTts + 在线客户端 + 播放器」两个原语注入 [TtsService]，决策逻辑
+/// 仍留在可测的 `tts_service.dart`。装配本身不触碰任何插件——只在真正
+/// `say()` 时才拉起平台通道，因此宿主 `pump` 阶段是安全的。
+final ttsServiceProvider = FutureProvider<TtsService>((ref) async {
+  final cfg = await ref.watch(apiConfigStoreProvider.future);
+  final playback = PlaybackService();
+  return TtsService(
+    speakSystem: (text, volume, match) => _speakSystemTts(text, volume, match),
+    speakOnline: (text, volume, voiceName) async {
+      if (!cfg.onlineTtsConfigured) return false;
+      final client = OnlineTtsClient(
+        client: http.Client(),
+        endpoint: cfg.ttsEndpoint,
+        apiKey: cfg.ttsApiKey,
+      );
+      final speaker = OnlineTtsSpeaker(
+        client: client,
+        sink: TtsAudioSink(
+          writeTemp: (bytes, ext) async {
+            final dir = await getTemporaryDirectory();
+            final f = File(
+                '${dir.path}/tts_${DateTime.now().microsecondsSinceEpoch}.$ext');
+            await f.writeAsBytes(bytes, flush: true);
+            return f.path;
+          },
+          deleteTemp: (path) => File(path).delete(),
+          play: (path, vol) async => (await playback.play(
+                path: path,
+                channel: AudioChannel.media,
+                volume: vol,
+                maxDurationMs: 60000,
+              ))
+                  .ok,
+        ),
+      );
+      try {
+        return await speaker.speak(text, voiceName, volume);
+      } finally {
+        client.close();
+      }
+    },
+  );
+});
+
+/// 系统 TTS（离线）试听：音量/语言/按关键词猜音色后喊话。
+///
+/// 与 `main.dart` 的 `_speakSystemTts` 同一策略（超时保护 + 音色匹配失败
+/// 视为降级而非错误）；异常如实上抛，由 [TtsService] 收敛成失败结果。
+Future<void> _speakSystemTts(
+    String text, double volume, List<String> match) async {
+  final tts = FlutterTts();
+  try {
+    await tts.setVolume(volume).timeout(const Duration(seconds: 8));
+    await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
+    if (match.isNotEmpty) {
+      try {
+        final voices = await tts.getVoices.timeout(const Duration(seconds: 8));
+        final picked = TtsVoices.pickSystemVoice(voices, match);
+        if (picked != null) {
+          await tts.setVoice(picked).timeout(const Duration(seconds: 8));
+        }
+      } on Object {
+        // 音色匹配是增强：失败交给系统默认音色。
+      }
+    }
+    await tts.speak(text).timeout(const Duration(seconds: 15));
+  } finally {
+    try {
+      await tts.stop().timeout(const Duration(seconds: 3));
+    } on Object {
+      // 清理失败不影响主流程。
+    }
+  }
+}
+
+/// 反击计划持久化。
+final counterPlanStoreProvider = FutureProvider<CounterPlanStore>((ref) async =>
+    CounterPlanStore(await ref.watch(sharedPrefsProvider.future)));
+
+/// 反击计划编排服务（本机 UI / 远程共用同一通路）。
+final counterPlanServiceProvider =
+    FutureProvider<CounterPlanService>((ref) async {
+  final tasks = await ref.watch(taskRepoProvider.future);
+  final assets = await ref.watch(assetRepoProvider.future);
+  final store = await ref.watch(counterPlanStoreProvider.future);
+  return CounterPlanService(
+    tasks: tasks,
+    store: store,
+    resolveAudioIds: (ids) async =>
+        resolvePresetAudioIds(await assets.listAll(), ids),
+    replan: () => BackgroundServiceManager.instance.replan(),
+  );
+});
 
 final taskRepoProvider = FutureProvider<TaskRepository>((ref) async {
   final db = await ref.watch(databaseProvider.future);

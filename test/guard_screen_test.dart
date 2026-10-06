@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
@@ -483,6 +484,92 @@ void main() {
       expect(find.byType(SnackBar), findsOneWidget,
           reason: '引擎无响应时必须说出来（BUG-061）');
       await retireSnackBars(tester);
+    }, timeout: perTest);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 动态反击开关（v2.0 阶段 D）——本轮新增。它此前**完全没有被驱动过**：
+  // `_onToggleReactive` 的"落 prefs + 下发引擎 + 守卫未开时必须提示"三件事，
+  // 任何一件静默失效，用户都会面对一个"看着像开了、实际没反应"的开关。
+  // ---------------------------------------------------------------------------
+  group('GS-09 动态反击开关（v2.0）', () {
+    /// 「动态反击」是 `ListTile + Switch`（刻意不是第二个 `SwitchListTile`，
+    /// 见 `guard_screen.dart` 的说明）。按标题文案定位它的 Switch，
+    /// 避免与守卫开关（`SwitchListTile` 内部也含一个 Switch）混淆。
+    Finder reactiveSwitch() => find.descendant(
+          of: find.ancestor(
+              of: find.text('动态反击'), matching: find.byType(ListTile)),
+          matching: find.byType(Switch),
+        );
+
+    testWidgets('GS-09a 守卫未开时打开动态反击 → 下发 true + 落 prefs + 提示需守卫运行',
+        (tester) async {
+      final reactiveCalls = <Object?>[];
+      BackgroundServiceManager.invokeHook = (m, a) async {
+        if (m == 'reactive') reactiveCalls.add(a);
+      };
+
+      await pumpGuard(tester);
+      await tester.ensureVisible(reactiveSwitch());
+      await tester.tap(reactiveSwitch());
+      await drainAsync(tester);
+
+      expect(reactiveCalls, isNotEmpty, reason: '必须把开关意图下发给引擎');
+      expect((reactiveCalls.last as Map)['enabled'], true);
+      expect(
+          (await SharedPreferences.getInstance())
+              .getBool(PrefsKeys.reactiveCounterEnabled),
+          isTrue,
+          reason: '开关必须落 prefs —— 引擎没跑时也要记住用户意愿');
+      // 守卫没开 = 动态反击"开了也没反应"，必须讲清楚（失败不可静默）。
+      await waitForText(tester, '动态反击需要守卫运行');
+      await retireSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('GS-09b 关闭动态反击 → 下发 false + 落 prefs false（不弹"需守卫"提示）',
+        (tester) async {
+      // 先把开关置为已开启：进页时 `_loadProfile` 会从 prefs 回填。
+      SharedPreferences.setMockInitialValues({
+        PrefsKeys.reactiveCounterEnabled: true,
+      });
+      final reactiveCalls = <Object?>[];
+      BackgroundServiceManager.invokeHook = (m, a) async {
+        if (m == 'reactive') reactiveCalls.add(a);
+      };
+
+      await pumpGuard(tester);
+      expect(tester.widget<Switch>(reactiveSwitch()).value, isTrue,
+          reason: '前置：prefs 已开 → 开关应回填为开');
+
+      await tester.ensureVisible(reactiveSwitch());
+      await tester.tap(reactiveSwitch());
+      await drainAsync(tester);
+
+      expect((reactiveCalls.last as Map)['enabled'], false);
+      expect(
+          (await SharedPreferences.getInstance())
+              .getBool(PrefsKeys.reactiveCounterEnabled),
+          isFalse);
+      // 关闭是"回到更安全的一侧"，不该弹"需要守卫运行"。
+      expect(find.textContaining('动态反击需要守卫运行'), findsNothing);
+    }, timeout: perTest);
+
+    testWidgets('GS-09c 守卫已运行中打开动态反击 → 不误报"需要守卫运行"',
+        (tester) async {
+      final reactiveCalls = <Object?>[];
+      BackgroundServiceManager.invokeHook = (m, a) async {
+        if (m == 'reactive') reactiveCalls.add(a);
+      };
+
+      await pumpGuard(tester, state: active);
+      await waitForText(tester, '正在监听声音事件');
+      await tester.ensureVisible(reactiveSwitch());
+      await tester.tap(reactiveSwitch());
+      await drainAsync(tester);
+
+      expect((reactiveCalls.last as Map)['enabled'], true);
+      expect(find.textContaining('动态反击需要守卫运行'), findsNothing,
+          reason: '守卫已在运行，不该误报"需要守卫"');
     }, timeout: perTest);
   });
 }

@@ -3,7 +3,7 @@
   "sampleRate": 22050,
   "license": "MIT（程序化合成，无采样素材）",
   "generator": "tool/gen_sfx.dart (seed=20260913)",
-  "total": 60,
+  "total": 70,
   "categories": {
     "knocks": 5,
     "impacts": 5,
@@ -16,7 +16,8 @@
     "alarms": 5,
     "nature": 5,
     "tech": 5,
-    "ambient": 5
+    "ambient": 5,
+    "annoy": 10
   },
   "items": [
     {
@@ -498,6 +499,86 @@
       "desc": "恒定气流传声器噪声",
       "file": "presets/ambient_fan.wav",
       "durationMs": 8000
+    },
+    {
+      "id": "annoy_cough_fit",
+      "category": "annoy",
+      "name": "连声咳嗽",
+      "desc": "三声短促连续咳嗽",
+      "file": "presets/annoy_cough_fit.wav",
+      "durationMs": 1500
+    },
+    {
+      "id": "annoy_throat_clear_hard",
+      "category": "annoy",
+      "name": "用力清嗓",
+      "desc": "低频粗糙的干咳清嗓",
+      "file": "presets/annoy_throat_clear_hard.wav",
+      "durationMs": 600
+    },
+    {
+      "id": "annoy_spit",
+      "category": "annoy",
+      "name": "吐痰",
+      "desc": "短促的「呸」吐痰音",
+      "file": "presets/annoy_spit.wav",
+      "durationMs": 550
+    },
+    {
+      "id": "annoy_snort_laugh",
+      "category": "annoy",
+      "name": "嗤笑",
+      "desc": "鼻腔「哼」两声嘲笑",
+      "file": "presets/annoy_snort_laugh.wav",
+      "durationMs": 850
+    },
+    {
+      "id": "annoy_jeer",
+      "category": "annoy",
+      "name": "喝倒彩",
+      "desc": "拉长的「嘘」倒彩声",
+      "file": "presets/annoy_jeer.wav",
+      "durationMs": 1300
+    },
+    {
+      "id": "annoy_tsk",
+      "category": "annoy",
+      "name": "咂嘴",
+      "desc": "两声不满的「啧」",
+      "file": "presets/annoy_tsk.wav",
+      "durationMs": 600
+    },
+    {
+      "id": "annoy_grumble",
+      "category": "annoy",
+      "name": "拖长抱怨",
+      "desc": "低沉的嘟囔抱怨声",
+      "file": "presets/annoy_grumble.wav",
+      "durationMs": 1600
+    },
+    {
+      "id": "annoy_what_doing",
+      "category": "annoy",
+      "name": "「干啥呢」",
+      "desc": "共振峰合成的「干啥呢」质问",
+      "file": "presets/annoy_what_doing.wav",
+      "durationMs": 1100
+    },
+    {
+      "id": "annoy_hey_you",
+      "category": "annoy",
+      "name": "「哎」短促喝止",
+      "desc": "高起短促的「哎」",
+      "file": "presets/annoy_hey_you.wav",
+      "durationMs": 500
+    },
+    {
+      "id": "annoy_mocking_laugh",
+      "category": "annoy",
+      "name": "讥笑",
+      "desc": "「哈哈哈」连串嘲笑",
+      "file": "presets/annoy_mocking_laugh.wav",
+      "durationMs": 1200
     }
   ]
 }

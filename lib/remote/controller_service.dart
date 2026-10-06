@@ -10,6 +10,7 @@ import 'endpoint_service.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 import 'remote_store.dart';
+import '../domain/models/counter_plan.dart';
 
 /// 远程遥控控制器（控制端能力）。
 ///
@@ -70,6 +71,28 @@ class RcControllerService {
           PairedEndpoint endpoint, RemoteStore store, bool enabled) =>
       _ep.sendTo(
           endpoint, RcMessage.now(RcCmd.guardSet, {'enabled': enabled}), store);
+
+  // ---------------- 随机反击计划（v2.0） ----------------
+
+  /// 下发并应用一份反击计划（端点侧走同一 `CounterPlanService.apply`）。
+  Future<bool> sendPlanApply(PairedEndpoint endpoint, RemoteStore store,
+          CounterPlan plan, {String? planId, bool replace = true}) =>
+      _ep.sendTo(
+          endpoint,
+          RcMessage.now(RcCmd.planApply, {
+            'plan': plan.toJson(),
+            if (planId != null && planId.isNotEmpty) 'planId': planId,
+            'replace': replace,
+          }),
+          store);
+
+  /// 查询端点当前反击计划 → 端点回 `rc.plan`。
+  Future<bool> sendPlanGet(PairedEndpoint endpoint, RemoteStore store) =>
+      _ep.sendTo(endpoint, RcMessage.now(RcCmd.planGet), store);
+
+  /// 下线端点反击计划。
+  Future<bool> sendPlanStop(PairedEndpoint endpoint, RemoteStore store) =>
+      _ep.sendTo(endpoint, RcMessage.now(RcCmd.planStop), store);
 
   // ---------------- 对讲机（v1 整段模式） ----------------
 

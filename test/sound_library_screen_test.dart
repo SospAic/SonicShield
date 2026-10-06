@@ -479,13 +479,14 @@ void main() {
   // SLB-A · 渲染
   // ══════════════════════════════════════════════════════════════════════
 
-  testWidgets('SLB-01 空态：说清"两条路都能导入"，且点名 60 条 / 12 分类',
+  testWidgets('SLB-01 空态：说清"两条路都能导入"，且点名 70 条 / 13 分类',
       (tester) async {
     await pumpLib(tester);
 
     expect(find.text('暂无音源。'), findsOneWidget);
     expect(find.textContaining('导入预置库'), findsWidgets);
-    expect(find.textContaining('60 条内置音效'), findsOneWidget);
+    // v2.0 阶段 A：新增 `annoy`（招人烦）分类 → 60/12 抬到 70/13。
+    expect(find.textContaining('70 条内置音效'), findsOneWidget);
     expect(find.textContaining('敲击/撞击/拖拽/门窗'), findsOneWidget,
         reason: '分类清单是"这里到底有什么"的唯一说明，别删');
   }, timeout: _timeout);
@@ -824,12 +825,13 @@ void main() {
     await runReal(tester, presetsCallback(tester));
 
     expect(audioLoads, 2);
-    expect(repo.saveAllCalls, 1, reason: '60 条也必须是**一次**事务（BUG-047）');
+    expect(repo.saveAllCalls, 1, reason: '整批也必须是**一次**事务（BUG-047）');
     expect(repo.items.length, 2);
     expect(audioFiles().length, 2, reason: '每条预置都要在私有目录落一份 .wav');
     expect(repo.items.map((a) => a.name).toList(),
         containsAll(['[预置]敲门（单下）', '[预置]玻璃破碎']));
-    expect(repo.items.first.tags, ['预置', 'knocks']);
+    // v2.0：第三个 tag 是 manifest 的稳定 id（反击计划按它回查本机已装的音效）。
+    expect(repo.items.first.tags, ['预置', 'knocks', 'knocks_door_single']);
     expect(repo.items.map((a) => a.sizeBytes), everyElement(64),
         reason: '字节数取自资源本身（data.lengthInBytes）');
     expect(find.textContaining('预置音效导入完成：新增 2 条，跳过已存在 0 条'),
@@ -837,7 +839,7 @@ void main() {
     expect(find.textContaining('库内共 2 条'), findsOneWidget);
     // 列表刷新（`finally` 里的 setState 顺带重建了 FutureBuilder）
     expect(find.text('[预置]敲门（单下）'), findsOneWidget);
-    expect(find.text('0 KB · 预置/knocks'), findsOneWidget);
+    expect(find.text('0 KB · 预置/knocks/knocks_door_single'), findsOneWidget);
 
     await drainSnacks(tester);
   }, timeout: _timeout);

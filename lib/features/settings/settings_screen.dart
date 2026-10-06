@@ -12,10 +12,15 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/providers.dart';
 import '../../core/constants.dart';
+import '../../data/repositories/api_config_store.dart';
+import '../../data/repositories/counter_plan_store.dart';
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
+import '../../domain/models/counter_plan.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
+import '../../domain/models/tts_voice.dart';
+import '../../domain/scheduling/counter_plan_random.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/export_crypto.dart';
@@ -41,6 +46,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 存 `SharedPreferences`（与本页其它设置同一存储）。**不做 DB 读取** ——
   /// kv 表要走一次 sqflite 往返，会让整页 widget 测试留下未完成的锁超时 Timer。
   bool _quietExemptMaster = false;
+
+  // ---------------- 语音与接口 / 反击计划（v2.0） ----------------
+  //
+  // ⚠️ 本区块**刻意不在页面里内联 `TextField`**：导入/导出的密码对话框用例用
+  // `find.byType(TextField).at(0/1)` 无作用域地取框，页面上任何常驻输入框都会
+  // 抢到 `at(0)`，让「导出/解密」用例把密码打进配置框（实测会假红）。因此：
+  // · DeepSeek / 在线语音配置 → 各自的编辑对话框；
+  // · 试听文本 → 试听对话框；
+  // · 音色选择 → 无输入框的 ListTile 列表。
+  String _dsBaseUrl = ApiConfigStore.defaultBaseUrl;
+  String _dsModel = ApiConfigStore.defaultModel;
+  String _dsApiKey = '';
+  String _ttsEndpoint = '';
+  String _ttsApiKey = '';
+  bool _onlineTtsConfigured = false;
+
+  /// 试听所选音色 id（`TtsVoices`）。
+  String _previewVoiceId = TtsVoices.defaultId;
+
+  CounterPlan? _plan;
+  bool _planEnabled = false;
 
   // ---------------- 任务备份（导出/导入，v1.3） ----------------
 
@@ -258,6 +284,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
+    final cfg = ApiConfigStore(p);
+    final planStore = CounterPlanStore(p);
     setState(() {
       _powerMode = p.getString('power_mode') ?? 'balanced';
       _quietStart = p.getInt(PrefsKeys.quietStartHour) ??
@@ -265,7 +293,270 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
           ComplianceGuardrails.defaultQuietEndHour;
       _quietExemptMaster = p.getBool(PrefsKeys.quietExemptMaster) ?? false;
+      _dsBaseUrl = cfg.baseUrl;
+      _dsModel = cfg.model;
+      _dsApiKey = cfg.apiKey;
+      _ttsEndpoint = cfg.ttsEndpoint;
+      _ttsApiKey = cfg.ttsApiKey;
+      _onlineTtsConfigured = cfg.onlineTtsConfigured;
+      _plan = planStore.loadPlan();
+      _planEnabled = planStore.enabled;
     });
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  // ---------------- 语音与接口（v2.0） ----------------
+
+  /// 编辑并保存 DeepSeek 配置（基址/模型/Key）。
+  Future<void> _editDeepSeek() async {
+    final out = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _FieldsDialog(
+        title: 'DeepSeek 接口配置',
+        fields: [
+          _FieldSpec('API 基址', _dsBaseUrl, hint: ApiConfigStore.defaultBaseUrl),
+          _FieldSpec('模型', _dsModel, hint: ApiConfigStore.defaultModel),
+          _FieldSpec('API Key', _dsApiKey, obscure: true, hint: '留空即清除'),
+        ],
+      ),
+    );
+    if (out == null) return;
+    final cfg = ApiConfigStore(await SharedPreferences.getInstance());
+    await cfg.setBaseUrl(out[0]);
+    await cfg.setModel(out[1]);
+    await cfg.setApiKey(out[2]);
+    if (!mounted) return;
+    setState(() {
+      _dsBaseUrl = cfg.baseUrl;
+      _dsModel = cfg.model;
+      _dsApiKey = cfg.apiKey;
+    });
+    _snack('DeepSeek 配置已保存');
+  }
+
+  /// 编辑并保存在线语音配置（endpoint + Key）。
+  Future<void> _editOnlineTts() async {
+    final out = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _FieldsDialog(
+        title: '在线语音配置',
+        fields: [
+          _FieldSpec('在线语音 Endpoint', _ttsEndpoint,
+              hint: '如 https://<region>.tts.speech.microsoft.com/cognitiveservices/v1'),
+          _FieldSpec('在线语音 Key', _ttsApiKey, obscure: true, hint: '留空即关闭在线语音'),
+        ],
+      ),
+    );
+    if (out == null) return;
+    final cfg = ApiConfigStore(await SharedPreferences.getInstance());
+    await cfg.setOnlineTts(endpoint: out[0], apiKey: out[1]);
+    if (!mounted) return;
+    setState(() {
+      _ttsEndpoint = cfg.ttsEndpoint;
+      _ttsApiKey = cfg.ttsApiKey;
+      _onlineTtsConfigured = cfg.onlineTtsConfigured;
+    });
+    _snack(_onlineTtsConfigured
+        ? '在线语音已配置（东北话音色可用）'
+        : '在线语音已关闭：仅系统音色可用');
+  }
+
+  /// 打开试听对话框（输入文字 → 走 `TtsService.say`）。
+  Future<void> _openPreview() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _TtsPreviewDialog(
+        voiceName: TtsVoices.byId(_previewVoiceId).name,
+        onPreview: _previewVoice,
+      ),
+    );
+  }
+
+  Future<void> _previewVoice(String text) async {
+    final svc = await ref.read(ttsServiceProvider.future);
+    final r = await svc.say(text, voiceId: _previewVoiceId);
+    if (!mounted) return;
+    _snack(r.ok
+        ? '已试听：${TtsVoices.byId(_previewVoiceId).name}'
+        : '试听失败：${r.message ?? '未知原因'}');
+  }
+
+  // ---------------- 反击计划（v2.0） ----------------
+
+  Future<void> _reloadPlan() async {
+    final p = await SharedPreferences.getInstance();
+    final store = CounterPlanStore(p);
+    if (!mounted) return;
+    setState(() {
+      _plan = store.loadPlan();
+      _planEnabled = store.enabled;
+    });
+  }
+
+  /// 本机按同一区间规则随机生成并启用（离线可用）。
+  Future<void> _genLocalPlan() async {
+    final svc = await ref.read(counterPlanServiceProvider.future);
+    final r = await svc.apply(CounterPlanRandom.generate());
+    await _reloadPlan();
+    _snack(r.message);
+  }
+
+  /// 一键 AI 生成：校验通过才落库；失败如实显示 message。
+  Future<void> _genAiPlan() async {
+    final ds = await ref.read(deepseekServiceProvider.future);
+    final gen = await ds.generatePlan();
+    if (!gen.ok || gen.plan == null) {
+      _snack('AI 生成失败：${gen.message}');
+      return;
+    }
+    final svc = await ref.read(counterPlanServiceProvider.future);
+    final r = await svc.apply(gen.plan!);
+    await _reloadPlan();
+    _snack(r.ok ? '${gen.message}；${r.message}' : r.message);
+  }
+
+  /// 导入 JSON 计划文件：解析失败/校验失败都如实提示，不落库。
+  Future<void> _importPlanJson() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.any);
+      if (result == null || result.files.single.path == null) return;
+      final raw = await File(result.files.single.path!).readAsString();
+      final plan = CounterPlan.tryParse(raw);
+      if (plan == null) {
+        _snack('导入失败：文件不是合法 JSON');
+        return;
+      }
+      final errs = plan.validate();
+      if (errs.isNotEmpty) {
+        _snack('计划校验未通过：${errs.join('；')}');
+        return;
+      }
+      final svc = await ref.read(counterPlanServiceProvider.future);
+      final r = await svc.apply(plan);
+      await _reloadPlan();
+      _snack(r.message);
+    } catch (e) {
+      _snack('导入失败：$e');
+    }
+  }
+
+  /// 下载 JSON 模版（默认计划 → 分享分发）。
+  Future<void> _downloadPlanTemplate() async {
+    try {
+      final json = CounterPlan.defaults().toPrettyJson();
+      final dir = await getTemporaryDirectory();
+      // ⚠️ 必须用 `dir.path`（BUG-065）：`Directory.toString()` 带回
+      // `Directory: '...'` 前缀，插值出的路径不存在，写盘必抛。
+      final path = '${dir.path}/sonicshield_counter_plan_template.json';
+      await File(path).writeAsString(json, flush: true);
+      if (!mounted) return;
+      await Share.shareXFiles([XFile(path)], subject: '声盾反击计划模版');
+    } catch (e) {
+      _snack('导出模版失败：$e');
+    }
+  }
+
+  Future<void> _disablePlan() async {
+    final svc = await ref.read(counterPlanServiceProvider.future);
+    final r = await svc.disable();
+    await _reloadPlan();
+    _snack(r.message);
+  }
+
+  /// 音色列表：按「普通话 / 东北话」分组，标注男/女，可选中（无输入框）。
+  List<Widget> _voiceWidgets(BuildContext context) {
+    final out = <Widget>[];
+    for (final d in TtsDialect.values) {
+      out.add(Padding(
+        padding: const EdgeInsets.only(left: 16, top: 6),
+        child: Text(d.label, style: Theme.of(context).textTheme.labelLarge),
+      ));
+      for (final v in TtsVoices.all.where((v) => v.dialect == d)) {
+        out.add(ListTile(
+          key: ValueKey<String>('voice_${v.id}'),
+          dense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          title: Text('${v.name}（${v.gender.label}）'),
+          subtitle: Text(v.summary),
+          trailing: Icon(_previewVoiceId == v.id
+              ? Icons.radio_button_checked
+              : Icons.radio_button_off),
+          onTap: () => setState(() => _previewVoiceId = v.id),
+        ));
+      }
+    }
+    return out;
+  }
+
+  /// 反击计划区块：状态 + 四时段区间 + 五个操作。
+  List<Widget> _planWidgets(BuildContext context) {
+    final p = _plan;
+    final out = <Widget>[
+      Text('反击计划', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 4),
+      ListTile(
+        leading: const Icon(Icons.security),
+        title: Text(p == null ? '当前计划：未配置' : '当前计划：${p.name}'),
+        subtitle: Text(p == null
+            ? '用下方按钮生成或导入一份计划'
+            : (_planEnabled
+                ? '已启用（任务命名空间 counter:，与手动任务隔离）'
+                : '未启用（已下线，保留计划本体）')),
+      ),
+    ];
+    if (p != null) {
+      for (final e in <(String, CounterWindow)>[
+        ('工作日·白天', p.windowFor(DayKind.workday, isNight: false)),
+        ('工作日·夜间', p.windowFor(DayKind.workday, isNight: true)),
+        ('休息日·白天', p.windowFor(DayKind.restday, isNight: false)),
+        ('休息日·夜间', p.windowFor(DayKind.restday, isNight: true)),
+      ]) {
+        out.add(ListTile(
+          dense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          title: Text(e.$1),
+          subtitle:
+              Text(e.$2.enabled ? describeWindow(e.$2) : '未启用（该时段不反击）'),
+        ));
+      }
+    }
+    out.addAll(<Widget>[
+      ListTile(
+        leading: const Icon(Icons.casino_outlined),
+        title: const Text('本机随机生成并启用'),
+        subtitle: const Text('离线按同一区间规则随机（与 AI 区间一致）'),
+        onTap: _genLocalPlan,
+      ),
+      ListTile(
+        leading: const Icon(Icons.auto_awesome),
+        title: const Text('一键 AI 生成并导入'),
+        subtitle: const Text('需先配置 DeepSeek Key'),
+        onTap: _genAiPlan,
+      ),
+      ListTile(
+        leading: const Icon(Icons.file_open_outlined),
+        title: const Text('导入 JSON'),
+        onTap: _importPlanJson,
+      ),
+      ListTile(
+        leading: const Icon(Icons.download_outlined),
+        title: const Text('下载 JSON 模版'),
+        subtitle: const Text('sonicshield_counter_plan_template.json'),
+        onTap: _downloadPlanTemplate,
+      ),
+      ListTile(
+        leading: const Icon(Icons.stop_circle_outlined),
+        title: const Text('下线'),
+        subtitle: const Text('清除计划任务并停用（保留计划本体）'),
+        onTap: _disablePlan,
+      ),
+    ]);
+    return out;
   }
 
   /// 切换夜间独立豁免主开关（v1.9，docs/20 §8.1）。
@@ -467,6 +758,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: _importTasks,
           ),
           const Divider(height: 32),
+          Text('语音与接口', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          ListTile(
+            leading: const Icon(Icons.smart_toy_outlined),
+            title: const Text('DeepSeek 接口配置'),
+            subtitle: Text('基址 $_dsBaseUrl · 模型 $_dsModel · '
+                'Key ${_dsApiKey.isEmpty ? '未配置' : '已配置'}'),
+            onTap: _editDeepSeek,
+          ),
+          ListTile(
+            leading: const Icon(Icons.translate),
+            title: const Text('在线语音配置'),
+            subtitle: Text(_onlineTtsConfigured
+                ? '已配置：$_ttsEndpoint'
+                : '未配置则只有系统音色可用（东北话需在线语音）'),
+            onTap: _editOnlineTts,
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: 16, top: 6, bottom: 2),
+            child: Text('音色（离线优先，可选中后试听）',
+                style: TextStyle(fontSize: 12)),
+          ),
+          ..._voiceWidgets(context),
+          ListTile(
+            leading: const Icon(Icons.play_circle_outline),
+            title: const Text('试听所选音色'),
+            subtitle: Text(TtsVoices.byId(_previewVoiceId).name),
+            onTap: _openPreview,
+          ),
+          const Divider(height: 32),
+          ..._planWidgets(context),
+          const Divider(height: 32),
           Text('录音取证', style: Theme.of(context).textTheme.titleMedium),
           ListTile(
             leading: const Icon(Icons.folder_special),
@@ -512,4 +835,132 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
   }
+}
+
+/// 一个可编辑字段的规格（供 [_FieldsDialog] 声明式渲染）。
+class _FieldSpec {
+  const _FieldSpec(this.label, this.initial, {this.obscure = false, this.hint});
+
+  final String label;
+  final String initial;
+  final bool obscure;
+  final String? hint;
+}
+
+/// 通用多字段编辑对话框：控制器由自身持有并在 `dispose()` 释放（BUG-064 形状）。
+///
+/// 点「保存」返回各字段文本（[List<String>]）；「取消」返回 null。
+class _FieldsDialog extends StatefulWidget {
+  const _FieldsDialog({required this.title, required this.fields});
+
+  final String title;
+  final List<_FieldSpec> fields;
+
+  @override
+  State<_FieldsDialog> createState() => _FieldsDialogState();
+}
+
+class _FieldsDialogState extends State<_FieldsDialog> {
+  late final List<TextEditingController> _ctrls = [
+    for (final f in widget.fields) TextEditingController(text: f.initial),
+  ];
+
+  @override
+  void dispose() {
+    for (final c in _ctrls) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < widget.fields.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: TextField(
+                      controller: _ctrls[i],
+                      obscureText: widget.fields[i].obscure,
+                      decoration: InputDecoration(
+                        labelText: widget.fields[i].label,
+                        hintText: widget.fields[i].hint,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消')),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(context, [for (final c in _ctrls) c.text]),
+            child: const Text('保存'),
+          ),
+        ],
+      );
+}
+
+/// 试听对话框：输入文字 → [onPreview] 走 `TtsService.say`（结果由上层提示）。
+class _TtsPreviewDialog extends StatefulWidget {
+  const _TtsPreviewDialog({required this.voiceName, required this.onPreview});
+
+  final String voiceName;
+  final Future<void> Function(String text) onPreview;
+
+  @override
+  State<_TtsPreviewDialog> createState() => _TtsPreviewDialogState();
+}
+
+class _TtsPreviewDialogState extends State<_TtsPreviewDialog> {
+  final _ctrl = TextEditingController(text: '请注意，已开启录音取证');
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await widget.onPreview(_ctrl.text);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text('试听 · ${widget.voiceName}'),
+        content: SizedBox(
+          width: 420,
+          child: TextField(
+            controller: _ctrl,
+            decoration: const InputDecoration(labelText: '试听文本'),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+          FilledButton.icon(
+            onPressed: _busy ? null : _run,
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('试听'),
+          ),
+        ],
+      );
 }

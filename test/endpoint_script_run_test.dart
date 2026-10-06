@@ -226,13 +226,18 @@ void main() {
           isTrue);
     });
 
-    test('ESR-06 装配后文本与音量原样交给能力层', () async {
-      final spoken = <({String text, double vol})>[];
-      svc.ttsHandler = (text, vol) async => spoken.add((text: text, vol: vol));
+    test('ESR-06 装配后文本、音量与音色原样交给能力层', () async {
+      final spoken = <({String text, double vol, String voice})>[];
+      svc.ttsHandler = (text, vol, {String voiceId = ''}) async =>
+          spoken.add((text: text, vol: vol, voice: voiceId));
 
       await svc.debugDispatch(
         runCmd(script([
-          const RcStep(RcStepKind.tts, {'text': '把门窗关好', 'volume': 0.6}),
+          const RcStep(RcStepKind.tts, {
+            'text': '把门窗关好',
+            'volume': 0.6,
+            'voiceId': 'az_db_male_yunbiao',
+          }),
         ])),
         peer,
       );
@@ -240,6 +245,21 @@ void main() {
 
       expect(spoken.single.text, '把门窗关好');
       expect(spoken.single.vol, 0.6);
+      expect(spoken.single.voice, 'az_db_male_yunbiao');
+    });
+
+    test('ESR-06b 未带音色 id 时交给能力层的是空串（由音色目录回落默认）', () async {
+      final spoken = <String>[];
+      svc.ttsHandler = (text, vol, {String voiceId = ''}) async =>
+          spoken.add(voiceId);
+
+      await svc.debugDispatch(
+        runCmd(script([const RcStep(RcStepKind.tts, {'text': '你好'})])),
+        peer,
+      );
+      await settle();
+
+      expect(spoken.single, isEmpty);
     });
   });
 

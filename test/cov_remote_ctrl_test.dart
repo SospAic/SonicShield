@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sonic_shield/domain/models/counter_plan.dart';
 import 'package:sonic_shield/remote/controller_service.dart';
 import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/remote/multi_call_service.dart';
@@ -162,6 +163,69 @@ void main() {
       final msg = await decodeFirstOutbox();
       expect(msg.type, RcCmd.guardSet);
       expect(msg.payload['enabled'], false);
+    });
+  });
+
+  group('反击计划命令（v2.0）：信封字段端到端可核对', () {
+    test('RC-20 sendPlanApply 带 planId 与 replace=false → 三字段原样进密文',
+        () async {
+      final svc = RcControllerService.instance;
+      RcMessage? captured;
+      RcEndpointService.instance.debugSendTo =
+          (e, m, s, enqueueOnFail) async {
+        captured = m;
+        return true;
+      };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+
+      final plan = CounterPlan.defaults();
+      final ok = await svc.sendPlanApply(endpoint, store, plan,
+          planId: 'p-1', replace: false);
+
+      expect(ok, isTrue);
+      expect(captured!.type, RcCmd.planApply);
+      expect(captured!.payload['plan'], plan.toJson());
+      expect(captured!.payload['planId'], 'p-1');
+      expect(captured!.payload['replace'], false,
+          reason: 'replace 必须原样透传，否则端点会误删仍要保留的旧任务');
+    });
+
+    test('RC-21 sendPlanApply 不带 planId（默认 replace=true）→ 不塞空 planId',
+        () async {
+      final svc = RcControllerService.instance;
+      RcMessage? captured;
+      RcEndpointService.instance.debugSendTo =
+          (e, m, s, enqueueOnFail) async {
+        captured = m;
+        return true;
+      };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+
+      final plan = CounterPlan.defaults();
+      await svc.sendPlanApply(endpoint, store, plan);
+
+      expect(captured!.type, RcCmd.planApply);
+      expect(captured!.payload.containsKey('planId'), isFalse,
+          reason: '未指定 planId 时不得塞 null/空串（空 id 会污染端点命名空间）');
+      expect(captured!.payload['replace'], true);
+    });
+
+    test('RC-22 sendPlanGet / sendPlanStop → 两条空 payload 的计划命令', () async {
+      final svc = RcControllerService.instance;
+      final sent = <RcMessage>[];
+      RcEndpointService.instance.debugSendTo =
+          (e, m, s, enqueueOnFail) async {
+        sent.add(m);
+        return true;
+      };
+      addTearDown(() => RcEndpointService.instance.debugSendTo = null);
+
+      await svc.sendPlanGet(endpoint, store);
+      await svc.sendPlanStop(endpoint, store);
+
+      expect(sent.map((m) => m.type).toList(), [RcCmd.planGet, RcCmd.planStop]);
+      expect(sent.every((m) => m.payload.isEmpty), isTrue,
+          reason: '查询 / 下线都不需要额外参数，塞参数说明实现漂移');
     });
   });
 

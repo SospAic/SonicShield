@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../../core/constants.dart';
 import '../../core/providers.dart';
 import '../../data/repositories/task_repository.dart';
 import '../../domain/models/task.dart';
@@ -38,6 +40,9 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
   /// 守卫编排（v1.10）：候选任务 / 挑选方式 / 延时。
   GuardOrchestration _orch = const GuardOrchestration();
 
+  /// 「实时随机动态反击」开关（v2.0 阶段 D），持久化在 [PrefsKeys.reactiveCounterEnabled]。
+  bool _reactiveCounter = false;
+
   /// 可作为候选的「声音触发」任务（用于多选）。
   List<Task> _soundTasks = const [];
 
@@ -54,6 +59,10 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
         await db.query('sound_profiles', where: 'enabled = 1', limit: 1);
     final orch = GuardOrchestration.decode(await appDb.kvGet(guardOrchestrationKey));
     final tasks = await TaskRepository(appDb).listAll(enabledOnly: true);
+    // 「动态反击」开关存在 prefs（进程内同步可读，UI 不必等 DB）。
+    final prefs = await SharedPreferences.getInstance();
+    final reactive =
+        prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false;
     if (!mounted) return;
     setState(() {
       if (rows.isNotEmpty) {
@@ -62,11 +71,30 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
         _cooldownSec = (rows.first['cooldown_sec'] as num?)?.toInt() ?? 120;
       }
       _orch = orch;
+      _reactiveCounter = reactive;
       _soundTasks = [
         for (final t in tasks)
           if (t.triggerType == TriggerType.soundTriggered) t,
       ];
     });
+  }
+
+  /// 切换「实时随机动态反击」开关并持久化。
+  Future<void> _onToggleReactive(bool v) async {
+    final scaffold = ScaffoldMessenger.of(context);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(PrefsKeys.reactiveCounterEnabled, v);
+    // 通知引擎即时装配/撤下（引擎未运行时无副作用，prefs 已落，下次守卫启动生效）。
+    await BackgroundServiceManager.instance.setReactiveCounter(v);
+    if (!mounted) return;
+    setState(() => _reactiveCounter = v);
+    // 动态反击消费守卫的声音事件 ⇒ 守卫没开就等于"开了也没反应"。
+    // 必须讲清楚，不能让用户面对一个静默无效的开关（本项目"失败不可静默"）。
+    if (v && !BackgroundServiceManager.instance.guardActive) {
+      scaffold.showSnackBar(const SnackBar(
+        content: Text('动态反击需要守卫运行才能听到声音，请同时开启上方「守卫」开关'),
+      ));
+    }
   }
 
   Future<void> _persist() async {
@@ -154,6 +182,28 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
               subtitle: const Text('检测到超过阈值的声音事件后自动执行声音触发类任务'),
               value: guardOn,
               onChanged: _onToggleGuard,
+            ),
+          ),
+          const SizedBox(height: 16),
+          // 「动态反击」开关（v2.0 阶段 D）。
+          //
+          // ⚠️ 刻意用 `ListTile + Switch` 而非第二个 `SwitchListTile`：
+          // 既有守卫页测试以 `find.byType(SwitchListTile)` 唯一命中守卫开关，
+          // 再加一个同类型控件会让那些用例的目标产生歧义（既有测试不被破坏）。
+          Card(
+            child: ListTile(
+              leading: Icon(
+                  _reactiveCounter ? Icons.bolt : Icons.bolt_outlined,
+                  size: 30),
+              title: const Text('动态反击'),
+              subtitle: const Text(
+                  '有声音尽量记录；轻量忽略、重量随机反击；静默 15–25 分钟后'
+                  '随机触发动态反制（渐进升级，避免规律可预测）。'
+                  '与手动播放互斥并带冷却，复用守卫同一条麦克风通路（需守卫运行）。'),
+              trailing: Switch(
+                value: _reactiveCounter,
+                onChanged: _onToggleReactive,
+              ),
             ),
           ),
           const SizedBox(height: 16),

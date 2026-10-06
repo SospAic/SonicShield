@@ -155,7 +155,10 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         for (final it in items)
           AssetImportEntry(
             name: '[预置]${it['name']}',
-            tags: ['预置', '${it['category']}'],
+            // 第三个 tag 是 manifest 里的**稳定 id**（如 `annoy_spit`）：
+            // 反击计划（v2.0）按它回查"本机装了哪些计划点名的音效"。
+            // 资产行 id 是导入时生成的 UUID，无法反推 manifest id，故必须落 tag。
+            tags: ['预置', '${it['category']}', '${it['id']}'],
             durationMs: (it['durationMs'] as num?)?.toInt() ?? 0,
             materialize: (id) async {
               final data = await rootBundle.load('assets/audio/${it['file']}');
@@ -275,8 +278,8 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
                     Text('暂无音源。', textAlign: TextAlign.center),
                     SizedBox(height: 8),
                     Text(
-                        '点击右上角「导入预置库」一键导入 60 条内置音效\n'
-                        '（敲击/撞击/拖拽/门窗/玻璃/人声/动物/铃声/警示/自然/电子/助眠），\n'
+                        '点击右上角「导入预置库」一键导入 70 条内置音效\n'
+                        '（敲击/撞击/拖拽/门窗/玻璃/人声/动物/铃声/警示/自然/电子/助眠/招人烦），\n'
                         '或用右下角导入本地音频文件。',
                         textAlign: TextAlign.center),
                   ],

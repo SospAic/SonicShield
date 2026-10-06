@@ -17,13 +17,16 @@ import 'package:flutter/foundation.dart';
 import '../core/constants.dart';
 import '../data/db/app_database.dart';
 import '../data/repositories/log_repository.dart';
+import '../data/repositories/counter_plan_store.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
 import '../domain/models/action.dart';
+import '../domain/models/counter_plan.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/scheduling/schedule_engine.dart';
 import '../services/background_service_manager.dart';
+import '../services/counter_plan_service.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
 import '../services/ptt_stream_sink.dart';
@@ -213,7 +216,15 @@ class RcEndpointService {
   /// 不必真等 90 秒。
   static Duration pttStreamKeepAlive = const Duration(seconds: 90);
   Future<String?> Function(String presetCategory)? resolvePresetHandler;
-  Future<void> Function(String text, double volume)? ttsHandler;
+
+  /// 语音播报能力（v2.0 起携带音色 id）。
+  ///
+  /// `voiceId` 是**可选命名参数**：Dart 函数子类型规则里"可选命名参数更多者"
+  /// 才是子类型，所以新增它会让老的两参闭包**不再兼容** —— 全库唯一的显式
+  /// 赋值点（`test/endpoint_script_run_test.dart` ESR-06）已同步为该形态。
+  /// 空串 ⇒ 由 `TtsVoices.byId` 回落系统默认音色（读不懂的配置回到最安全默认）。
+  Future<void> Function(String text, double volume, {String voiceId})?
+      ttsHandler;
   Future<void> Function(List<int> pattern)? vibrateHandler;
 
   /// v1.9：参数化振动步骤（`mode` = random/continuous）的执行器。
@@ -1189,6 +1200,12 @@ class RcEndpointService {
         await _playRemote(msg, peer, logs);
       case RcCmd.vibrateStop:
         await _stopVibrate(msg, peer, logs);
+      case RcCmd.planApply:
+        await _applyRemotePlan(msg, peer, logs, db, tasks);
+      case RcCmd.planGet:
+        await _sendRemotePlan(msg, db, tasks);
+      case RcCmd.planStop:
+        await _stopRemotePlan(msg, peer, logs, db, tasks);
       case RcCmd.logsRecent:
         final limit = (msg.payload['limit'] as num?)?.toInt() ?? 50;
         final rows = await logs.recent(limit: limit);
@@ -1276,6 +1293,85 @@ class RcEndpointService {
             message: 'by ${peer.name} · 未知命令，未执行');
         await _ack(msg, false, data: '未知命令');
     }
+  }
+
+  // ==================== v2.0：随机反击计划（远程） ====================
+
+  /// 构造端点侧的反击计划编排器 —— 与本机 UI 走**同一条** `CounterPlanService`
+  /// 通路（校验 → 物化 → 落库），确保"本机能用、远程也能用"的一致性。
+  ///
+  /// 音源解析读端点自己的音源库；`replan` 请求引擎立即重排（引擎未运行时
+  /// 不阻断落库，下一次 tick 会读到新任务）。
+  Future<CounterPlanService> _counterPlanner(
+      TaskRepository tasks, AppDatabase db) async {
+    final prefs = await SharedPreferences.getInstance();
+    final assets = AssetRepository(db);
+    return CounterPlanService(
+      tasks: tasks,
+      store: CounterPlanStore(prefs),
+      resolveAudioIds: (presetIds) async =>
+          resolvePresetAudioIds(await assets.listAll(), presetIds),
+      replan: () async {
+        try {
+          await BackgroundServiceManager.instance.replan();
+        } on Object {
+          // 引擎未运行 ⇒ 落库照常，留给下一次 tick 重算（不静默，仅降级）。
+        }
+      },
+    );
+  }
+
+  /// `plan.apply`：校验 → 物化 → 落库。**不合格计划绝不落库**，如实回执。
+  Future<void> _applyRemotePlan(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, AppDatabase db, TaskRepository tasks) async {
+    final raw = msg.payload['plan'];
+    if (raw is! Map) {
+      await _ack(msg, false, data: '缺少 plan');
+      return;
+    }
+    final plan = CounterPlan.fromJson(raw);
+    final rawId = (msg.payload['planId'] as String?)?.trim() ?? '';
+    final replace = msg.payload['replace'] as bool? ?? true;
+    final svc = await _counterPlanner(tasks, db);
+    final r = await svc.apply(plan,
+        planId: rawId.isEmpty ? null : rawId, replace: replace);
+    await logs.append(
+        source: 'remote',
+        action: 'plan.apply',
+        status: r.ok ? 'success' : 'failed',
+        message: 'by ${peer.name} · ${r.message}');
+    await _ack(msg, r.ok, data: r.ok ? 'tasks=${r.taskCount}' : r.message);
+  }
+
+  /// `plan.get`：回传端点的计划快照（计划本体 + 启用位 + 已排任务数）。
+  Future<void> _sendRemotePlan(
+      RcMessage msg, AppDatabase db, TaskRepository tasks) async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = CounterPlanStore(prefs);
+    final plan = store.loadPlan();
+    final count = (await tasks.counterTaskIds(store.planId)).length;
+    await _send(
+        RcMessage.now(RcEvt.plan, {
+          'for': msg.id,
+          'plan': plan?.toJson(),
+          'enabled': store.enabled,
+          'planId': store.planId,
+          'taskCount': count,
+        }),
+        targetPeerId: msg.from);
+  }
+
+  /// `plan.stop`：下线（清空该计划命名空间的任务并置未启用；保留计划本体）。
+  Future<void> _stopRemotePlan(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, AppDatabase db, TaskRepository tasks) async {
+    final svc = await _counterPlanner(tasks, db);
+    final r = await svc.disable();
+    await logs.append(
+        source: 'remote',
+        action: 'plan.stop',
+        status: r.ok ? 'success' : 'failed',
+        message: 'by ${peer.name} · ${r.message}');
+    await _ack(msg, r.ok, data: 'stopped=${r.taskCount}');
   }
 
   // ==================== v2.0：配对双向化（R-2） ====================
@@ -2068,8 +2164,16 @@ class RcEndpointService {
           }
         case RcStepKind.tts:
           if (ttsHandler != null) {
-            await ttsHandler!(step.params['text'] as String? ?? '',
-                ((step.params['volume'] as num?)?.toDouble() ?? 0.8));
+            // 入站数据不可信：音色 id 只做长度夹紧（未知 id 由 `TtsVoices.byId`
+            // 回落默认音色，不需要在这里判"认不认识"）。
+            final rawVoice = step.params['voiceId'] as String? ?? '';
+            await ttsHandler!(
+                step.params['text'] as String? ?? '',
+                ((step.params['volume'] as num?)?.toDouble() ?? 0.8),
+                voiceId:
+                    rawVoice.length > _maxVoiceIdLen
+                        ? rawVoice.substring(0, _maxVoiceIdLen)
+                        : rawVoice);
           } else {
             stepNotes.add('步骤 ${stepIndex + 1}（tts）未执行：端点未装配语音播报能力');
             await logs.append(
@@ -3091,6 +3195,13 @@ class DecodeFailThrottle {
 
 /// 点名 peer evt 解密失败的"最近成功"抑制窗口（P2-22，10 分钟）。
 const int rcPeerEvtNoiseWindowMs = 10 * 60 * 1000;
+
+/// 远程 TTS 步骤携带的**音色 id** 长度上限（v2.0）。
+///
+/// 音色 id 是 "sys_zh_female" / "az_db_male_yunbiao" 这类稳定短标识（≤ 32），
+/// 给一倍余量到 64 只为**挡住畸形超长串**（入站数据不可信）。未知 id 不影响
+/// 正确性 —— `TtsVoices.byId` 会回落默认音色，不需要在这里做白名单校验。
+const int _maxVoiceIdLen = 64;
 
 /// 点名 peer evt 解密失败是否**值得审计**（P2-22 纯判据）。
 ///

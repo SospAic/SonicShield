@@ -101,6 +101,14 @@ ProbeSpec? specOf(String key) => switch (key) {
           expect: RcEvt.presets,
           payload: const <String, dynamic>{},
         ),
+      // v2.0：反击计划快照（与 tasks/assets/presets 同一"列清单 → 事件回传"形态）。
+      // 消费方在桌面 E2E 探针侧；App 内暂无展示入口（见 evtWithoutInAppConsumer）。
+      'plan' => (
+          name: 'plan.get',
+          type: RcCmd.planGet,
+          expect: RcEvt.plan,
+          payload: const <String, dynamic>{},
+        ),
       'device' => (
           name: 'device.status',
           type: RcCmd.deviceStatus,

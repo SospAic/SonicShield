@@ -8,6 +8,7 @@ import '../../core/providers.dart';
 import '../../data/repositories/task_repository.dart' show AudioAsset;
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
+import '../../domain/models/tts_voice.dart';
 import '../../remote/rc_script.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
@@ -228,6 +229,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
 
   String get _rampUpLabel => _rampUpSec == 0 ? '关闭' : '$_rampUpSec 秒渐强';
   String _ttsText = '请注意，已开启录音取证';
+  /// TTS 音色 id（v2.0，见 `TtsVoices`）；空串 = 系统默认音色。
+  String _ttsVoiceId = '';
   int _recordSec = 60;
 
   Task? _editing;
@@ -400,6 +403,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _actionKind = ActionKindChoice.randomFrom;
       } else if (a is TtsAction) {
         _ttsText = a.text;
+        _ttsVoiceId = a.voiceId;
         _actionKind = ActionKindChoice.tts;
       } else if (a is RecordEvidenceAction) {
         _recordSec = a.seconds;
@@ -978,6 +982,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             decoration: const InputDecoration(labelText: '播报文本'),
             onChanged: (v) => _ttsText = v,
           ),
+          const SizedBox(height: 8),
+          const Text('音色', style: TextStyle(fontSize: 12)),
+          SizedBox(width: double.infinity, child: _ttsVoiceDropdown()),
         ];
       case ActionKindChoice.record:
         return [
@@ -1007,6 +1014,36 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       case ActionKindChoice.vibrateContinuous:
         return _vibrateContinuousInputs();
     }
+  }
+
+  /// TTS 音色下拉（v2.0）：按「普通话 / 东北话」分组，标注男/女/是否在线。
+  ///
+  /// `value=''` = 系统默认（自动挑）；其余为 [TtsVoices.id]。这里只把选择落到
+  /// [TtsAction.voiceId]，具体走系统 TTS 还是在线语音由 `TtsService` 决定。
+  /// 未知 id（如外部导入的脏数据）回落到「系统默认」，避免 Dropdown 断言。
+  Widget _ttsVoiceDropdown() {
+    final known = TtsVoices.all.any((v) => v.id == _ttsVoiceId);
+    return DropdownButton<String>(
+      isExpanded: true,
+      value: known ? _ttsVoiceId : '',
+      items: [
+        const DropdownMenuItem(value: '', child: Text('系统默认（自动）')),
+        for (final d in TtsDialect.values) ...[
+          DropdownMenuItem(
+            enabled: false,
+            value: '__header_${d.name}',
+            child: Text(d.label, style: const TextStyle(fontSize: 12)),
+          ),
+          for (final v in TtsVoices.all.where((v) => v.dialect == d))
+            DropdownMenuItem(
+              value: v.id,
+              child: Text(
+                  '${v.name}（${v.gender.label}${v.isOnline ? '·在线' : ''}）'),
+            ),
+        ],
+      ],
+      onChanged: (v) => setState(() => _ttsVoiceId = v ?? ''),
+    );
   }
 
   /// 能力提示条（v1.9，FR-38 / docs/20 §5.2）。
@@ -1561,7 +1598,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                     channel:
                         _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
                   ),
-                RcStepKind.tts => TtsAction(text: _ttsText),
+                RcStepKind.tts =>
+                  TtsAction(text: _ttsText, voiceId: _ttsVoiceId),
                 RcStepKind.notify =>
                   NotifyAction(title: '声盾 · 触发', body: _nameCtrl.text),
                 RcStepKind.vibrate => const VibrateAction(),
@@ -1573,7 +1611,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           ..._setPreserved,
         ]);
       case ActionKindChoice.tts:
-        action = TtsAction(text: _ttsText);
+        action = TtsAction(text: _ttsText, voiceId: _ttsVoiceId);
       case ActionKindChoice.vibrateFixed:
         // 固定节奏：模式串至少要有"延迟 + 一次振动"。
         if (_vibPattern.length < 2) {

@@ -826,6 +826,81 @@ void main() {
     expect(find.text('新文案ABC'), findsOneWidget);
   }, timeout: perTest);
 
+  testWidgets('TEI-E3b 动作：语音播报音色下拉 → 保存落到 TtsAction.voiceId（v2.0）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(tester, remoteSave: (t) async {
+      sent = t;
+      return true;
+    });
+    await tester.tap(chip('语音播报'));
+    await tester.pump();
+
+    // 页面上唯一的 `DropdownButton<String>` 就是音色下拉（条件区是 <int?>）。
+    final dd = find.byType(DropdownButton<String>);
+    expect(dd, findsOneWidget, reason: '语音播报应有音色下拉');
+    await tester.ensureVisible(dd);
+    await tester.tap(dd);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('系统默认男声（男）').last);
+    await tester.pumpAndSettle();
+
+    await tapSave(tester);
+    await tester.pump();
+    expect(sent, isNotNull);
+    expect(sent!.actionType, ActionType.tts);
+    // 选中的音色必须真的落进动作 —— 只存在 UI 状态里、保存时丢掉就是静默失效。
+    expect((sent!.action as TtsAction).voiceId, 'sys_zh_male');
+  }, timeout: perTest);
+
+  testWidgets('TEI-E3c 动作：语音播报选系统女声 → 保存逐位落到 TtsAction.voiceId（v2.0）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(tester, remoteSave: (t) async {
+      sent = t;
+      return true;
+    });
+    await tester.tap(chip('语音播报'));
+    await tester.pump();
+
+    final dd = find.byType(DropdownButton<String>);
+    await tester.ensureVisible(dd);
+    await tester.tap(dd);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('系统默认女声（女）').last);
+    await tester.pumpAndSettle();
+
+    await tapSave(tester);
+    await tester.pump();
+    expect(sent, isNotNull);
+    expect((sent!.action as TtsAction).voiceId, 'sys_zh_female');
+  }, timeout: perTest);
+
+  testWidgets('TEI-E3d 动作：语音播报选在线东北话音色 → 保存逐位落到 TtsAction.voiceId（v2.0）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(tester, remoteSave: (t) async {
+      sent = t;
+      return true;
+    });
+    await tester.tap(chip('语音播报'));
+    await tester.pump();
+
+    final dd = find.byType(DropdownButton<String>);
+    await tester.ensureVisible(dd);
+    await tester.tap(dd);
+    await tester.pumpAndSettle();
+    // 在线音色项带「·在线」后缀，与系统音色区分。
+    await tester.tap(find.text('小北（东北话·女）（女·在线）').last);
+    await tester.pumpAndSettle();
+
+    await tapSave(tester);
+    await tester.pump();
+    expect(sent, isNotNull);
+    expect((sent!.action as TtsAction).voiceId, 'az_db_female_xiaobei',
+        reason: '在线（东北话）音色必须逐位落进动作，不能在保存时丢失');
+  }, timeout: perTest);
+
   testWidgets('TEI-E4 动作：录音取证时长步进器', (tester) async {
     await pumpEditor(tester, remoteSave: (t) async => true);
     await tester.tap(chip('录音取证'));
@@ -1179,5 +1254,82 @@ void main() {
     await tapSave(tester);
     expect(sent, isNotNull);
     expect(sent!.assetIds.toSet(), {'a1', 'a2'});
+  });
+
+  testWidgets('TEI-A2-5 音源选择器：搜索过滤（名称/标签）+ 勾选双向 + 取消',
+      (tester) async {
+    await pumpEditor(tester, remoteSave: (t) async => true);
+    await dbRead(tester, () => AssetRepository(db).upsertMany([
+          AudioAsset(
+              id: 'a1',
+              name: '铃声甲',
+              path: '/p/a1.mp3',
+              tags: const ['晨间', '提醒'],
+              createdAt: DateTime(2026, 1, 1)),
+          AudioAsset(
+              id: 'a2',
+              name: '雷声',
+              path: '/p/a2.mp3',
+              tags: const ['自然'],
+              createdAt: DateTime(2026, 1, 2)),
+        ]));
+
+    await tester.tap(find.text('音源：未选择'));
+    await tester.pump();
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pumpAndSettle();
+    expect(find.text('选择音源'), findsOneWidget);
+
+    final search = find.descendant(
+        of: find.byType(AlertDialog), matching: find.byType(TextField));
+
+    // ① 按名称过滤：只留匹配项，且标签文案要渲染（tags 非空的副标题分支）。
+    await tester.enterText(search, '雷');
+    await tester.pump();
+    expect(find.text('雷声'), findsOneWidget);
+    expect(find.text('铃声甲'), findsNothing, reason: '不匹配的应被过滤掉');
+
+    // ② 按标签过滤：标签命中也要留在结果里（而不是只搜 name）。
+    await tester.enterText(search, '自然');
+    await tester.pump();
+    expect(find.text('雷声'), findsOneWidget, reason: '标签命中必须留在结果里');
+    expect(find.text('铃声甲'), findsNothing);
+
+    // ③ 勾选双向：加 → 计数 +1；再点 → 取消勾选（计数回落）。
+    await tester.tap(find.text('雷声'));
+    await tester.pump();
+    expect(find.text('确定（1）'), findsOneWidget);
+    await tester.tap(find.text('雷声'));
+    await tester.pump();
+    expect(find.text('确定（0）'), findsOneWidget, reason: '二次点击应取消勾选');
+
+    // ④ 取消：不得把选择写回编辑器。
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('音源：未选择'), findsOneWidget, reason: '取消选择不得写入');
+  }, timeout: perTest);
+
+  testWidgets('TEI-A2-6 固定一次：过去时刻保存被拦下（不静默改成未来）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.fixedOnce,
+        // 已过去的时间：回填后保存必须**如实拦下**，而不是悄悄顶替成未来某天。
+        trigger: FixedOnceTrigger(at: DateTime(2020, 1, 1, 6, 5)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tapSave(tester);
+    expect(find.textContaining('固定一次的时间必须晚于当前时间'), findsOneWidget);
+    expect(sent, isNull, reason: '校验失败不得保存');
   }, timeout: perTest);
 }

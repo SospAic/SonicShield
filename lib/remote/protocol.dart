@@ -220,6 +220,23 @@ abstract final class RcCmd {
   /// 本地有「停止振动」按钮，远程有本命令。它是让"不设上限"站得住的那半边。
   /// ⚠️ 不携带 taskId：停止是全局的，避免"停错了对象"这类静默失效。
   static const vibrateStop = 'vibrate.stop';
+
+  // ---- v2.0：随机反击计划（JSON 计划的下发 / 查询 / 下线，docs/14 §2.2）----
+
+  /// 下发并应用一份反击计划：{plan: <CounterPlan JSON>, planId?, replace?}
+  /// → rc.ack {ok, data: 'tasks=<n>;replan=...'}。
+  ///
+  /// 计划结构见 `CounterPlan`（固定 schema `sonicshield.counterPlan/1`）；
+  /// 端点侧走**同一** `CounterPlanService.apply` 通路（校验 → 物化 → 落库），
+  /// 任务落在 `counter:{planId}:` 命名空间内，与手动任务完全隔离。
+  /// `replace` 缺省 true（整族替换）；`planId` 缺省沿用端点已有 id。
+  static const planApply = 'plan.apply';
+
+  /// 查询端点当前反击计划：{} → rc.plan {plan, enabled, planId, taskCount}。
+  static const planGet = 'plan.get';
+
+  /// 下线端点反击计划（清空计划任务 + 置未启用）：{} → rc.ack {stopped}。
+  static const planStop = 'plan.stop';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------
@@ -251,6 +268,7 @@ abstract final class RcEvt {
   static const assets =
       'rc.assets'; // 音源库 {for, assets:[{id,name,durationMs,tags}]}
   static const presets = 'rc.presets'; // 预置分类 {for, categories:[...]}
+  static const plan = 'rc.plan'; // 反击计划快照 {for, plan, enabled, planId, taskCount}
 }
 
 // ---------------- 加密编解码 ----------------

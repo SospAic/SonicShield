@@ -6,6 +6,55 @@ import 'package:record/record.dart';
 
 import '../domain/models/trigger.dart';
 
+/// 声音分级（v2.0 阶段 D）：轻 / 中 / 重。
+///
+/// 只由「峰值 dBFS + 持续时长」两个既有量决定，不引入新采流、不改
+/// [SoundEvent] 的构造签名（既有测试锁它们）—— 分级是**派生读数**。
+enum SoundGrade {
+  light('轻'),
+  medium('中'),
+  heavy('重');
+
+  const SoundGrade(this.label);
+  final String label;
+}
+
+/// 分级阈值（**唯一真源**，回归锁见 `test/reactive_counter_test.dart`）。
+///
+/// 判据是"响度"与"持续"的二维组合：一声脆响（高 dB、极短）与一段闷响
+/// （中等 dB、很久）都应被注意到，但强度不同 —— 故每条都给了
+/// 「硬阈」与「软阈 + 时长」两条进入条件。
+abstract final class SoundGradeLimits {
+  /// 峰值 ≥ 此值：无视时长直接判重。
+  static const double heavyDb = -12;
+
+  /// 峰值 ≥ [heavySoftDb] 且持续 ≥ [heavyMs]：判重。
+  static const double heavySoftDb = -20;
+  static const int heavyMs = 3000;
+
+  /// 峰值 ≥ 此值：至少判中。
+  static const double mediumDb = -25;
+
+  /// 峰值 ≥ [mediumSoftDb] 且持续 ≥ [mediumMs]：至少判中。
+  static const double mediumSoftDb = -30;
+  static const int mediumMs = 2000;
+}
+
+/// 声音分级纯函数（宿主可穷举，无平台依赖）。
+SoundGrade gradeOf(double peakDb, int durationMs) {
+  if (peakDb >= SoundGradeLimits.heavyDb ||
+      (peakDb >= SoundGradeLimits.heavySoftDb &&
+          durationMs >= SoundGradeLimits.heavyMs)) {
+    return SoundGrade.heavy;
+  }
+  if (peakDb >= SoundGradeLimits.mediumDb ||
+      (peakDb >= SoundGradeLimits.mediumSoftDb &&
+          durationMs >= SoundGradeLimits.mediumMs)) {
+    return SoundGrade.medium;
+  }
+  return SoundGrade.light;
+}
+
 /// 声音事件（守卫模式输出）。
 class SoundEvent {
   const SoundEvent(
@@ -16,6 +65,9 @@ class SoundEvent {
   final DateTime detectedAt;
   final double peakDb; // dBFS
   final int durationMs;
+
+  /// 本次事件的分级（由 [gradeOf] 从既有两字段派生，不改变构造签名）。
+  SoundGrade get grade => gradeOf(peakDb, durationMs);
 }
 
 /// 守卫启动结果。

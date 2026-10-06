@@ -183,6 +183,7 @@ void main() {
         'tasks',
         'assets',
         'presets',
+        'plan',
         'device',
         'logs',
         'sound'
@@ -199,6 +200,7 @@ void main() {
         'tasks',
         'assets',
         'presets',
+        'plan',
         'device',
         'logs',
         'sound'

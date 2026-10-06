@@ -367,7 +367,7 @@ List<int> _u32(int v) =>
 List<int> _u16(int v) => [v & 0xff, (v >> 8) & 0xff];
 
 // ============================================================
-// 音效库定义（12 类 × 5 条 = 60 种）
+// 音效库定义（13 类：12 类 × 5 条 + annoy 10 条 = 70 种）
 // ============================================================
 
 void main() {
@@ -934,6 +934,191 @@ void main() {
       out[i] = (hum[i] + air[i] * 0.7) * blade;
     }
     return fadeEdges(out, 0.5, 0.8);
+  }());
+
+  // ---------- 13. annoy 招人烦（v2.0）----------
+  // 合规：仍为**程序化合成**（无采样素材、无版权风险），非真人录音。
+  // 用途限定：用户自有设备的「反击/拒绝」场景，实际发声受日间/夜间音量区间
+  // 与动作时长上限约束（见 CounterPlan），并遵循夜间免打扰护栏。
+  emit('annoy', 'cough_fit', '连声咳嗽', '三声短促连续咳嗽', () {
+    List<double> one(double amp) {
+      const d = 0.26;
+      final burst = bandpass(whiteNoise(d), 420, 2600);
+      final n = (d * sampleRate).round();
+      final env = attackDecayEnv(n, 0.010, 0.055);
+      return [for (var i = 0; i < n; i++) burst[i] * env[i] * amp];
+    }
+
+    final out = silence(1.5);
+    for (final (at, amp) in [(0.0, 1.0), (0.30, 0.9), (0.56, 0.8)]) {
+      mixInto(out, one(amp), at: (at * sampleRate).round());
+    }
+    return out;
+  }());
+  emit('annoy', 'throat_clear_hard', '用力清嗓', '低频粗糙的干咳清嗓', () {
+    const d = 0.6;
+    final n = (d * sampleRate).round();
+    final raw = bandpass(whiteNoise(d), 260, 1700);
+    final env = attackDecayEnv(n, 0.02, 0.22);
+    final out = List<double>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final t = i / sampleRate;
+      final m = (0.5 + 0.5 * sin(2 * pi * 9 * t)) * env[i];
+      out[i] = raw[i] * m;
+    }
+    return out;
+  }());
+  emit('annoy', 'spit', '吐痰', '短促的「呸」吐痰音', () {
+    final out = silence(0.55);
+    // 唇齿爆破：极短宽带噪声簇。
+    const bd = 0.10;
+    final bn = (bd * sampleRate).round();
+    final burst = bandpass(whiteNoise(bd), 900, 6000);
+    final benv = attackDecayEnv(bn, 0.004, 0.03);
+    mixInto(out, [for (var i = 0; i < bn; i++) burst[i] * benv[i]]);
+    // 随后的低频唾沫拖尾。
+    final tail = lowpass(whiteNoise(0.30), 900);
+    final tn = tail.length;
+    final tenv = expDecayEnv(tn, 0.09);
+    mixInto(out, [for (var i = 0; i < tn; i++) tail[i] * tenv[i]],
+        srcAmp: 0.5, at: (0.08 * sampleRate).round());
+    return out;
+  }());
+  emit('annoy', 'snort_laugh', '嗤笑', '鼻腔「哼」两声嘲笑', () {
+    List<double> hn(double f0) => formantVoice(
+          f0: f0,
+          dur: 0.22,
+          formants: [
+            [300, 90, 1.0],
+            [1100, 140, 0.5],
+            [2300, 200, 0.25],
+          ],
+          breath: 0.35,
+          vibDepth: 0.015,
+        );
+
+    final out = silence(0.85);
+    mixInto(out, hn(150));
+    mixInto(out, hn(138), srcAmp: 0.9, at: (0.28 * sampleRate).round());
+    return out;
+  }());
+  emit('annoy', 'jeer', '喝倒彩', '拉长的「嘘」倒彩声', () {
+    const d = 1.3;
+    final voice = formantVoice(
+      f0: 128,
+      dur: d,
+      formants: [
+        [320, 110, 1.0],
+        [900, 160, 0.55],
+        [2100, 240, 0.2],
+      ],
+      breath: 0.45,
+      vibrato: 4,
+      vibDepth: 0.05,
+    );
+    final n = voice.length;
+    final out = List<double>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final t = i / n;
+      // 尾音渐弱并微微起伏，像拖长的哄声。
+      out[i] = voice[i] * (1 - t * 0.75) * (0.9 + 0.1 * sin(2 * pi * 3 * t));
+    }
+    return out;
+  }());
+  emit('annoy', 'tsk', '咂嘴', '两声不满的「啧」', () {
+    final click = highpass(
+        strike(modes: [2600, 4200, 6000], decay: 0.012, dur: 0.05, q: 10), 1400);
+    final out = silence(0.6);
+    mixInto(out, click);
+    mixInto(out, click, srcAmp: 0.85, at: (0.22 * sampleRate).round());
+    return out;
+  }());
+  emit('annoy', 'grumble', '拖长抱怨', '低沉的嘟囔抱怨声', () {
+    const d = 1.6;
+    final voice = formantVoice(
+      f0: 108,
+      dur: d,
+      formants: [
+        [500, 120, 1.0],
+        [1500, 180, 0.5],
+        [2500, 260, 0.2],
+      ],
+      breath: 0.3,
+      vibrato: 4.5,
+      vibDepth: 0.04,
+    );
+    final n = voice.length;
+    final out = List<double>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final t = i / n;
+      final env = sin(pi * min(1.0, t * 1.1)) * (1 - t * 0.35);
+      out[i] = voice[i] * env;
+    }
+    return out;
+  }());
+  emit('annoy', 'what_doing', '「干啥呢」', '共振峰合成的「干啥呢」质问', () {
+    // 三个音节近似：「干」/「啥」/「呢」（元音 a / a / e）。
+    const sylls = <List<double>>[
+      [700, 1200, 2600],
+      [730, 1090, 2440],
+      [500, 1700, 2500],
+    ];
+    final out = silence(1.1);
+    for (var s = 0; s < sylls.length; s++) {
+      final v = formantVoice(
+        f0: 165 - s * 8.0,
+        dur: 0.26,
+        formants: [
+          [sylls[s][0], 110, 1.0],
+          [sylls[s][1], 150, 0.55],
+          [sylls[s][2], 220, 0.25],
+        ],
+        breath: 0.18,
+        vibDepth: 0.02,
+      );
+      mixInto(out, v, at: ((0.05 + s * 0.30) * sampleRate).round());
+    }
+    return out;
+  }());
+  emit('annoy', 'hey_you', '「哎」短促喝止', '高起短促的「哎」', () {
+    final v = formantVoice(
+      f0: 205,
+      dur: 0.5,
+      formants: [
+        [700, 110, 1.0],
+        [1250, 150, 0.55],
+        [2500, 240, 0.25],
+      ],
+      breath: 0.2,
+      vibDepth: 0.025,
+    );
+    final n = v.length;
+    final env = attackDecayEnv(n, 0.01, 0.16);
+    final out = List<double>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final t = i / n;
+      out[i] = v[i] * env[i] * (1 - t * 0.2);
+    }
+    return out;
+  }());
+  emit('annoy', 'mocking_laugh', '讥笑', '「哈哈哈」连串嘲笑', () {
+    final out = silence(1.2);
+    for (var k = 0; k < 4; k++) {
+      final v = formantVoice(
+        f0: 178 - k * 6.0,
+        dur: 0.18,
+        formants: [
+          [730, 110, 1.0],
+          [1090, 150, 0.5],
+          [2440, 220, 0.22],
+        ],
+        breath: 0.22,
+        vibDepth: 0.03,
+      );
+      mixInto(out, v,
+          srcAmp: 1.0 - k * 0.12, at: ((0.06 + k * 0.22) * sampleRate).round());
+    }
+    return out;
   }());
 
   // ---------- manifest ----------

@@ -101,6 +101,13 @@ class PlaybackService {
     return snapshot.length;
   }
 
+  /// 是否有**任何**实例正在播放（手动 / 调度 / 声景 / 对讲）。
+  ///
+  /// 只读探测，供「实时随机动态反击」做互斥判断：手动或调度正在出声时，
+  /// 反击**不得叠加**（叠加既难听又易踩播放器）。之所以复用 [_playing]
+  /// 登记表而不是自建标志：那张表正是"谁在出声"的唯一真源，自建标志一定会漂移。
+  static bool get anyPlaying => _playing.isNotEmpty;
+
   /// 测试缝：清空 [_playing] 登记表。
   ///
   /// ## 为什么需要它

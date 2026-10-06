@@ -154,6 +154,41 @@ void main() {
     });
   });
 
+  // ── 反击计划命名空间读写（v2.0）──────────────────────────────────
+  //
+  // 计划任务 id 形如 `counter:{planId}:{key}`。读取/删除按**前缀范围**进行，
+  // 必须只作用于目标计划：手动任务与其它 planId 的任务一律不得被误伤。
+  group('TaskRepository 反击计划命名空间', () {
+    test('counterTaskIds/deleteCounterTasks 只作用于指定 counter:{planId}: 前缀', () async {
+      final repo = TaskRepository(appDb);
+      await repo.upsertMany([
+        makeTask('manual-1'),
+        makeTask('manual-2'),
+        makeTask('counter:p1:20260310D00'),
+        makeTask('counter:p1:20260311D01'),
+        makeTask('counter:p2:20260310D00'),
+      ]);
+
+      // 读：只返回目标计划前缀下的 id。
+      final p1 = await repo.counterTaskIds('p1')..sort();
+      expect(p1, ['counter:p1:20260310D00', 'counter:p1:20260311D01']);
+      expect(await repo.counterTaskIds('p2'), ['counter:p2:20260310D00']);
+
+      // 删：条数正确，且只清目标前缀。
+      final deleted = await repo.deleteCounterTasks('p1');
+      expect(deleted, 2);
+      expect(await repo.counterTaskIds('p1'), isEmpty);
+
+      // 手动任务与其它计划任务不受影响。
+      expect(await repo.get('manual-1'), isNotNull);
+      expect(await repo.get('manual-2'), isNotNull);
+      expect(await repo.get('counter:p2:20260310D00'), isNotNull);
+
+      // 幂等：再次删除返回 0。
+      expect(await repo.deleteCounterTasks('p1'), 0);
+    });
+  });
+
   // ── P2-02：任务更新语义（REPLACE 级联删历史）──────────────────────
   //
   // `INSERT OR REPLACE` 在主键冲突时先 DELETE 再 INSERT，而

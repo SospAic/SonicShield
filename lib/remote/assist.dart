@@ -356,7 +356,8 @@ abstract final class RcPermGate {
         RcCmd.taskList ||
         RcCmd.taskGet ||
         RcCmd.assetList ||
-        RcCmd.presetList =>
+        RcCmd.presetList ||
+        RcCmd.planGet =>
           null,
         // 审计日志读取：会回传端点的操作轨迹（谁在何时做了什么），是敏感只读面。
         // 此前它与 ping/status 同列"免授权"，等于未放行任何权限的对端也能读审计 ——
@@ -389,7 +390,9 @@ abstract final class RcPermGate {
         RcCmd.taskSkipNext ||
         RcCmd.taskUpsert ||
         RcCmd.taskDelete ||
-        RcCmd.guardSet =>
+        RcCmd.guardSet ||
+        RcCmd.planApply ||
+        RcCmd.planStop =>
           'script',
         _ => denyAll,
       };

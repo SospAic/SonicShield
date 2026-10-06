@@ -282,13 +282,15 @@ void main() {
   });
 
   group('预置库清单与磁盘资源一致性', () {
-    test('60 条 / 12 分类 / 每个 file 都存在 / 名字唯一', () {
+    test('70 条 / 13 分类 / 每个 file 都存在 / 名字唯一', () {
       final raw = File('assets/audio/presets_manifest.json').readAsStringSync();
       final m = jsonDecode(raw) as Map<String, dynamic>;
       final items = (m['items'] as List).cast<Map<String, dynamic>>();
 
-      expect(items, hasLength(60));
-      expect(items.map((i) => i['category']).toSet(), hasLength(12));
+      // v2.0 阶段 A：新增 `annoy` 分类（咳嗽/吐痰/嘲笑/「干啥呢」等 10 条
+      // 招人烦音效）→ 60/12 抬到 70/13。此锁随清单同步演进，防止"清单悄悄少一条"。
+      expect(items, hasLength(70));
+      expect(items.map((i) => i['category']).toSet(), hasLength(13));
 
       final names = <String>[];
       for (final it in items) {

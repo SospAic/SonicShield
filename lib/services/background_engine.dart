@@ -9,28 +9,36 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/constants.dart';
 import '../data/db/app_database.dart';
+import '../data/repositories/api_config_store.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
 import '../domain/models/action.dart';
 import '../domain/models/condition.dart';
+import '../domain/models/counter_plan.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
+import '../domain/models/tts_voice.dart';
 import '../domain/scheduling/schedule_engine.dart';
 import '../domain/scheduling/vibrate_resolve.dart';
 import '../features/guard/guard_orchestration.dart';
 import 'condition_env.dart';
+import 'counter_plan_service.dart';
 import 'notification_service.dart';
 import 'native_bridge.dart';
+import 'online_tts_client.dart';
 import 'playback_service.dart';
+import 'reactive_counter_service.dart';
 import 'retention_maintenance.dart';
 import 'sound_guard_service.dart';
+import 'tts_service.dart';
 import 'vibrate_session.dart';
 
 /// 后台引擎状态快照（服务 -> UI 广播）。
@@ -201,6 +209,14 @@ Future<void> _engineBody(ServiceInstance service) async {
   const native = MethodChannel(Channels.method);
   final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
+
+  /// 实时随机动态反击（v2.0 阶段 D）。
+  ///
+  /// **不采音**：本服务没有录音器，它消费 [SoundGuardService] 的 [SoundEvent]
+  /// —— 与守卫复用同一条麦克风通路（计划第 21 条），结构上不可能出现"第二个
+  /// 录音器"。因此它只在守卫运行时才有意义（无声音来源 = 无输入）。
+  /// 由 `PrefsKeys.reactiveCounterEnabled` 决定是否装配；`reactive` 通道热切换。
+  ReactiveCounterService? reactive;
 
   // 振动会话（v1.9，docs/20 §7）：分片续发 + S1–S4 失效安全。
   final vibrate = VibrateSession.standard(
@@ -492,29 +508,34 @@ Future<void> _engineBody(ServiceInstance service) async {
         : ExecutionOutcome.failed(r.message ?? '播放失败');
   }
 
-  Future<ExecutionOutcome> ttsAndLog(Task task, TtsAction t, String source) async {
+  /// 系统 TTS（引擎隔离内）：音量 + 语言 + 按关键词猜音色 + 喊话。
+  ///
+  /// 与 `main.dart` 的 `speakSystemTts` 是**同一套决策**（都调可测的
+  /// `TtsVoices.pickSystemVoice`），只是一份 `FlutterTts` 平台胶水无法跨
+  /// isolate 共享 —— 引擎 isolate 不能 import 应用装配入口（会把整个 UI 拖进来）。
+  /// 音色匹配失败**不视为错误**（交给系统默认音色）。
+  ///
+  /// 超时保护：无 TTS 引擎的平台（如 AOSP 镜像）speak/setLanguage 可能永不回调，
+  /// 此前会导致审计日志永远写不进去（BUG-011 关联）。
+  Future<void> speakSystemTts(
+      String text, double volume, List<String> match) async {
     final tts = FlutterTts();
     try {
-      // 整体超时保护：无 TTS 引擎的平台（如 AOSP 镜像）speak/setLanguage
-      // 可能永远不回调，此前会导致审计日志永远写不进去（BUG-011 关联）。
-      await tts.setVolume(t.volume).timeout(const Duration(seconds: 8));
+      await tts.setVolume(volume).timeout(const Duration(seconds: 8));
       await tts.setLanguage('zh-CN').timeout(const Duration(seconds: 8));
-      await tts.speak(t.text).timeout(const Duration(seconds: 15));
-      await logs.append(
-          source: source,
-          action: 'tts',
-          status: 'success',
-          taskId: task.id,
-          volume: t.volume);
-      return const ExecutionOutcome.success();
-    } catch (e) {
-      await logs.append(
-          source: source,
-          action: 'tts',
-          status: 'failed',
-          taskId: task.id,
-          message: e.toString());
-      return ExecutionOutcome.failed(e.toString());
+      if (match.isNotEmpty) {
+        try {
+          final voices =
+              await tts.getVoices.timeout(const Duration(seconds: 8));
+          final picked = TtsVoices.pickSystemVoice(voices, match);
+          if (picked != null) {
+            await tts.setVoice(picked).timeout(const Duration(seconds: 8));
+          }
+        } on Object {
+          // 音色匹配是增强：拿不到列表/设置失败都不该让播报失败。
+        }
+      }
+      await tts.speak(text).timeout(const Duration(seconds: 15));
     } finally {
       try {
         await tts.stop().timeout(const Duration(seconds: 3));
@@ -522,6 +543,69 @@ Future<void> _engineBody(ServiceInstance service) async {
         // 清理失败不影响审计
       }
     }
+  }
+
+  /// 在线语音（引擎隔离内）：合成 → 临时 mp3 → 播放器出声。
+  Future<bool> speakOnlineTts(
+      String text, double volume, String voiceName, ApiConfigStore cfg) async {
+    if (!cfg.onlineTtsConfigured) return false;
+    final client = OnlineTtsClient(
+      client: http.Client(),
+      endpoint: cfg.ttsEndpoint,
+      apiKey: cfg.ttsApiKey,
+    );
+    final speaker = OnlineTtsSpeaker(
+      client: client,
+      sink: TtsAudioSink(
+        writeTemp: (bytes, ext) async {
+          final dir = await getTemporaryDirectory();
+          final f = File(
+              '${dir.path}/tts_${DateTime.now().microsecondsSinceEpoch}.$ext');
+          await f.writeAsBytes(bytes, flush: true);
+          return f.path;
+        },
+        deleteTemp: (path) => File(path).delete(),
+        play: (path, vol) async =>
+            (await playback.play(
+          path: path,
+          channel: AudioChannel.media,
+          volume: vol,
+          maxDurationMs: 60000,
+        ))
+                .ok,
+      ),
+    );
+    try {
+      return await speaker.speak(text, voiceName, volume);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<ExecutionOutcome> ttsAndLog(Task task, TtsAction t, String source) async {
+    // v2.0：本地定时「语音喊话」也走统一 `TtsService` —— 按 `voiceId` 决定用
+    // 系统 TTS（离线）还是在线语音（含东北话）。与远程端点同一套决策，
+    // 所以"本机用的音色"和"远程发的音色"语义不会分叉。
+    final tts = TtsService(
+      speakSystem: speakSystemTts,
+      speakOnline: (text, volume, voiceName) => speakOnlineTts(
+        text,
+        volume,
+        voiceName,
+        ApiConfigStore(prefs),
+      ),
+    );
+    final r = await tts.say(t.text, voiceId: t.voiceId, volume: t.volume);
+    await logs.append(
+        source: source,
+        action: 'tts',
+        status: r.ok ? 'success' : 'failed',
+        taskId: task.id,
+        volume: t.volume,
+        message: r.ok ? (r.online ? '在线语音（${t.voiceId}）' : null) : r.message);
+    return r.ok
+        ? const ExecutionOutcome.success()
+        : ExecutionOutcome.failed(r.message ?? '语音播报失败');
   }
 
   Future<ExecutionOutcome> recordAndLog(
@@ -1188,6 +1272,72 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   }
 
+  /// 装配动态反击的动作池（v2.0 阶段 D）。
+  ///
+  /// 优先取**已导入的预置招人烦音效**（按 tag 命中库内资产），再补默认 TTS 文案。
+  /// 素材库为空 / 读取失败时自动退化为纯 TTS 池 —— 保证动态反击**总有**可执行
+  /// 动作，不会因为"用户还没导入音效"而静默空转。
+  Future<List<CounterAction>> buildReactivePool() async {
+    final pool = <CounterAction>[];
+    try {
+      final assets = await AssetRepository(db).listAll();
+      final ids = resolvePresetAudioIds(assets, CounterPlan.defaultPresetIds);
+      final byId = {for (final a in assets) a.id: a};
+      for (final id in ids) {
+        final a = byId[id];
+        if (a != null && a.path.isNotEmpty) {
+          pool.add(CounterAction.audio(a.path));
+        }
+      }
+    } on Object {
+      // 素材库读取失败不该让动态反击整条失效：退化为纯 TTS 池。
+    }
+    for (final t in CounterPlan.defaultTtsTexts) {
+      pool.add(CounterAction.tts(t));
+    }
+    return pool;
+  }
+
+  /// 启动动态反击（复用守卫的麦克风通路；本服务自身不采音）。
+  ///
+  /// 守卫没跑 ⇒ **不启动**：没有声音事件来源，装了也只是空转。
+  Future<void> startReactiveCounter() async {
+    if (!guard.isRunning) return;
+    final pool = await buildReactivePool();
+    reactive = ReactiveCounterService(
+      pool: pool,
+      playAudio: ({
+        required String path,
+        required double volume,
+        required int durationMs,
+      }) =>
+          playback.play(
+              path: path,
+              channel: AudioChannel.media,
+              volume: volume,
+              maxDurationMs: durationMs),
+      speak: (text, {required String voiceId, required double volume}) =>
+          TtsService(
+        speakSystem: speakSystemTts,
+        speakOnline: (t, v, name) =>
+            speakOnlineTts(t, v, name, ApiConfigStore(prefs)),
+      ).say(text, voiceId: voiceId, volume: volume),
+      // 审计过滤：**只持久化反击决策**（counter/success|failed|skipped），
+      // 原始的 "观察到一次声音"（observed/ignored）只留内存记录 —— 否则
+      // 7×24 常驻下 exec_logs 会被每次环境声响淹没（内存记录仍在，满足"尽量记录"）。
+      audit: ({required String action, required String status, String? message}) async {
+        if (action != 'counter') return;
+        await logs.append(
+            source: 'reactive', action: action, status: status, message: message);
+      },
+    )..start();
+  }
+
+  void stopReactiveCounter() {
+    reactive?.stop();
+    reactive = null;
+  }
+
   service.on('replan').listen((_) => unawaited(replan()));
   service.on('tick').listen((_) => unawaited(executeDue()));
   service.on('guard').listen((m) async {
@@ -1212,12 +1362,21 @@ Future<void> _engineBody(ServiceInstance service) async {
       guardError = started.message;
       if (started.ok) {
         await guardSub?.cancel();
-        guardSub = guard.events
-            .listen((e) => unawaited(onSoundEvent(e.detectedAt, e.peakDb)));
+        guardSub = guard.events.listen((e) {
+          unawaited(onSoundEvent(e.detectedAt, e.peakDb));
+          // 动态反击复用**同一条**声音事件流（不新建录音器）。
+          final rc = reactive;
+          if (rc != null) unawaited(rc.onSound(e));
+        });
         await guardErrSub?.cancel();
         guardErrSub = guard.errors.listen((e) {
           unawaited(onGuardStreamError(e));
         });
+        // 守卫拿到流后，若用户已开启动态反击则装配它。守卫是动态反击的
+        // **唯一声音来源**，所以装配时机只能是"守卫确实启动成功"之后。
+        if (prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false) {
+          await startReactiveCounter();
+        }
       }
       await logs.append(
           source: 'guard',
@@ -1235,6 +1394,9 @@ Future<void> _engineBody(ServiceInstance service) async {
       guardSub = null;
       await guardErrSub?.cancel();
       guardErrSub = null;
+      // 守卫停 ⇒ 声音来源停 ⇒ 动态反击必须一并停（否则静默反制定时器
+      // 会在无输入的情况下继续自主出声）。
+      stopReactiveCounter();
       await guard.stop();
       // 关闭也要留痕（对称）：否则"关了但没关掉"在日志里完全无迹可寻。
       await logs.append(
@@ -1242,9 +1404,22 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
     await broadcast();
   });
+  // 动态反击热切换（v2.0 阶段 D）：UI 开关 → 引擎即时装配/撤下，
+  // 不必重启守卫。守卫没跑时只落 prefs（下次守卫启动自动装配）。
+  service.on('reactive').listen((m) async {
+    final on = (m?['enabled'] as bool?) ?? false;
+    await prefs.setBool(PrefsKeys.reactiveCounterEnabled, on);
+    if (on) {
+      if (guard.isRunning) await startReactiveCounter();
+    } else {
+      stopReactiveCounter();
+    }
+    await broadcast();
+  });
   service.on('stop').listen((_) async {
     guardDelayTimer?.cancel();
     guardDelayTimer = null;
+    stopReactiveCounter();
     await guardSub?.cancel();
     guardSub = null;
     await guardErrSub?.cancel();

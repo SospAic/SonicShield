@@ -7,7 +7,7 @@ import '../domain/models/action.dart';
 ///
 /// step kind：
 /// - play    {volume(0..1), durationSec, presetCategory?}   随机播放（可指定分类）
-/// - tts     {text, volume}
+/// - tts     {text, volume, voiceId?}   v2.0 起可指定音色（缺省=系统默认女声）
 /// - notify  {title, body}
 /// - vibrate {mode?, ...}   v1.9 参数化（docs/20 §10.1）。
 ///           ⚠️ `mode` 缺省 = `fixed` ⇒ **老控制器发的 `{}` 行为一字不变**

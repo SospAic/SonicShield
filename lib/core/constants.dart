@@ -104,4 +104,11 @@ abstract final class PrefsKeys {
   /// 而且 prefs 是**进程内同步可读**的，UI 读它不产生平台往返
   /// （kv 表要走一次 sqflite 查询，会让整页 widget 测试留下未完成的 Timer）。
   static const String quietExemptMaster = 'quiet_exempt_master';
+
+  /// 「实时随机动态反击」开关（v2.0 阶段 D）。默认 false。
+  ///
+  /// 读取方：引擎装配 `ReactiveCounterService` 时决定是否喂入声音事件；
+  /// 写入方：守卫页的「动态反击」开关。默认关闭 —— 这是会**主动出声**的
+  /// 行为，必须由用户显式开启（与其它"会自动执行"的能力同一口径）。
+  static const String reactiveCounterEnabled = 'reactive_counter_enabled';
 }

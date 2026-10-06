@@ -7,19 +7,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
+import 'package:sonic_shield/data/repositories/api_config_store.dart';
+import 'package:sonic_shield/data/repositories/counter_plan_store.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/condition.dart';
+import 'package:sonic_shield/domain/models/counter_plan.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/features/settings/settings_screen.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';
+import 'package:sonic_shield/services/counter_plan_service.dart';
+import 'package:sonic_shield/services/deepseek_service.dart';
+import 'package:sonic_shield/services/tts_service.dart';
 
 /// 设置页（`SettingsScreen`）的宿主回归锁。
 ///
@@ -176,7 +184,10 @@ void main() {
     );
   }
 
-  Future<void> pumpSettings(WidgetTester tester) async {
+  Future<void> pumpSettings(
+    WidgetTester tester, {
+    List<Override> overrides = const [],
+  }) async {
     tester.view.physicalSize = const Size(1200, 4000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -192,6 +203,7 @@ void main() {
           // 该 provider 自身的行为由 `quiet_exempt_lock_test.dart` QE-25
           // 在真实 DB 上验证 —— 界面用例只关心"渲染得对不对"。
           quietExemptCountProvider.overrideWith((ref) async => 0),
+          ...overrides,
         ],
         child: const MaterialApp(home: SettingsScreen()),
       ),
@@ -852,6 +864,487 @@ void main() {
       );
       expect(find.textContaining('解密失败'), findsNothing);
       expect(await dbRead(tester, () => TaskRepository(db).listAll()), isEmpty);
+    }, timeout: perTest);
+  });
+
+  // ─────────────── SET-07 语音与接口 / 反击计划（v2.0） ───────────────
+
+  group('SET-07 语音与接口与反击计划', () {
+    testWidgets('SET-07a 语音与接口：配置入口 + 音色分组 + 试听都在', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      expect(find.text('语音与接口'), findsOneWidget);
+      expect(find.text('DeepSeek 接口配置'), findsOneWidget);
+      expect(find.text('在线语音配置'), findsOneWidget);
+      // 未配置在线语音必须**明确告知**"只有系统音色"，不能默默少几个音色。
+      expect(find.textContaining('未配置则只有系统音色可用'), findsOneWidget);
+      // 两种方言分组标题各自成组（不是把在线音色混进普通话里）。
+      expect(find.text('普通话'), findsOneWidget);
+      expect(find.text('东北话'), findsOneWidget);
+      // 系统音色与在线东北话音色都在列表里（按 id 定位，不靠展示名）。
+      expect(find.byKey(const ValueKey<String>('voice_sys_zh_female')),
+          findsOneWidget);
+      expect(find.byKey(const ValueKey<String>('voice_az_db_male_yunbiao')),
+          findsOneWidget);
+      expect(find.text('试听所选音色'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('SET-07b 已配置 DeepSeek Key → 副标题如实显示「已配置」',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'api_base_url': 'https://api.deepseek.com',
+        'api_model': 'deepseek-chat',
+        'api_key': 'sk-test',
+      });
+      await pumpSettings(tester);
+
+      expect(find.textContaining('基址 https://api.deepseek.com'), findsOneWidget);
+      expect(find.textContaining('Key 已配置'), findsOneWidget,
+          reason: '配了 Key 就不能还显示"未配置"');
+    }, timeout: perTest);
+
+    testWidgets('SET-07c 反击计划未配置：状态 + 五个操作都在', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      expect(find.text('反击计划'), findsOneWidget);
+      expect(find.text('当前计划：未配置'), findsOneWidget);
+      for (final t in [
+        '本机随机生成并启用',
+        '一键 AI 生成并导入',
+        '导入 JSON',
+        '下载 JSON 模版',
+        '下线',
+      ]) {
+        expect(find.text(t), findsOneWidget, reason: '操作「$t」');
+      }
+    }, timeout: perTest);
+
+    testWidgets('SET-07d 已落库计划 → 展示名称 + 四时段区间（含未启用说明）',
+        (tester) async {
+      final plan = CounterPlan.defaults();
+      SharedPreferences.setMockInitialValues({
+        'counter_plan_json': jsonEncode(plan.toJson()),
+        'counter_plan_enabled': true,
+      });
+      await pumpSettings(tester);
+
+      expect(find.text('当前计划：${plan.name}'), findsOneWidget);
+      expect(find.textContaining('已启用'), findsOneWidget);
+      for (final label in ['工作日·白天', '工作日·夜间', '休息日·白天', '休息日·夜间']) {
+        expect(find.text(label), findsOneWidget, reason: '时段「$label」');
+      }
+      // 工作日白天启用 → 显示区间（音量/时长/次数）；休息日两段默认关 →
+      // 必须显式说明"不反击"，而不是留一行空白让人猜。
+      expect(find.text(describeWindow(plan.workdayDay)), findsOneWidget);
+      expect(find.text('未启用（该时段不反击）'), findsNWidgets(2));
+    }, timeout: perTest);
+
+    // ───── 以下为 v2.0 新增代码（语音与接口 / 反击计划）的补测 ─────
+
+    /// 合法计划 JSON（与 `deepseek_service_test.goodPlanJson()` 同源）。
+    String goodPlanJson() => jsonEncode({
+          'schema': 'sonicshield.counterPlan/1',
+          'name': 'AI 反击',
+          'version': 1,
+          'dayStartHour': 8,
+          'dayEndHour': 20,
+          'cooldownSec': 900,
+          'respectQuietHours': true,
+          'workday': {
+            'day': {
+              'enabled': true,
+              'volumeMin': 0.5,
+              'volumeMax': 0.8,
+              'durationSecMin': 3,
+              'durationSecMax': 8,
+              'actionsPerHour': 2,
+            },
+            'night': {
+              'enabled': true,
+              'volumeMin': 0.3,
+              'volumeMax': 0.5,
+              'durationSecMin': 3,
+              'durationSecMax': 5,
+              'actionsPerHour': 1,
+            },
+          },
+          'restday': {
+            'day': {'enabled': false},
+            'night': {'enabled': false},
+          },
+          'presetIds': ['annoy_cough_fit', 'annoy_spit'],
+          'ttsTexts': ['干啥呢？'],
+          'voiceId': '',
+        });
+
+    http.Response ok200(String content) => http.Response.bytes(
+          utf8.encode(content),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+
+    String chatBody(String content) => jsonEncode({
+          'choices': [
+            {
+              'message': {'content': content}
+            }
+          ],
+          'usage': {'prompt_tokens': 1, 'completion_tokens': 1},
+        });
+
+    /// `TtsService` 替身：系统音色成功（或按 [fail] 抛错），在线音色成功。
+    Override ttsOverride({bool fail = false}) =>
+        ttsServiceProvider.overrideWith((ref) async => TtsService(
+              speakSystem: (t, v, m) async {
+                if (fail) throw StateError('boom');
+              },
+              speakOnline: (t, v, n) async => true,
+            ));
+
+    /// `DeepSeekService` 替身：返回合法计划（[ok]）或恒非法内容（失败）。
+    Override deepSeekOverride({required bool ok}) =>
+        deepseekServiceProvider.overrideWith((ref) async {
+          final prefs = await SharedPreferences.getInstance();
+          return DeepSeekService(
+            client: MockClient((r) async =>
+                ok200(chatBody(ok ? goodPlanJson() : '这不是 JSON'))),
+            config: ApiConfigStore(prefs),
+          );
+        });
+
+    /// `CounterPlanService` 替身：真实 DB 仓储 + 真实 prefs 存储，音源池空
+    /// （计划自带 TTS 文案，仍能物化出任务）、replan 为 no-op。
+    Override counterPlanOverride() =>
+        counterPlanServiceProvider.overrideWith((ref) async {
+          final prefs = await SharedPreferences.getInstance();
+          return CounterPlanService(
+            tasks: TaskRepository(db),
+            store: CounterPlanStore(prefs),
+            resolveAudioIds: (ids) async => const <String>{},
+            replan: () async {},
+          );
+        });
+
+    testWidgets('SET-07e DeepSeek 对话框「保存」→ 三项落库 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('DeepSeek 接口配置'));
+      await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
+          reason: '应弹出 DeepSeek 配置对话框');
+      await tester.enterText(
+          find.byType(TextField).at(0), 'https://api.example.com');
+      await tester.enterText(find.byType(TextField).at(1), 'my-model');
+      await tester.enterText(find.byType(TextField).at(2), 'sk-abc');
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, 'DeepSeek 配置已保存');
+
+      expect(await prefString('api_base_url'), 'https://api.example.com');
+      expect(await prefString('api_model'), 'my-model');
+      expect(await prefString('api_key'), 'sk-abc');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07e2 DeepSeek 对话框「取消」→ 不落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('DeepSeek 接口配置'));
+      await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
+          reason: '应弹出对话框');
+      await tester.enterText(
+          find.byType(TextField).at(0), 'https://changed.example.com');
+      await tester.tap(find.text('取消'));
+      await waitFor(tester, () => find.text('保存').evaluate().isEmpty,
+          reason: '取消后应关闭对话框');
+
+      expect(await prefString('api_base_url'), isNull, reason: '取消绝不能落库');
+      expect(await prefString('api_model'), isNull);
+      expect(await prefString('api_key'), isNull);
+    }, timeout: perTest);
+
+    testWidgets('SET-07f 在线语音填 endpoint+key → 落库 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('在线语音配置'));
+      await waitFor(
+          tester, () => find.text('在线语音 Endpoint').evaluate().isNotEmpty,
+          reason: '应弹出在线语音对话框');
+      await tester.enterText(
+          find.byType(TextField).at(0), 'https://x.tts.example.com/v1');
+      await tester.enterText(find.byType(TextField).at(1), 'tts-key-1');
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '在线语音已配置');
+
+      expect(await prefString('tts_endpoint'), 'https://x.tts.example.com/v1');
+      expect(await prefString('tts_api_key'), 'tts-key-1');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07f2 在线语音两项留空 → 视为关闭 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'tts_endpoint': 'https://old.example.com/v1',
+        'tts_api_key': 'old-key',
+      });
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('在线语音配置'));
+      await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
+          reason: '应弹出对话框');
+      await tester.enterText(find.byType(TextField).at(0), '');
+      await tester.enterText(find.byType(TextField).at(1), '');
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '在线语音已关闭');
+
+      expect(await prefString('tts_endpoint'), '');
+      expect(await prefString('tts_api_key'), '');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07g 试听对话框播放 → 回执「已试听」', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [ttsOverride()]);
+
+      await tester.tap(find.text('试听所选音色'));
+      await waitFor(tester, () => find.text('试听').evaluate().isNotEmpty,
+          reason: '应弹出试听对话框');
+      await tester.tap(find.text('试听'));
+      await waitForText(tester, '已试听');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07g2 试听失败（系统 TTS 抛错）→ 回执「试听失败」', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [ttsOverride(fail: true)]);
+
+      await tester.tap(find.text('试听所选音色'));
+      await waitFor(tester, () => find.text('试听').evaluate().isNotEmpty,
+          reason: '应弹出试听对话框');
+      await tester.tap(find.text('试听'));
+      await waitForText(tester, '试听失败');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07h 本机随机生成并启用 → 落库 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('本机随机生成并启用'));
+      await waitForText(tester, '反击计划已生效');
+
+      expect(await prefString('counter_plan_json'), isNotNull,
+          reason: '计划本体必须落库');
+      expect(await prefBool('counter_plan_enabled'), isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07i 一键 AI 生成并导入（成功）→ 落库 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({'api_key': 'sk-test'});
+      await pumpSettings(
+          tester, overrides: [deepSeekOverride(ok: true), counterPlanOverride()]);
+
+      await tester.tap(find.text('一键 AI 生成并导入'));
+      await waitForText(tester, '反击计划已生效');
+
+      expect(await prefString('counter_plan_json'), isNotNull);
+      expect(await prefBool('counter_plan_enabled'), isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07i2 AI 失败 → 提示「AI 生成失败」且不落库', (tester) async {
+      SharedPreferences.setMockInitialValues({'api_key': 'sk-test'});
+      await pumpSettings(
+          tester, overrides: [deepSeekOverride(ok: false)]);
+
+      await tester.tap(find.text('一键 AI 生成并导入'));
+      await waitForText(tester, 'AI 生成失败');
+
+      expect(await prefString('counter_plan_json'), isNull, reason: '不落库');
+      expect(await prefBool('counter_plan_enabled'), isNull);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07j 导入合法 JSON 计划 → 落库 + 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final f = File('${tmp.path}/plan.json')
+        ..writeAsStringSync(CounterPlan.defaults().toPrettyJson());
+      final prevPicker = FilePicker.platform;
+      addTearDown(() => FilePicker.platform = prevPicker);
+      FilePicker.platform =
+          _FakeFilePicker(FilePickerResult([_pf('plan.json', f)]));
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('导入 JSON'));
+      await waitForText(tester, '反击计划已生效');
+
+      expect(await prefString('counter_plan_json'), isNotNull);
+      expect(await prefBool('counter_plan_enabled'), isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07j2 导入非法 JSON → 提示且不落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final f = File('${tmp.path}/bad.json')
+        ..writeAsStringSync('{{{ not json');
+      final prevPicker = FilePicker.platform;
+      addTearDown(() => FilePicker.platform = prevPicker);
+      FilePicker.platform =
+          _FakeFilePicker(FilePickerResult([_pf('bad.json', f)]));
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('导入 JSON'));
+      await waitForText(tester, '不是合法 JSON');
+
+      expect(await prefString('counter_plan_json'), isNull);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07j3 计划校验未通过 → 提示且不落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final f = File('${tmp.path}/badschema.json')
+        ..writeAsStringSync(jsonEncode({'schema': 'other/9'}));
+      final prevPicker = FilePicker.platform;
+      addTearDown(() => FilePicker.platform = prevPicker);
+      FilePicker.platform =
+          _FakeFilePicker(FilePickerResult([_pf('badschema.json', f)]));
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('导入 JSON'));
+      await waitForText(tester, '计划校验未通过');
+
+      expect(await prefString('counter_plan_json'), isNull);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07k 下载 JSON 模版 → 写盘并分享', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('下载 JSON 模版'));
+      await waitFor(tester, () => shareCalls.any((c) => c.method == 'shareFiles'),
+          reason: '下载模版应在写盘后调起分享');
+
+      final f = File('${tmp.path}/sonicshield_counter_plan_template.json');
+      expect(f.existsSync(), isTrue);
+      expect(f.readAsStringSync(), CounterPlan.defaults().toPrettyJson());
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07l 下线已启用计划 → counter_plan_enabled 变 false', (tester) async {
+      final plan = CounterPlan.defaults();
+      SharedPreferences.setMockInitialValues({
+        'counter_plan_json': jsonEncode(plan.toJson()),
+        'counter_plan_enabled': true,
+      });
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('下线'));
+      await waitForText(tester, '已下线反击计划');
+
+      expect(await prefBool('counter_plan_enabled'), isFalse,
+          reason: '下线必须把启用状态置回 false');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07m 模版写盘失败（取不到临时目录）→ 明说「导出模版失败」',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // 取不到临时目录 ⇒ getTemporaryDirectory 抛 ⇒ 必须被 catch 成可读文案，
+      // 而不是让异步错误裸露（否则用户点了"下载模版"却毫无反应）。
+      messenger().setMockMethodCallHandler(kPathProvider, (c) async => null);
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('下载 JSON 模版'));
+      await waitForText(tester, '导出模版失败：');
+      expect(shareCalls, isEmpty, reason: '写盘都没成功，不得调起分享');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07n 点音色卡片 → 选中态切到该音色（试听目标真的变了）',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      const key = ValueKey<String>('voice_az_db_male_yunbiao');
+      // 前置：默认选中不是该在线音色（默认是系统女声）。
+      expect(
+          find.descendant(
+              of: find.byKey(key),
+              matching: find.byIcon(Icons.radio_button_checked)),
+          findsNothing);
+
+      await tester.ensureVisible(find.byKey(key));
+      await tester.tap(find.byKey(key));
+      await tester.pump();
+
+      expect(
+          find.descendant(
+              of: find.byKey(key),
+              matching: find.byIcon(Icons.radio_button_checked)),
+          findsOneWidget,
+          reason: '点击必须真的切到该音色，否则试听还是旧音色（静默失效）');
+    }, timeout: perTest);
+
+    testWidgets('SET-07o 点「取证文件管理」→ 打开取证页（导航真的发生）',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // 取证页默认 store 基于应用文档目录 —— 给通道一个真实空目录，避免
+      // 未打桩时抛 MissingPlatformDirectoryException 掩盖导航是否发生。
+      messenger().setMockMethodCallHandler(kPathProvider, (call) async {
+        if (call.method == 'getApplicationDocumentsDirectory') return tmp.path;
+        if (call.method == 'getTemporaryDirectory') return tmp.path;
+        return null;
+      });
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('取证文件管理'));
+      await waitForText(tester, '录音取证文件');
+      expect(find.text('录音取证文件'), findsOneWidget,
+          reason: '点击必须真的打开取证页，而不是留在设置页什么都不做');
+    }, timeout: perTest);
+
+    testWidgets('SET-07p 试听对话框点「关闭」→ 对话框关掉（不留半开状态）',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.tap(find.text('试听所选音色'));
+      await waitFor(tester, () => find.text('关闭').evaluate().isNotEmpty,
+          reason: '应弹出试听对话框');
+
+      await tester.tap(find.text('关闭'));
+      await waitFor(tester, () => find.text('关闭').evaluate().isEmpty,
+          reason: '关闭后对话框应消失');
+    }, timeout: perTest);
+
+    testWidgets('SET-07r 导入计划时落库异常 → 明说「导入失败」，不静默',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final f = File('${tmp.path}/plan_boom.json')
+        ..writeAsStringSync(CounterPlan.defaults().toPrettyJson());
+      final prevPicker = FilePicker.platform;
+      addTearDown(() => FilePicker.platform = prevPicker);
+      FilePicker.platform =
+          _FakeFilePicker(FilePickerResult([_pf('plan_boom.json', f)]));
+      await pumpSettings(tester, overrides: [
+        counterPlanServiceProvider.overrideWith((ref) async {
+          final prefs = await SharedPreferences.getInstance();
+          return CounterPlanService(
+            tasks: TaskRepository(db),
+            store: CounterPlanStore(prefs),
+            // 计划本身合法，坏在下游（音源解析抛错）⇒ 只能靠 catch 兜住。
+            resolveAudioIds: (ids) async => throw StateError('音源库损坏'),
+            replan: () async {},
+          );
+        }),
+      ]);
+
+      await tester.tap(find.text('导入 JSON'));
+      await waitForText(tester, '导入失败：');
+      await settleSnackBars(tester);
     }, timeout: perTest);
   });
 }

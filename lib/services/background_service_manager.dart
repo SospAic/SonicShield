@@ -178,6 +178,17 @@ class BackgroundServiceManager {
         'enabled': enabled,
         if (micGranted != null) 'micGranted': micGranted,
       });
+
+  /// 开关「实时随机动态反击」（v2.0 阶段 D）。
+  ///
+  /// 与 [setGuard] 同为 **fire-and-forget** invoke：引擎未运行时调用无副作用，
+  /// 但 UI 侧已把开关持久化（`PrefsKeys.reactiveCounterEnabled`），下一次守卫
+  /// 启动会据此自动装配 —— 因此"现在没引擎"不会让用户的意愿丢失。
+  ///
+  /// 动态反击**只在守卫运行时**有效（它消费守卫的声音事件），所以引擎侧在
+  /// 守卫没跑时只落 prefs、不装配。
+  Future<void> setReactiveCounter(bool enabled) =>
+      _invoke('reactive', {'enabled': enabled});
   Future<void> setPowerMode(String mode) => _invoke('powerMode', {'mode': mode});
 
   /// 远程 `vibrate.stop`（v1.9）：停止全部进行中的振动。
