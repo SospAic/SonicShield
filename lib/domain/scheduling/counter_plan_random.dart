@@ -1,23 +1,24 @@
 /// 本机"按规则随机"生成反击计划（不调 AI，离线可用）。
 ///
 /// ## 与 AI 生成的关系
-/// 两条路产出**同一个 [CounterPlan] 结构**、遵守**同一组区间约束**：
-/// - 工作日白天音量落在 50%–80%、夜间 30%–50%；
-/// - 白天动作 3–8 秒、夜间 3–5 秒；
-/// - 休息日两段默认关闭（可选开启）。
-///
-/// 差别只在"谁来挑具体数值"：本文件用 [Random] 在区间内取值，AI 用提示词。
+/// 两条路产出**同一个 [CounterPlan] 结构**、遵守**同一份生成参数**
+/// （[CounterPlanParams]）：
+/// - 生成时在参数给定的**区间内**随机取值（音量 / 时长 / 每小时次数）；
+/// - 参数还可控制四个时段是否参与（休息日两段默认关闭 = 可选）、
+///   白天起止小时、两次动作的最小间隔区间；
+/// - 差别只在"谁来挑具体数值"：本文件用 [Random] 在区间内取值，AI 用提示词。
 /// 因此二者可以互相导入、互相下发，且**离线一定有可用计划**（AI 不可用时不空转）。
 ///
 /// ## 随机但不失约束
-/// 注意各区间是**在用户约定范围内再取子区间**（如工作日白天音量下限定在
-/// 50%–65%、上限定在 70%–80%），而不是"先随机再校验"——避免随机出
-/// `volumeMin > volumeMax` 这类自相矛盾的窗口。
+/// 每个窗口先在参数区间内取**下限**，再在 `[下限, 参数上限]` 内取**上限**
+/// ——不是"先随机再校验"，从而不会随机出 `volumeMin > volumeMax` 这类
+/// 自相矛盾的窗口（AI 侧由 [CounterPlan.fromJson] 的夹紧兜底）。
 library;
 
 import 'dart:math';
 
 import '../models/counter_plan.dart';
+import '../models/counter_plan_params.dart';
 
 abstract final class CounterPlanRandom {
   /// 「招人烦」预置音效池（复用 [CounterPlan.defaultPresetIds]，单一真源）。
@@ -26,93 +27,88 @@ abstract final class CounterPlanRandom {
   /// 可选 TTS 文案池（复用 [CounterPlan.defaultTtsTexts]）。
   static const List<String> ttsPool = CounterPlan.defaultTtsTexts;
 
-  /// 生成一份合规计划。
+  /// 按 [params] 生成一份合规计划。
   ///
-  /// [seed] 非空 ⇒ 完全可复现（测试用）；[restdayDay]/[restdayNight] 控制
-  /// 休息日两段是否参与（"可选"）；[presetIds]/[ttsTexts] 可注入自定义池。
+  /// [seed] 非空 ⇒ 完全可复现（测试用）。[params] 为空时用
+  /// [CounterPlanParams.defaults]（= 出厂约定区间）。
+  ///
+  /// [restdayDay]/[restdayNight] 非空时**覆盖**参数里对应时段的开关
+  /// （保留旧调用点的简洁写法）；[presetIds]/[ttsTexts] 同理覆盖动作池。
   static CounterPlan generate({
     int? seed,
     String name = '本机随机反击计划',
-    bool restdayDay = false,
-    bool restdayNight = false,
-    List<String> presetIds = annoyPresets,
-    List<String> ttsTexts = ttsPool,
+    CounterPlanParams? params,
+    bool? restdayDay,
+    bool? restdayNight,
+    List<String>? presetIds,
+    List<String>? ttsTexts,
   }) {
+    final p = (params ?? CounterPlanParams.defaults()).clamped();
     final rng = Random(seed);
-    final plan = CounterPlan(
+
+    CounterPlanParams eff = p;
+    if (restdayDay != null) {
+      eff = eff.copyWith(restdayDay: eff.restdayDay.copyWith(enabled: restdayDay));
+    }
+    if (restdayNight != null) {
+      eff = eff.copyWith(
+          restdayNight: eff.restdayNight.copyWith(enabled: restdayNight));
+    }
+    final pool = presetIds ?? eff.presetIds;
+    final texts = ttsTexts ?? eff.ttsTexts;
+
+    final lo = min(eff.cooldownSecMin, eff.cooldownSecMax);
+    final hi = max(eff.cooldownSecMin, eff.cooldownSecMax);
+
+    return CounterPlan(
       name: name,
-      cooldownSec: _intIn(rng, 600, 2400), // 10–40 分钟
-      workdayDay: _window(
-        rng,
-        enabled: true,
-        vLoRange: (0.50, 0.65),
-        vHiRange: (0.70, 0.80),
-        dLoRange: (3, 4),
-        dHiRange: (6, 8),
-        perHour: (1, 3),
-      ),
-      workdayNight: _window(
-        rng,
-        enabled: true,
-        vLoRange: (0.30, 0.38),
-        vHiRange: (0.45, 0.50),
-        dLoRange: (3, 4),
-        dHiRange: (4, 5),
-        perHour: (1, 2),
-      ),
-      restdayDay: _window(
-        rng,
-        enabled: restdayDay,
-        vLoRange: (0.50, 0.65),
-        vHiRange: (0.70, 0.80),
-        dLoRange: (3, 4),
-        dHiRange: (6, 8),
-        perHour: (1, 3),
-      ),
-      restdayNight: _window(
-        rng,
-        enabled: restdayNight,
-        vLoRange: (0.10, 0.16),
-        vHiRange: (0.24, 0.30),
-        dLoRange: (3, 3),
-        dHiRange: (4, 5),
-        perHour: (1, 2),
-      ),
-      presetIds: _pick(rng, presetIds, 3, 6),
-      ttsTexts: _pick(rng, ttsTexts, 3, 5),
+      dayStartHour: eff.dayStartHour,
+      dayEndHour: eff.dayEndHour,
+      cooldownSec: _intIn(rng, lo, hi),
+      respectQuietHours: eff.respectQuietHours,
+      workdayDay: _window(rng, eff.workdayDay),
+      workdayNight: _window(rng, eff.workdayNight),
+      restdayDay: _window(rng, eff.restdayDay),
+      restdayNight: _window(rng, eff.restdayNight),
+      presetIds: _pick(rng, pool, 3, 6),
+      ttsTexts: _pick(rng, texts, 3, 5),
+      voiceId: eff.voiceId,
+      // 排期参数由生成参数**原样带入**产物（不在随机区间内抽值）。
+      scheduleMode: eff.scheduleMode,
+      occurrenceCount: eff.occurrenceCount,
+      spanDays: eff.spanDays,
+      specificDate: eff.specificDate,
+      rangeStart: eff.rangeStart,
+      rangeEnd: eff.rangeEnd,
+      weekdays: eff.weekdays,
     );
-    // 兜底：万一注入的池为空导致动作池为空，回落到内置池（validate 要求非空）。
-    return plan;
   }
 
-  static CounterWindow _window(
-    Random rng, {
-    required bool enabled,
-    required (double, double) vLoRange,
-    required (double, double) vHiRange,
-    required (int, int) dLoRange,
-    required (int, int) dHiRange,
-    required (int, int) perHour,
-  }) {
-    final vLo = _doubleIn(rng, vLoRange.$1, vLoRange.$2);
-    final vHi = _doubleIn(rng, vHiRange.$1, vHiRange.$2);
-    final dLo = _intIn(rng, dLoRange.$1, dLoRange.$2);
-    final dHi = _intIn(rng, dHiRange.$1, dHiRange.$2);
+  /// 在 [w] 给定的各区间内随机取一组具体值（下限先取、上限再取 ⇒ 恒 min ≤ max）。
+  static CounterWindow _window(Random rng, PlanWindowParams w) {
+    final vLo = _doubleIn(rng, w.volumeMin, w.volumeMax);
+    final vHi = _doubleIn(rng, vLo, w.volumeMax);
+    final dLo = _intIn(rng, w.durationSecMin, w.durationSecMax);
+    final dHi = _intIn(rng, dLo, w.durationSecMax);
+    final aLo = _intIn(rng, w.actionsPerHourMin, w.actionsPerHourMax);
     return CounterWindow(
-      enabled: enabled,
+      enabled: w.enabled,
       volumeMin: vLo,
       volumeMax: vHi < vLo ? vLo : vHi,
       durationSecMin: dLo,
       durationSecMax: dHi < dLo ? dLo : dHi,
-      actionsPerHour: _intIn(rng, perHour.$1, perHour.$2),
+      actionsPerHour: aLo,
     ).clamped();
   }
 
-  static int _intIn(Random rng, int lo, int hi) =>
-      lo + rng.nextInt(hi - lo + 1);
+  static int _intIn(Random rng, int lo, int hi) {
+    final a = min(lo, hi), b = max(lo, hi);
+    return a + rng.nextInt(b - a + 1);
+  }
 
   static double _doubleIn(Random rng, double lo, double hi) {
-    final v = lo + rng.nextDouble() * (hi - lo);
+    final a = min(lo, hi), b = max(lo, hi);
+    final v = a + rng.nextDouble() * (b - a);
     return (v * 100).round() / 100; // 两位小数，落库/展示更干净
   }
 

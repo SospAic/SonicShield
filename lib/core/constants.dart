@@ -20,6 +20,22 @@ class AppMeta {
   /// 于是远程 status/device 回执上报的是**过期的版本号**）——
   /// 现已由 `test/version_consistency_test.dart` 强制三者一致。
   static const String version = '1.9.0-alpha';
+
+  /// 与 pubspec.yaml 的 `+N` **构建号**同步（第七十七轮基线新增）。
+  ///
+  /// 为什么单独立一个常量：[version] 只到 `x.y.z[-pre]`，而**每次迭代抬的是
+  /// 构建号**（`+17` → `+18`）。若界面只显示 [version]，用户**看不出本轮
+  /// 迭代已经更新**——与「每次迭代 APP 中显示的版本必须同步更新」这条基线
+  /// 相悖（历史上设置页底部还长期写死 `v1.0.0`，属同类漂移）。
+  ///
+  /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
+  /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
+  /// 并锁死界面不得再出现写死的版本号。
+  static const String buildNumber = '19';
+
+  /// 面向用户的完整版本串（含构建号），设置页「关于」区块显示的就是它。
+  static String get displayVersion => '$version+$buildNumber';
+
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换
 }

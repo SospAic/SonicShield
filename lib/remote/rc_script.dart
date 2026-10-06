@@ -140,6 +140,77 @@ const Map<RcVibrateMode, List<RcVibrateField>> rcVibrateFields =
 List<RcVibrateField> rcVibrateFieldsFor(RcVibrateMode m) =>
     rcVibrateFields[m] ?? const <RcVibrateField>[];
 
+/// `vibrate.start`（远程**发起**振动）在 `fixed` 模式下的参数规格。
+///
+/// ⚠️ 与指令组里的 `fixed`（固定**节奏**，`VibrateAction`，无强度）**刻意不同**：
+/// 远程按钮的语义是"固定强度 + 固定时长"的恒定振动，不是一串节奏点 ——
+/// 这正是用户要求的两种形态之一（另一种是随机强度 + 随机时长）。
+const List<RcVibrateField> rcVibrateStartFixedFields = <RcVibrateField>[
+  RcVibrateField('durationSec', '时长（秒）',
+      min: 1, max: VibrateLimits.maxDurationSec),
+  RcVibrateField('intensity', '强度（0–1）', min: 0, max: 1, fraction: true),
+];
+
+/// `vibrate.start` 的 mode → 参数规格（控制台表单与执行器共用一份声明）。
+///
+/// random / continuous 直接复用指令组那两套（同一夹紧口径、同一字段名），
+/// 只有 fixed 换成了"时长 + 强度"两个字段。
+const Map<RcVibrateMode, List<RcVibrateField>> rcVibrateStartFields =
+    <RcVibrateMode, List<RcVibrateField>>{
+  RcVibrateMode.fixed: rcVibrateStartFixedFields,
+  RcVibrateMode.random: rcVibrateRandomFields,
+  RcVibrateMode.continuous: rcVibrateContinuousFields,
+};
+
+List<RcVibrateField> rcVibrateStartFieldsFor(RcVibrateMode m) =>
+    rcVibrateStartFields[m] ?? const <RcVibrateField>[];
+
+/// `vibrate.start` 参数 → 执行动作（**端点侧**消费点，纯函数）。
+///
+/// 与 [RcStep.vibrateConfig] 同一纪律：**先夹紧再构造**（`ActionConfig` 的区间
+/// 约束靠 `assert`，release 会被剥离），并**强制 `respectDnd = true`**（远程
+/// 路径不提供穿透系统勿扰的能力，docs/20 §10.3）。
+///
+/// `fixed` = 恒定振动（强度 min==max、时长 min==max、无波动），
+/// 表达为 [ContinuousVibrateAction] 的**退化区间** —— 从而执行引擎零改动，
+/// 与 random / continuous 走同一条 [VibrateSession] 通路。
+ActionConfig rcVibrateStartConfig(Map<String, dynamic> p) {
+  final mode = rcVibrateModeOf(p['mode']);
+  if (mode == RcVibrateMode.fixed) {
+    final sec =
+        RcStep._int(p, 'durationSec', 1, VibrateLimits.maxDurationSec, 5);
+    final amp = RcStep._dbl(p, 'intensity', 0, 1, 0.6);
+    return ContinuousVibrateAction(
+      durationSecMin: sec,
+      durationSecMax: sec,
+      amplitudeMin: amp,
+      amplitudeMax: amp,
+      respectDnd: true,
+    );
+  }
+  return RcStep(RcStepKind.vibrate, {...p, 'mode': mode.name}).vibrateConfig();
+}
+
+/// `vibrate.start` 的人类可读描述（控制台按钮文案 / 审计留痕）。
+String rcVibrateStartLabel(Map<String, dynamic> p) {
+  String pct(double v) => '${(v * 100).round()}%';
+  switch (rcVibrateStartConfig(p)) {
+    case final RandomVibrateAction x:
+      return '随机振动 ${x.durationSecMin}–${x.durationSecMax} 秒'
+          '（强度 ${pct(x.amplitudeMin)}–${pct(x.amplitudeMax)}）';
+    case final ContinuousVibrateAction x:
+      if (x.amplitudeMin == x.amplitudeMax &&
+          x.durationSecMin == x.durationSecMax &&
+          x.jitterMs == 0) {
+        return '固定振动 ${x.durationSecMin} 秒（强度 ${pct(x.amplitudeMin)}）';
+      }
+      return '持续振动 ${x.durationSecMin}–${x.durationSecMax} 秒'
+          '（强度 ${pct(x.amplitudeMin)}–${pct(x.amplitudeMax)}）';
+    default:
+      return '振动';
+  }
+}
+
 /// 组装器新建振动步时的初值（UI 用；与 `fromJson` 的默认值同源）。
 ///
 /// ⚠️ 键集合必须**恰好**等于 `rcVibrateFieldsFor(m)`（`RV-14` 锁）：

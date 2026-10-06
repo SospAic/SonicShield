@@ -17,11 +17,13 @@ import '../../data/repositories/counter_plan_store.dart';
 import '../../domain/models/action.dart';
 import '../../domain/models/condition.dart';
 import '../../domain/models/counter_plan.dart';
+import '../../domain/models/counter_plan_params.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../domain/models/tts_voice.dart';
 import '../../domain/scheduling/counter_plan_random.dart';
 import '../../services/background_service_manager.dart';
+import '../../services/holiday_update_service.dart';
 import '../../services/native_bridge.dart';
 import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
@@ -67,6 +69,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   CounterPlan? _plan;
   bool _planEnabled = false;
+
+  /// 联网一键更新落库的节假日表（条数 / 上次更新时间），仅用于本页如实展示。
+  int _holidayDayCount = 0;
+  DateTime? _holidayUpdatedAt;
+
+  /// 反击计划的**生成参数**（音量区间 / 时长区间 / 每小时次数区间 / 动作间隔
+  /// 区间 / 休息日两段是否反击……）。本机随机与 AI 生成共用同一份，落库在
+  /// `counter_plan_params_json`；未配置时用出厂约定区间。
+  CounterPlanParams _planParams = CounterPlanParams.defaults();
 
   // ---------------- 任务备份（导出/导入，v1.3） ----------------
 
@@ -301,6 +312,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _onlineTtsConfigured = cfg.onlineTtsConfigured;
       _plan = planStore.loadPlan();
       _planEnabled = planStore.enabled;
+      _planParams = planStore.loadParams() ?? CounterPlanParams.defaults();
     });
   }
 
@@ -347,8 +359,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         title: '在线语音配置',
         fields: [
           _FieldSpec('在线语音 Endpoint', _ttsEndpoint,
-              hint: '如 https://<region>.tts.speech.microsoft.com/cognitiveservices/v1'),
-          _FieldSpec('在线语音 Key', _ttsApiKey, obscure: true, hint: '留空即关闭在线语音'),
+              hint: '默认内置免 Key 端点（Edge 大声朗读）；留空即关闭在线语音'),
+          _FieldSpec('在线语音 Key', _ttsApiKey,
+              obscure: true, hint: '内置端点免 Key；改用 Azure 等 REST 端点时才需填写'),
         ],
       ),
     );
@@ -395,21 +408,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     setState(() {
       _plan = store.loadPlan();
       _planEnabled = store.enabled;
+      _planParams = store.loadParams() ?? CounterPlanParams.defaults();
+      _holidayDayCount = store.autoOverrides().length;
+      _holidayUpdatedAt = store.autoOverridesUpdatedAt();
     });
   }
 
-  /// 本机按同一区间规则随机生成并启用（离线可用）。
+  /// 本机按同一份生成参数随机并启用（离线可用）。
   Future<void> _genLocalPlan() async {
     final svc = await ref.read(counterPlanServiceProvider.future);
-    final r = await svc.apply(CounterPlanRandom.generate());
+    final r = await svc.apply(CounterPlanRandom.generate(params: _planParams));
     await _reloadPlan();
     _snack(r.message);
   }
 
-  /// 一键 AI 生成：校验通过才落库；失败如实显示 message。
+  /// 一键 AI 生成：把当前生成参数拼进提示词；校验通过才落库。
   Future<void> _genAiPlan() async {
     final ds = await ref.read(deepseekServiceProvider.future);
-    final gen = await ds.generatePlan();
+    final gen = await ds.generatePlan(params: _planParams);
     if (!gen.ok || gen.plan == null) {
       _snack('AI 生成失败：${gen.message}');
       return;
@@ -466,6 +482,55 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final r = await svc.disable();
     await _reloadPlan();
     _snack(r.message);
+  }
+
+  /// 一键更新中国节假日（联网）：拉取公开数据源 → 落库自动覆盖表 → 按需重排。
+  ///
+  /// **失败不静默、不写空表**：全部年份都失败时如实报错，内置表与旧表原样保留
+  /// （`HolidayUpdateService` 只在有成功结果时才返回非空 overrides）。
+  Future<void> _updateHolidays() async {
+    _snack('正在联网更新节假日…');
+    try {
+      final svc = await ref.read(holidayUpdateServiceProvider.future);
+      final res = await svc.update();
+      if (!res.anyOk) {
+        _snack('节假日更新失败（已保留内置表）：\n${res.describe()}');
+        return;
+      }
+      final plan = await ref.read(counterPlanServiceProvider.future);
+      final r = await plan.refreshHolidays(res.overrides);
+      await _reloadPlan();
+      _snack('${res.describe()}\n${r.message}');
+    } catch (e) {
+      _snack('节假日更新失败（已保留内置表）：$e');
+    }
+  }
+
+  String _fmtDay(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+
+  /// 编辑并保存**生成参数**（音量区间 / 时长区间 / 每小时次数 / 动作间隔 /
+  /// 时段开关 / 白天起止小时）。
+  ///
+  /// 用对话框承载（本页**禁止常驻 `TextField`**，见文件顶部注释）；滑块与开关
+  /// 即改即显。保存后本机随机与 AI 生成**同时**读到新参数（同一份 `_planParams`）。
+  Future<void> _editPlanParams() async {
+    final out = await showDialog<CounterPlanParams>(
+      context: context,
+      builder: (_) => _PlanParamsDialog(initial: _planParams),
+    );
+    if (out == null) return;
+    final errs = out.validate();
+    if (errs.isNotEmpty) {
+      _snack('参数未通过校验：${errs.join('；')}');
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    await CounterPlanStore(p).saveParams(out);
+    if (!mounted) return;
+    setState(() => _planParams = out);
+    _snack('生成参数已保存（本机随机与 AI 生成同时生效）');
   }
 
   /// 音色列表：按「普通话 / 东北话」分组，标注男/女，可选中（无输入框）。
@@ -525,11 +590,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ));
       }
     }
+    out.add(ListTile(
+      key: const ValueKey<String>('plan_params_edit'),
+      leading: const Icon(Icons.tune),
+      title: const Text('编辑生成参数'),
+      subtitle: Text(_planParams.summary()),
+      isThreeLine: true,
+      onTap: _editPlanParams,
+    ));
     out.addAll(<Widget>[
       ListTile(
         leading: const Icon(Icons.casino_outlined),
         title: const Text('本机随机生成并启用'),
-        subtitle: const Text('离线按同一区间规则随机（与 AI 区间一致）'),
+        subtitle: const Text('离线按当前参数区间随机（与 AI 同一份参数）'),
         onTap: _genLocalPlan,
       ),
       ListTile(
@@ -542,6 +615,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         leading: const Icon(Icons.file_open_outlined),
         title: const Text('导入 JSON'),
         onTap: _importPlanJson,
+      ),
+      ListTile(
+        key: const ValueKey<String>('holiday_update'),
+        leading: const Icon(Icons.event_available_outlined),
+        title: const Text('一键更新节假日（联网）'),
+        subtitle: Text(_holidayDayCount > 0
+            ? '已更新 $_holidayDayCount 天'
+                '${_holidayUpdatedAt == null ? '' : ' · ${_fmtDay(_holidayUpdatedAt!)}'}'
+            : '拉取公开数据源（覆盖 '
+                '${HolidayUpdateService.defaultYears().join('、')} 年）；失败保留内置表'),
+        onTap: _updateHolidays,
       ),
       ListTile(
         leading: const Icon(Icons.download_outlined),
@@ -771,8 +855,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             leading: const Icon(Icons.translate),
             title: const Text('在线语音配置'),
             subtitle: Text(_onlineTtsConfigured
-                ? '已配置：$_ttsEndpoint'
-                : '未配置则只有系统音色可用（东北话需在线语音）'),
+                ? (_ttsEndpoint == ApiConfigStore.defaultTtsEndpoint
+                    ? '内置免费在线语音（开箱可用）：Microsoft Edge 大声朗读'
+                    : '已配置：$_ttsEndpoint')
+                : '在线语音已关闭：仅系统音色可用（东北话需在线语音）'),
             onTap: _editOnlineTts,
           ),
           const Padding(
@@ -826,10 +912,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('声盾 SonicShield'),
-            subtitle: Text('v1.0.0 · Flutter 跨平台 · 仅限合法用途'),
+          const Divider(height: 32),
+          Text('关于', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          ListTile(
+            key: const ValueKey<String>('about_version'),
+            leading: const Icon(Icons.info_outline),
+            title: const Text(AppMeta.appName),
+            // 版本串**只从常量取**（`AppMeta.displayVersion` = version+buildNumber）。
+            // 历史上这里写死过 `v1.0.0`，此后漂了多个版本没人发现 —— 与「每次迭代
+            // APP 中显示的版本必须同步更新」这条基线相悖。现由
+            // `test/version_consistency_test.dart` 机器锁死：既锁常量与 pubspec 一致，
+            // 也锁本文件不得再出现写死的版本号。
+            subtitle: Text('v${AppMeta.displayVersion} · Flutter 跨平台 · 仅限合法用途'),
           ),
         ],
       ),
@@ -963,4 +1058,327 @@ class _TtsPreviewDialogState extends State<_TtsPreviewDialog> {
           ),
         ],
       );
+}
+
+/// 反击计划「生成参数」编辑对话框（参数化选择：音量区间 / 时长区间 /
+/// 每小时次数区间 / 动作间隔区间 / 四个时段开关 / 白天起止小时）。
+///
+/// ## 为什么只用滑块与开关，**不用 `TextField`**
+/// 设置页靠"页面上没有常驻输入框"来保证导出/加密用例里
+/// `find.byType(TextField).at(0)` 取到的就是密码框（见文件顶部注释）。
+/// 对话框虽在叠加层，但仍统一不用输入框 —— 参数天然是数值区间，滑块更直观。
+///
+/// 「保存」返回 [CounterPlanParams]；「取消」返回 null；「恢复默认」回到出厂区间。
+class _PlanParamsDialog extends StatefulWidget {
+  const _PlanParamsDialog({required this.initial});
+
+  final CounterPlanParams initial;
+
+  @override
+  State<_PlanParamsDialog> createState() => _PlanParamsDialogState();
+}
+
+class _PlanParamsDialogState extends State<_PlanParamsDialog> {
+  late CounterPlanParams _p = widget.initial.clamped();
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('反击计划生成参数'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('调好的参数同时作用于「本机随机生成」与「一键 AI 生成」。',
+                  style: TextStyle(fontSize: 12)),
+              _section('排期模式'),
+              Wrap(
+                spacing: 6,
+                runSpacing: 2,
+                children: [
+                  for (final m in PlanScheduleMode.values)
+                    ChoiceChip(
+                      key: ValueKey<String>('pp_mode_${m.name}'),
+                      label: Text(m.label),
+                      selected: _p.scheduleMode == m,
+                      onSelected: (_) =>
+                          setState(() => _p = _p.copyWith(scheduleMode: m)),
+                    ),
+                ],
+              ),
+              ..._scheduleFields(),
+              _section('时段与间隔'),
+              _range(
+                '白天时段',
+                0,
+                23,
+                23,
+                _p.dayStartHour.toDouble(),
+                _p.dayEndHour.toDouble(),
+                (v) => setState(() => _p = _p.copyWith(
+                      dayStartHour: v.start.round(),
+                      dayEndHour: v.end.round(),
+                    )),
+                fmt: (v) => '${v.round()}:00',
+              ),
+              _range(
+                '动作间隔（秒）',
+                0,
+                CounterPlanParams.maxCooldownSec.toDouble(),
+                96,
+                _p.cooldownSecMin.toDouble(),
+                _p.cooldownSecMax.toDouble(),
+                (v) => setState(() => _p = _p.copyWith(
+                      cooldownSecMin: v.start.round(),
+                      cooldownSecMax: v.end.round(),
+                    )),
+                fmt: (v) => '${v.round()}s',
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: const Text('遵循免打扰时段'),
+                value: _p.respectQuietHours,
+                onChanged: (v) =>
+                    setState(() => _p = _p.copyWith(respectQuietHours: v)),
+              ),
+              _section('工作日'),
+              _window('工作日·白天', _p.workdayDay,
+                  (w) => _p.copyWith(workdayDay: w)),
+              _window('工作日·夜间', _p.workdayNight,
+                  (w) => _p.copyWith(workdayNight: w)),
+              _section('休息日（可选）'),
+              _window('休息日·白天', _p.restdayDay,
+                  (w) => _p.copyWith(restdayDay: w)),
+              _window('休息日·夜间', _p.restdayNight,
+                  (w) => _p.copyWith(restdayNight: w)),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () =>
+                setState(() => _p = CounterPlanParams.defaults()),
+            child: const Text('恢复默认')),
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(context, _p),
+            child: const Text('保存')),
+      ],
+    );
+  }
+
+  Widget _section(String title) => Padding(
+        padding: const EdgeInsets.only(top: 12, bottom: 2),
+        child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+      );
+
+  /// 按当前排期模式渲染**仅该模式需要**的字段（其余模式不显示，避免误配）。
+  List<Widget> _scheduleFields() {
+    switch (_p.scheduleMode) {
+      case PlanScheduleMode.single:
+        return const <Widget>[
+          Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Text('在接下来的一周内随机反击 1 次。', style: TextStyle(fontSize: 12)),
+          ),
+        ];
+      case PlanScheduleMode.several:
+        return <Widget>[
+          _intDropdown('次数', 'pp_occ', _p.occurrenceCount, 1, 12,
+              (v) => setState(() => _p = _p.copyWith(occurrenceCount: v))),
+        ];
+      case PlanScheduleMode.severalDays:
+        return <Widget>[
+          _intDropdown('天数', 'pp_span', _p.spanDays, 1, 30,
+              (v) => setState(() => _p = _p.copyWith(spanDays: v))),
+        ];
+      case PlanScheduleMode.specificDate:
+        return <Widget>[
+          _dateTile('指定日期', 'pp_specific_date', _p.specificDate,
+              (iso) => setState(() => _p = _p.copyWith(specificDate: iso))),
+        ];
+      case PlanScheduleMode.dateRange:
+        return <Widget>[
+          _dateTile('起始日期', 'pp_range_start', _p.rangeStart,
+              (iso) => setState(() => _p = _p.copyWith(rangeStart: iso))),
+          _dateTile('结束日期', 'pp_range_end', _p.rangeEnd,
+              (iso) => setState(() => _p = _p.copyWith(rangeEnd: iso))),
+        ];
+      case PlanScheduleMode.recurringRandom:
+        const names = <String>['一', '二', '三', '四', '五', '六', '日'];
+        return <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Wrap(
+              spacing: 6,
+              children: [
+                for (var i = 1; i <= 7; i++)
+                  FilterChip(
+                    key: ValueKey<String>('pp_wd_$i'),
+                    label: Text('周${names[i - 1]}'),
+                    selected: _p.weekdays.contains(i),
+                    onSelected: (sel) => setState(() {
+                      final set = <int>{..._p.weekdays};
+                      if (sel) {
+                        set.add(i);
+                      } else if (set.length > 1) {
+                        set.remove(i); // 至少保留一天，避免生成空计划
+                      }
+                      _p = _p.copyWith(weekdays: set.toList()..sort());
+                    }),
+                  ),
+              ],
+            ),
+          ),
+        ];
+    }
+  }
+
+  Widget _intDropdown(String label, String key, int value, int lo, int hi,
+      ValueChanged<int> onChanged) {
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        DropdownButton<int>(
+          key: ValueKey<String>(key),
+          value: value.clamp(lo, hi),
+          items: [
+            for (var i = lo; i <= hi; i++)
+              DropdownMenuItem<int>(value: i, child: Text('$i')),
+          ],
+          onChanged: (v) {
+            if (v != null) onChanged(v);
+          },
+        ),
+      ],
+    );
+  }
+
+  /// 日期选择行：未设置显示「未设置」，选择后回填 ISO `yyyy-MM-dd`。
+  Widget _dateTile(String label, String key, String? iso,
+      ValueChanged<String> onChanged) {
+    final d = CounterPlan.parseIsoDate(iso);
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        TextButton(
+          key: ValueKey<String>(key),
+          onPressed: () async {
+            final now = DateTime.now();
+            final picked = await showDatePicker(
+              context: context,
+              initialDate: d ?? now,
+              firstDate: DateTime(now.year - 1),
+              lastDate: DateTime(now.year + 3),
+            );
+            if (picked != null) {
+              onChanged('${picked.year.toString().padLeft(4, '0')}-'
+                  '${picked.month.toString().padLeft(2, '0')}-'
+                  '${picked.day.toString().padLeft(2, '0')}');
+            }
+          },
+          child: Text(iso ?? '未设置'),
+        ),
+      ],
+    );
+  }
+
+  /// 单个时段的开关 + 三条区间滑块（关闭时只留开关，避免误调）。
+  Widget _window(
+    String label,
+    PlanWindowParams w,
+    CounterPlanParams Function(PlanWindowParams) update,
+  ) {
+    final c = w.clamped();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SwitchListTile(
+          key: ValueKey<String>('pp_enabled_$label'),
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: Text(label),
+          value: c.enabled,
+          onChanged: (v) =>
+              setState(() => _p = update(w.copyWith(enabled: v))),
+        ),
+        if (c.enabled) ...[
+          _range(
+            '$label 音量',
+            0,
+            1,
+            20,
+            c.volumeMin,
+            c.volumeMax,
+            (v) => setState(() => _p = update(
+                w.copyWith(volumeMin: v.start, volumeMax: v.end))),
+            fmt: (v) => '${(v * 100).round()}%',
+          ),
+          _range(
+            '$label 时长（秒）',
+            1,
+            CounterWindow.maxDurationSec.toDouble(),
+            CounterWindow.maxDurationSec - 1,
+            c.durationSecMin.toDouble(),
+            c.durationSecMax.toDouble(),
+            (v) => setState(() => _p = update(w.copyWith(
+                durationSecMin: v.start.round(),
+                durationSecMax: v.end.round()))),
+            fmt: (v) => '${v.round()}s',
+          ),
+          _range(
+            '$label 每小时次数',
+            0,
+            CounterWindow.maxActionsPerHour.toDouble(),
+            CounterWindow.maxActionsPerHour,
+            c.actionsPerHourMin.toDouble(),
+            c.actionsPerHourMax.toDouble(),
+            (v) => setState(() => _p = update(w.copyWith(
+                actionsPerHourMin: v.start.round(),
+                actionsPerHourMax: v.end.round()))),
+            fmt: (v) => '${v.round()}',
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _range(
+    String label,
+    double min,
+    double max,
+    int divisions,
+    double lo,
+    double hi,
+    ValueChanged<RangeValues> onChanged, {
+    required String Function(double) fmt,
+  }) {
+    final a = lo.clamp(min, max);
+    final b = hi.clamp(min, max);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text('$label：${fmt(a)} – ${fmt(b)}',
+              style: const TextStyle(fontSize: 12)),
+        ),
+        RangeSlider(
+          min: min,
+          max: max,
+          divisions: divisions,
+          values: RangeValues(a <= b ? a : b, a <= b ? b : a),
+          labels: RangeLabels(fmt(a), fmt(b)),
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
 }

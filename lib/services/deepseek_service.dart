@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../data/repositories/api_config_store.dart';
 import '../domain/models/counter_plan.dart';
+import '../domain/models/counter_plan_params.dart';
 import '../domain/scheduling/counter_plan_random.dart';
 
 /// 「一键通过 DeepSeek 生成反击计划」——**最小 token、最高可导入率**。
@@ -37,18 +38,28 @@ class DeepSeekService {
   bool get configured => _config.hasApiKey;
 
   /// 一键生成。失败一律**如实回报**，不返回半成品。
-  Future<DeepSeekPlanResult> generatePlan({String hint = ''}) async {
+  ///
+  /// [params] 非空 ⇒ 用**用户调好的生成参数**替换系统提示里的区间约定，并把
+  /// 参数说明拼进 user 消息 —— 于是 AI 与本机随机落在同一组约束里（产物可互相
+  /// 导入）。[hint] 非空时**优先**当作额外要求（在参数说明之后追加）。
+  Future<DeepSeekPlanResult> generatePlan({
+    String hint = '',
+    CounterPlanParams? params,
+  }) async {
     if (!configured) {
       return DeepSeekPlanResult.fail('未配置 DeepSeek API Key（请在「语音与接口」中填写）');
     }
+    final sys = params == null ? _systemPrompt : _systemPromptFor(params);
+    final fromParams = params?.toPromptHint() ?? '';
+    final user = <String>[
+      if (fromParams.isNotEmpty) fromParams,
+      if (hint.trim().isNotEmpty) hint.trim(),
+      if (fromParams.isEmpty && hint.trim().isEmpty)
+        '生成一份 24 小时全天候随机反击计划。',
+    ].join('\n');
     final messages = <Map<String, String>>[
-      {'role': 'system', 'content': _systemPrompt},
-      {
-        'role': 'user',
-        'content': hint.trim().isEmpty
-            ? '生成一份 24 小时全天候随机反击计划。'
-            : hint.trim(),
-      },
+      {'role': 'system', 'content': sys},
+      {'role': 'user', 'content': user},
     ];
 
     var lastError = '';
@@ -170,16 +181,54 @@ class DeepSeekService {
 {"schema":"sonicshield.counterPlan/1","name":文字,"version":1,
 "dayStartHour":0-23,"dayEndHour":0-23,"cooldownSec":0-86400,"respectQuietHours":true/false,
 "workday":{"day":W,"night":W},"restday":{"day":W,"night":W},
-"presetIds":[音效id],"ttsTexts":[中文短句],"voiceId":""}
+"presetIds":[音效id],"ttsTexts":[中文短句],"voiceId":"",
+"scheduleMode":"recurringRandom","occurrenceCount":3,"spanDays":3,
+"specificDate":null,"rangeStart":null,"rangeEnd":null,"weekdays":[1,2,3,4,5,6,7]}
 W={"enabled":true/false,"volumeMin":0-1,"volumeMax":0-1,
 "durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12}
 硬性要求：至少一个 enabled=true；presetIds 与 ttsTexts 不能同时为空；
 ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限。
 区间约定：工作日白天音量0.50-0.80、时长3-8；工作日夜0.30-0.50、3-5；
 休息日白天(可关)0.50-0.80、3-8；休息日夜(可关)0.10-0.30、3-5。
+排期：默认 scheduleMode="recurringRandom"（周一至周日循环随机）。
 presetIds 只能从此清单选择（可多选，建议3-6个）：
 $_allowedPresets
 ''';
+
+  /// 参数化系统提示：结构不变，只把「区间约定」换成用户调好的参数区间。
+  ///
+  /// 与 [_systemPrompt] 同口径（同样极简、不做解释），差别仅在区间来源 ——
+  /// 这样"用户把工作日夜间音量区间调宽"能**真的传给模型**，而不是嘴上说说。
+  static String _systemPromptFor(CounterPlanParams p) {
+    String w(PlanWindowParams x) => x.enabled
+        ? '音量${x.volumeMin.toStringAsFixed(2)}-${x.volumeMax.toStringAsFixed(2)}、'
+            '时长${x.durationSecMin}-${x.durationSecMax}、'
+            '每小时${x.actionsPerHourMin}-${x.actionsPerHourMax}'
+        : 'enabled=false（不反击）';
+    return '''
+你是「声盾」随机反击计划生成器。只输出一个 JSON 对象，禁止解释与代码块。
+结构（字段名必须一致）：
+{"schema":"sonicshield.counterPlan/1","name":文字,"version":1,
+"dayStartHour":0-23,"dayEndHour":0-23,"cooldownSec":0-86400,"respectQuietHours":true/false,
+"workday":{"day":W,"night":W},"restday":{"day":W,"night":W},
+"presetIds":[音效id],"ttsTexts":[中文短句],"voiceId":"",
+"scheduleMode":"single|several|severalDays|specificDate|dateRange|recurringRandom",
+"occurrenceCount":1-96,"spanDays":1-92,"specificDate":"yyyy-MM-dd或null",
+"rangeStart":"yyyy-MM-dd或null","rangeEnd":"yyyy-MM-dd或null","weekdays":[1-7]}
+W={"enabled":true/false,"volumeMin":0-1,"volumeMax":0-1,
+"durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12}
+硬性要求：至少一个 enabled=true；presetIds 与 ttsTexts 不能同时为空；
+ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限。
+区间约定（**必须落在下列区间内**）：
+工作日白天(${w(p.workdayDay)})；工作日夜(${w(p.workdayNight)})；
+休息日白天(${w(p.restdayDay)})；休息日夜(${w(p.restdayNight)})；
+动作间隔 ${p.cooldownSecMin}-${p.cooldownSecMax} 秒；白天 ${p.dayStartHour}-${p.dayEndHour} 时。
+排期要求（**原样回填**）：${p.scheduleSummary()}；
+单次/指定日期用 specificDate，区间用 rangeStart/rangeEnd，循环随机用 weekdays（1=周一…7=周日）。
+presetIds 只能从此清单选择（可多选，建议3-6个）：
+$_allowedPresets
+''';
+  }
 
   static String get _allowedPresets =>
       CounterPlanRandom.annoyPresets.join(', ');

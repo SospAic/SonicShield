@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import 'endpoint_service.dart';
 import 'call_lifecycle.dart';
+import 'call_media_profile.dart';
 import 'protocol.dart';
 import 'remote_store.dart';
 
@@ -129,6 +130,14 @@ class CallService {
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
+
+  /// 本端已 `addTrack` 出去的 sender（docs/16 §10）。
+  ///
+  /// 用它在 `setLocalDescription` **之后**下发编码档位
+  /// （[applySendProfileToSenders]）：WebRTC 硬要求在本地描述就位后才能
+  /// `setParameters`。为什么需要下发：默认编码器**没有码率/帧率上限**，
+  /// BWE 会把码率抬到编码器跑不动为止 —— 这正是低端机"爆卡"的主因。
+  List<RTCRtpSender> _senders = const <RTCRtpSender>[];
   String? _callId;
   PairedEndpoint? _peer;
   bool _isCaller = false;
@@ -436,6 +445,8 @@ class CallService {
     try {
       final offer = await _pc!.createOffer();
       await _pc!.setLocalDescription(offer);
+      // 本地描述就位 → 立刻下发编码档位（docs/16 §10）。失败不阻塞发起。
+      await _applySendProfile();
     } on Object {
       _lastStartBlock = CallStartBlock.offerFailed;
       await _teardown();
@@ -570,6 +581,8 @@ class CallService {
       _remoteDescSet = true;
       final answer = await _pc!.createAnswer();
       await _pc!.setLocalDescription(answer);
+      // 本地描述就位 → 立刻下发编码档位（docs/16 §10）。失败不阻塞接通。
+      await _applySendProfile();
       final sent = await _sendCallMsg(
           RcCmd.callAnswer,
           {
@@ -747,10 +760,13 @@ class CallService {
 
   Future<bool> _ensureMedia({required bool video}) async {
     try {
+      // ⚠️ 采集约束必须走 [videoConstraintsFor]（docs/16 §10）：旧写法只写死
+      // 640x480、**完全不设帧率上限**，部分机型会以 30/60fps 采集，
+      // 低端机编码线程直接吃满 CPU ⇒ 双方"爆卡"。`ideal` 而非精确值是为了
+      // 避免"摄像头不支持该分辨率 ⇒ 整通电话起不来"。
       _localStream = await navigator.mediaDevices.getUserMedia({
         'audio': true,
-        'video':
-            video ? {'facingMode': 'user', 'width': 640, 'height': 480} : false,
+        'video': video ? videoConstraintsFor(callVideoCapture) : false,
       });
       // 免提（hands-free）：不切扬声器时 Android 会把通话声音送**听筒**，
       // 视频通话里表现为"能看到画面但听不清/听不到对方" —— 这是"无效果"
@@ -800,11 +816,12 @@ class CallService {
     // `integration_test/camera_probe_test.dart` 传了 stream，所以探针能过、
     // 生产却崩（这也是"profile 通过、release 崩溃"假象的由来）。
     final local = _localStream;
+    _senders = <RTCRtpSender>[];
     if (local != null) {
       // await：addTrack 是异步平台调用，结果被丢弃时异常会变成"无人接管的
       // 未来错误"（同 webrtc_stub 第 45 轮记录的那类静默失败）。
       for (final t in local.getTracks()) {
-        await pc.addTrack(t, local);
+        _senders.add(await pc.addTrack(t, local));
       }
     }
     pc.onTrack = (event) {
@@ -841,6 +858,18 @@ class CallService {
       unawaited(_sendLocalCandidate(c));
     };
   }
+
+  /// 把编码档位下发给本端 sender（docs/16 §10）。
+  ///
+  /// 单路通话固定取 `sendProfileFor(1)`（600kbps / 24fps / 不缩放 /
+  /// `maintain-framerate`）。多路通话由 `MultiCallService` 按并发路数取档，
+  /// 两处共用同一张表。
+  ///
+  /// ⚠️ 只能在 `setLocalDescription` **之后**调用（WebRTC 硬要求），
+  /// 且失败一律**吞掉**（[applySendProfileToSenders] 内已处理）——
+  /// 它调的是"画质/负载"而不是"能否通话"，失败应退回默认自适应。
+  Future<void> _applySendProfile() =>
+      applySendProfileToSenders(_senders, sendProfileFor(1));
 
   /// 发出本端的一条 ICE candidate（尽力而为：失败由会话级状态兜底上报）。
   Future<void> _sendLocalCandidate(RTCIceCandidate c) async {
@@ -923,6 +952,9 @@ class CallService {
       // ignore
     }
     _pc = null;
+    // sender 随 `_pc` 一起失效（它们只是 pc 的句柄）：不清会在下一通里
+    // 对着一批已 dispose 的 sender 调 setParameters。
+    _senders = const <RTCRtpSender>[];
     try {
       _localStream?.getTracks().forEach((t) => t.stop());
     } on Object {

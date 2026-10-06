@@ -221,6 +221,22 @@ abstract final class RcCmd {
   /// ⚠️ 不携带 taskId：停止是全局的，避免"停错了对象"这类静默失效。
   static const vibrateStop = 'vibrate.stop';
 
+  /// 远程**发起**振动（v2.x）：{} → rc.ack {ok, data?}
+  ///
+  /// payload：`{mode: fixed|random|continuous, ...参数}`
+  /// - `fixed`（缺省）：**固定强度 + 固定时长** ——
+  ///   `{durationSec: 1..maxDurationSec, intensity: 0..1}`
+  /// - `random`：**随机强度 + 随机时长**的脉冲串 ——
+  ///   `{durationSecMin/Max, amplitudeMin/Max, gapMsMin/Max?, pulseMsMin/Max?}`
+  /// - `continuous`：区间浮动的持续振动 —— 与 `random` 同参数字段。
+  ///
+  /// ⚠️ 与指令组里的 `fixed` 步**语义刻意不同**（那里是固定"节奏"，
+  /// 这里是固定"强度+时长"）—— 远程按钮要的是"震 5 秒、强度 60%"。
+  /// 参数经 `rcVibrateStartConfig` **先夹紧再构造**，强制 `respectDnd=true`；
+  /// 端点未接线参数化振动时**如实 `ok=false`**，不退回固定节奏（不静默降级）。
+  /// 与 [vibrateStop] 是一对：停止是全局兜底，本命令是主动"震"。
+  static const vibrateStart = 'vibrate.start';
+
   // ---- v2.0：随机反击计划（JSON 计划的下发 / 查询 / 下线，docs/14 §2.2）----
 
   /// 下发并应用一份反击计划：{plan: <CounterPlan JSON>, planId?, replace?}

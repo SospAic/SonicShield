@@ -31,9 +31,12 @@ import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/api_config_store.dart';
 import 'package:sonic_shield/data/repositories/counter_plan_store.dart';
+import 'package:sonic_shield/domain/models/counter_plan.dart';
 import 'package:sonic_shield/services/counter_plan_service.dart';
 import 'package:sonic_shield/services/deepseek_service.dart';
+import 'package:sonic_shield/services/holiday_update_service.dart';
 import 'package:sonic_shield/services/tts_service.dart';
+import 'package:sonic_shield/services/background_service_manager.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -135,18 +138,31 @@ void main() {
 
   // ───────────────── TtsService / speakOnline 闭包 ─────────────────
 
-  test('PVD-03 ttsServiceProvider 解析出 TtsService；未配置在线语音 → speakOnline 直接 false',
+  test('PVD-03 ttsServiceProvider 解析出 TtsService；显式关闭在线语音 → speakOnline 直接 false',
       () async {
-    SharedPreferences.setMockInitialValues({});
+    // 出厂默认是内置免 Key 端点（可用）；这里**显式清空端点**以表达"关闭"，
+    // 闭包据此立刻 false、不发任何请求。
+    SharedPreferences.setMockInitialValues({'tts_endpoint': ''});
     final c = ProviderContainer();
     addTearDown(c.dispose);
 
     final svc = await c.read(ttsServiceProvider.future);
     expect(svc, isA<TtsService>());
 
-    // 闭包第一条判据：`!cfg.onlineTtsConfigured` → 立刻 false，不发任何请求。
     final ok = await svc.speakOnline('你好', 0.8, 'zh-CN-XiaoxiaoNeural');
-    expect(ok, isFalse, reason: '未配置在线语音时必须直接返回 false（不偷偷联网）');
+    expect(ok, isFalse, reason: '显式关闭在线语音时必须直接返回 false（不偷偷联网）');
+  });
+
+  test('PVD-03b 出厂默认（空 SharedPreferences）→ 在线语音即 configured（内置免 Key 端点）',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+
+    final store = await c.read(apiConfigStoreProvider.future);
+    expect(store.onlineTtsConfigured, isTrue,
+        reason: '出厂内置免 Key Edge 端点，开箱即可用（"在线语音需配置"的落点）');
+    expect(store.ttsEndpoint, startsWith('wss://'));
   });
 
   test('PVD-04 已配置在线语音 + 上游非 200 → speakOnline 走失败分支返回 false',
@@ -190,5 +206,35 @@ void main() {
     expect(svc, isA<CounterPlanService>());
     expect(svc.currentPlan(), isNull, reason: '未配置 → 无计划');
     expect(svc.planId, CounterPlanStore.defaultPlanId);
+  });
+
+  test('PVD-07 holidayUpdateServiceProvider 解析出服务；counterPlanService 的注入闭包真的生效',
+      () async {
+    // holidayUpdateServiceProvider 的工厂体（providers.dart:127–129）。
+    SharedPreferences.setMockInitialValues({});
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    final holiday = await c.read(holidayUpdateServiceProvider.future);
+    expect(holiday, isA<HolidayUpdateService>());
+
+    // counterPlanServiceProvider 的 `resolveAudioIds` / `replan` 闭包
+    // （providers.dart:140–142）只有在真的调用一次 apply 时才会执行。
+    // replan 会走 BackgroundServiceManager（宿主无原生实现会抛），用测试缝短路。
+    BackgroundServiceManager.replanHook = () async {};
+    addTearDown(() => BackgroundServiceManager.replanHook = null);
+
+    final c2 = ProviderContainer(overrides: [
+      databaseProvider.overrideWith((ref) async => db),
+    ]);
+    addTearDown(c2.dispose);
+    final svc = await c2.read(counterPlanServiceProvider.future);
+    // 只用 TTS 文案：默认音源库为空也能生成任务 ⇒ 一路走到 _replan()。
+    final plan = CounterPlan.defaults().copyWith(
+      presetIds: const [],
+      ttsTexts: const ['干啥呢？'],
+    );
+    final r = await svc.apply(plan, now: DateTime(2026, 3, 10), days: 3);
+    expect(r.ok, isTrue, reason: r.message);
+    expect(svc.enabled, isTrue);
   });
 }

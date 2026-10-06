@@ -626,4 +626,205 @@ void main() {
       await settleSnackBars(tester);
     }, timeout: perTest);
   });
+
+  // ══════════════════ TLS-09 批量操作（v2.x 新增） ══════════════════
+  //
+  // 批量动作是**一次改多条**的高危面：漏写一条 = "批量停用了 5 条，其实只停了 3 条"；
+  // 只改界面不落库 = 重启后全部复活；失败静默 = 用户以为删干净了其实没有。
+  // 所以这一组的铁律与单条一致：**真的落库 + 失败必须可见**。
+  group('TLS-09 批量操作', () {
+    Finder batchKey(String k) => find.byKey(Key(k));
+
+    testWidgets('TLS-09 普通态有「批量管理」入口；进入后出现工具条且 FAB 让位',
+        (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await pumpList(tester, embedded: true);
+
+      expect(batchKey('task_batch_enter'), findsOneWidget);
+      expect(batchKey('task_batch_select_all'), findsNothing);
+
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+
+      expect(batchKey('task_batch_select_all'), findsOneWidget);
+      expect(find.text('已选 0 项'), findsOneWidget);
+      // 选择态不应还能新建 —— 避免"勾着任务却弹出新建页"。
+      // ⚠️ FAB 的退场走 Scaffold 的缩放动画，单次 pump 还在树上，须等其真的消失。
+      await waitFor(
+          tester,
+          () => find
+              .widgetWithText(FloatingActionButton, '新建任务')
+              .evaluate()
+              .isEmpty,
+          reason: '进入选择态后 FAB 应让位（退场动画结束后不在树上）');
+    }, timeout: perTest);
+
+    testWidgets('TLS-09b 多选：点条目勾选/取消，计数随之更新', (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await addTask(tester, makeTask('t2', name: '乙'));
+      await pumpList(tester, embedded: true);
+
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+
+      await tester.tap(find.text('甲'));
+      await tester.pump();
+      expect(find.text('已选 1 项'), findsOneWidget);
+
+      await tester.tap(find.text('乙'));
+      await tester.pump();
+      expect(find.text('已选 2 项'), findsOneWidget);
+
+      await tester.tap(find.text('乙')); // 再点一次 = 取消勾选
+      await tester.pump();
+      expect(find.text('已选 1 项'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09c 全选：一键勾满；再点变「取消全选」并清空', (tester) async {
+      for (var i = 0; i < 3; i++) {
+        await addTask(tester, makeTask('t$i', name: '任务$i'));
+      }
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+      expect(find.text('已选 3 项'), findsOneWidget);
+      expect(find.text('取消全选'), findsOneWidget);
+
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+      expect(find.text('已选 0 项'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09d 批量停用 → **真的落库**（不是只改界面）', (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await addTask(tester, makeTask('t2', name: '乙'));
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+
+      await tester.tap(batchKey('task_batch_disable'));
+      await waitForText(tester, '已停用 2 个任务');
+
+      final all = await dbRead(tester, () => TaskRepository(db).listAll());
+      expect(all.every((t) => !t.enabled), isTrue,
+          reason: '批量停用必须写进库；只改内存会让重启后"自己又开了"');
+      // 操作完成应自动退出选择态。
+      expect(batchKey('task_batch_select_all'), findsNothing);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09e 批量启用 → 落库（双向都要锁）', (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲', enabled: false));
+      await addTask(tester, makeTask('t2', name: '乙', enabled: false));
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+
+      await tester.tap(batchKey('task_batch_enable'));
+      await waitForText(tester, '已启用 2 个任务');
+
+      final all = await dbRead(tester, () => TaskRepository(db).listAll());
+      expect(all.every((t) => t.enabled), isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09f 批量删除 → 二次确认后任务与计划**一并**清掉',
+        (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await addTask(tester, makeTask('t2', name: '乙'));
+      await addOcc(
+          tester,
+          PlannedOccurrence(
+              id: 'o1',
+              taskId: 't1',
+              fireAt: DateTime.now().add(const Duration(days: 1)),
+              status: OccurrenceStatus.pending));
+      await addOcc(
+          tester,
+          PlannedOccurrence(
+              id: 'o2',
+              taskId: 't2',
+              fireAt: DateTime.now().add(const Duration(days: 1)),
+              status: OccurrenceStatus.pending));
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+
+      await tester.tap(batchKey('task_batch_delete'));
+      await waitForText(tester, '删除 2 个任务？');
+      await tester.tap(find.descendant(
+          of: find.byType(AlertDialog), matching: find.text('删除')));
+      await waitForText(tester, '已删除 2 个任务');
+
+      final left = await dbRead(tester, () => TaskRepository(db).listAll());
+      expect(left, isEmpty);
+      // 孤儿计划是最阴的缺陷：任务没了、计划还在，引擎仍会"替不存在的人响"。
+      final occ = await dbRead(tester, () => db.db.query('occurrences'));
+      expect(occ, isEmpty, reason: '删除必须级联清计划，不能留孤儿 occurrence');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09g 取消删除 → 库不变，且仍留在选择态', (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+
+      await tester.tap(batchKey('task_batch_delete'));
+      await waitForText(tester, '删除 1 个任务？');
+      await tester.tap(find.descendant(
+          of: find.byType(AlertDialog), matching: find.text('取消')));
+      await tester.pump();
+      await tester.pump();
+
+      final all = await dbRead(tester, () => TaskRepository(db).listAll());
+      expect(all.length, 1);
+      expect(all.single.id, 't1');
+      // 取消后仍留在选择态 —— 用户可能只是换了主意，不该被踢出去。
+      expect(batchKey('task_batch_select_all'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09h 选择态隐藏单条动作（开关/跳过），避免误改某一条',
+        (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await pumpList(tester, embedded: true);
+      expect(find.byType(Switch), findsOneWidget);
+
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+
+      expect(find.byType(Switch), findsNothing);
+      expect(find.byIcon(Icons.skip_next_outlined), findsNothing);
+    }, timeout: perTest);
+
+    testWidgets('TLS-09i 批量动作失败（重排炸）→ 如实报错，不许静默成功',
+        (tester) async {
+      await addTask(tester, makeTask('t1', name: '甲'));
+      await pumpList(tester, embedded: true);
+      await tester.tap(batchKey('task_batch_enter'));
+      await tester.pump();
+      await tester.tap(batchKey('task_batch_select_all'));
+      await tester.pump();
+
+      BackgroundServiceManager.replanHook =
+          () async => throw StateError('replan-boom');
+      await tester.tap(batchKey('task_batch_disable'));
+      await waitForText(tester, '批量停用失败：');
+
+      // 不许谎报成功。
+      expect(find.textContaining('已停用'), findsNothing);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+  });
 }

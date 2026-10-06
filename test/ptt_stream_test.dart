@@ -617,8 +617,15 @@ void main() {
       await until(() => sink.appended.length == 1, '首片开会话');
 
       await until(() => sink.disposeCalls == 1, '空闲超时自动回收会话', maxMs: 6000);
-      expect(File(sink.appended[0]).existsSync(), isFalse,
-          reason: '空闲回收必须清理分片，不留悬挂会话/文件');
+      // ⚠️ 「释放会话」与「删分片」是**两拍**：`_closePttStream` 先调
+      //    `sink.dispose()`（`disposeCalls` 立即可见），**随后**才
+      //    `await File(p).delete()`；而空闲回收走的是 `unawaited(...)`
+      //    （Timer 回调里无法 await 任何人）。因此必须**等文件真的消失**
+      //    再断言 —— 直接 `expect(existsSync(), isFalse)` 会在并行跑测试时
+      //    观测到"已释放、还没删完"的中间态（第 78 轮实测 flake，
+      //    单跑必过、并发偶红）。判据不变：分片最终必须被清理。
+      await until(() => !File(sink.appended[0]).existsSync(),
+          '空闲回收必须清理分片，不留悬挂会话/文件');
     });
   });
 

@@ -38,6 +38,41 @@ enum DayKind {
   final String label;
 }
 
+/// 反击计划的**排期模式**：生成出的任务覆盖哪些日期、共生成多少条。
+///
+/// ## 与"现有自动化任务的设置参数"的对应关系（一一对应）
+/// 每种模式都映射到 `TriggerType` 的既有语义，而不是另造一套：
+/// - [single] / [specificDate] ↔ `fixedOnce`（固定一次）；
+/// - [several] / [severalDays] / [dateRange] ↔ 有界（随机窗口 / 日期区间）；
+/// - [recurringRandom] ↔ **长期有效**（无结束日期，周一至周日循环随机）——默认。
+///
+/// ## 为什么不直接改成"一条随机窗口触发器"
+/// 计划需要按"工作日 / 休息日"切换音量/时长区间（见
+/// `counter_plan_materializer.dart` 顶部说明），而一条 `RandomWindowTrigger`
+/// 只能携带**同一组**动作参数。因此本模式只约束"生成范围/条数"，每条反击仍
+/// 逐日展开为一条普通自动化任务（`fixedOnce`），与手工任务完全同构。
+enum PlanScheduleMode {
+  single('单次'),
+  several('几次'),
+  severalDays('几日'),
+  specificDate('指定日期'),
+  dateRange('日期区间'),
+  recurringRandom('循环随机');
+
+  const PlanScheduleMode(this.label);
+  final String label;
+
+  /// 容错解析（读不懂 → 默认 [recurringRandom]，与出厂默认一致）。
+  static PlanScheduleMode parse(Object? raw) {
+    if (raw is String) {
+      for (final m in values) {
+        if (m.name == raw) return m;
+      }
+    }
+    return PlanScheduleMode.recurringRandom;
+  }
+}
+
 /// 一个"时段"的反击参数（工作日/休息日 × 白天/夜间 共四份）。
 class CounterWindow {
   const CounterWindow({
@@ -148,6 +183,13 @@ class CounterPlan {
     this.presetIds = defaultPresetIds,
     this.ttsTexts = defaultTtsTexts,
     this.voiceId = '',
+    this.scheduleMode = PlanScheduleMode.recurringRandom,
+    this.occurrenceCount = 3,
+    this.spanDays = 3,
+    this.specificDate,
+    this.rangeStart,
+    this.rangeEnd,
+    this.weekdays = defaultWeekdays,
   });
 
   /// 出厂预置动作池：「招人烦」音效（对应 `presets_manifest.json` 的 id）。
@@ -219,6 +261,58 @@ class CounterPlan {
 
   /// TTS 音色 id（见 `TtsVoices`）；空串 = 系统默认。
   final String voiceId;
+
+  // ---- 排期模式（v2.0，见 [PlanScheduleMode]）----
+
+  /// 排期模式，默认 [PlanScheduleMode.recurringRandom]（周一至周日循环随机）。
+  final PlanScheduleMode scheduleMode;
+
+  /// [PlanScheduleMode.several] 的总条数（几次）。
+  final int occurrenceCount;
+
+  /// [PlanScheduleMode.severalDays] 的覆盖天数（几日）。
+  final int spanDays;
+
+  /// [PlanScheduleMode.specificDate] 的指定日期（ISO `yyyy-MM-dd`）。
+  final String? specificDate;
+
+  /// [PlanScheduleMode.dateRange] 的起止日期（ISO `yyyy-MM-dd`，含端点）。
+  final String? rangeStart;
+  final String? rangeEnd;
+
+  /// [PlanScheduleMode.recurringRandom] 的循环星期集合（1=周一 … 7=周日）。
+  final List<int> weekdays;
+
+  /// 循环随机默认覆盖周一至周日（全部）。
+  static const List<int> defaultWeekdays = <int>[1, 2, 3, 4, 5, 6, 7];
+
+  /// 单次批量的条数上界（与物化器 `maxTasksPerDay` 同量级，防畸形输入算爆）。
+  static const int maxOccurrenceCount = 96;
+
+  /// 覆盖天数上界（约一季度，足够覆盖任意连休）。
+  static const int maxSpanDays = 92;
+
+  /// 单次/指定日期 / 次数批量模式是否"有界"（不需要滚动续算）。
+  bool get isRecurring => scheduleMode == PlanScheduleMode.recurringRandom;
+
+  /// 解析 ISO 日期（读不懂 → null，**不抛**）。
+  static DateTime? parseIsoDate(String? s) {
+    if (s == null) return null;
+    final t = s.trim();
+    if (t.isEmpty) return null;
+    final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(t);
+    if (m == null) return null;
+    final y = int.tryParse(m.group(1)!);
+    final mo = int.tryParse(m.group(2)!);
+    final d = int.tryParse(m.group(3)!);
+    if (y == null || mo == null || d == null) return null;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return DateTime(y, mo, d);
+  }
+
+  DateTime? get specificDateValue => parseIsoDate(specificDate);
+  DateTime? get rangeStartValue => parseIsoDate(rangeStart);
+  DateTime? get rangeEndValue => parseIsoDate(rangeEnd);
 
   /// 单条 TTS 文案长度上限（与 `TaskWire.maxTextLen` 同源语义）。
   static const int maxTtsTextLen = 200;
@@ -301,6 +395,37 @@ class CounterPlan {
         errs.add('TTS 文案过长（上限 $maxTtsTextLen 字）：${t.substring(0, 12)}…');
       }
     }
+
+    // 排期模式：只校验**当前模式真正用到的**字段，避免无关默认值误报。
+    if (occurrenceCount < 1 || occurrenceCount > maxOccurrenceCount) {
+      errs.add('「几次」的条数必须在 1–$maxOccurrenceCount');
+    }
+    if (spanDays < 1 || spanDays > maxSpanDays) {
+      errs.add('「几日」的天数必须在 1–$maxSpanDays');
+    }
+    switch (scheduleMode) {
+      case PlanScheduleMode.specificDate:
+        if (specificDateValue == null) {
+          errs.add('「指定日期」需要一个合法日期（yyyy-MM-dd）');
+        }
+      case PlanScheduleMode.dateRange:
+        final s = rangeStartValue;
+        final e = rangeEndValue;
+        if (s == null || e == null) {
+          errs.add('「日期区间」需要合法的起止日期（yyyy-MM-dd）');
+        } else if (s.isAfter(e)) {
+          errs.add('「日期区间」的起始日期不能晚于结束日期');
+        }
+      case PlanScheduleMode.recurringRandom:
+        if (weekdays.isEmpty ||
+            weekdays.any((w) => w < 1 || w > 7)) {
+          errs.add('「循环随机」的星期集合必须在 1–7（周一至周日）且非空');
+        }
+      case PlanScheduleMode.single:
+      case PlanScheduleMode.several:
+      case PlanScheduleMode.severalDays:
+        break;
+    }
     return errs;
   }
 
@@ -336,6 +461,14 @@ class CounterPlan {
           .map((t) => t.length > maxTtsTextLen ? t.substring(0, maxTtsTextLen) : t)
           .toList(),
       voiceId: _str(j['voiceId'], ''),
+      scheduleMode: PlanScheduleMode.parse(j['scheduleMode']),
+      occurrenceCount: _int(j['occurrenceCount'], d.occurrenceCount)
+          .clamp(1, maxOccurrenceCount),
+      spanDays: _int(j['spanDays'], d.spanDays).clamp(1, maxSpanDays),
+      specificDate: _strOrNull(j['specificDate']),
+      rangeStart: _strOrNull(j['rangeStart']),
+      rangeEnd: _strOrNull(j['rangeEnd']),
+      weekdays: _isoWeekdays(j['weekdays']),
     );
   }
 
@@ -366,6 +499,13 @@ class CounterPlan {
         'presetIds': presetIds,
         'ttsTexts': ttsTexts,
         'voiceId': voiceId,
+        'scheduleMode': scheduleMode.name,
+        'occurrenceCount': occurrenceCount,
+        'spanDays': spanDays,
+        if (specificDate != null) 'specificDate': specificDate,
+        if (rangeStart != null) 'rangeStart': rangeStart,
+        if (rangeEnd != null) 'rangeEnd': rangeEnd,
+        'weekdays': weekdays,
       };
 
   /// **规范 JSON 文本**（缩进 2）—— 供模版下载 / 导出分发。
@@ -385,6 +525,13 @@ class CounterPlan {
     List<String>? presetIds,
     List<String>? ttsTexts,
     String? voiceId,
+    PlanScheduleMode? scheduleMode,
+    int? occurrenceCount,
+    int? spanDays,
+    String? specificDate,
+    String? rangeStart,
+    String? rangeEnd,
+    List<int>? weekdays,
   }) =>
       CounterPlan(
         schema: schema,
@@ -401,6 +548,13 @@ class CounterPlan {
         presetIds: presetIds ?? this.presetIds,
         ttsTexts: ttsTexts ?? this.ttsTexts,
         voiceId: voiceId ?? this.voiceId,
+        scheduleMode: scheduleMode ?? this.scheduleMode,
+        occurrenceCount: occurrenceCount ?? this.occurrenceCount,
+        spanDays: spanDays ?? this.spanDays,
+        specificDate: specificDate ?? this.specificDate,
+        rangeStart: rangeStart ?? this.rangeStart,
+        rangeEnd: rangeEnd ?? this.rangeEnd,
+        weekdays: weekdays ?? this.weekdays,
       );
 
   // ---- 内部工具 ----
@@ -418,6 +572,24 @@ class CounterPlan {
   }
 
   static int _int(Object? v, int fallback) => v is num ? v.toInt() : fallback;
+
+  /// 可空字符串字段：非字符串或空串 → null（不落库、不参与校验）。
+  static String? _strOrNull(Object? v) {
+    if (v is! String) return null;
+    final t = v.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  /// 星期集合解析：只收 1–7 的整数，去重并升序；空/非法 → 默认全周。
+  static List<int> _isoWeekdays(Object? v) {
+    if (v is! List) return defaultWeekdays;
+    final set = <int>{
+      for (final e in v)
+        if (e is num && e.toInt() >= 1 && e.toInt() <= 7) e.toInt(),
+    };
+    if (set.isEmpty) return defaultWeekdays;
+    return set.toList()..sort();
+  }
 
   static List<String> _strList(Object? v) {
     if (v is! List) return const <String>[];

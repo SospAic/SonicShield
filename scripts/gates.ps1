@@ -14,7 +14,7 @@
 #   .\scripts\gates.ps1 -WithAot         # + AOT 绝对验收（flutter drive --profile）
 #   $env:ALLOW_DEVICE_SKIP = '1'         # 无 adb/无设备时**显式**放行跳过设备层（默认 BLOCKED/RC=3）
 #   $env:COVERAGE_MIN = '98.8'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
-#   $env:MIN_COVERED  = '11405'          # 可覆盖"绝对覆盖行"下限（同上）
+#   $env:MIN_COVERED  = '12476'          # 可覆盖"绝对覆盖行"下限（同上）
 #   第 45 轮（2026-09-28）：90.4 / 8680 → 92.6 / 8892（可测面 92.82% / 8898 分子 − 6 行余量）。
 #   第 66 轮（2026-10-02）：98.7 / 9477 → 98.8 / 9487（可测面 98.92% / 9493 分子 − 6 行余量）；
 #   第 67 轮（2026-10-03）：MIN_COVERED 9487 → 9490 → 9503（可测面 99.08% / 9509 分子 − 6 行余量；COVERAGE_MIN 保持 98.8）。
@@ -32,6 +32,12 @@
 #   第 76 轮（2026-10-06）：MIN_COVERED 10269 → 11405（可测面 98.85% / 11413 分子 − 8 行余量；含 lib/** 改动、
 #                            分母 10399 → 11546；COVERAGE_MIN 保持 98.8）。v2.0 四簇功能（音效库/仿真 TTS/
 #                            JSON 随机反击计划/实时动态反击）+ DeepSeek 内置默认 Key 轮。
+#   第 77 轮（2026-10-06）：MIN_COVERED 11405 → 11765（可测面 98.89% / 11773 分子 − 8 行余量；含 lib/** 改动、
+#                           分母 11546 → 11905；COVERAGE_MIN 保持 98.8）。新基线「APP 显示版本每轮同步」
+#                            + 反击计划生成参数化（音量/时长/间隔/休息日白天夜间开关全部可调）轮。
+#   第 78 轮（2026-10-07）：MIN_COVERED 11765 → 12476（可测面 98.94% / 12484 分子 − 8 行余量；含 lib/** 改动、
+#                            分母 11905 → 12618；COVERAGE_MIN 保持 98.8）。通话爆卡优化
+#                            （call_media_profile.dart 单一真源：采集档 + 按路数下发编码档位）轮。
 #   $env:SKIP_COVERAGE = '1'             # 只在排查覆盖率工具本身时用
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
 # ⚠️ 覆盖率阈值是 **ratchet 地板，只升不降，不是目标值**：
@@ -158,7 +164,7 @@ if (($out -join "`n") -match "All tests passed") {
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
     $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.8' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '11405' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12476' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。

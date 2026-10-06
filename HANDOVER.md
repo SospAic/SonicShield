@@ -11,20 +11,20 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-10-06 第七十六轮）**：v1.9.0-alpha（`+17`），
-功能层 **2450/2450** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（可测面 **98.85%（11413/11546）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=11405`）；
-机器学习锁 **73/73**（`_pt/bt4_locks.txt`；含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例**；`GEC` 10 例含新增 CI ratchet / 设备层 BLOCKED 一致锁）。
-🔴 **本轮产出 = v2.0 四簇功能一次性落地 + DeepSeek 内置默认 Key（可 `--dart-define` 覆盖、设置页可改，非写死）**（含 `lib/**` 改动）：① **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类，重生成 10 条招人烦音效（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等，`annoy_*`）；② **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程）；③ **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart`（本机按规则随机，时长区间与 AI 一致）+ `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**）+ 远程 `plan.*`（`lib/remote/protocol.dart` / `assist.dart`）；④ **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制）；⑤ **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（`String.fromEnvironment('DEEPSEEK_API_KEY', defaultValue: …)`），**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认；⑥ 本轮含 `lib/**` 改动 ⇒ 可测面分母 10399 → **11546（+1147）**、分子 10277 → **11413（+1136）**，可测面 **98.85%（11413/11546）**，`MIN_COVERED` 10269 → **11405**（只升不降）。
-⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛、DST 时区专项、A10 决策（见 `docs/12 §109`）。
+**当前状态（2026-10-07 第七十八轮）**：v1.9.0-alpha（`+19`），
+功能层 **2563/2563** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（可测面 **98.94%（12484/12618）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=12476`）；
+机器学习锁 **75/75**（含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例** + 🔴 **`version` 组 6 例（第七十七轮 4 → 6：新增「APP 显示版本每轮同步」两把锁）**；`GEC` 10 例含 CI ratchet / 设备层 BLOCKED 一致锁）。
+🔴 **本轮产出 = 通话爆卡优化（新增 `lib/remote/call_media_profile.dart` 单一真源：采集 640×480@24fps + `sendProfileFor(n)` 按并发视频路数下发 `RTCRtpSender.setParameters` 编码档位，主叫 / 被叫 / 多路全部接线；见 `docs/12 §111`）**（含 `lib/**` 改动）**；以下为第七十七轮（上一轮）产出 = ① 新基线「每次迭代 APP 显示版本每轮同步」（`AppMeta.displayVersion` = `version+build`；设置页「关于」只从常量取、禁写死；`version` 组 +2 锁）；② 反击计划生成参数化（新增 `lib/domain/models/counter_plan_params.dart` + 设置页 `_PlanParamsDialog` 全参数可调，本机随机与 AI 同源）；以下为第七十六轮产出：① **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类，重生成 10 条招人烦音效（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等，`annoy_*`）；② **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程）；③ **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart`（本机按规则随机，时长区间与 AI 一致）+ `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**）+ 远程 `plan.*`（`lib/remote/protocol.dart` / `assist.dart`）；④ **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制）；⑤ **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（`String.fromEnvironment('DEEPSEEK_API_KEY', defaultValue: …)`），**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认；⑥ 本轮含 `lib/**` 改动 ⇒ 可测面分母 10399 → **11546（+1147）**、分子 10277 → **11413（+1136）**，可测面 **98.85%（11413/11546）**，`MIN_COVERED` 10269 → **11405**（只升不降）。
+⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛、DST 时区专项、A10 决策（见 `docs/12 §111`）。
 残差逐行归类见 `_pt/covgap.py` / `_pt/covblocks.py` 输出；**100% 仍不可达**的量化裁决见 `docs/12 §104.1`。
-详见 `docs/12 §109` / `docs/17 §106`。
+详见 `docs/12 §111` / `docs/17 §108`。
 **设备层（第十六轮复验全绿）**：真机不在线 ⇒ 三机模拟器（API 36 / x86_64，`emulator-5554/5556/5558`）复验 **F-3 开机自启**（`isForeground=true types=0x00000002`）+ **集成 7 文件 22 例** + **AOT 6 例** + **远程命令 9/9（CRUD 8/8）** —— **十六轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69/70）**同编排全绿。
 ✅ **中继加固（`docs/17 §86.2`）继续有效**：本轮宿主锁/门禁作业均自带 `exec 1>>_pt/<轮次>_progress.log` + `trap ... EXIT`，正常写出 `.done`。
 BUG-078 / BUG-079 修复**未回归**。
 **多模拟器裁决**：双机并发 Gradle 不可行 ⇒ **通路分工**形态（`docs/17 §83.2`）。
-**覆盖率：门禁口径（可测面）98.85%（11413/11546）／对外诚实数字（全局）93.64%（11421/12197）**（**本轮含 `lib/**` 改动，分母 10399 → 11546（+1147）、分子 10277 → 11413（+1136）**）——
-双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=11405`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102` / `§103` / `§104` / `§105` / `§106` / `§107` / `§108` / `§109`）。
-⚠️ 自第三十六轮续四起启用**设备层豁免 651 行**（`background_engine.dart` 584 + `main.dart` 67）⇒ 两个口径**不再相等**；
+**覆盖率：门禁口径（可测面）98.94%（12484/12618）／对外诚实数字（全局）94.17%（12492/13265）**（**本轮含 `lib/**` 改动，分母 11905 → 12618（+713）、分子 11773 → 12484（+711）**）——
+双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=12476`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102` / `§103` / `§104` / `§105` / `§106` / `§107` / `§108` / `§109` / `§110` / `§111`）。
+⚠️ 自第三十六轮续四起启用**设备层豁免 647 行**（`background_engine.dart` 582 + `main.dart` 65）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
 ① **新建** `test/support/just_audio_stub.dart`（照 `just_audio_platform_interface 4.6.0` 的 `JustAudioPlatform` / `AudioPlayerPlatform` 写；`JustAudioPlatform.instance` 是**静态可写单例** ⇒ `tearDown` 必须**还原原实例**，否则污染同进程其它测试文件；另把该包显式加进 `dev_dependencies` 以过 `depend_on_referenced_packages`）；
@@ -2674,7 +2674,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第七十六轮** · 🔴 **v2.0 四簇功能一次性落地**（A 招人烦音效库 / B 仿真 TTS 音色（普通话 + 东北话，男女）/ C 以中国法定休息日·工作日为基准的 JSON 随机反击计划（AI 一键生成 + 本机随机 + 远程 `plan.*`）/ D 实时随机动态反击（轻 / 重量分级 + 15–25 分钟静默反制））+ 🔴 **DeepSeek 内置默认 Key**（`defaultApiKey` 开箱可用、**非写死**：`--dart-define` 可覆盖、设置页可改、显式清空即停用））—— **本轮含 `lib/**` 改动 ⇒ 可测面分母 10399 → 11546（+1147）、分子 10277 → 11413（+1136）**，可测面 **98.85%（11413/11546）**，`COVERAGE_MIN=98.8` **保持** / `MIN_COVERED` 10269 → **11405**（只升不降）；机器锁 **73/73**；设备层（真机 arm64 分级门槛 / 无线真机）见 `docs/12 §109`
+## ★ 当前口径（**第七十八轮** · 🔴 **通话爆卡优化**（新增单一真源 `lib/remote/call_media_profile.dart`：采集档 640×480@24fps（ideal+max）、`sendProfileFor(n)` 档位表（1→600k/24/1.0；2→400k/20/1.0；3→260k/15/1.5；≥4→150k/12/2.0，全部 `maintainFramerate`）、`applySendProfileToSender(s)` 每路显式调 `RTCRtpSender.setParameters` 压码率/帧率/分辨率并按路数降级，杜绝 WebRTC BWE 把码率抬到编码器跑不动 ⇒ 低端机整机卡；接线 `call_service.dart` / `multi_call_service.dart`；文档真源 `docs/16 §10`））—— **本轮含 `lib/**` 改动 ⇒ 可测面分母 11905 → 12618（+713）、分子 11773 → 12484（+711）**，可测面 **98.94%（12484/12618）**，`COVERAGE_MIN=98.8` **保持** / `MIN_COVERED` 11765 → **12476**（只升不降）；机器锁 **75/75**；设备层（真机 arm64 分级门槛 / 无线真机）见 `docs/12 §111`
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
@@ -2683,26 +2683,31 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 | 项 | 实测 |
 |---|---|
-| `bash scripts/gates.sh`（**4 步**，干净环境） | **RC=0 全绿**（`_pt/bt3gate.txt`） |
+| `scripts/gates.ps1`（**4 步**，干净环境） | **RC=0 全绿**（`_pt/gate78.txt`） |
 | 1/4 analyze | `No issues found!` |
-| 2/4 功能层 | **2450**（全绿） |
+| 2/4 功能层 | **2563**（全绿） |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 98.85%（11413/11546）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=11405`（含 `lib/**` 改动 ⇒ 分母 +1147、分子 +1136） |
-| 全局（对外诚实数字） | **93.64%（11421/12197）** |
-| **设备层** | 见 `docs/12 §109`（真机 arm64 分级门槛 + 无线真机执行全功能点用例；未在线者如实登记为**未执行**，不伪造通过） |
+| 4/4 覆盖率 ratchet | **可测面 98.94%（12484/12618）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=12476`（含 `lib/**` 改动 ⇒ 分母 11905 → 12618（+713）、分子 11773 → 12484（+711）） |
+| 全局（对外诚实数字） | **94.17%（12492/13265）** |
+| **设备层** | 见 `docs/12 §111`（真机 arm64 分级门槛 + 无线真机执行全功能点用例；未在线者如实登记为**未执行**，不伪造通过） |
 | 🔴 本轮缺陷 | **无新增用户侧缺陷**；第 50/53/73/75 轮 BUG-078 / BUG-079 / BUG-080 / BUG-081 经复验确认**修复未回归** |
-| 🔴 本轮实质产出 | ①🔴 **A 招人烦音效库**（`tool/gen_sfx.dart` 新增 `annoy` 分类，10 条 `annoy_*`：咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等）；②🔴 **B 仿真 TTS**（`tts_voice.dart` 音色目录 + `tts_service.dart` + `online_tts_client.dart`，`voiceId` 本地/远程全链路）；③🔴 **C 随机反击计划**（`counter_plan.dart` + `china_holidays.dart` + `counter_plan_materializer.dart` + `counter_plan_random.dart` + `counter_plan_service.dart` + `deepseek_service.dart` 一键生成/固定模版/100% 可导入 + 远程 `plan.*`）；④🔴 **D 实时动态反击**（`sound_guard_service.dart` 轻/重量分级 + `reactive_counter_service.dart` 重量随机反击 + 15–25 分钟静默反制）；⑤🔴 **DeepSeek 内置默认 Key**（`defaultApiKey`，非写死，`--dart-define`/设置页可改、显式清空即停用） |
-| 反漂移抽查 | 7 落点**逐位含有** `11413/11546` 与 `11421/12197`；`_pt/bg_drift_audit.py` 复跑（**零命中**） |
-| 机器锁（DGC / GEC / version / SCR） | ✅ **73/73**（LOCKS_RC=0；`doc_gate_consistency_test.dart` 55 = `DGC` 13 + `BAS` 11 + `BRL` 10 + `MCL` 5 + `CCL` 5 + `RCL` 5 + 🔴 **`SSL` 6**；`GEC` 10） |
-| 真实进度 | **可测面 +1136 行**（10277 → 11413）；功能层 **2450**、压测 **24** —— 本轮价值在 **v2.0 四簇功能一次性落地 + DeepSeek 内置默认 Key** |
-| 续作入口 | **`docs/12 §109` / `docs/17 §106`（接力棒 §106.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
+| 🔴 本轮实质产出 | ①🔴 **通话爆卡优化**（新增单一真源 `lib/remote/call_media_profile.dart`：采集档 640×480@24fps（ideal+max）、`sendProfileFor(n)` 档位表（1→600k/24/1.0；2→400k/20/1.0；3→260k/15/1.5；≥4→150k/12/2.0）、`applySendProfileToSender(s)` 逐路 `RTCRtpSender.setParameters` 压 maxBitrate/maxFramerate/分辨率 + 按路数降级 `degradationPreference`；接线 `call_service.dart` / `multi_call_service.dart`；文档真源 `docs/16 §10`；回归锁 `test/call_media_profile_test.dart`）；**以下为第七十七轮（上一轮）产出**：🔴 新基线「APP 显示版本每轮同步」（`AppMeta.displayVersion` = `version+build`）+ 🔴 反击计划生成参数化（`counter_plan_params.dart` + 设置页 `_PlanParamsDialog` 音量/时长/间隔/次数区间 + 四时段开关全部可调）；**以下为第七十六轮产出**：A 招人烦音效库 / B 仿真 TTS / C 随机反击计划 / D 实时动态反击 / DeepSeek 内置默认 Key |
+| 反漂移抽查 | 7 落点**逐位含有** `12484/12618` 与 `12492/13265`；`_pt/bg_drift_audit.py` 复跑（**零命中**） |
+| 机器锁（DGC / GEC / version / SCR） | ✅ **75/75**（LOCKS_RC=0；`doc_gate_consistency_test.dart` 55 = `DGC` 13 + `BAS` 11 + `BRL` 10 + `MCL` 5 + `CCL` 5 + `RCL` 5 + 🔴 **`SSL` 6**；`GEC` 10；🔴 `version` **6**（第七十七轮 4 → 6：新增「APP 显示版本每轮同步」两把锁）；`SCR` 4） |
+| 真实进度 | **可测面 +711 行**（11773 → 12484）；功能层 **2563**（上轮 2471，+92）、压测 **24** —— 本轮价值在 **通话爆卡优化（`call_media_profile.dart` 单一真源 + 逐路 `setParameters`）** |
+| 续作入口 | **`docs/12 §111` / `docs/17 §108`（接力棒 §108.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
 
-**本轮做了什么**：①开工四态（`git status --short` 判四态）；②🔴 **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类并重生成 10 条 `annoy_*`（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等），刷新 `assets/audio/presets_manifest.json`；③🔴 **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程，设置页「语音与接口」区块 + 任务编辑器 / 指令组音色选择），回归锁 `test/tts_v2_test.dart` / `test/settings_screen_test.dart`；④🔴 **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart`（本机按规则随机，时长区间与 AI 一致）+ `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**；模版下载 / 导入）+ 远程 `plan.*`（`lib/remote/protocol.dart` / `assist.dart`），回归锁 `test/counter_plan_test.dart` / `test/counter_plan_service_test.dart` / `test/deepseek_service_test.dart` / `test/remote_plan_command_test.dart`；⑤🔴 **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制），回归锁 `test/reactive_counter_test.dart`；⑥🔴 **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（非写死：`--dart-define=DEEPSEEK_API_KEY` 可覆盖、设置页可改；**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认），回归锁 `test/api_config_store_test.dart`（AC-01 / AC-02 / AC-06 / AC-08）；⑦宿主全量门禁 **RC=0**（analyze / 功能层 **2450** / 压测 **24** / ratchet）+ 机器锁 **73/73**；⑧反漂移 7 落点逐位核对（`11413/11546`、`11421/12197`）。**本轮含 `lib/**` 改动 ⇒ 分母 10399 → 11546（+1147）、分子 10277 → 11413（+1136），`COVERAGE_MIN=98.8` 保持 / `MIN_COVERED` 10269 → 11405。**
+**本轮做了什么**：①开工四态（`git status --short` 判四态）；②🔴 **通话爆卡优化** —— 新增单一真源 `lib/remote/call_media_profile.dart`（采集档 640×480@24fps ideal+max、`sendProfileFor(n)` 档位表、`applySendProfileToSender(s)` 逐路 `RTCRtpSender.setParameters` 压 maxBitrate/maxFramerate/分辨率 + 按路数降级 `degradationPreference`），接线 `call_service.dart` / `multi_call_service.dart`，设计真源 `docs/16 §10`，回归锁 `test/call_media_profile_test.dart` / `test/call_service_webrtc_test.dart`；③ 宿主全量门禁 **RC=0**（analyze / 功能层 **2563** / 压测 **24** / ratchet）+ 机器锁 **75/75**；④ 反漂移 7 落点逐位核对（`12484/12618`、`12492/13265`）。**以下为第七十七轮（上一轮）做了什么**：②🔴 新基线「APP 显示版本每轮同步」（`AppMeta.displayVersion` = `version+build`；`buildNumber` → 18；设置页「关于」从常量取、禁写死；`version` 组 +2 锁）；③🔴 反击计划生成参数化（新增 `lib/domain/models/counter_plan_params.dart` 参数模型 + 设置页 `_PlanParamsDialog`：音量 / 时长 / 时间间隔 / 每小时次数区间 + 四个时段开关全部可调，本机随机与 AI 同源）；④ 补测把可测面拉回阈值以上；⑤ 宿主全量门禁 **RC=0**（功能层 **2471** / 压测 **24**）+ 机器锁 **75/75**。**以下为第七十六轮（上一轮）做了什么**：🔴 **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类并重生成 10 条 `annoy_*`（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等），刷新 `assets/audio/presets_manifest.json`；③🔴 **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程，设置页「语音与接口」区块 + 任务编辑器 / 指令组音色选择），回归锁 `test/tts_v2_test.dart` / `test/settings_screen_test.dart`；④🔴 **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart`（本机按规则随机，时长区间与 AI 一致）+ `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**；模版下载 / 导入）+ 远程 `plan.*`（`lib/remote/protocol.dart` / `assist.dart`），回归锁 `test/counter_plan_test.dart` / `test/counter_plan_service_test.dart` / `test/deepseek_service_test.dart` / `test/remote_plan_command_test.dart`；⑤🔴 **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制），回归锁 `test/reactive_counter_test.dart`；⑥🔴 **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（非写死：`--dart-define=DEEPSEEK_API_KEY` 可覆盖、设置页可改；**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认），回归锁 `test/api_config_store_test.dart`（AC-01 / AC-02 / AC-06 / AC-08）；⑦宿主全量门禁 **RC=0**（analyze / 功能层 **2450** / 压测 **24** / ratchet）+ 机器锁 **73/73**；⑧反漂移 7 落点逐位核对（`11413/11546`、`11421/12197`）。**本轮含 `lib/**` 改动 ⇒ 分母 10399 → 11546（+1147）、分子 10277 → 11413（+1136），`COVERAGE_MIN=98.8` 保持 / `MIN_COVERED` 10269 → 11405。**
 
 **★ 新增长期规则**
 - 🔴 **开工必查工作树**（第六十一轮新增）：`git status --short` 先判**四态**（可续做 / 未完成 / 坏产物 / 无关）。
   本轮实测：他轮留下的 5 个测试文件改动**从未过门禁**，且同轮设备作业**半途掉线**（`CMD_RC=124`）。
   **可续做者接续并收口**（残骸自洽时先**单文件冒烟**，再跑权威门禁）；**不得静默丢弃**，也**不得在未验证前当权威产物**。
+- 🔴 **每次迭代 APP 显示版本必须同步更新**（第七十七轮新增基线）：`AppMeta.version` 只锁 `x.y.z[-pre]`，
+  而每次迭代抬的是**构建号** `+N` —— 若界面只显示 `version`，用户看不出本轮已更新（设置页「关于」历史上还长期写死 `v1.0.0`）。
+  ⇒ 界面必须显示 `AppMeta.displayVersion`（= `version+build`），且 `AppMeta.buildNumber` 必须与 `pubspec.yaml` 的 `+N` 逐字一致；
+  `test/version_consistency_test.dart` 两把锁盯住「`buildNumber` == pubspec `+N`」与「设置页含 `displayVersion` 且无写死版本字面量」。
+  **每轮改版本 = 同时改 `constants.dart` 的 `version`/`buildNumber` + `pubspec.yaml`**，否则 `version` 组判红。
 - 🔴 **阈值取整纪律**（第六十一轮实证）：`COVERAGE_MIN` **不是机械 floor 到 0.1** —— 若 floor 后与实测差
   **< 0.05pt（≈1~2 行）**，应再下一档（本轮 98.11 ⇒ 取 **98.0** 而非 98.1），让绝对下限 `MIN_COVERED` 成为约束项。
 - 🔴 **`CCL` 锁盯「权威块标题自述轮次」**（第六十轮新增）：`HANDOVER.md` 末尾 `## ★ 当前口径（**第N轮** …）`
@@ -2737,9 +2742,9 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 **未闭环**：① 🟡 真机 arm64 专项（厂商确认框 / 降级链 / BUG-075 扫码流）需设备在线方可执行；
 ② 🟡 仅剩 **A10**（用户未回复 ⇒ **继续挂起**）；
-③ 🟡 可测面残差 **133 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减。
+③ 🟡 可测面残差 **134 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减。
 
-**接力棒**：`docs/17 §106.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBY*`**）。
+**接力棒**：`docs/17 §108.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBZ*`**）。
 
 **历史（第五十三轮，已被超越）**：用户指令「多模拟器全部通路」⇒ 设备功能 22/22 + AOT 6 例 +
 远程命令 9/9（CRUD 8/8）；🔴 **抓修 BUG-079**（DB 迁移 v2→v3 漏补 `occurrences.quiet_exempt`

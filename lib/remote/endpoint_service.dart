@@ -1200,6 +1200,8 @@ class RcEndpointService {
         await _playRemote(msg, peer, logs);
       case RcCmd.vibrateStop:
         await _stopVibrate(msg, peer, logs);
+      case RcCmd.vibrateStart:
+        await _startVibrate(msg, peer, logs);
       case RcCmd.planApply:
         await _applyRemotePlan(msg, peer, logs, db, tasks);
       case RcCmd.planGet:
@@ -2046,6 +2048,39 @@ class RcEndpointService {
         message: 'by ${peer.name} · 已请求停止全部进行中的振动'
             '（实际停止条数见引擎审计）');
     await _ack(msg, true);
+  }
+
+  /// 远程**发起**振动（v2.x）：固定强度/固定时长，或随机强度/随机时长。
+  ///
+  /// 与 [RcCmd.vibrateStop] 是一对：停止是全局兜底，本命令是主动"震"。
+  /// 参数经 [rcVibrateStartConfig] **先夹紧再构造**（`ActionConfig` 的区间约束
+  /// 靠 `assert`，release 会被剥离），并复用引擎隔离的 [vibrateActionHandler] ——
+  /// 与指令组的 `random`/`continuous` 步走**同一条** `VibrateSession` 通路，
+  /// 从而执行引擎零改动。
+  ///
+  /// 端点未接线参数化振动时**如实失败**（`ok=false`），不退回固定节奏：
+  /// 对端要的是"固定强度 60%、震 5 秒"，端点震两下就结束是**承诺了没做到**。
+  Future<void> _startVibrate(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final handler = vibrateActionHandler;
+    if (handler == null) {
+      await logs.append(
+          source: 'remote',
+          action: 'vibrate.start',
+          status: 'skipped',
+          message: 'by ${peer.name} · 端点未接线参数化振动');
+      await _ack(msg, false, data: '端点未接线参数化振动');
+      return;
+    }
+    final cfg = rcVibrateStartConfig(msg.payload);
+    final label = rcVibrateStartLabel(msg.payload);
+    final r = await handler(action: cfg, occurrenceId: 'rcvibrate:${msg.id}');
+    await logs.append(
+        source: 'remote',
+        action: 'vibrate.start',
+        status: r.ok ? 'success' : 'failed',
+        message: 'by ${peer.name} · $label · ${r.message}');
+    await _ack(msg, r.ok, data: r.ok ? null : r.message);
   }
 
   Future<void> _runScript(
@@ -3787,6 +3822,7 @@ const Set<String> rcTransientOutboxTypes = {
   RcCmd.soundPlay,
   RcCmd.deviceAlert,
   RcCmd.volumeSet,
+  RcCmd.vibrateStart,
 };
 
 /// 瞬时动作的补发窗口（10 分钟）。

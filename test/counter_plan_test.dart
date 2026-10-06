@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/counter_plan.dart';
+import 'package:sonic_shield/domain/models/counter_plan_params.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/china_holidays.dart';
 import 'package:sonic_shield/domain/scheduling/counter_plan_materializer.dart';
 import 'package:sonic_shield/domain/scheduling/counter_plan_random.dart';
+import 'package:sonic_shield/services/counter_plan_service.dart';
 
 void main() {
   group('CP schema 与校验', () {
@@ -405,6 +407,518 @@ void main() {
       final a = CounterPlanRandom.generate(seed: 1);
       final b = CounterPlanRandom.generate(seed: 2);
       expect(a.toJson(), isNot(equals(b.toJson())));
+    });
+  });
+
+  group('PP 生成参数（参数化选择）', () {
+    test('PP-01 出厂参数与约定一致且通过校验', () {
+      final p = CounterPlanParams.defaults();
+      expect(p.validate(), isEmpty);
+      expect(p.workdayDay.volumeMin, 0.5);
+      expect(p.workdayDay.volumeMax, 0.8);
+      expect(p.workdayDay.durationSecMin, 3);
+      expect(p.workdayDay.durationSecMax, 8);
+      expect(p.workdayNight.volumeMin, 0.3);
+      expect(p.workdayNight.volumeMax, 0.5);
+      expect(p.restdayDay.enabled, isFalse);
+      expect(p.restdayNight.enabled, isFalse);
+      expect(p.cooldownSecMin, 600);
+      expect(p.cooldownSecMax, 2400);
+      expect(p.dayStartHour, 8);
+      expect(p.dayEndHour, 20);
+    });
+
+    test('PP-02 toJson/fromJson 往返一致（含各区间与开关）', () {
+      final p = CounterPlanParams.defaults().copyWith(
+        dayStartHour: 7,
+        dayEndHour: 22,
+        cooldownSecMin: 300,
+        cooldownSecMax: 900,
+        workdayDay: const PlanWindowParams(
+            volumeMin: 0.4,
+            volumeMax: 0.9,
+            durationSecMin: 2,
+            durationSecMax: 10,
+            actionsPerHourMin: 2,
+            actionsPerHourMax: 5),
+        restdayDay: const PlanWindowParams(
+            enabled: true, volumeMin: 0.2, volumeMax: 0.6),
+      );
+      final back =
+          CounterPlanParams.fromJson(jsonDecode(jsonEncode(p.toJson())));
+      expect(back.toJson(), p.toJson());
+      expect(back.validate(), isEmpty);
+    });
+
+    test('PP-03 fromJson 容错：脏类型回默认、越界夹紧、min>max 交换', () {
+      final p = CounterPlanParams.fromJson(<String, dynamic>{
+        'schema': CounterPlanParams.schemaId,
+        'dayStartHour': 99,
+        'cooldownSecMin': -5,
+        'workday': {
+          'day': {
+            'volumeMin': 1.8,
+            'volumeMax': -3,
+            'durationSecMax': 9999,
+            'actionsPerHourMin': 9,
+            'actionsPerHourMax': 2,
+          },
+        },
+        'presetIds': <dynamic>['a', '', 5, 'b'],
+      });
+      expect(p.dayStartHour, 23);
+      expect(p.cooldownSecMin, 0);
+      expect(p.workdayDay.volumeMin, 0.0);
+      expect(p.workdayDay.volumeMax, 1.0);
+      expect(p.workdayDay.durationSecMax, PlanWindowParams.maxDurationSec);
+      // 9 > 2 → 交换
+      expect(p.workdayDay.actionsPerHourMin, 2);
+      expect(p.workdayDay.actionsPerHourMax, 9);
+      expect(p.presetIds, const ['a', 'b']);
+    });
+
+    test('PP-04 validate 抓出各类问题', () {
+      final off = CounterPlanParams.defaults().copyWith(
+        workdayDay: const PlanWindowParams(enabled: false),
+        workdayNight: const PlanWindowParams(enabled: false),
+      );
+      expect(off.validate().any((e) => e.contains('至少需要启用')), isTrue);
+
+      final badVol = CounterPlanParams.defaults().copyWith(
+        workdayDay: const PlanWindowParams(volumeMin: 0.9, volumeMax: 0.2),
+      );
+      expect(badVol.validate().any((e) => e.contains('下限不能大于上限')), isTrue);
+
+      final badGap = CounterPlanParams.defaults()
+          .copyWith(cooldownSecMin: 900, cooldownSecMax: 300);
+      expect(
+          badGap.validate().any((e) => e.contains('动作间隔区间下限不能大于上限')),
+          isTrue);
+
+      final same =
+          CounterPlanParams.defaults().copyWith(dayStartHour: 8, dayEndHour: 8);
+      expect(same.validate().any((e) => e.contains('不能相同')), isTrue);
+
+      final empty = CounterPlanParams.defaults()
+          .copyWith(presetIds: const [], ttsTexts: const []);
+      expect(empty.validate().any((e) => e.contains('动作池为空')), isTrue);
+    });
+
+    test('PP-05 toPromptHint 含用户调整后的区间（AI 与本机同源）', () {
+      final p = CounterPlanParams.defaults().copyWith(
+        cooldownSecMin: 120,
+        cooldownSecMax: 480,
+        workdayDay: const PlanWindowParams(
+            volumeMin: 0.6, volumeMax: 0.9, durationSecMin: 4, durationSecMax: 6),
+      );
+      final hint = p.toPromptHint();
+      expect(hint, contains('0.60-0.90'));
+      expect(hint, contains('4-6'));
+      expect(hint, contains('120-480'));
+    });
+
+    test('PP-06 summary 列出四时段开关与区间', () {
+      final s = CounterPlanParams.defaults().summary();
+      expect(s, contains('工作日·白天'));
+      expect(s, contains('休息日·夜间：不反击'));
+    });
+  });
+
+  group('PP2 生成参数：精确校验分支与取值', () {
+    test('PP-07 validate 精确分支（schema / 间隔越界 / 文案过长 / 区间越界）', () {
+      const badSchema = CounterPlanParams(schema: 'other/9');
+      expect(badSchema.validate().any((e) => e.contains('schema 不匹配')), isTrue);
+
+      const badCdMin = CounterPlanParams(cooldownSecMin: -1);
+      expect(badCdMin.validate().any((e) => e.contains('动作间隔区间下限')), isTrue);
+
+      const badCdMax = CounterPlanParams(
+          cooldownSecMax: CounterPlanParams.maxCooldownSec + 1);
+      expect(badCdMax.validate().any((e) => e.contains('动作间隔区间上限')), isTrue);
+
+      const badVol =
+          CounterPlanParams(workdayDay: PlanWindowParams(volumeMin: -0.5));
+      expect(badVol.validate().any((e) => e.contains('音量区间必须在')), isTrue);
+
+      const badDur = CounterPlanParams(
+          workdayDay: PlanWindowParams(durationSecMin: 700, durationSecMax: 5));
+      expect(badDur.validate().any((e) => e.contains('时长区间必须在')), isTrue);
+
+      const swapDur = CounterPlanParams(
+          workdayDay: PlanWindowParams(durationSecMin: 8, durationSecMax: 3));
+      expect(
+          swapDur.validate().any((e) => e.contains('时长区间下限不能大于上限')), isTrue);
+
+      const badAct =
+          CounterPlanParams(workdayDay: PlanWindowParams(actionsPerHourMin: 99));
+      expect(
+          badAct.validate().any((e) => e.contains('每小时次数区间必须在')), isTrue);
+
+      const swapAct = CounterPlanParams(
+          workdayDay:
+              PlanWindowParams(actionsPerHourMin: 5, actionsPerHourMax: 2));
+      expect(
+          swapAct.validate().any((e) => e.contains('每小时次数区间下限不能大于上限')),
+          isTrue);
+
+      final longTts = CounterPlanParams(
+          ttsTexts: <String>['x' * (CounterPlan.maxTtsTextLen + 1)]);
+      expect(longTts.validate().any((e) => e.contains('TTS 文案过长')), isTrue);
+
+      expect(CounterPlanParams.defaults().isValid, isTrue);
+      expect(badSchema.isValid, isFalse);
+    });
+
+    test('PP-08 windowFor 取四组合对应时段', () {
+      final p = CounterPlanParams.defaults();
+      expect(p.windowFor(DayKind.workday, isNight: false), same(p.workdayDay));
+      expect(p.windowFor(DayKind.workday, isNight: true), same(p.workdayNight));
+      expect(p.windowFor(DayKind.restday, isNight: false), same(p.restdayDay));
+      expect(p.windowFor(DayKind.restday, isNight: true), same(p.restdayNight));
+    });
+
+    test('PP-09 PlanWindowParams.copyWith 生效且 clamped 兜底', () {
+      const w = PlanWindowParams();
+      expect(w.copyWith(enabled: false).enabled, isFalse);
+      // copyWith 内部已 clamped：volumeMin=9 被夹到 1.0 后超过原 volumeMax(0.8)，
+      // 于是 min/max 交换 → min 落到 0.8、max 落到 1.0。
+      expect(w.copyWith(volumeMin: 9).volumeMin, 0.8);
+      expect(w.copyWith(volumeMin: 9).volumeMax, 1.0);
+      expect(w.copyWith(durationSecMin: 0).clamped().durationSecMin, 1);
+      expect(w.copyWith(actionsPerHourMax: 99).clamped().actionsPerHourMax,
+          PlanWindowParams.maxActionsPerHour);
+    });
+  });
+
+  group('RD2 参数化随机', () {
+    test('RD-05 自定义参数：结果严格落在用户区间内', () {
+      const params = CounterPlanParams(
+        cooldownSecMin: 120,
+        cooldownSecMax: 200,
+        dayStartHour: 9,
+        dayEndHour: 18,
+        workdayDay: PlanWindowParams(
+            volumeMin: 0.6,
+            volumeMax: 0.9,
+            durationSecMin: 4,
+            durationSecMax: 6,
+            actionsPerHourMin: 2,
+            actionsPerHourMax: 4),
+      );
+      for (var seed = 0; seed < 30; seed++) {
+        final p = CounterPlanRandom.generate(seed: seed, params: params);
+        expect(p.validate(), isEmpty, reason: 'seed=$seed');
+        expect(p.dayStartHour, 9);
+        expect(p.dayEndHour, 18);
+        expect(p.cooldownSec, inInclusiveRange(120, 200));
+        expect(p.workdayDay.volumeMin, inInclusiveRange(0.6, 0.9));
+        expect(p.workdayDay.volumeMax,
+            inInclusiveRange(p.workdayDay.volumeMin, 0.9));
+        expect(p.workdayDay.durationSecMin, inInclusiveRange(4, 6));
+        expect(p.workdayDay.durationSecMax,
+            inInclusiveRange(p.workdayDay.durationSecMin, 6));
+        expect(p.workdayDay.actionsPerHour, inInclusiveRange(2, 4));
+      }
+    });
+
+    test('RD-06 参数开启休息日两段 → 生成结果含休息日反击', () {
+      final params = CounterPlanParams.defaults().copyWith(
+        restdayDay:
+            const PlanWindowParams(enabled: true, volumeMin: 0.2, volumeMax: 0.6),
+        restdayNight: const PlanWindowParams(
+            enabled: true, volumeMin: 0.05, volumeMax: 0.2),
+      );
+      final p = CounterPlanRandom.generate(seed: 11, params: params);
+      expect(p.restdayDay.enabled, isTrue);
+      expect(p.restdayNight.enabled, isTrue);
+      expect(p.restdayDay.volumeMin, inInclusiveRange(0.2, 0.6));
+      expect(p.restdayNight.volumeMax, inInclusiveRange(0.05, 0.2));
+      expect(p.validate(), isEmpty);
+    });
+
+    test('RD-07 同种子同参数 → 完全可复现', () {
+      const params = CounterPlanParams(cooldownSecMin: 300, cooldownSecMax: 600);
+      final a = CounterPlanRandom.generate(seed: 3, params: params);
+      final b = CounterPlanRandom.generate(seed: 3, params: params);
+      expect(a.toJson(), b.toJson());
+    });
+  });
+
+  group('SCH 排期模式（生成范围 / 条数）', () {
+    final base = CounterPlan.defaults().copyWith(
+      presetIds: const ['annoy_spit'],
+      ttsTexts: const ['干啥呢？'],
+      cooldownSec: 60,
+    );
+    const pool = <String>{'annoy_spit'};
+
+    List<Task> mat(CounterPlan p, DateTime from, {int days = 7}) =>
+        CounterPlanMaterializer.materialize(p,
+            planId: 'sched',
+            from: from,
+            days: days,
+            assetIdPool: pool,
+            now: null);
+
+    // 用任务 id 里编码的**日历日**（夜间时段会跨到次日凌晨，不能看 at）。
+    Set<String> dayKeys(List<Task> l) => l
+        .map((t) => ChinaHolidays.isoDate(dayOfCounterTaskId(t.id)!))
+        .toSet();
+
+    test('SCH-01 默认排期 = 循环随机，覆盖 horizon 内的所有工作日', () {
+      expect(base.scheduleMode, PlanScheduleMode.recurringRandom);
+      expect(base.weekdays, const <int>[1, 2, 3, 4, 5, 6, 7]);
+      final l = mat(base, DateTime(2026, 3, 9)); // 周一
+      // 3/14、3/15 为休息日，默认休息日两段关闭 → 无任务。
+      expect(dayKeys(l), {
+        '2026-03-09',
+        '2026-03-10',
+        '2026-03-11',
+        '2026-03-12',
+        '2026-03-13',
+      });
+    });
+
+    test('SCH-02 循环随机 + 指定星期：只在所选星期生成', () {
+      final p = base.copyWith(weekdays: const <int>[1, 3, 5]); // 一/三/五
+      final l = mat(p, DateTime(2026, 3, 9));
+      expect(dayKeys(l), {'2026-03-09', '2026-03-11', '2026-03-13'});
+    });
+
+    test('SCH-03 单次：整份计划恰好 1 条', () {
+      final p = base.copyWith(scheduleMode: PlanScheduleMode.single);
+      expect(mat(p, DateTime(2026, 3, 9)).length, 1);
+    });
+
+    test('SCH-04 几次：恰好 N 条', () {
+      final p = base.copyWith(
+          scheduleMode: PlanScheduleMode.several, occurrenceCount: 5);
+      expect(mat(p, DateTime(2026, 3, 9)).length, 5);
+    });
+
+    test('SCH-05 几日：只覆盖前 N 个日历日', () {
+      final p = base.copyWith(
+          scheduleMode: PlanScheduleMode.severalDays, spanDays: 2);
+      expect(dayKeys(mat(p, DateTime(2026, 3, 9))), {'2026-03-09', '2026-03-10'});
+    });
+
+    test('SCH-06 指定日期：只在指定日生成', () {
+      final p = base.copyWith(
+          scheduleMode: PlanScheduleMode.specificDate,
+          specificDate: '2026-03-12');
+      expect(dayKeys(mat(p, DateTime(2026, 3, 9))), {'2026-03-12'});
+    });
+
+    test('SCH-07 日期区间：只在区间内生成', () {
+      final p = base.copyWith(
+          scheduleMode: PlanScheduleMode.dateRange,
+          rangeStart: '2026-03-12',
+          rangeEnd: '2026-03-13');
+      expect(dayKeys(mat(p, DateTime(2026, 3, 9))), {'2026-03-12', '2026-03-13'});
+    });
+
+    test('SCH-08 有界/循环判定', () {
+      expect(base.isRecurring, isTrue);
+      expect(base.copyWith(scheduleMode: PlanScheduleMode.single).isRecurring,
+          isFalse);
+      expect(base.copyWith(scheduleMode: PlanScheduleMode.dateRange).isRecurring,
+          isFalse);
+    });
+
+    test('SCH-09 生成参数 ↔ JSON 往返（含排期字段）', () {
+      final p = CounterPlanParams.defaults().copyWith(
+        scheduleMode: PlanScheduleMode.dateRange,
+        rangeStart: '2026-03-12',
+        rangeEnd: '2026-03-20',
+        occurrenceCount: 7,
+        spanDays: 5,
+        weekdays: const <int>[1, 2, 3],
+      );
+      final back = CounterPlanParams.fromJson(jsonDecode(jsonEncode(p.toJson())));
+      expect(back.scheduleMode, PlanScheduleMode.dateRange);
+      expect(back.rangeStart, '2026-03-12');
+      expect(back.rangeEnd, '2026-03-20');
+      expect(back.occurrenceCount, 7);
+      expect(back.spanDays, 5);
+      expect(back.weekdays, const <int>[1, 2, 3]);
+      expect(back.validate(), isEmpty);
+    });
+
+    test('SCH-10 计划 ↔ JSON 往返（排期字段随计划落库）', () {
+      final p = base.copyWith(
+        scheduleMode: PlanScheduleMode.specificDate,
+        specificDate: '2026-03-12',
+        occurrenceCount: 9,
+        spanDays: 4,
+        weekdays: const <int>[6, 7],
+      );
+      final back = CounterPlan.fromJson(jsonDecode(jsonEncode(p.toJson())));
+      expect(back.scheduleMode, PlanScheduleMode.specificDate);
+      expect(back.specificDate, '2026-03-12');
+      expect(back.occurrenceCount, 9);
+      expect(back.spanDays, 4);
+      expect(back.weekdays, const <int>[6, 7]);
+    });
+
+    test('SCH-11 validate 抓出排期问题', () {
+      expect(
+          base
+              .copyWith(scheduleMode: PlanScheduleMode.specificDate)
+              .validate()
+              .any((e) => e.contains('指定日期')),
+          isTrue);
+      expect(
+          base
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.dateRange,
+                  rangeStart: '2026-03-20',
+                  rangeEnd: '2026-03-12')
+              .validate()
+              .any((e) => e.contains('起始日期不能晚于')),
+          isTrue);
+      expect(
+          CounterPlanParams.defaults()
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.several,
+                  occurrenceCount: 999)
+              .validate()
+              .any((e) => e.contains('「几次」的条数')),
+          isTrue);
+      // 循环随机把星期清空 → 报错（渲染层保证至少留一天，这里是兜底校验）。
+      expect(
+          const CounterPlanParams(
+                  scheduleMode: PlanScheduleMode.recurringRandom,
+                  weekdays: <int>[])
+              .validate()
+              .any((e) => e.contains('「循环随机」')),
+          isTrue);
+    });
+
+    test('SCH-12 本机随机生成带上排期字段并按其物化', () {
+      final p = CounterPlanRandom.generate(
+          seed: 7,
+          params: CounterPlanParams.defaults().copyWith(
+              scheduleMode: PlanScheduleMode.several, occurrenceCount: 4));
+      expect(p.scheduleMode, PlanScheduleMode.several);
+      expect(p.occurrenceCount, 4);
+      final l = mat(p, DateTime(2026, 3, 9));
+      expect(l.length, 4);
+    });
+  });
+
+  group('COV67 排期校验/摘要的剩余分支', () {
+    CounterPlan base() => CounterPlan.defaults().copyWith(
+          presetIds: const ['annoy_spit'],
+          ttsTexts: const ['干啥呢？'],
+        );
+
+    test('COV67-01 CounterPlan.validate：几次/几日越界、区间缺失、有界模式 break', () {
+      // occurrenceCount 越界（counter_plan.dart:401）
+      expect(
+          base()
+              .copyWith(occurrenceCount: 999)
+              .validate()
+              .any((e) => e.contains('「几次」的条数')),
+          isTrue);
+      // spanDays 越界（404）
+      expect(
+          base()
+              .copyWith(spanDays: 999)
+              .validate()
+              .any((e) => e.contains('「几日」的天数')),
+          isTrue);
+      // dateRange 缺起止日期（415）：默认 rangeStart/rangeEnd 为 null
+      expect(
+          base()
+              .copyWith(scheduleMode: PlanScheduleMode.dateRange)
+              .validate()
+              .any((e) => e.contains('日期区间')),
+          isTrue);
+      // recurringRandom 星期集合为空（422）
+      expect(
+          base()
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.recurringRandom,
+                  weekdays: const <int>[])
+              .validate()
+              .any((e) => e.contains('循环随机')),
+          isTrue);
+      // 有界模式单次/几次/几日走 break 分支（424–426）
+      for (final m in const [
+        PlanScheduleMode.single,
+        PlanScheduleMode.several,
+        PlanScheduleMode.severalDays,
+      ]) {
+        expect(base().copyWith(scheduleMode: m).validate(), isEmpty,
+            reason: '$m 是合法有界排期，不应报错');
+      }
+    });
+
+    test('COV67-02 CounterPlanParams.validate：几日越界、指定日期/区间非法、severalDays',
+        () {
+      final d = CounterPlanParams.defaults();
+      // spanDays 越界（counter_plan_params.dart:410）
+      expect(
+          d.copyWith(spanDays: 999).validate().any((e) => e.contains('「几日」的天数')),
+          isTrue);
+      // specificDate 非法（414–415）
+      expect(
+          d
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.specificDate, specificDate: 'bad')
+              .validate()
+              .any((e) => e.contains('指定日期')),
+          isTrue);
+      // dateRange 缺起止（421）
+      expect(
+          d
+              .copyWith(scheduleMode: PlanScheduleMode.dateRange)
+              .validate()
+              .any((e) => e.contains('日期区间')),
+          isTrue);
+      // dateRange 起晚于止（423）
+      expect(
+          d
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.dateRange,
+                  rangeStart: '2026-03-20',
+                  rangeEnd: '2026-03-12')
+              .validate()
+              .any((e) => e.contains('起始日期不能晚于')),
+          isTrue);
+      // severalDays 走 break 分支（431）
+      expect(
+          d.copyWith(scheduleMode: PlanScheduleMode.severalDays).validate(),
+          isEmpty);
+    });
+
+    test('COV67-03 scheduleSummary / toPromptHint 的指定日期与区间分支', () {
+      final d = CounterPlanParams.defaults();
+      // scheduleSummary: specificDate（446）与 dateRange（448）
+      expect(
+          d
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.specificDate,
+                  specificDate: '2026-03-12')
+              .scheduleSummary(),
+          contains('2026-03-12'));
+      expect(
+          d
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.dateRange,
+                  rangeStart: '2026-03-12',
+                  rangeEnd: '2026-03-13')
+              .scheduleSummary(),
+          contains('2026-03-12'));
+      // toPromptHint: dateRange（483）
+      expect(
+          d
+              .copyWith(
+                  scheduleMode: PlanScheduleMode.dateRange,
+                  rangeStart: '2026-03-12',
+                  rangeEnd: '2026-03-13')
+              .toPromptHint(),
+          contains('日期区间'));
     });
   });
 }

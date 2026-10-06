@@ -561,4 +561,57 @@ void main() {
       expect(svc.sessionOf('EP51'), isNull, reason: '挂断后该路必须从列表移除');
     });
   });
+
+  // ══════════════════ MC-G 媒体档位随路数自适应（第七十八轮） ══════════════════
+  //
+  // 多路是 **P2P，没有 SFU** ⇒ 每一路各跑一个编码器，路数越多 CPU 越爆
+  // （低端机"too many video streams simultaneously"是常见卡顿根因）。
+  // 因此必须在**增减路**时对所有路重下发档位：加一路 → 一起降级；
+  // 少一路 → 恢复更高画质。只降不恢复会让剩余通话一直停在低画质。
+
+  group('MC-G 编码档位随并发路数自适应', () {
+    int? bitrateOf(Map<String, dynamic> record) {
+      final list = record['encodings'] as List;
+      if (list.isEmpty) return null;
+      return (list.first as Map<String, dynamic>)['maxBitrate'] as int?;
+    }
+
+    test('MC-26 单路：视频 sender 下发 600kbps + maintain-framerate', () async {
+      await svc.connect(peer('EP60'), store, video: true);
+      expect(rtc.senderParameters, hasLength(1),
+          reason: '只该有视频 sender 被下发；为 0 ⇒ 编码仍无上限（"爆卡"根因）');
+      expect(rtc.senderParameters.single['degradationPreference'],
+          'maintain-framerate');
+      expect(bitrateOf(rtc.senderParameters.single), 600000);
+    });
+
+    test('MC-27 新增第二路 → 两路一起降级到 400kbps', () async {
+      await svc.connect(peer('EP61'), store, video: true);
+      rtc.senderParameters.clear();
+      await svc.connect(peer('EP62'), store, video: true);
+      expect(rtc.senderParameters, hasLength(2),
+          reason: '新加一路时必须对**所有**路重下发（只调新路 ⇒ 老路仍按单路码率编码）');
+      for (final p in rtc.senderParameters) {
+        expect(bitrateOf(p), 400000, reason: '两路并发各降码率，避免编码器过载');
+        expect(p['degradationPreference'], 'maintain-framerate');
+      }
+    });
+
+    test('MC-28 挂断一路 → 剩余那路恢复单路档位', () async {
+      await svc.connect(peer('EP63'), store, video: true);
+      await svc.connect(peer('EP64'), store, video: true);
+      rtc.senderParameters.clear();
+      await svc.hangUp('EP64');
+      expect(rtc.senderParameters, hasLength(1),
+          reason: '路数下降要对剩余路重下发；不下发 ⇒ 剩下的通话一直停在低画质');
+      expect(bitrateOf(rtc.senderParameters.single), 600000);
+    });
+
+    test('MC-29 语音多路：没有视频 sender ⇒ 一律不下发档位', () async {
+      await svc.connect(peer('EP65'), store, video: false);
+      await svc.connect(peer('EP66'), store, video: false);
+      expect(rtc.senderParameters, isEmpty,
+          reason: '语音路不占视频编码器，不该出现无意义的 setParameters');
+    });
+  });
 }

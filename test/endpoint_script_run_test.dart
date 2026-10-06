@@ -405,4 +405,73 @@ void main() {
       expect(await hasLog('script.stop', 'success'), isTrue);
     });
   });
+
+  // ─────────────────── 远程 vibrate.start（_startVibrate） ───────────────────
+
+  group('ESR vibrate.start 远程命令（_startVibrate 生产路径）', () {
+    test('ESR-13 handler 已接线：固定振动夹紧后交给引擎，成功由结果决定', () async {
+      final seen = <({ActionConfig action, String occ})>[];
+      svc.vibrateActionHandler = (
+          {required ActionConfig action, required String occurrenceId}) async {
+        seen.add((action: action, occ: occurrenceId));
+        return const RunNowResult(ok: true, message: '引擎已接受');
+      };
+
+      final m = RcMessage.now(RcCmd.vibrateStart, {
+        'mode': 'fixed',
+        'durationSec': 5,
+        'intensity': 0.6,
+      });
+      await svc.debugDispatch(m, peer);
+      await settle();
+
+      expect(seen, hasLength(1),
+          reason: 'vibrate.start 必须走参数化振动处理器，不能退化成"震两下"');
+      expect(seen.single.occ, 'rcvibrate:${m.id}',
+          reason: 'occurrenceId 必须按消息 id 唯一，便于审计与回溯');
+      expect(await hasLog('vibrate.start', 'success'), isTrue,
+          reason: '引擎接受 ⇒ 必须写 success 审计并回 ok=true');
+    });
+
+    test('ESR-14 handler 报失败 → 审计 failed，绝不谎报成功', () async {
+      svc.vibrateActionHandler = (
+          {required ActionConfig action, required String occurrenceId}) async =>
+          const RunNowResult(ok: false, message: '引擎未运行');
+
+      await svc.debugDispatch(
+        RcMessage.now(RcCmd.vibrateStart, {
+          'mode': 'random',
+          'durationSecMax': 5,
+          'amplitudeMin': 0.3,
+          'amplitudeMax': 0.9,
+        }),
+        peer,
+      );
+      await settle();
+
+      expect(
+          await hasLog('vibrate.start', 'failed', contains: '引擎未运行'), isTrue);
+      expect(await hasLog('vibrate.start', 'success'), isFalse,
+          reason: '能力层说失败时不得留下 success（承诺了没做到）');
+    });
+
+    test('ESR-15 handler 未接线 → 如实 skipped，绝不退回固定节奏', () async {
+      // tearDown 已清空处理器；这里显式再确认，避免单例残留。
+      svc.vibrateActionHandler = null;
+      svc.vibrateHandler = (p) async => fail('不得退回老路径震两下就完事');
+
+      await svc.debugDispatch(
+        RcMessage.now(RcCmd.vibrateStart, {'mode': 'continuous'}),
+        peer,
+      );
+      await settle();
+
+      expect(
+          await hasLog('vibrate.start', 'skipped', contains: '端点未接线参数化振动'),
+          isTrue,
+          reason: '端点没接线参数化振动时必须如实 skipped（ok=false），'
+              '而不是退化成固定节奏"敷衍一下"');
+      expect(await hasLog('vibrate.start', 'success'), isFalse);
+    });
+  });
 }

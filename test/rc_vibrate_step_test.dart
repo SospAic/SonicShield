@@ -291,4 +291,117 @@ void main() {
           reason: '固定节奏必须保持空参数（协议向后兼容）');
     });
   });
+
+  // ══════════════════ VS 远程发送振动（`vibrate.start`，v2.x） ══════════════════
+  //
+  // 用户要的两种形态：**固定强度+固定时长** 与 **随机强度+随机时长**，且强度/时长
+  // 可调。`fixed` 在**远程命令**语境下刻意不同于指令组的"固定节奏"（那里没有强度），
+  // 这里是"震 N 秒、强度 X%"的恒定振动 —— 用 ContinuousVibrateAction 的退化区间表达，
+  // 从而与 random/continuous 共用同一条 VibrateSession 通路（引擎零改动）。
+  group('VS 远程发送振动', () {
+    test('VS-01 fixed 缺省 → 恒定振动（强度/时长退化为点），且强制遵循勿扰', () {
+      final a = rcVibrateStartConfig(const <String, dynamic>{})
+          as ContinuousVibrateAction;
+      expect(a.durationSecMin, 5);
+      expect(a.durationSecMax, 5);
+      expect(a.amplitudeMin, 0.6);
+      expect(a.amplitudeMax, 0.6);
+      expect(a.jitterMs, 0, reason: '恒定振动不得有强度波动');
+      expect(a.respectDnd, isTrue, reason: '远程路径不得绕过系统勿扰');
+    });
+
+    test('VS-02 fixed 越界先夹紧再构造（release 下 assert 被剥离）', () {
+      final tooBig = rcVibrateStartConfig(const {
+        'mode': 'fixed',
+        'durationSec': 999999999,
+        'intensity': 9,
+      }) as ContinuousVibrateAction;
+      expect(tooBig.durationSecMin, VibrateLimits.maxDurationSec);
+      expect(tooBig.amplitudeMax, 1.0);
+
+      final tooSmall = rcVibrateStartConfig(const {
+        'mode': 'fixed',
+        'durationSec': -5,
+        'intensity': -2,
+      }) as ContinuousVibrateAction;
+      expect(tooSmall.durationSecMin, 1);
+      expect(tooSmall.amplitudeMin, 0.0);
+    });
+
+    test('VS-03 random 与指令组同口径（复用 vibrateConfig 的夹紧）', () {
+      final a = rcVibrateStartConfig(const {
+        'mode': 'random',
+        'durationSecMin': 3,
+        'durationSecMax': 10,
+        'amplitudeMin': 0.4,
+        'amplitudeMax': 1.0,
+      }) as RandomVibrateAction;
+      expect(a.durationSecMin, 3);
+      expect(a.durationSecMax, 10);
+      expect(a.amplitudeMin, 0.4);
+      expect(a.amplitudeMax, 1.0);
+      expect(a.respectDnd, isTrue);
+    });
+
+    test('VS-04 continuous 区间浮动（时长/强度/波动周期都生效）', () {
+      final a = rcVibrateStartConfig(const {
+        'mode': 'continuous',
+        'durationSecMin': 10,
+        'durationSecMax': 30,
+        'amplitudeMin': 0.5,
+        'amplitudeMax': 1.0,
+        'jitterMs': 800,
+      }) as ContinuousVibrateAction;
+      expect(a.durationSecMin, 10);
+      expect(a.durationSecMax, 30);
+      expect(a.jitterMs, 800);
+      expect(a.respectDnd, isTrue);
+    });
+
+    test('VS-05 未知/缺失 mode 归到 fixed（与 rcVibrateModeOf 一致，不抛）', () {
+      for (final bad in <Object?>[null, 'RANDOM', 'x', 42, <String>[]]) {
+        final a = rcVibrateStartConfig({'mode': bad});
+        expect(a, isA<ContinuousVibrateAction>(), reason: 'mode=$bad');
+        expect((a as ContinuousVibrateAction).durationSecMin, 5,
+            reason: 'mode=$bad 应落到 fixed 的缺省时长');
+      }
+    });
+
+    test('VS-06 label 给出台数与强度（审计/按钮文案用）', () {
+      final f = rcVibrateStartLabel(
+          const {'mode': 'fixed', 'durationSec': 5, 'intensity': 0.6});
+      expect(f, contains('固定振动 5 秒'));
+      expect(f, contains('60%'));
+
+      final r = rcVibrateStartLabel(const {
+        'mode': 'random',
+        'durationSecMin': 3,
+        'durationSecMax': 10,
+        'amplitudeMin': 0.4,
+        'amplitudeMax': 1.0,
+      });
+      expect(r, contains('随机振动 3–10 秒'));
+      expect(r, contains('40%'));
+      expect(r, contains('100%'));
+    });
+
+    test('VS-07 规格覆盖三种 mode；非 fixed 与指令组同源（同一份声明）', () {
+      for (final m in RcVibrateMode.values) {
+        expect(rcVibrateStartFields.containsKey(m), isTrue, reason: '$m 缺规格');
+      }
+      expect(
+          {for (final f in rcVibrateStartFieldsFor(RcVibrateMode.fixed)) f.key},
+          {'durationSec', 'intensity'},
+          reason: 'fixed = 固定强度 + 固定时长，字段必须恰好是这两个');
+      expect(
+          identical(rcVibrateStartFieldsFor(RcVibrateMode.random),
+              rcVibrateRandomFields),
+          isTrue,
+          reason: 'random 规格必须与指令组共用同一份声明，否则会分叉');
+      expect(
+          identical(rcVibrateStartFieldsFor(RcVibrateMode.continuous),
+              rcVibrateContinuousFields),
+          isTrue);
+    });
+  });
 }

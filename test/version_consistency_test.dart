@@ -41,6 +41,16 @@ void main() {
           .map((m) => m.group(1)!)
           .toList();
 
+  /// 取 `version: 1.9.0-alpha+18` 里的**构建号** `18`。
+  String pubspecBuild() {
+    final m = RegExp(
+            r'^version:\s*[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.\-]+)?\+([0-9]+)',
+            multiLine: true)
+        .firstMatch(pubspec);
+    expect(m, isNotNull, reason: 'pubspec.yaml 的 version 行必须带 `+构建号`');
+    return m!.group(1)!;
+  }
+
   /// `(a, b, c, isPrerelease)` —— 用于比较大小。
   (int, int, int, bool) semver(String v) {
     final m = RegExp(r'^(\d+)\.(\d+)\.(\d+)(-(.+))?$').firstMatch(v);
@@ -92,5 +102,32 @@ void main() {
     for (final v in versions) {
       expect(seen.add(v), isTrue, reason: '版本「$v」出现了两次（历史 BUG-023 修过同类问题）');
     }
+  });
+
+  // ── 第七十七轮基线新增：「每次迭代 APP 中显示的版本必须同步更新」 ──
+  //
+  // 上面四条只锁 `x.y.z[-pre]`，而**每次迭代抬的是构建号 `+N`**。若界面只显示
+  // `version`，用户根本看不出本轮迭代已更新（历史上设置页底部还长期写死
+  // `v1.0.0`，漂了多个版本没人发现）。故再上两把锁：
+  //   ① `AppMeta.buildNumber` == pubspec 的 `+N`；
+  //   ② 设置页「关于」区块**只从常量取**版本串，且不得再出现写死的版本号。
+
+  test('AppMeta.buildNumber 与 pubspec.yaml 的构建号一致（界面显示的就是它）',
+      () {
+    expect(AppMeta.buildNumber, pubspecBuild(),
+        reason: '每次迭代抬的是构建号：不同步则 APP 中显示的版本仍停在上一轮'
+            '（与「每次迭代 APP 显示版本必须同步更新」的基线相悖）');
+  });
+
+  test('设置页「关于」区块必须显示 AppMeta.displayVersion，且不得写死版本号', () {
+    final src =
+        File('lib/features/settings/settings_screen.dart').readAsStringSync();
+    expect(src.contains('AppMeta.displayVersion'), isTrue,
+        reason: '「关于」区块必须从 `AppMeta.displayVersion`（= version+build）取版本串，'
+            '否则迭代后用户看到的仍是旧版本');
+    // 历史形状：写死 `v1.0.0`。任何 `v<数字>.<数字>.<数字>` 字面量都判红。
+    final hardcoded = RegExp(r"'v[0-9]+\.[0-9]+\.[0-9]+");
+    expect(hardcoded.hasMatch(src), isFalse,
+        reason: '设置页不得再出现写死的版本号字面量（应统一走 AppMeta.displayVersion）');
   });
 }

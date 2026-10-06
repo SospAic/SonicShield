@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -320,4 +321,211 @@ void main() {
       expect(await speaker.speak('你好', 'v', 0.5), isFalse);
     });
   });
+
+  group('EDGE Edge「大声朗读」免 Key 通路', () {
+    Uint8List binFrame(String path, List<int> payload) {
+      final header = utf8.encode('Path:$path\r\n');
+      final out = BytesBuilder();
+      out.add(<int>[(header.length >> 8) & 0xff, header.length & 0xff]);
+      out.add(header);
+      out.add(payload);
+      return out.toBytes();
+    }
+
+    test('EDGE-01 协议：先 config 后 ssml；收 Path:audio 音频；turn.end 结束并关连接',
+        () async {
+      final frame = binFrame('audio', <int>[1, 2, 3]);
+      final socket = _FakeEdgeSocket(<Object?>[
+        'X-RequestId:x\r\nPath:turn.start\r\n\r\n{"context":{}}',
+        frame,
+        'X-RequestId:x\r\nPath:turn.end\r\n\r\n',
+      ]);
+      final c = EdgeTtsClient(
+        endpoint: 'wss://edge.example/v1',
+        connector: (url, {headers}) async {
+          expect(url.toString(), 'wss://edge.example/v1');
+          return socket;
+        },
+        requestId: 'abc123',
+      );
+      expect(c.configured, isTrue);
+      final bytes = await c.synthesize('你好', 'zh-CN-liaoning-XiaobeiNeural');
+      expect(bytes, <int>[1, 2, 3]);
+
+      expect(socket.sent, hasLength(2), reason: '只发 config + ssml 两帧');
+      expect(socket.sent[0], contains('Path:speech.config'));
+      expect(socket.sent[0], contains('X-RequestId:abc123'));
+      expect(socket.sent[0], contains(EdgeTtsClient.outputFormat));
+      expect(socket.sent[1], contains('Path:ssml'));
+      expect(socket.sent[1], contains('name="zh-CN-liaoning-XiaobeiNeural"'));
+      expect(socket.closed, isTrue, reason: '合成后必须关连接');
+    });
+
+    test('EDGE-02 非 audio 二进制帧被忽略；只有非音频帧 → null', () async {
+      final c = EdgeTtsClient(
+        endpoint: 'wss://edge.example/v1',
+        connector: (url, {headers}) async => _FakeEdgeSocket(<Object?>[
+              binFrame('response', <int>[9, 9]),
+              'Path:turn.end\r\n\r\n',
+            ]),
+      );
+      expect(await c.synthesize('你好', 'v'), isNull);
+    });
+
+    test('EDGE-03 未收到 turn.end（对端异常关闭）→ null（不播残缺音频）', () async {
+      final c = EdgeTtsClient(
+        endpoint: 'wss://edge.example/v1',
+        connector: (url, {headers}) async =>
+            _FakeEdgeSocket(<Object?>[binFrame('audio', <int>[1, 2])]),
+      );
+      expect(await c.synthesize('你好', 'v'), isNull);
+    });
+
+    test('EDGE-04 端点为空 / 文本为空 → null，不建连', () async {
+      var connected = 0;
+      final ep = EdgeTtsClient(
+        endpoint: '  ',
+        connector: (url, {headers}) async {
+          connected++;
+          return _FakeEdgeSocket(<Object?>[]);
+        },
+      );
+      expect(ep.configured, isFalse);
+      expect(await ep.synthesize('你好', 'v'), isNull);
+
+      final txt = EdgeTtsClient(
+        endpoint: 'wss://edge.example/v1',
+        connector: (url, {headers}) async {
+          connected++;
+          return _FakeEdgeSocket(<Object?>[]);
+        },
+      );
+      expect(await txt.synthesize('   ', 'v'), isNull);
+      expect(connected, 0, reason: '未配置/空文本不应发起连接');
+    });
+
+    test('EDGE-05 建连抛错 → null（不外泄异常），且 close 安全', () async {
+      final c = EdgeTtsClient(
+        endpoint: 'wss://edge.example/v1',
+        connector: (url, {headers}) async => throw StateError('offline'),
+      );
+      expect(await c.synthesize('你好', 'v'), isNull);
+      c.close(); // 无资源，安全空操作
+    });
+
+    test('EDGE-06 audioPayload 边界：帧过短 / header 越界 → null', () {
+      expect(EdgeTtsClient.audioPayload(Uint8List.fromList(<int>[1])), isNull);
+      expect(
+        EdgeTtsClient.audioPayload(Uint8List.fromList(<int>[0, 200, 1, 2])),
+        isNull,
+        reason: '声明 header 长 200 但实际不足 → null',
+      );
+      final ok = binFrame('audio', <int>[7, 8]);
+      expect(EdgeTtsClient.audioPayload(ok), <int>[7, 8]);
+    });
+
+    test('EDGE-07 newRequestId 为 32 位十六进制', () {
+      final id = EdgeTtsClient.newRequestId();
+      expect(id, hasLength(32));
+      expect(RegExp(r'^[0-9a-f]{32}$').hasMatch(id), isTrue);
+    });
+  });
+
+  group('BOTC buildOnlineTtsClient 选通路', () {
+    test('BOTC-01 空端点 → null（未配置）', () {
+      expect(buildOnlineTtsClient(endpoint: '', apiKey: ''), isNull);
+      expect(buildOnlineTtsClient(endpoint: '   ', apiKey: 'k'), isNull);
+    });
+
+    test('BOTC-02 ws/wss → EdgeTtsClient（免 Key）', () {
+      expect(
+        buildOnlineTtsClient(
+            endpoint: 'wss://edge.example/v1', apiKey: ''),
+        isA<EdgeTtsClient>(),
+      );
+      expect(
+        buildOnlineTtsClient(endpoint: 'WS://edge.example/v1', apiKey: ''),
+        isA<EdgeTtsClient>(),
+      );
+    });
+
+    test('BOTC-03 http(s) → OnlineTtsClient，且必须有 Key', () {
+      final c = buildOnlineTtsClient(
+        endpoint: 'https://r.tts.example/v1',
+        apiKey: 'k',
+      );
+      expect(c, isA<OnlineTtsClient>());
+      expect(
+        buildOnlineTtsClient(endpoint: 'https://r.tts.example/v1', apiKey: ''),
+        isNull,
+        reason: 'REST 端点缺 Key → 不可用',
+      );
+    });
+
+    test('BOTC-04 未知协议 → null', () {
+      expect(
+        buildOnlineTtsClient(endpoint: 'ftp://x/y', apiKey: 'k'),
+        isNull,
+      );
+    });
+  });
+
+  group('EDGE-IO 生产连接器 defaultEdgeSocketConnector / _IoEdgeSocket', () {
+    test('EDGE-IO-01 真连本机 WebSocket：stream/add/close 全通路可用（150–174）',
+        () async {
+      // flutter_test 默认的 HttpOverrides 会把请求拦成 400 ⇒ 要先放开，
+      // 让 dart:io 的 WebSocket.connect 能连到本机服务。
+      final prev = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = prev);
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final received = <String>[];
+      server.listen((req) async {
+        final ws = await WebSocketTransformer.upgrade(req);
+        ws.listen((data) {
+          if (data is String) {
+            received.add(data);
+            ws.add('echo:$data'); // 回一帧，验证 stream 真的可达
+          }
+        });
+      });
+
+      final socket = await defaultEdgeSocketConnector(
+          Uri.parse('ws://127.0.0.1:${server.port}'));
+      expect(socket, isA<EdgeSocket>());
+
+      final frames = <Object?>[];
+      final sub = socket.stream.listen(frames.add);
+      socket.add('hello'); // 覆盖 _IoEdgeSocket.add
+      for (var i = 0; i < 100 && frames.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(received, contains('hello'));
+      expect(frames, contains('echo:hello'),
+          reason: 'WebSocket 双向都必须真的通 —— 只发不收等于连接器是坏的');
+
+      await sub.cancel();
+      await socket.close(); // 覆盖 _IoEdgeSocket.close
+    });
+  });
+}
+
+/// 假 Edge WebSocket：预置收帧序列、记录发送帧与是否关闭。
+class _FakeEdgeSocket implements EdgeSocket {
+  _FakeEdgeSocket(this._frames);
+
+  final List<Object?> _frames;
+  final List<String> sent = <String>[];
+  bool closed = false;
+
+  @override
+  Stream<Object?> get stream => Stream<Object?>.fromIterable(_frames);
+
+  @override
+  void add(String data) => sent.add(data);
+
+  @override
+  Future<void> close() async => closed = true;
 }

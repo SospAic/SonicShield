@@ -576,6 +576,44 @@ void main() {
         reason: '持续振动"不设时长上限"的另一半就是"任何时刻都能停"');
   });
 
+  // ══════════════ RCT-VS 远程发送振动（v2.x） ══════════════
+  //
+  // 「发送振动」是新增的**主动**命令：与「停止端点振动」成对。
+  // 锁的是"对话框确实把参数带进了 payload" —— 只断言"发了 vibrate.start"
+  // 会漏掉"参数丢了、端点只能取默认值"的静默降级。
+
+  testWidgets('RCT-VS 发送振动（固定）→ vibrate.start 带 mode/时长/强度', (tester) async {
+    final ch = await _pump(tester);
+
+    await _tapOutlined(tester, '发送振动');
+    // 对话框默认「固定」+ 5 秒 / 60%，直接确认。
+    await tester.tap(find.widgetWithText(FilledButton, '发送'));
+    await tester.pumpAndSettle();
+
+    final m = ch.lastOfType(RcCmd.vibrateStart);
+    expect(m.payload['mode'], 'fixed');
+    expect(m.payload['durationSec'], 5);
+    expect(m.payload['intensity'], 0.6);
+  });
+
+  testWidgets('RCT-VS2 切到「随机」→ payload 带随机区间字段', (tester) async {
+    final ch = await _pump(tester);
+
+    await _tapOutlined(tester, '发送振动');
+    await tester.tap(find.text('随机'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '发送'));
+    await tester.pumpAndSettle();
+
+    final m = ch.lastOfType(RcCmd.vibrateStart);
+    expect(m.payload['mode'], 'random');
+    // 随机模式必须带上区间字段，否则端点只能落默认值（表单填了等于没填）。
+    expect(m.payload.containsKey('durationSecMin'), isTrue);
+    expect(m.payload.containsKey('durationSecMax'), isTrue);
+    expect(m.payload.containsKey('amplitudeMin'), isTrue);
+    expect(m.payload.containsKey('amplitudeMax'), isTrue);
+  });
+
   // ---------------- D · 回执事件与卡片 ----------------
 
   testWidgets('RCT-10 回执事件（pong/status/location/photo）各自渲染卡片', (tester) async {

@@ -360,6 +360,68 @@ void main() {
       expect(resolvePresetAudioIds(assets, const []), isEmpty);
     });
   });
+
+  group('COV67 编排剩余分支（有界计划 / 访问器 / 无计划本体）', () {
+    CounterPlan bounded() => const CounterPlan(
+          presetIds: ['annoy_cough_fit'],
+          workdayDay: CounterWindow(
+              volumeMin: 0.5, volumeMax: 0.8, durationSecMin: 3, durationSecMax: 8),
+          workdayNight: CounterWindow(
+              volumeMin: 0.3, volumeMax: 0.5, durationSecMin: 3, durationSecMax: 5),
+          scheduleMode: PlanScheduleMode.specificDate,
+          specificDate: '2026-03-12',
+        );
+
+    test('COV67-01 有界计划 apply 的成功文案含排期标签（102）', () async {
+      SharedPreferences.setMockInitialValues({});
+      final tasks = _FakeTasks();
+      final store = CounterPlanStore(await SharedPreferences.getInstance());
+      final svc = CounterPlanService(
+          tasks: tasks, store: store, resolveAudioIds: (_) async => {'a1'});
+      final r = await svc.apply(bounded(),
+          planId: 'local', now: DateTime(2026, 3, 10), days: 7);
+      expect(r.ok, isTrue, reason: r.message);
+      expect(r.taskCount, greaterThan(0));
+      expect(r.message, contains('排期')); // 非循环 ⇒ 走 100–102 的 else 分支
+    });
+
+    test('COV67-02 refreshIfNeeded：有界计划不滚动续算（141–142）', () async {
+      SharedPreferences.setMockInitialValues({});
+      final tasks = _FakeTasks();
+      final store = CounterPlanStore(await SharedPreferences.getInstance());
+      await store.savePlan(bounded(), id: 'local', enabled: true);
+      final svc = CounterPlanService(
+          tasks: tasks, store: store, resolveAudioIds: (_) async => {'a1'});
+      final r = await svc.refreshIfNeeded(now: DateTime(2026, 3, 10));
+      expect(r.ok, isTrue, reason: r.message);
+      expect(r.taskCount, 0);
+      expect(r.message, contains('有界'));
+      expect(tasks.upserted, isEmpty);
+    });
+
+    test('COV67-03 autoOverrides / autoOverridesUpdatedAt 直读 store（157/160）', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = CounterPlanStore(await SharedPreferences.getInstance());
+      final svc = CounterPlanService(tasks: _FakeTasks(), store: store);
+      expect(svc.autoOverrides(), isEmpty);
+      expect(svc.autoOverridesUpdatedAt(), isNull);
+      final at = DateTime(2026, 10, 6, 9);
+      await store.setAutoOverrides({'2026-01-04': DayKind.workday}, at: at);
+      expect(svc.autoOverrides()['2026-01-04'], DayKind.workday);
+      expect(svc.autoOverridesUpdatedAt(), at);
+    });
+
+    test('COV67-04 refreshHolidays：已启用但无计划本体 → 存表并提示（182–183）', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = CounterPlanStore(await SharedPreferences.getInstance());
+      await store.setEnabled(true); // 启用标志置真但没有落盘计划
+      final svc = CounterPlanService(tasks: _FakeTasks(), store: store);
+      final r = await svc.refreshHolidays({'2026-01-04': DayKind.workday});
+      expect(r.ok, isTrue);
+      expect(r.message, contains('尚无反击计划'));
+      expect(store.autoOverrides()['2026-01-04'], DayKind.workday);
+    });
+  });
 }
 
 /// `TaskRepository` 的替身：只实现反击计划相关的读/删/批写，

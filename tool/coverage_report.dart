@@ -90,7 +90,8 @@ const Map<String, String> _deviceOnly = <String, String>{
 /// lcov 里 → 本清单的对应条目立刻被判为"失效"，工具报错要求删除。
 /// 因此这个清单**藏不住真实的覆盖漏洞** —— 它只能装"确实没有可执行行"的文件。
 const Set<String> _noExecutableLines = <String>{
-  'lib/core/constants.dart', // AppMeta/Channels/SchedulerConfig… 全是 static const
+  // ⚠️ `lib/core/constants.dart` 已于第七十七轮移出白名单：`AppMeta.displayVersion`
+  // 是带方法体的 getter（`'$version+$buildNumber'`），Dart VM 会为它产生覆盖记录。
   // 纯抽象接口：整文件只有 `abstract interface class PttStreamSink` 的
   // 三个方法**签名**（无方法体、无字段初始化），Dart VM 不产生任何覆盖记录。
   // 具体实现（PttPlaybackSession）在 playback_service.dart 一侧照常计入分母。

@@ -100,11 +100,17 @@ abstract final class ChinaHolidays {
   /// （→ 休息日），都没有才按星期几。顺序不能反：调休补班日本就落在周末，
   /// 若先判放假会把它当休息日。
   ///
-  /// [overrides] 为可选的**逐日覆盖**（ISO `yyyy-MM-dd` → [DayKind]），
-  /// 供用户手动指定或远程下发；命中则优先于内置表。传 null/空表即纯内置行为。
-  static DayKind dayKind(DateTime date, {Map<String, DayKind>? overrides}) {
+  /// [overrides] 为**手动逐日覆盖**（ISO `yyyy-MM-dd` → [DayKind]）；
+  /// [autoOverrides] 为**联网一键更新**拉回的整年表（同一结构，可被下一次更新
+  /// 整体替换）。优先级：手动覆盖 > 自动更新表 > 内置表 > 按星期几。
+  /// 手动覆盖始终压过自动表 —— 用户手改的一天不该被下一次联网更新冲掉。
+  static DayKind dayKind(
+    DateTime date, {
+    Map<String, DayKind>? overrides,
+    Map<String, DayKind>? autoOverrides,
+  }) {
     final key = isoDate(date);
-    final ov = overrides?[key];
+    final ov = overrides?[key] ?? autoOverrides?[key];
     if (ov != null) return ov;
 
     final y = table[date.year];

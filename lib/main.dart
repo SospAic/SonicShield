@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -183,12 +182,11 @@ Future<bool> _speakOnlineTts(
   ApiConfigStore cfg,
   PlaybackService playback,
 ) async {
-  if (!cfg.onlineTtsConfigured) return false;
-  final client = OnlineTtsClient(
-    client: http.Client(),
+  final client = buildOnlineTtsClient(
     endpoint: cfg.ttsEndpoint,
     apiKey: cfg.ttsApiKey,
   );
+  if (client == null) return false;
   final speaker = OnlineTtsSpeaker(
     client: client,
     sink: TtsAudioSink(

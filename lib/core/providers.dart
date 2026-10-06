@@ -18,6 +18,7 @@ import '../domain/models/tts_voice.dart';
 import '../services/background_service_manager.dart';
 import '../services/counter_plan_service.dart';
 import '../services/deepseek_service.dart';
+import '../services/holiday_update_service.dart';
 import '../services/online_tts_client.dart';
 import '../services/playback_service.dart';
 import '../services/tts_service.dart';
@@ -51,12 +52,13 @@ final ttsServiceProvider = FutureProvider<TtsService>((ref) async {
   return TtsService(
     speakSystem: (text, volume, match) => _speakSystemTts(text, volume, match),
     speakOnline: (text, volume, voiceName) async {
-      if (!cfg.onlineTtsConfigured) return false;
-      final client = OnlineTtsClient(
-        client: http.Client(),
+      // 选通路（Edge 免 Key WebSocket / Azure REST）由 `buildOnlineTtsClient`
+      // 统一决策；返回 null = 未配置或端点不可用，直接判失败、不发请求。
+      final client = buildOnlineTtsClient(
         endpoint: cfg.ttsEndpoint,
         apiKey: cfg.ttsApiKey,
       );
+      if (client == null) return false;
       final speaker = OnlineTtsSpeaker(
         client: client,
         sink: TtsAudioSink(
@@ -120,6 +122,11 @@ Future<void> _speakSystemTts(
 /// 反击计划持久化。
 final counterPlanStoreProvider = FutureProvider<CounterPlanStore>((ref) async =>
     CounterPlanStore(await ref.watch(sharedPrefsProvider.future)));
+
+/// 中国节假日**一键更新**（联网）：默认 DeepSeek 之外的独立 http 通道。
+final holidayUpdateServiceProvider =
+    FutureProvider<HolidayUpdateService>((ref) async =>
+        HolidayUpdateService(client: http.Client()));
 
 /// 反击计划编排服务（本机 UI / 远程共用同一通路）。
 final counterPlanServiceProvider =

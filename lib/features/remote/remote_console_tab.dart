@@ -11,6 +11,7 @@ import '../../remote/command_channel.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
+import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
 
 /// 远程控制台（v1.6）：对已配对端点的完全控制——
@@ -588,11 +589,25 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           ],
         ),
         const SizedBox(height: 12),
-        _section('振动（v1.9）'),
+        _section('振动（v1.9 停止 / v2.x 发送）'),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
+            // v2.x：主动"震"端点 —— 固定强度+固定时长 或 随机强度+随机时长。
+            // 与下面「停止端点振动」是一对（能震才谈得上停）。
+            OutlinedButton.icon(
+                icon: const Icon(Icons.touch_app, size: 18),
+                onPressed: _allowed(RcCmd.vibrateStart)
+                    ? () async {
+                        final v = await showDialog<Map<String, dynamic>>(
+                            context: context,
+                            builder: (_) => const _VibrateStartDialog());
+                        if (v == null || !mounted) return;
+                        await _send(RcCmd.vibrateStart, v, '发送端点振动');
+                      }
+                    : null,
+                label: const Text('发送振动')),
             // D1 配套：持续振动**不设时长硬上限**，换来的是"任何时刻都能停"。
             // 这个按钮就是那半边 —— 没有它，"不设上限"就是一句空话。
             OutlinedButton.icon(
@@ -1028,5 +1043,113 @@ class _PhotoView extends StatelessWidget {
     } on Object {
       return const Text('图片解码失败', style: TextStyle(fontSize: 12));
     }
+  }
+}
+
+/// 「发送振动」参数对话框：选模式 → 调强度/时长 → 返回 `vibrate.start` payload。
+///
+/// 与指令组的振动步**共用** [rcVibrateStartFieldsFor] 的参数表 —— 表单字段与
+/// 端点解析口径同源，不会出现"UI 能填、端点读不懂"的隐性契约。
+/// 三种模式对应：固定强度+固定时长（fixed）/ 随机强度+随机时长（random）/
+/// 区间浮动（continuous）。
+class _VibrateStartDialog extends StatefulWidget {
+  const _VibrateStartDialog();
+
+  @override
+  State<_VibrateStartDialog> createState() => _VibrateStartDialogState();
+}
+
+class _VibrateStartDialogState extends State<_VibrateStartDialog> {
+  RcVibrateMode _mode = RcVibrateMode.fixed;
+
+  /// 当前各字段取值（key → num）；模式切换时按 [rcVibrateDefaultParams] 重置。
+  final Map<String, num> _v = <String, num>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _seed();
+  }
+
+  void _seed() {
+    _v.clear();
+    if (_mode == RcVibrateMode.fixed) {
+      // 固定强度 + 固定时长：默认 5 秒 / 60%。
+      _v['durationSec'] = 5;
+      _v['intensity'] = 0.6;
+      return;
+    }
+    final defaults = rcVibrateDefaultParams(_mode);
+    for (final f in rcVibrateStartFieldsFor(_mode)) {
+      final d = defaults[f.key];
+      _v[f.key] = d is num ? d : f.min;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('发送振动'),
+      content: SizedBox(
+        width: 320,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SegmentedButton<RcVibrateMode>(
+                segments: const [
+                  ButtonSegment(
+                      value: RcVibrateMode.fixed, label: Text('固定')),
+                  ButtonSegment(
+                      value: RcVibrateMode.random, label: Text('随机')),
+                  ButtonSegment(
+                      value: RcVibrateMode.continuous, label: Text('持续')),
+                ],
+                selected: {_mode},
+                onSelectionChanged: (s) => setState(() {
+                  _mode = s.first;
+                  _seed();
+                }),
+              ),
+              const SizedBox(height: 8),
+              for (final f in rcVibrateStartFieldsFor(_mode)) _field(f),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(
+          onPressed: () => Navigator.pop(
+              context, <String, dynamic>{'mode': _mode.name, ..._v}),
+          child: const Text('发送'),
+        ),
+      ],
+    );
+  }
+
+  Widget _field(RcVibrateField f) {
+    final lo = f.min.toDouble();
+    final hi = f.max.toDouble();
+    final cur = (_v[f.key] ?? f.min).toDouble().clamp(lo, hi);
+    final divisions = f.fraction ? 20 : (hi - lo).round().clamp(1, 120);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${f.label}：${f.fraction ? cur.toStringAsFixed(2) : cur.round()}',
+          style: const TextStyle(fontSize: 12),
+        ),
+        Slider(
+          min: lo,
+          max: hi,
+          divisions: divisions,
+          value: cur,
+          onChanged: (v) => setState(() => _v[f.key] = v),
+        ),
+      ],
+    );
   }
 }

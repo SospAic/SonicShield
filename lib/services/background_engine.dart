@@ -9,7 +9,6 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -548,12 +547,13 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 在线语音（引擎隔离内）：合成 → 临时 mp3 → 播放器出声。
   Future<bool> speakOnlineTts(
       String text, double volume, String voiceName, ApiConfigStore cfg) async {
-    if (!cfg.onlineTtsConfigured) return false;
-    final client = OnlineTtsClient(
-      client: http.Client(),
+    // 选通路（Edge 免 Key WebSocket / Azure REST）统一交给 buildOnlineTtsClient；
+    // 返回 null = 未配置/端点不可用，直接判失败、不发请求。
+    final client = buildOnlineTtsClient(
       endpoint: cfg.ttsEndpoint,
       apiKey: cfg.ttsApiKey,
     );
+    if (client == null) return false;
     final speaker = OnlineTtsSpeaker(
       client: client,
       sink: TtsAudioSink(

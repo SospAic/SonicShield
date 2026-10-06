@@ -352,5 +352,24 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       }
     }, timeout: const Timeout(Duration(seconds: 90)));
+
+    test('PFL-07 microphoneDenied 覆盖拒绝/永久拒绝，且与通知位相互独立（100–101）',
+        () {
+      PermissionRequestOutcome withMic(PermissionStatus m) =>
+          PermissionRequestOutcome(
+              notification: PermissionStatus.granted, microphone: m);
+
+      expect(withMic(PermissionStatus.granted).microphoneDenied, isFalse);
+      expect(withMic(PermissionStatus.denied).microphoneDenied, isTrue);
+      expect(
+          withMic(PermissionStatus.permanentlyDenied).microphoneDenied, isTrue);
+      // 麦克风被拒与通知是否被拒互不影响
+      expect(
+          const PermissionRequestOutcome(
+                  notification: PermissionStatus.denied,
+                  microphone: PermissionStatus.granted)
+              .microphoneDenied,
+          isFalse);
+    });
   });
 }

@@ -21,12 +21,14 @@ import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/condition.dart';
 import 'package:sonic_shield/domain/models/counter_plan.dart';
+import 'package:sonic_shield/domain/models/counter_plan_params.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/features/settings/settings_screen.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';
 import 'package:sonic_shield/services/counter_plan_service.dart';
 import 'package:sonic_shield/services/deepseek_service.dart';
+import 'package:sonic_shield/services/holiday_update_service.dart';
 import 'package:sonic_shield/services/tts_service.dart';
 
 /// 设置页（`SettingsScreen`）的宿主回归锁。
@@ -305,6 +307,21 @@ void main() {
       expect(seg.selected, {'saver'});
       expect(find.text('开始：21:00'), findsOneWidget);
       expect(find.text('结束：6:00'), findsOneWidget);
+    }, timeout: perTest);
+
+    testWidgets('SET-01d 「关于」显示 AppMeta.displayVersion（含构建号，不写死）',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      expect(find.text('关于'), findsOneWidget);
+      // 显示的版本串必须来自常量（version+buildNumber），而不是写死的字面量。
+      expect(
+          find.text('v${AppMeta.displayVersion} · Flutter 跨平台 · 仅限合法用途'),
+          findsOneWidget);
+      // 「每次迭代 APP 显示版本同步更新」：显示串必须含本轮构建号。
+      expect(AppMeta.displayVersion, contains(AppMeta.buildNumber),
+          reason: '界面显示串必须带构建号，否则看不出本轮迭代替换过');
     }, timeout: perTest);
   });
 
@@ -877,8 +894,8 @@ void main() {
       expect(find.text('语音与接口'), findsOneWidget);
       expect(find.text('DeepSeek 接口配置'), findsOneWidget);
       expect(find.text('在线语音配置'), findsOneWidget);
-      // 未配置在线语音必须**明确告知**"只有系统音色"，不能默默少几个音色。
-      expect(find.textContaining('未配置则只有系统音色可用'), findsOneWidget);
+      // 出厂默认是内置免 Key 端点（开箱可用），必须如实显示"已配置"。
+      expect(find.textContaining('内置免费在线语音'), findsOneWidget);
       // 两种方言分组标题各自成组（不是把在线音色混进普通话里）。
       expect(find.text('普通话'), findsOneWidget);
       expect(find.text('东北话'), findsOneWidget);
@@ -1027,6 +1044,26 @@ void main() {
           );
         });
 
+    /// `HolidayUpdateService` 替身：返回一年放假表（[ok]=false 时全源 500）。
+    Override holidayOverride({bool ok = true}) =>
+        holidayUpdateServiceProvider.overrideWith((ref) async =>
+            HolidayUpdateService(
+              client: MockClient((r) async {
+                if (!ok) return http.Response('boom', 500);
+                return http.Response.bytes(
+                  utf8.encode(jsonEncode({
+                    'year': 2026,
+                    'days': [
+                      {'name': '元旦', 'date': '2026-01-01', 'isOffDay': true},
+                    ],
+                  })),
+                  200,
+                  headers: {'content-type': 'application/json; charset=utf-8'},
+                );
+              }),
+              sources: (_) => ['https://cdn.example/holiday/2026.json'],
+            ));
+
     testWidgets('SET-07e DeepSeek 对话框「保存」→ 三项落库 + 回执', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
@@ -1138,6 +1175,313 @@ void main() {
       expect(await prefString('counter_plan_json'), isNotNull,
           reason: '计划本体必须落库');
       expect(await prefBool('counter_plan_enabled'), isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07s 参数开启休息日 → 本机随机生成含休息日反击',
+        (tester) async {
+      // 参数化选择的端到端锁：把"休息日白天/夜间是否反击"打开，本机随机生成
+      // 出的计划就必须带上这两段（而不是永远沿用出厂默认的"关闭"）。
+      final params = CounterPlanParams.defaults().copyWith(
+        restdayDay: const PlanWindowParams(enabled: true),
+        restdayNight: const PlanWindowParams(
+          enabled: true,
+          volumeMin: 0.1,
+          volumeMax: 0.3,
+          durationSecMax: 5,
+        ),
+      );
+      SharedPreferences.setMockInitialValues({
+        'counter_plan_params_json': jsonEncode(params.toJson()),
+      });
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      await tester.tap(find.text('本机随机生成并启用'));
+      await waitForText(tester, '反击计划已生效');
+
+      final raw = await prefString('counter_plan_json');
+      expect(raw, isNotNull);
+      final plan =
+          CounterPlan.fromJson(jsonDecode(raw!) as Map<String, dynamic>);
+      expect(plan.restdayDay.enabled, isTrue, reason: '参数开了休息日白天就该反击');
+      expect(plan.restdayNight.enabled, isTrue, reason: '参数开了休息日夜也该反击');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07t 参数对话框：切换休息日开关 → 保存落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
+      await tester.ensureVisible(edit);
+      await tester.tap(edit);
+      await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
+          reason: '应弹出参数对话框');
+
+      // 出厂参数里休息日两段默认关闭；打开「休息日·白天」。
+      final sw = find.byKey(const ValueKey<String>('pp_enabled_休息日·白天'));
+      await tester.ensureVisible(sw);
+      await tester.tap(sw);
+      await tester.pump();
+
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '生成参数已保存');
+
+      final raw = await prefString('counter_plan_params_json');
+      expect(raw, isNotNull, reason: '参数必须落库（重启后不丢）');
+      final saved =
+          CounterPlanParams.fromJson(jsonDecode(raw!) as Map<String, dynamic>);
+      expect(saved.restdayDay.enabled, isTrue);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07u 参数对话框：全滑块/开关/三按钮驱动 → 参数生效',
+        (tester) async {
+      // 覆盖 `_PlanParamsDialog` 的所有交互回调：顶端两条区间滑块、免打扰开关、
+      // 四个时段（工作日两段默认开、休息日两段默认关）的开关与区间滑块、
+      // 「恢复默认」「取消」「保存」三个按钮。
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
+      await tester.ensureVisible(edit);
+      await tester.tap(edit);
+      await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
+          reason: '应弹出参数对话框');
+
+      Future<void> driveAllSliders() async {
+        final sliders = find.byType(RangeSlider);
+        final n = sliders.evaluate().length;
+        for (var i = 0; i < n; i++) {
+          final s = tester.widget<RangeSlider>(sliders.at(i));
+          s.onChanged!(RangeValues(s.min, s.max));
+          await tester.pump();
+        }
+      }
+
+      // 1) 顶端两条：白天时段 / 动作间隔（精确驱动一次，校验文案随之变化）。
+      final top = find.byType(RangeSlider);
+      tester.widget<RangeSlider>(top.at(0)).onChanged!(const RangeValues(6, 22));
+      await tester.pump();
+      expect(find.text('白天时段：6:00 – 22:00'), findsOneWidget);
+      tester
+          .widget<RangeSlider>(top.at(1))
+          .onChanged!(const RangeValues(300, 1800));
+      await tester.pump();
+      expect(find.text('动作间隔（秒）：300s – 1800s'), findsOneWidget);
+
+      // 2) 遵循免打扰开关。
+      final quiet = find.widgetWithText(SwitchListTile, '遵循免打扰时段');
+      tester.widget<SwitchListTile>(quiet).onChanged!(false);
+      await tester.pump();
+
+      // 3) 工作日两段（默认开）→ 驱动其音量/时长/次数三条滑块。
+      await driveAllSliders();
+
+      // 4) 打开休息日两段 → 再驱动一遍（此时共 6 段全部启用）。
+      for (final label in ['休息日·白天', '休息日·夜间']) {
+        final sw = find.byKey(ValueKey<String>('pp_enabled_$label'));
+        await tester.ensureVisible(sw);
+        tester.widget<SwitchListTile>(sw).onChanged!(true);
+        await tester.pump();
+      }
+      await driveAllSliders();
+
+      // 5) 「恢复默认」→ 回到出厂区间；再「保存」落库。
+      await tester.tap(find.widgetWithText(TextButton, '恢复默认'));
+      await tester.pump();
+      expect(find.text('白天时段：8:00 – 20:00'), findsOneWidget,
+          reason: '恢复默认应回到出厂白天时段');
+
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '生成参数已保存');
+      final raw = await prefString('counter_plan_params_json');
+      expect(raw, isNotNull);
+      final saved =
+          CounterPlanParams.fromJson(jsonDecode(raw!) as Map<String, dynamic>);
+      expect(saved.dayStartHour, 8);
+      expect(saved.dayEndHour, 20);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07v 参数对话框：取消不落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
+      await tester.ensureVisible(edit);
+      await tester.tap(edit);
+      await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
+          reason: '应弹出参数对话框');
+
+      final sliders = find.byType(RangeSlider);
+      tester.widget<RangeSlider>(sliders.at(0)).onChanged!(const RangeValues(9, 19));
+      await tester.pump();
+
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+
+      expect(await prefString('counter_plan_params_json'), isNull,
+          reason: '取消不应落库');
+    }, timeout: perTest);
+
+    testWidgets('SET-07w 参数对话框：排期六选一 + 条件字段驱动 → 落库', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
+      await tester.ensureVisible(edit);
+      await tester.tap(edit);
+      await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
+          reason: '应弹出参数对话框');
+
+      void tapMode(PlanScheduleMode m) {
+        tester
+            .widget<ChoiceChip>(find.byKey(ValueKey<String>('pp_mode_${m.name}')))
+            .onSelected!(true);
+      }
+
+      // 默认循环随机：渲染周一至周日 7 个星期 chip，其它模式字段不出现。
+      expect(find.byKey(const ValueKey<String>('pp_wd_1')), findsOneWidget);
+      expect(find.byKey(const ValueKey<String>('pp_occ')), findsNothing);
+
+      // 切「几次」→ 出现次数下拉，驱动一次。
+      tapMode(PlanScheduleMode.several);
+      await tester.pump();
+      final occ = find.byKey(const ValueKey<String>('pp_occ'));
+      expect(occ, findsOneWidget);
+      tester.widget<DropdownButton<int>>(occ).onChanged!(6);
+      await tester.pump();
+
+      // 切「指定日期」→ 出现日期按钮，未设置。
+      tapMode(PlanScheduleMode.specificDate);
+      await tester.pump();
+      expect(find.byKey(const ValueKey<String>('pp_specific_date')), findsOneWidget);
+      expect(find.text('未设置'), findsOneWidget);
+
+      // 切「日期区间」→ 出现两个日期按钮。
+      tapMode(PlanScheduleMode.dateRange);
+      await tester.pump();
+      expect(find.byKey(const ValueKey<String>('pp_range_start')), findsOneWidget);
+      expect(find.byKey(const ValueKey<String>('pp_range_end')), findsOneWidget);
+
+      // 切回「循环随机」→ 关闭周三（至少保留一天）。
+      tapMode(PlanScheduleMode.recurringRandom);
+      await tester.pump();
+      tester
+          .widget<FilterChip>(find.byKey(const ValueKey<String>('pp_wd_3')))
+          .onSelected!(false);
+      await tester.pump();
+
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '生成参数已保存');
+      final saved = CounterPlanParams.fromJson(
+          jsonDecode((await prefString('counter_plan_params_json'))!)
+              as Map<String, dynamic>);
+      expect(saved.scheduleMode, PlanScheduleMode.recurringRandom);
+      expect(saved.weekdays, isNot(contains(3)));
+      expect(saved.weekdays.length, 6);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07y 参数对话框：severalDays/日期选择器/周几追加 → 全覆盖 + 落库',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, overrides: [counterPlanOverride()]);
+
+      final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
+      await tester.ensureVisible(edit);
+      await tester.tap(edit);
+      await waitFor(tester,
+          () => find.text('反击计划生成参数').evaluate().isNotEmpty,
+          reason: '应弹出参数对话框');
+
+      void tapMode(PlanScheduleMode m) {
+        tester
+            .widget<ChoiceChip>(find.byKey(ValueKey<String>('pp_mode_${m.name}')))
+            .onSelected!(true);
+      }
+
+      /// 点开日期按钮 → 日期选择器弹出 → 直接确认（回填 initialDate）→ 关闭。
+      /// 这条路径覆盖 `_dateTile` 的 `onPressed` 整体（选择器构造 + ISO 回填）。
+      Future<void> pickDate(String tileKey) async {
+        final tile = find.byKey(ValueKey<String>(tileKey));
+        await tester.ensureVisible(tile);
+        await tester.tap(tile);
+        await waitFor(tester, () => find.text('OK').evaluate().isNotEmpty,
+            reason: '日期选择器应弹出（$tileKey）');
+        await tester.tap(find.text('OK'));
+        await waitFor(tester, () => find.text('OK').evaluate().isEmpty,
+            reason: '日期选择器应关闭（$tileKey）');
+      }
+
+      // 「几天内」（severalDays）：出现"天数"下拉并驱动一次（含 spanDays 回写）。
+      tapMode(PlanScheduleMode.severalDays);
+      await tester.pump();
+      final span = find.byKey(const ValueKey<String>('pp_span'));
+      expect(span, findsOneWidget, reason: 'severalDays 必须有"天数"字段');
+      tester.widget<DropdownButton<int>>(span).onChanged!(7);
+      await tester.pump();
+
+      // 「指定日期」：点开日期选择器并确认 → onChanged 回填。
+      tapMode(PlanScheduleMode.specificDate);
+      await tester.pump();
+      await pickDate('pp_specific_date');
+
+      // 「日期区间」：起止两个日期按钮都要能点开确认。
+      tapMode(PlanScheduleMode.dateRange);
+      await tester.pump();
+      await pickDate('pp_range_start');
+      await pickDate('pp_range_end');
+
+      // 「循环随机」：先关一天（至少留一天），再加回来 → 覆盖"追加"分支。
+      tapMode(PlanScheduleMode.recurringRandom);
+      await tester.pump();
+      final wd3 = find.byKey(const ValueKey<String>('pp_wd_3'));
+      tester.widget<FilterChip>(wd3).onSelected!(false);
+      await tester.pump();
+      tester.widget<FilterChip>(wd3).onSelected!(true);
+      await tester.pump();
+
+      await tester.tap(find.text('保存'));
+      await waitForText(tester, '生成参数已保存');
+      final saved = CounterPlanParams.fromJson(
+          jsonDecode((await prefString('counter_plan_params_json'))!)
+              as Map<String, dynamic>);
+      expect(saved.scheduleMode, PlanScheduleMode.recurringRandom);
+      expect(saved.weekdays, contains(3), reason: '追加回来的一天必须在集合里');
+      expect(saved.weekdays.length, 7, reason: '关一天再加回来 = 仍是 7 天');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07x 一键更新节假日：成功落「自动覆盖表」+ 回执', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(
+          tester, overrides: [holidayOverride(), counterPlanOverride()]);
+
+      final tile = find.byKey(const ValueKey<String>('holiday_update'));
+      await tester.ensureVisible(tile);
+      await tester.tap(tile);
+      await waitForText(tester, '已更新节假日表');
+      // 落库到**自动覆盖表**（与手动覆盖 `counter_plan_overrides` 分开）
+      final raw = await prefString('counter_plan_auto_overrides');
+      expect(raw, isNotNull);
+      expect(raw, contains('2026-01-01'));
+      expect(raw, contains('restday'));
+      expect(await prefInt('counter_plan_auto_overrides_at'), isNotNull);
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-07x2 更新失败（全源 500）→ 如实报错 + 不落表', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(
+          tester, overrides: [holidayOverride(ok: false), counterPlanOverride()]);
+
+      final tile = find.byKey(const ValueKey<String>('holiday_update'));
+      await tester.ensureVisible(tile);
+      await tester.tap(tile);
+      await waitForText(tester, '节假日更新失败（已保留内置表）');
+      expect(await prefString('counter_plan_auto_overrides'), isNull);
       await settleSnackBars(tester);
     }, timeout: perTest);
 

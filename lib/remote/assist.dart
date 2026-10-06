@@ -373,6 +373,9 @@ abstract final class RcPermGate {
         // 本工具是自我保护用途，让没有振动权限的对端停掉用户自己的报警振动
         // 同样是不可接受的。能震的才能停。
         RcCmd.vibrateStop => 'vibrate',
+        // v2.x：远程**发起**振动与停止同为 `vibrate` 位 —— "能震的才能停、
+        // 能停的也就能震"，两条命令是同一件事的两端，权限不该劈成两半。
+        RcCmd.vibrateStart => 'vibrate',
         // 隐私
         RcCmd.locationGet => 'location',
         RcCmd.cameraSnap => 'video',

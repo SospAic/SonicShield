@@ -9,7 +9,8 @@ import 'package:sonic_shield/data/repositories/api_config_store.dart';
 /// 2. `chatCompletionsUrl` 无论基址带几个尾斜杠都拼成**唯一**合法端点；
 /// 3. DeepSeek Key 有**内置默认**（开箱可用），但可被显式清空/改写 —— 即
 ///    "默认"必须始终可覆盖，绝不能退化成写死不可变；
-/// 4. `clearAll` 后基址/模型/Key 各自回到**内置默认**、在线语音回到关闭。
+/// 4. `clearAll` 后基址/模型/Key 各自回到**内置默认**、在线语音回到**内置默认**
+///    （内置免 Key 端点，出厂可用）。
 void main() {
   Future<ApiConfigStore> fresh([Map<String, Object>? seed]) async {
     SharedPreferences.setMockInitialValues(seed ?? <String, Object>{});
@@ -64,23 +65,34 @@ void main() {
       expect(s.hasApiKey, isFalse);
     });
 
-    test('AC-05 onlineTtsConfigured 需端点与 Key 同时具备', () async {
+    test('AC-05 在线语音：内置免 Key 端点即可用；REST 端点需 Key；空端点=关闭', () async {
       final s = await fresh();
-      expect(s.onlineTtsConfigured, isFalse);
+      // 出厂内置默认 = 免 Key（ws/wss）端点 → 开箱即用。
+      expect(s.ttsEndpoint, ApiConfigStore.defaultTtsEndpoint);
+      expect(s.onlineTtsConfigured, isTrue,
+          reason: '内置免 Key 端点（ws/wss）无需 Key 即可用');
 
+      // 改成 Azure 兼容 REST：有端点但没 Key → 不可用。
       await s.setOnlineTts(endpoint: 'https://r.tts.example/v1', apiKey: '');
-      expect(s.onlineTtsConfigured, isFalse, reason: '只有端点不算已配置');
+      expect(s.onlineTtsConfigured, isFalse, reason: 'REST 端点缺 Key 不算已配置');
 
+      // 只有 Key、没端点 → 也不可用。
       await s.setOnlineTts(endpoint: '', apiKey: 'k');
-      expect(s.onlineTtsConfigured, isFalse, reason: '只有 Key 不算已配置');
+      expect(s.onlineTtsConfigured, isFalse, reason: '没有端点不算已配置');
 
+      // REST 端点 + Key → 可用（两端空白被裁剪）。
       await s.setOnlineTts(endpoint: ' https://r.tts.example/v1 ', apiKey: ' k ');
-      expect(s.ttsEndpoint, 'https://r.tts.example/v1', reason: '两端空白被裁剪');
+      expect(s.ttsEndpoint, 'https://r.tts.example/v1');
       expect(s.ttsApiKey, 'k');
       expect(s.onlineTtsConfigured, isTrue);
+
+      // 显式清空端点 = 关闭（不再回落内置默认）。
+      await s.setOnlineTts(endpoint: '', apiKey: '');
+      expect(s.ttsEndpoint, '');
+      expect(s.onlineTtsConfigured, isFalse, reason: '清空端点即关闭在线语音');
     });
 
-    test('AC-06 clearAll 回到内置默认（Key 回默认、在线语音回关闭）', () async {
+    test('AC-06 clearAll 回到内置默认（含在线语音回到内置免 Key 端点）', () async {
       final s = await fresh();
       await s.setBaseUrl('https://custom.example');
       await s.setApiKey('sk-abc');
@@ -97,9 +109,10 @@ void main() {
       expect(s.apiKey, ApiConfigStore.defaultApiKey,
           reason: '清除后 Key 回到内置默认（而非留空）');
       expect(s.hasApiKey, isTrue);
-      expect(s.ttsEndpoint, '');
-      expect(s.ttsApiKey, '');
-      expect(s.onlineTtsConfigured, isFalse);
+      expect(s.ttsEndpoint, ApiConfigStore.defaultTtsEndpoint,
+          reason: '清除后在线语音回到内置默认端点');
+      expect(s.onlineTtsConfigured, isTrue,
+          reason: '内置免 Key 端点出厂可用；要停用须显式 setOnlineTts("", "")');
     });
 
     test('AC-07 从既有持久化值读取（模拟重启后仍生效）', () async {

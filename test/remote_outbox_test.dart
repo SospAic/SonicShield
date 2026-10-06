@@ -387,6 +387,25 @@ void main() {
       expect(l.length, 2);
     });
 
+    test('OB-E7 RcDelivery.copyWith 保留其余字段并可换 state（protocol.dart:536）', () {
+      const d = RcDelivery(
+        requestId: 'r1',
+        targetId: 'ep',
+        createdAtMs: 100,
+        state: RcDeliveryState.published,
+        expiresAtMs: 999,
+      );
+      final acked = d.copyWith(state: RcDeliveryState.acked);
+      expect(acked.requestId, 'r1');
+      expect(acked.targetId, 'ep');
+      expect(acked.createdAtMs, 100);
+      expect(acked.expiresAtMs, 999);
+      expect(acked.state, RcDeliveryState.acked);
+      expect(acked.isTerminal, isTrue);
+      // 不传 state ⇒ 原样保留（拷贝语义不得丢字段）
+      expect(d.copyWith().state, RcDeliveryState.published);
+    });
+
     test('OB-E2 acceptAck：ok ⇒ acked；失败 ⇒ failed（终态）', () {
       final l = RcDeliveryLedger();
       l.record('a', 'ep', published: true, nowMs: 0);

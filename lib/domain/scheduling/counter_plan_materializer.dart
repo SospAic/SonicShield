@@ -45,7 +45,8 @@ abstract final class CounterPlanMaterializer {
   /// - [assetIdPool]：当前设备**实际可用**的音效 id 集合 —— 只有池非空才会生成
   ///   播放类任务（否则到点会"无可用音源"失败，属于静默假成功，必须避免）；
   /// - [now]：过滤已过时刻（null = 不过滤，便于测试）；
-  /// - [overrides]：逐日工作日/休息日覆盖（手动或远程下发）。
+  /// - [overrides]：逐日工作日/休息日覆盖（手动或远程下发）；
+  /// - [autoOverrides]：联网一键更新拉回的整年表（优先级低于 [overrides]）。
   static List<Task> materialize(
     CounterPlan plan, {
     required String planId,
@@ -54,6 +55,7 @@ abstract final class CounterPlanMaterializer {
     Set<String> assetIdPool = const <String>{},
     DateTime? now,
     Map<String, DayKind>? overrides,
+    Map<String, DayKind>? autoOverrides,
   }) {
     if (days <= 0) return const <Task>[];
     final id = safePlanId(planId);
@@ -66,12 +68,14 @@ abstract final class CounterPlanMaterializer {
     if (!hasAudio && !hasTts) return const <Task>[];
 
     final created = now ?? DateTime.now();
-    final out = <Task>[];
-    final startDay = DateTime(from.year, from.month, from.day);
+    final sched = _resolveSchedule(plan, from, days);
+    if (sched.days.isEmpty) return const <Task>[];
 
-    for (var d = 0; d < days; d++) {
-      final day = DateTime(startDay.year, startDay.month, startDay.day + d);
-      final kind = ChinaHolidays.dayKind(day, overrides: overrides);
+    final out = <Task>[];
+    var remaining = sched.maxTasks;
+    for (final day in sched.days) {
+      final kind = ChinaHolidays.dayKind(day,
+          overrides: overrides, autoOverrides: autoOverrides);
       final perDay = <Task>[];
       for (final isNight in const <bool>[false, true]) {
         final w = plan.windowFor(kind, isNight: isNight);
@@ -90,10 +94,60 @@ abstract final class CounterPlanMaterializer {
           now: now,
         ));
       }
-      if (perDay.length > maxTasksPerDay) perDay.removeRange(maxTasksPerDay, perDay.length);
+      if (perDay.length > maxTasksPerDay) {
+        perDay.removeRange(maxTasksPerDay, perDay.length);
+      }
+      // 全局条数上限（单次 = 1 / 几次 = N）：逐日累计，够数即止。
+      if (remaining != null) {
+        if (perDay.length > remaining) perDay.removeRange(remaining, perDay.length);
+        remaining -= perDay.length;
+      }
       out.addAll(perDay);
+      if (remaining != null && remaining <= 0) break;
     }
     return out;
+  }
+
+  /// 按 [CounterPlan.scheduleMode] 解析**候选日历日**与**全局条数上限**。
+  ///
+  /// - 循环随机：滚动 `[from, from+days)`，并按 `weekdays` 过滤（默认周一至周日 = 全周）；
+  /// - 单次 / 几次：在滚动 horizon 内生成 1 / N 条；
+  /// - 几日：从 `from` 起 `spanDays` 天；
+  /// - 指定日期 / 日期区间：精确到该日 / 该区间（与滚动 horizon 无关，可指向未来）。
+  ///
+  /// 日期非法（如指定日期为空）→ 返回空候选，调用方据此**不落库**（由
+  /// `CounterPlan.validate` 在更外层如实报错）。
+  static ({List<DateTime> days, int? maxTasks}) _resolveSchedule(
+      CounterPlan plan, DateTime from, int days) {
+    final start = DateTime(from.year, from.month, from.day);
+    List<DateTime> span(int n) => <DateTime>[
+          for (var i = 0; i < n; i++)
+            DateTime(start.year, start.month, start.day + i),
+        ];
+    switch (plan.scheduleMode) {
+      case PlanScheduleMode.recurringRandom:
+        final wk = plan.weekdays.toSet();
+        return (
+          days: span(days).where((d) => wk.contains(d.weekday)).toList(),
+          maxTasks: null,
+        );
+      case PlanScheduleMode.single:
+        return (days: span(days), maxTasks: 1);
+      case PlanScheduleMode.several:
+        return (days: span(days), maxTasks: plan.occurrenceCount);
+      case PlanScheduleMode.severalDays:
+        return (days: span(plan.spanDays), maxTasks: null);
+      case PlanScheduleMode.specificDate:
+        final d = plan.specificDateValue;
+        return (days: d == null ? const <DateTime>[] : <DateTime>[d], maxTasks: null);
+      case PlanScheduleMode.dateRange:
+        final s = plan.rangeStartValue;
+        final e = plan.rangeEndValue;
+        if (s == null || e == null || s.isAfter(e)) {
+          return (days: const <DateTime>[], maxTasks: null);
+        }
+        return (days: DateRange(start: s, end: e).days().toList(), maxTasks: null);
+    }
   }
 
   // ---- 内部 ----

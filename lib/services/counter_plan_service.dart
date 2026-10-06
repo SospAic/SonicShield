@@ -83,6 +83,7 @@ class CounterPlanService {
       assetIdPool: pool,
       now: at,
       overrides: ov,
+      autoOverrides: _store.autoOverrides(),
     );
     if (tasks.isEmpty) {
       final why = pool.isEmpty && plan.ttsTexts.isEmpty
@@ -96,9 +97,11 @@ class CounterPlanService {
     await _tasks.upsertMany(tasks);
     await _store.savePlan(plan, id: id, enabled: true);
     await _replan();
+    final scope = plan.isRecurring
+        ? '近 $days 天，每 ${plan.cooldownSec}s 至少间隔）'
+        : '排期「${plan.scheduleMode.label}」）';
     return CounterApplyResult.ok2(
-      '反击计划已生效：排入 ${tasks.length} 条计划任务'
-      '（近 $days 天，每 ${plan.cooldownSec}s 至少间隔）',
+      '反击计划已生效：排入 ${tasks.length} 条计划任务（$scope',
       taskCount: tasks.length,
       planId: id,
     );
@@ -132,6 +135,14 @@ class CounterPlanService {
     final plan = _store.loadPlan();
     if (plan == null) return CounterApplyResult.fail('尚无反击计划');
     final id = _store.planId;
+    // 有界排期（单次/几次/几日/指定日期/日期区间）跑完即止，**不滚动续算**；
+    // 否则"单次"会在每次 tick 后不断新生，语义就错了。
+    if (!plan.isRecurring) {
+      return CounterApplyResult.ok2(
+          '排期「${plan.scheduleMode.label}」为有界计划，无需续算',
+          taskCount: 0,
+          planId: id);
+    }
     final at = now ?? DateTime.now();
     final last = lastPlannedDay(await _tasks.counterTaskIds(id));
     if (last != null &&
@@ -140,6 +151,38 @@ class CounterPlanService {
           taskCount: 0, planId: id);
     }
     return apply(plan, planId: id, now: at, days: days, replace: false);
+  }
+
+  /// 已落库的**联网更新**节假日表（UI 展示条数与更新时间用）。
+  Map<String, DayKind> autoOverrides() => _store.autoOverrides();
+
+  /// 上次一键更新成功时间；从未更新 → null。
+  DateTime? autoOverridesUpdatedAt() => _store.autoOverridesUpdatedAt();
+
+  /// 落库一张**联网拉回的节假日表**，并（若计划已启用）立即按新表重排。
+  ///
+  /// 与 [apply] 的分工：本方法只负责"存表 + 触发重排"，不解析任何网络格式
+  /// （解析在 `HolidayUpdateService`）。表空 ⇒ 视为清除（回到内置表）。
+  /// 计划未启用 / 尚无计划本体时**不算失败**：表已存下，下次启用即生效。
+  Future<CounterApplyResult> refreshHolidays(
+    Map<String, DayKind> autoOv, {
+    DateTime? now,
+  }) async {
+    final at = now ?? DateTime.now();
+    await _store.setAutoOverrides(autoOv, at: at);
+    if (autoOv.isEmpty) {
+      return CounterApplyResult.ok2('已清除联网节假日表（回到内置表）');
+    }
+    if (!_store.enabled) {
+      return CounterApplyResult.ok2(
+          '已更新节假日表（${autoOv.length} 天）；反击计划未启用，启用即按新表排期');
+    }
+    final plan = _store.loadPlan();
+    if (plan == null) {
+      return CounterApplyResult.ok2(
+          '已更新节假日表（${autoOv.length} 天）；尚无反击计划，生成后即按新表排期');
+    }
+    return apply(plan, planId: _store.planId, now: at, replace: true);
   }
 }
 

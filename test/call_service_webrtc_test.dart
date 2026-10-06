@@ -217,13 +217,18 @@ void main() {
       expect(sent.single.payload['video'], isFalse);
     });
 
-    test('CS-07 视频呼叫：video 约束带 facingMode 与分辨率', () async {
+    test('CS-07 视频呼叫：video 约束带 facingMode 与分辨率/帧率上限', () async {
       await svc.startCall(peer('EP0012'), store, video: true);
       final video =
           rtc.constraintsOf('getUserMedia')['video'] as Map<String, Object?>;
       expect(video['facingMode'], 'user');
-      expect(video['width'], 640);
-      expect(video['height'], 480);
+      // ⚠️ 用 `ideal` 而非精确值：精确值在"摄像头不支持该分辨率"的机型上会让
+      // **整通电话直接起不来**（docs/16 §10）。
+      expect(video['width'], <String, Object?>{'ideal': 640});
+      expect(video['height'], <String, Object?>{'ideal': 480});
+      // ⚠️ 帧率上限是"防爆卡"的第一级：旧实现完全不设帧率，部分机型会以
+      // 30/60fps 采集，低端机编码线程直接吃满 CPU。
+      expect(video['frameRate'], <String, Object?>{'ideal': 24, 'max': 24});
     });
 
     test('CS-07b ★ addTrack 必须带本地流（BUG-077：不带 ⇒ native NPE 崩溃）',
@@ -870,5 +875,70 @@ void main() {
       expect(ends, isNotEmpty, reason: '必须通知对端，避免一边退出一边卡住');
       expect(ends.last.payload['reason'], 'media');
     }, timeout: const Timeout(Duration(seconds: 90)));
+  });
+
+  // ══════════════════ CS-K 媒体档位（第七十八轮：防"建立通话即爆卡"） ══════════════════
+  //
+  // 旧实现有三个结构性缺口：① `getUserMedia` 不设帧率上限、且**从不**
+  // `setParameters` ⇒ 编码码率/帧率无上限，BWE 会把码率抬到编码器跑不动为止，
+  // 低端机编码线程吃满 CPU；② `degradationPreference` 缺省 `balanced`
+  // ⇒ 又糊又卡；③ 多路各自编码（由 `multi_call_service` 那侧锁）。
+  // 本组锁 ① ② 的**下发行为真的发生**（只锁"源码里有那行字"正是 docs/17 §74
+  // 说的假绿：桩恒回成功、track 恒为 null 时，这条路径根本走不到）。
+
+  group('CS-K 视频通话的编码档位必须真的下发', () {
+    test('CS-43 主叫：视频 sender 下发 600kbps/24fps + maintain-framerate',
+        () async {
+      final id = await svc.startCall(peer('EP0090'), store, video: true);
+      expect(id, isNotNull, reason: '前置：必须真的建了 PC 并 addTrack');
+      expect(rtc.senderParameters, hasLength(1),
+          reason: '只该有**视频** sender 被下发（音频轨没有档位可调）；'
+              '若为 0 ⇒ setParameters 根本没被调用，编码仍无上限');
+      final p = rtc.senderParameters.single;
+      expect(p['degradationPreference'], 'maintain-framerate',
+          reason: '缺省 balanced 会**同时**掉分辨率和帧率 ⇒ 用户看到"又糊又卡"；'
+              '通话要的是"宁可糊一点，也要跟手"');
+      final enc = (p['encodings'] as List).single as Map<String, dynamic>;
+      expect(enc['maxBitrate'], 600000,
+          reason: '没有码率上限，BWE 会把码率一路抬到编码器跑不动为止');
+      expect(enc['maxFramerate'], 24);
+      expect(enc['scaleResolutionDownBy'], 1.0);
+    });
+
+    test('CS-44 语音通话：没有视频 sender ⇒ 不下发档位', () async {
+      final id = await svc.startCall(peer('EP0091'), store, video: false);
+      expect(id, isNotNull);
+      expect(rtc.senderParameters, isEmpty,
+          reason: '语音通话无视频轨，不该出现无意义的 setParameters');
+    });
+
+    test('CS-45 被叫自动接通：同样下发档位（不只是主叫）', () async {
+      await freshPrefs(<String, Object>{'rc_call_auto_answer': true});
+      final ok = await svc.onIncomingCall(
+          <String, dynamic>{
+            'callId': 'C-45',
+            'sdp': 'offer-sdp',
+            'type': 'offer',
+            'video': true,
+          },
+          peer('EP0092'),
+          store);
+      expect(ok, isTrue, reason: '前置：自动接通必须真的接了');
+      expect(rtc.senderParameters, isNotEmpty,
+          reason: '被叫侧同样要下发 —— "接收方机器爆卡"就是这条缺失的症状');
+      expect(rtc.senderParameters.first['degradationPreference'],
+          'maintain-framerate');
+    });
+
+    test('CS-46 收尾后 sender 列表必须清空（下一通不串味）', () async {
+      await svc.startCall(peer('EP0093'), store, video: true);
+      expect(rtc.senderParameters, hasLength(1));
+      await svc.onRemoteEnd();
+      await settle();
+      rtc.resetObservations();
+      await svc.startCall(peer('EP0094'), store, video: true);
+      expect(rtc.senderParameters, hasLength(1),
+          reason: '每通只该下发一次；若 >1，说明上一通的 sender 被重用了');
+    });
   });
 }

@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 
 import 'call_lifecycle.dart';
+import 'call_media_profile.dart';
 import 'call_service.dart' show CallService;
 import 'endpoint_service.dart';
 import 'protocol.dart';
@@ -83,6 +84,14 @@ class MultiCallSession {
   /// 没有它：answer 一到就取消 `waitTimer`，之后 ICE 迟迟不通时本路
   /// **永久停在「连接中…」**（既不报未接、也不报失败）。
   Timer? connectTimer;
+
+  /// 本路已 `addTrack` 出去的 sender（docs/16 §10）。
+  ///
+  /// 多路是 **P2P，没有 SFU** ⇒ 每一路各跑一个编码器，路数越多 CPU 越爆
+  /// （低端机上"too many video streams simultaneously"是常见卡顿根因）。
+  /// 因此需要在**路数变化**时对**所有路**重新下发档位
+  /// （见 [MultiCallService._applyProfilesToAll]）。
+  List<RTCRtpSender> senders = <RTCRtpSender>[];
 }
 
 /// 多路视频同连（主控视角：同时连多台设备，点窗口切换目标）。
@@ -284,9 +293,10 @@ class MultiCallService {
       // `JniHelper.getStringBytes` 抛 NPE ⇒ WebRTC `CheckException`
       // `RTC_CHECK(false)` ⇒ SIGABRT（多路视频同连一发即崩即此因）。
       final local = _localStream;
+      s.senders = <RTCRtpSender>[];
       if (local != null) {
         for (final t in local.getTracks()) {
-          await pc.addTrack(t, local);
+          s.senders.add(await pc.addTrack(t, local));
         }
       }
       pc.onTrack = (event) {
@@ -340,6 +350,9 @@ class MultiCallService {
 
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      // 本地描述就位 → 按**当前并发路数**对本路与既有各路统一下发档位
+      // （docs/16 §10）：新加一路会让所有路一起降级，避免低端机编码器过载。
+      await _applyProfilesToAll();
       final desc = await pc.getLocalDescription();
       final sent = await _send(
           peer,
@@ -376,14 +389,41 @@ class MultiCallService {
 
   Future<bool> _ensureLocalStream({required bool video}) async {
     try {
+      // 与单路同源（docs/16 §10）：走 [videoConstraintsFor] 才有帧率上限，
+      // 否则多路 + 无上限帧率会让低端机直接"爆卡"。
       _localStream = await navigator.mediaDevices.getUserMedia({
         'audio': true,
-        'video':
-            video ? {'facingMode': 'user', 'width': 640, 'height': 480} : false,
+        'video': video ? videoConstraintsFor(callVideoCapture) : false,
       });
       return true;
     } on Object {
       return false;
+    }
+  }
+
+  /// 当前**并发视频路数**（有视频 sender 的会话数）。
+  ///
+  /// 音频路不占视频编码器，因此不能简单用 `_sessions.length` ——
+  /// 会低估档位（把 1 路视频 + 2 路语音误判成 3 路视频而降得过狠）。
+  int _concurrentVideoSessions() {
+    var n = 0;
+    for (final s in _sessions.values) {
+      if (s.senders.any((x) => x.track?.kind == 'video')) n++;
+    }
+    return n;
+  }
+
+  /// 按当前路数把档位下发给**所有**路（docs/16 §10）。
+  ///
+  /// 调用时机：**增加一路**（`connect` 里 setLocalDescription 之后）与
+  /// **减少一路**（`hangUp` 移除之后）。前者降级、后者恢复更高画质 ——
+  /// 只在新路建立时下发、挂断时不恢复，会让剩下的通话一直停在低画质。
+  ///
+  /// ⚠️ 失败一律吞掉（[applySendProfileToSenders] 内已处理），不阻塞信令。
+  Future<void> _applyProfilesToAll() async {
+    final profile = sendProfileFor(_concurrentVideoSessions());
+    for (final s in _sessions.values) {
+      await applySendProfileToSenders(s.senders, profile);
     }
   }
 
@@ -410,11 +450,16 @@ class MultiCallService {
       // 关闭失败也要把状态清干净，不能留一路"僵尸会话"。
     }
     s.phase = MultiCallPhase.closed;
+    // sender 随 `s.pc` 一起失效，断开引用避免后续误用。
+    s.senders = <RTCRtpSender>[];
     if (_sessions.isEmpty) {
       _localStream?.getTracks().forEach((t) => unawaited(t.stop()));
       _localStream = null;
     }
     _activeId = nextActiveId(_sessions.keys.toList(), _activeId);
+    // 路数下降 → 对**剩余各路恢复更高档位**（docs/16 §10）：只在新路建立时
+    // 降级、挂断时不恢复，会让剩下的通话一直停在低画质。
+    if (_sessions.isNotEmpty) await _applyProfilesToAll();
     _notify();
   }
 

@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/data/repositories/api_config_store.dart';
 import 'package:sonic_shield/domain/models/counter_plan.dart';
+import 'package:sonic_shield/domain/models/counter_plan_params.dart';
 import 'package:sonic_shield/services/deepseek_service.dart';
 
 /// DeepSeek 一键生成的**收敛与降级**锁：
@@ -199,5 +200,71 @@ void main() {
     expect(w.durationSecMin, 3);
     expect(w.durationSecMax, 8);
     expect(w.actionsPerHour, CounterWindow.maxActionsPerHour);
+  });
+
+  test('DS-08 传入生成参数 → 系统提示与 user 消息都含用户区间', () async {
+    late http.Request seen;
+    final svc = DeepSeekService(
+      client: MockClient((r) async {
+        seen = r;
+        return _ok(chatBody(goodPlanJson()));
+      }),
+      config: await storeWith(),
+    );
+    final params = CounterPlanParams.defaults().copyWith(
+      dayStartHour: 9,
+      dayEndHour: 22,
+      cooldownSecMin: 120,
+      cooldownSecMax: 480,
+      workdayDay: const PlanWindowParams(
+        volumeMin: 0.6,
+        volumeMax: 0.9,
+        durationSecMin: 4,
+        durationSecMax: 6,
+        actionsPerHourMin: 2,
+        actionsPerHourMax: 5,
+      ),
+    );
+    final r = await svc.generatePlan(params: params);
+    expect(r.ok, isTrue, reason: r.message);
+
+    final body = jsonDecode(seen.body) as Map<String, dynamic>;
+    final msgs = (body['messages'] as List).cast<Map<String, dynamic>>();
+    final sys = msgs.first['content'] as String;
+    final user = msgs.last['content'] as String;
+    // 系统提示的「区间约定」必须换成用户参数（0.60-0.90 / 4-6 / 2-5）。
+    expect(sys, contains('0.60-0.90'));
+    expect(sys, contains('时长4-6'));
+    expect(sys, contains('动作间隔 120-480 秒'));
+    expect(sys, contains('白天 9-22 时'));
+    // user 消息带同一份参数说明 ⇒ AI 与本机随机落在同一组约束里。
+    expect(user, contains('0.60-0.90'));
+    expect(user, contains('时长4-6'));
+    // 默认区间不得再出现在系统提示里（否则参数只是"嘴上说说"）。
+    expect(sys, isNot(contains('0.50-0.80')));
+  });
+
+  test('DS-08b 参数与 hint 同时给出 → 参数在前、hint 追加在后', () async {
+    late http.Request seen;
+    final svc = DeepSeekService(
+      client: MockClient((r) async {
+        seen = r;
+        return _ok(chatBody(goodPlanJson()));
+      }),
+      config: await storeWith(),
+    );
+    final r = await svc.generatePlan(
+      hint: '白天多一点',
+      params: CounterPlanParams.defaults(),
+    );
+    expect(r.ok, isTrue, reason: r.message);
+    final body = jsonDecode(seen.body) as Map<String, dynamic>;
+    final user = ((body['messages'] as List).last
+        as Map<String, dynamic>)['content'] as String;
+    // 参数说明在前、hint 追加在后（顺序固定，便于模型先读约束再看附加要求）。
+    final paramAt = user.indexOf('生成一份 24 小时全天候随机反击计划');
+    final hintAt = user.indexOf('白天多一点');
+    expect(paramAt, 0);
+    expect(hintAt, greaterThan(paramAt));
   });
 }

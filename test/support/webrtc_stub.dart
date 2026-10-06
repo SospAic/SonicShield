@@ -79,10 +79,17 @@ class FakeWebrtc {
   /// `getLocalDescription` 回的 SDP。设为空串即复刻"空 SDP 假成功"分支。
   String localSdp = 'v=0\r\no=- 4611 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n';
 
-  /// 是否在 `getUserMedia` 里带**音频轨**（`toggleMute` 的前置）。
+  /// "设备是否**有**音频轨"（`toggleMute` 的前置）。
+  ///
+  /// 与 `getUserMedia` 的 `audio` 约束**取与**：约束为 false 时轨不会出现，
+  /// 与真实插件一致（见 [_handle] 的 getUserMedia 分支）。
   bool withAudioTrack = true;
 
-  /// 是否在 `getUserMedia` 里带**视频轨**（`switchCamera` 的前置）。
+  /// "设备是否**有**视频轨"（`switchCamera` 的前置）。
+  ///
+  /// 与 `getUserMedia` 的 `video` 约束**取与**：语音通话（`video:false`）下
+  /// 真实插件不返回视频轨，桩也必须如此，否则会出现"语音也有视频 sender"
+  /// 的假象。设为 false 可复刻"无摄像头/无权限但音频仍可用"。
   bool withVideoTrack = true;
 
   // ───────────────────────── 观测面 ─────────────────────────
@@ -95,6 +102,20 @@ class FakeWebrtc {
 
   /// 曾收到的 `addCandidate` 候选 SDP（断言缓存重放真的喂了进去）。
   final List<String> addedCandidates = <String>[];
+
+  /// 曾收到的 `rtpSenderSetParameters` 参数（断言**编码档位真的下发了**）。
+  ///
+  /// 第七十八轮新增：`call_media_profile.dart` 的下发是"调优"，桩若只是
+  /// 不报错地放过，`setParameters` 有没有被调用、带了什么档位**都无法断言**
+  /// —— 那正是 `docs/17 §74` 说的"锁住的是存在，不是行为"。
+  final List<Map<String, dynamic>> senderParameters = <Map<String, dynamic>>[];
+
+  /// 由 `getUserMedia` 建出的本地轨：trackId → kind。
+  ///
+  /// 让 `addTrack` 能回**真实形状**的 track（见 [_handle] 的 addTrack 分支）：
+  /// 旧桩恒回空 track ⇒ `applySendProfileToSender` 里 `track.kind != 'video'`
+  /// 判定在宿主上**永远为真**（提前 return）⇒ 编码档位用例假绿。
+  final Map<String, String> _trackKinds = <String, String>{};
 
   bool get installed => _installed;
   bool _installed = false;
@@ -134,6 +155,9 @@ class FakeWebrtc {
     methods.clear();
     calls.clear();
     addedCandidates.clear();
+    senderParameters.clear();
+    _trackKinds.clear();
+    _senderSeq = 0;
   }
 
   int countOf(String method) => methods.where((m) => m == method).length;
@@ -222,7 +246,7 @@ class FakeWebrtc {
         'receiver': <String, dynamic>{
           'receiverId': 'receiver-1',
           'track': _trackMap('remote-video', 'video'),
-          'rtpParameters': _rtpParameters,
+          'rtpParameters': _rtpParameters(),
         },
         'track': _trackMap('remote-video', 'video'),
       });
@@ -253,14 +277,20 @@ class FakeWebrtc {
   /// 传 `{}` 或 `null` 会抛 `type 'Null' is not a subtype of type 'bool'`
   /// （第 45 轮实测，错误发生在 `pc.addTrack` 这条**没人 await** 的路径上，
   /// 症状是"整个用例莫名失败"）。
-  static final Map<String, dynamic> _rtpParameters = <String, dynamic>{
-    'transactionId': 'tx-1',
-    'encodings': <dynamic>[],
-    'headerExtensions': <dynamic>[],
-    'codecs': <dynamic>[],
-    'rtcp': <String, dynamic>{'cname': 'fake-cname', 'reducedSize': false},
-    'degradationPreference': null,
-  };
+  ///
+  /// ⚠️ 返回**新建 map**（而非共享常量）：编码档位下发会改动 `encodings`，
+  /// 共享一份会让多路 sender 互相串味 —— 那是桩造成的假象，不是生产行为。
+  static Map<String, dynamic> _rtpParameters() => <String, dynamic>{
+        'transactionId': 'tx-1',
+        'encodings': <dynamic>[],
+        'headerExtensions': <dynamic>[],
+        'codecs': <dynamic>[],
+        'rtcp': <String, dynamic>{'cname': 'fake-cname', 'reducedSize': false},
+        'degradationPreference': null,
+      };
+
+  /// 递增的 sender 序号（让每次 `addTrack` 回不同的 `senderId`）。
+  int _senderSeq = 0;
 
   Future<Object?> _handle(MethodCall call) async {
     methods.add(call.method);
@@ -271,13 +301,26 @@ class FakeWebrtc {
         if (failUserMedia) {
           throw PlatformException(code: 'userMediaFailed', message: '无可用设备');
         }
+        // ⚠️ 必须**按约束**回轨：真实 `getUserMedia` 在 `video: false` 时
+        // 不返回任何视频轨。旧桩不看约束、恒回视频轨 ⇒ 语音通话（video:false）
+        // 在宿主上也会冒出视频 sender ⇒ "语音不下发编码档位"这类断言假红/假绿。
+        final constraints = _asMap(args['constraints']);
+        final wantAudio = constraints['audio'] != false;
+        final wantVideo =
+            constraints['video'] != null && constraints['video'] != false;
+        final hasAudio = wantAudio && withAudioTrack;
+        final hasVideo = wantVideo && withVideoTrack;
+        // 登记本地轨的 kind，供 addTrack 回真实形状的 track（见下）。
+        _trackKinds.clear();
+        if (hasAudio) _trackKinds['local-audio'] = 'audio';
+        if (hasVideo) _trackKinds['local-video'] = 'video';
         return <String, dynamic>{
           'streamId': streamId,
           'audioTracks': <dynamic>[
-            if (withAudioTrack) _trackMap('local-audio', 'audio'),
+            if (hasAudio) _trackMap('local-audio', 'audio'),
           ],
           'videoTracks': <dynamic>[
-            if (withVideoTrack) _trackMap('local-video', 'video'),
+            if (hasVideo) _trackMap('local-video', 'video'),
           ],
         };
       case 'createPeerConnection':
@@ -321,14 +364,34 @@ class FakeWebrtc {
               code: 'addTrackFailed',
               message: 'streamIds 为空（漏传本地流 ⇒ 原生 NPE）');
         }
-        // `RTCRtpSenderNative.fromMap` 要求 `track` / `rtpParameters` 齐全：
-        // `track` 为空 map ⇒ sender 的 track 为 null（本桩不关心发送侧）。
+        // ⚠️ 必须回**真实形状**的 track：真实插件的 addTrack 回的是
+        // `rtpSenderToMap(sender)`，其中 `track` 是**非空**的
+        // `mediaTrackToMap(sender.track())`（PeerConnectionObserver.java:1010）。
+        // 旧桩恒回 `{}`（track == null）⇒ `applySendProfileToSender` 里
+        // `track.kind != 'video'` 在宿主上永远命中提前 return ⇒ 新的编码档位
+        // 用例会**假绿**。kind 由 getUserMedia 登记的 trackId→kind 反查。
+        final trackId = '${args['trackId']}';
+        final kind = _trackKinds[trackId] ?? 'video';
         return <String, dynamic>{
-          'senderId': 'sender-1',
-          'track': <dynamic, dynamic>{},
-          'rtpParameters': _rtpParameters,
+          'senderId': 'sender-${_senderSeq++}',
+          'track': _trackMap(trackId, kind),
+          'rtpParameters': _rtpParameters(),
           'ownsTrack': false,
         };
+      case 'rtpSenderSetParameters':
+        // 真实插件：`rtpSenderSetParameters` → `response['result']`
+        // （rtc_rtp_sender_impl.dart:77）。记录参数以便断言档位真的下发。
+        final params = _asMap(args['parameters']);
+        senderParameters.add(<String, dynamic>{
+          'rtpSenderId': args['rtpSenderId'],
+          'degradationPreference': params['degradationPreference'],
+          'encodings': (params['encodings'] is List)
+              ? (params['encodings'] as List)
+                  .map((e) => e is Map ? e.cast<String, dynamic>() : null)
+                  .toList()
+              : const <dynamic>[],
+        });
+        return <String, dynamic>{'result': true};
       case 'enableSpeakerphone':
         if (failSpeakerphone) {
           throw PlatformException(code: 'noSpeaker', message: '不支持免提');
