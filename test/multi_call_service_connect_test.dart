@@ -516,4 +516,49 @@ void main() {
           reason: '从未收到 answer ⇒ 不得被标成已回答，否则后续会误判已接通');
     });
   });
+
+  // ══════════════════ MC-F 应答后建连超时（第七十五轮） ══════════════════
+  //
+  // BUG-081：单路侧新增了"应答后建连超时"（`call_lifecycle.connectTimeout`），
+  // 多路必须**同源同结论** —— 否则同一台设备上"单路来电"会收尾、而"多路同连"
+  // 永远停在"连接中"（两处超时值/判定漂移，正是本项目反复出现的形状）。
+
+  group('MC-F 应答后建连超时（真实计时器）', () {
+    test('MC-25 answer 到位但 ICE 始终不连通 → 满 15 秒判该路失败并挂断', () async {
+      await svc.connect(peer('EP51'), store);
+      final s = svc.sessionOf('EP51')!;
+      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      svc.attach(ctrl.stream);
+      addTearDown(() => ctrl.close());
+
+      // 记录相位迁移：`hangUp` 随后会把该路收成 closed，故必须看**迁移过程**。
+      final phases = <MultiCallPhase>[];
+      final sub = svc.updates.listen((_) => phases.add(s.phase));
+      addTearDown(sub.cancel);
+
+      // 前置：answer 到位 ⇒ 取消 45s 等待计时，启动 15s 建连计时。
+      ctrl.add(<String, dynamic>{
+        'type': RcCmd.callAnswer,
+        'payload': <String, dynamic>{
+          'callId': s.callId,
+          'sdp': 'answer-sdp',
+          'sdpType': 'answer',
+        },
+      });
+      await settle();
+      expect(s.answered, isTrue, reason: '前置：answer 已被受理');
+
+      // 真实计时器：ICE 状态不推进 ⇒ 15s 到点必须收尾，不能无限"连接中"。
+      await Future<void>.delayed(const Duration(milliseconds: 15500));
+      await settle();
+
+      expect(phases, contains(MultiCallPhase.failed),
+          reason: '应答后连不上必须判失败，否则"多路同连"永远停在连接中（BUG-081 多路同源）');
+      expect(phases.last, MultiCallPhase.closed,
+          reason: '失败后必须挂断收尾，不能把死路留在列表里占着焦点');
+      expect(s.failure, contains('TURN'),
+          reason: '失败原因必须可诊断（指向对称 NAT + 配置 TURN），不能只显示"连接失败"');
+      expect(svc.sessionOf('EP51'), isNull, reason: '挂断后该路必须从列表移除');
+    });
+  });
 }

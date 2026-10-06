@@ -11,19 +11,19 @@
 红线见 §1 与 §8 —— **拒绝「未经授权控制他人设备」与「隐蔽监控」**，
 合法替代是扫码配对。这条不要重新设计。
 
-**当前状态（2026-10-05 第七十四轮）**：v1.9.0-alpha（`+17`），
-功能层 **2284/2284** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（可测面 **98.82%（10217/10339）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=10209`）；
+**当前状态（2026-10-06 第七十五轮）**：v1.9.0-alpha（`+17`），
+功能层 **2297/2297** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（可测面 **98.83%（10277/10399）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=10269`）；
 机器学习锁 **73/73**（`_pt/bt4_locks.txt`；含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例**；`GEC` 10 例含新增 CI ratchet / 设备层 BLOCKED 一致锁）。
-🔴 **本轮产出 = 对讲机（PTT）v2 全量真流式 + 防复发机制落地（替身边界登记锁 SBL）**（含 `lib/**` 改动）：① PTT v2 流式 —— `ptt.voice` 载荷新增 `seq`/`last`，控制端 `record.startStream` 边录边按 ADTS AAC 帧切分发送（`AdtsChunker` 保证每片覆盖整数个完整帧），端点首片即用 just_audio `ConcatenatingAudioSource` 边收边放、末片收尾，无 `seq` 或未注入 `pttStreamOpener` 回落 v1 整段（回归锁 EP-06 / PB-04 / RC-16）；② 🔴 **防复发机制（直接回答第七十三轮复盘）** —— `test/support/webrtc_stub.dart` 的 `addTrack` **复刻真实拒绝**（`streamIds` 含 null/缺失/空 ⇒ `PlatformException`，合法流才回 sender）+ 新建 `test/substitute_boundary_lock_test.dart`（**SBL 登记制机器锁**：`test/support/*_stub.dart` 集合须与 `_registry` 完全相等，且每个替身须登记「遮蔽的生产文件 / 驱动它的真实链宿主测试 / 真机冒烟功能点」）；③ 本轮含 `lib/**` 改动 ⇒ 可测面分母 10156 → **10339（+183）**、分子 10035 → **10217（+182）**，可测面 **98.82%（10217/10339）**，`MIN_COVERED` 10025 → **10209**（只升不降）。
-⚠️ **BLOCKED**：iOS / macOS 宿主层、DST 时区专项、A10 决策（真机 arm64 矩阵 / 无线真机执行见 `docs/12 §107`）。
+🔴 **本轮产出 = WebRTC 建连提速 + 修复 BUG-081（应答后无建连超时 ⇒ 永久「连接中」）**（含 `lib/**` 改动）：① **建连提速** —— STUN 由 2 条 Google 换成 **4 条国内可达**（`stun.miwifi.com:3478` / `stun.chat.bilibili.com:3478` / `stun.qq.com:3478`）+ 1 条 Google 兜底；`lib/remote/call_service.dart` 新增 `peerConnectionConfig()`（`iceCandidatePoolSize=4` / `bundlePolicy=max-bundle` / `rtcpMuxPolicy=require` / `sdpSemantics=unified-plan` / `iceTransportPolicy=all`）**供单路与多路共用**；TURN 自动补 `?transport=tcp`（`call_lifecycle.turnTcpFallbackUrl`）双通道；② 🔴 **BUG-081 修复** —— `lib/remote/call_lifecycle.dart` 新增**应答后建连超时** `connectTimeout = 15s`（单路 / 多路都在 answer 后启动计时、`connected` / teardown 取消、到点发 `call.end(reason='media')` 并收尾；原先**永久停在「连接中」**），主叫**等待应答**超时改为**先发 `call.end(reason='missed')` 通知对端**再本地收尾；回归锁 `test/call_lifecycle_test.dart` **CL-21~CL-28** / `test/call_ice_test.dart` **CS-05 / CS-20 / CS-21** / `test/call_service_webrtc_test.dart` **CS-35 / CS-40 / CS-42** / `test/multi_call_service_connect_test.dart` **MC-25**；③ 本轮含 `lib/**` 改动 ⇒ 可测面分母 10339 → **10399（+60）**、分子 10217 → **10277（+60）**，可测面 **98.83%（10277/10399）**，`MIN_COVERED` 10209 → **10269**（只升不降）。
+⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛、DST 时区专项、A10 决策（见 `docs/12 §108`）。
 残差逐行归类见 `_pt/covgap.py` / `_pt/covblocks.py` 输出；**100% 仍不可达**的量化裁决见 `docs/12 §104.1`。
-详见 `docs/12 §107` / `docs/17 §104`。
+详见 `docs/12 §108` / `docs/17 §105`。
 **设备层（第十六轮复验全绿）**：真机不在线 ⇒ 三机模拟器（API 36 / x86_64，`emulator-5554/5556/5558`）复验 **F-3 开机自启**（`isForeground=true types=0x00000002`）+ **集成 7 文件 22 例** + **AOT 6 例** + **远程命令 9/9（CRUD 8/8）** —— **十六轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69/70）**同编排全绿。
 ✅ **中继加固（`docs/17 §86.2`）继续有效**：本轮宿主锁/门禁作业均自带 `exec 1>>_pt/<轮次>_progress.log` + `trap ... EXIT`，正常写出 `.done`。
 BUG-078 / BUG-079 修复**未回归**。
 **多模拟器裁决**：双机并发 Gradle 不可行 ⇒ **通路分工**形态（`docs/17 §83.2`）。
-**覆盖率：门禁口径（可测面）98.82%（10217/10339）／对外诚实数字（全局）93.88%（10225/10892）**（**本轮含 `lib/**` 改动，分母 10156 → 10339（+183）、分子 10035 → 10217（+182）**）——
-双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=10209`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102` / `§103` / `§104` / `§105` / `§106` / `§107`）。
+**覆盖率：门禁口径（可测面）98.83%（10277/10399）／对外诚实数字（全局）93.91%（10285/10952）**（**本轮含 `lib/**` 改动，分母 10339 → 10399（+60）、分子 10217 → 10277（+60）**）——
+双指标 ratchet：`COVERAGE_MIN=98.8` **且** `MIN_COVERED=10269`（只升不降；见 §1、`docs/12 §87` / `§92` / `§93` / `§97` / `§98` / `§99` / `§100` / `§101` / `§102` / `§103` / `§104` / `§105` / `§106` / `§107` / `§108`）。
 ⚠️ 自第三十六轮续四起启用**设备层豁免 553 行**（`background_engine.dart` 516 + `main.dart` 37）⇒ 两个口径**不再相等**；
 **豁免不产生任何新的已覆盖行**。
 ⭐ **第四十六轮（2026-09-28）把「第六代」判据换域到 `just_audio`（**纯测试，生产代码 0 行改动**）**：
@@ -2674,7 +2674,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 
 <!-- ===== 第 36 轮续六（2026-09-26 23:10）· 现场实测块 —— 以本块为准 ===== -->
 
-## ★ 当前口径（**第七十四轮** · 🔴 对讲机（PTT）**v2 全量真流式**（控制端 `record.startStream` 边录边按 ADTS AAC 帧切片发送；端点 just_audio `ConcatenatingAudioSource` 边收边放、末片收尾；无 `seq` 回落 v1）+ 🔴 **防复发机制落地**（`webrtc_stub.addTrack` 复刻真实拒绝 + `test/substitute_boundary_lock_test.dart` 替身边界登记锁 SBL）—— **本轮含 `lib/**` 改动 ⇒ 可测面分母 10156 → 10339（+183）、分子 10035 → 10217（+182）**，可测面 **98.82%（10217/10339）**，`COVERAGE_MIN=98.8` **保持** / `MIN_COVERED` 10025 → **10209**（只升不降）；机器锁 **73/73**；设备层（真机 arm64 矩阵 / 无线真机）见 `docs/12 §107`
+## ★ 当前口径（**第七十五轮** · 🔴 **WebRTC 建连提速**（STUN 换 4 条国内可达 + 1 条 Google 兜底、单路/多路共用 `peerConnectionConfig()`、TURN 自动补 `?transport=tcp` 双通道）+ 🔴 **修复 BUG-081**（应答后无建连超时 ⇒ 永久「连接中」：`call_lifecycle.dart` 新增 15s `connectTimeout`，超时发 `call.end(reason='media')` 收尾；主叫等待应答超时改为先发 `call.end(reason='missed')` 通知对端）—— **本轮含 `lib/**` 改动 ⇒ 可测面分母 10339 → 10399（+60）、分子 10217 → 10277（+60）**，可测面 **98.83%（10277/10399）**，`COVERAGE_MIN=98.8` **保持** / `MIN_COVERED` 10209 → **10269**（只升不降）；机器锁 **73/73**；设备层（真机 arm64 分级门槛 / 无线真机）见 `docs/12 §108`
 
 > ⚠️ 本块自称「以本块为准」⇒ 长期不刷即是一处**静默漂移**。
 > 历史：本块曾停在**第三十六轮续六**（1707 例 / 82.36%）连超九轮，
@@ -2685,19 +2685,19 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 |---|---|
 | `bash scripts/gates.sh`（**4 步**，干净环境） | **RC=0 全绿**（`_pt/bt3gate.txt`） |
 | 1/4 analyze | `No issues found!` |
-| 2/4 功能层 | **2284**（全绿） |
+| 2/4 功能层 | **2297**（全绿） |
 | 3/4 压测层 | **24/24** |
-| 4/4 覆盖率 ratchet | **可测面 98.82%（10217/10339）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=10209`（含 `lib/**` 改动 ⇒ 分母 +183、分子 +182） |
-| 全局（对外诚实数字） | **93.88%（10225/10892）** |
-| **设备层** | 见 `docs/12 §107`（真机 arm64 矩阵 + 无线真机执行全功能点用例；未在线者如实登记为**未执行**，不伪造通过） |
-| 🔴 本轮缺陷 | **无新增用户侧缺陷**；第 50/53/73 轮 BUG-078 / BUG-079 / BUG-080 经复验确认**修复未回归**；本轮把「替身吃掉真实契约」这条系统性失效固化成机器锁（SBL） |
-| 🔴 本轮实质产出 | ①🔴 **PTT v2 全量真流式**（`ptt.voice` 增 `seq`/`last`；控制端 `record.startStream` + `AdtsChunker` 边录边切；端点 just_audio `ConcatenatingAudioSource` 边收边放；无 `seq` 回落 v1；回归锁 EP-06 / PB-04 / RC-16）；②🔴 **防复发机制**（`test/support/webrtc_stub.dart` 的 `addTrack` 复刻真实拒绝 + 新建 `test/substitute_boundary_lock_test.dart` SBL 登记制机器锁：替身集合 = `_registry`、每个替身登记「遮蔽的生产文件 / 真实链宿主测试 / 真机冒烟功能点」）；③ `lib/services/ptt_stream_sink.dart` 纯抽象接口（`@visibleForTesting` 注入缝） |
-| 反漂移抽查 | 7 落点**逐位含有** `10217/10339` 与 `10225/10892`；`_pt/bg_drift_audit.py` 复跑（**零命中**） |
+| 4/4 覆盖率 ratchet | **可测面 98.83%（10277/10399）** ≥ `COVERAGE_MIN=98.8` 且 ≥ `MIN_COVERED=10269`（含 `lib/**` 改动 ⇒ 分母 +60、分子 +60） |
+| 全局（对外诚实数字） | **93.91%（10285/10952）** |
+| **设备层** | 见 `docs/12 §108`（真机 arm64 分级门槛 + 无线真机执行全功能点用例；未在线者如实登记为**未执行**，不伪造通过） |
+| 🔴 本轮缺陷 | **无新增用户侧缺陷**；第 50/53/73 轮 BUG-078 / BUG-079 / BUG-080 经复验确认**修复未回归**；本轮修复 **BUG-081**（应答后无建连超时 ⇒ 永久「连接中」） |
+| 🔴 本轮实质产出 | ①🔴 **WebRTC 建连提速**（STUN 换 4 条国内可达 + 1 条 Google 兜底；`call_service.dart` 新增 `peerConnectionConfig()` 供单路/多路共用；TURN 自动补 `?transport=tcp` 双通道；回归锁 CS-05 / CS-20 / CS-21）；②🔴 **BUG-081 修复**（`call_lifecycle.dart` 新增 15s `connectTimeout`，超时发 `call.end(reason='media')` 收尾；主叫等待应答超时改为先发 `call.end(reason='missed')` 通知对端；回归锁 CL-21~CL-28 / CS-35 / CS-40 / CS-42 / MC-25） |
+| 反漂移抽查 | 7 落点**逐位含有** `10277/10399` 与 `10285/10952`；`_pt/bg_drift_audit.py` 复跑（**零命中**） |
 | 机器锁（DGC / GEC / version / SCR） | ✅ **73/73**（LOCKS_RC=0；`doc_gate_consistency_test.dart` 55 = `DGC` 13 + `BAS` 11 + `BRL` 10 + `MCL` 5 + `CCL` 5 + `RCL` 5 + 🔴 **`SSL` 6**；`GEC` 10） |
-| 真实进度 | **可测面 +182 行**（10035 → 10217）；功能层 **2284**、压测 **24** —— 本轮价值在 **PTT 流式化 + 防复发机制（SBL）** |
-| 续作入口 | **`docs/12 §107` / `docs/17 §104`（接力棒 §104.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
+| 真实进度 | **可测面 +60 行**（10217 → 10277）；功能层 **2297**、压测 **24** —— 本轮价值在 **WebRTC 建连提速 + BUG-081（建连超时）修复** |
+| 续作入口 | **`docs/12 §108` / `docs/17 §105`（接力棒 §105.5 = 下一轮入口；稳态轮模板 §81.3 + 设备编排铁律 §83.4 + 中继加固 §86.2）** |
 
-**本轮做了什么**：①开工四态（`git status --short` 判四态）；②承接第七十三轮复盘，🔴 **把「替身吃掉真实契约」固化成机器锁** —— `test/support/webrtc_stub.dart` 的 `addTrack` 复刻真实拒绝（`streamIds` 含 null/缺失/空 ⇒ `PlatformException`；合法流才回 sender），新建 `test/substitute_boundary_lock_test.dart`（**SBL 登记制机器锁**：`test/support/*_stub.dart` 集合须与 `_registry` 完全相等；每个替身登记「遮蔽的生产文件（须存在）/ 驱动它的真实链宿主测试（须真 import）/ 真机冒烟功能点（非空）」）；③🔴 **对讲机（PTT）v2 全量真流式** —— `ptt.voice` 载荷新增 `seq`(0..N-1)/`last`(bool)；控制端 `controller_service.dart` 用 `record.startStream` 边录边按 ADTS AAC 帧切分发送（`AdtsChunker` 保证每片覆盖整数个完整帧，`len<7` 为非法防御分支）；端点 `endpoint_service.dart` 首片 seq=0 即用 just_audio `ConcatenatingAudioSource` 边收边放、末片 `last=true` 收尾；无 `seq` 或未注入 `pttStreamOpener` ⇒ **回落 v1 整段**（向后兼容）；`lib/services/ptt_stream_sink.dart` 为纯抽象接口（注入缝，已入 `tool/coverage_report.dart` 白名单）；回归锁 EP-06 / PB-04 / RC-16；④宿主全量门禁 **RC=0**（analyze / 功能层 **2284** / 压测 **24** / ratchet）+ 机器锁 **73/73**；⑤反漂移 7 落点逐位核对（`10217/10339`、`10225/10892`）。**本轮含 `lib/**` 改动 ⇒ 分母 10156 → 10339（+183）、分子 10035 → 10217（+182），`COVERAGE_MIN=98.8` 保持 / `MIN_COVERED` 10025 → 10209。**
+**本轮做了什么**：①开工四态（`git status --short` 判四态）；②🔴 **WebRTC 建连提速** —— `lib/remote/call_service.dart` / `lib/remote/multi_call_service.dart` 的 STUN 由 2 条 Google 换成 **4 条国内可达**（`stun.miwifi.com:3478` / `stun.chat.bilibili.com:3478` / `stun.qq.com:3478`）+ 1 条 Google 兜底；新增 `CallService.peerConnectionConfig()`（`iceCandidatePoolSize=4` / `bundlePolicy=max-bundle` / `rtcpMuxPolicy=require` / `sdpSemantics=unified-plan` / `iceTransportPolicy=all`）**供单路与多路共用**；TURN 自动补 `?transport=tcp` 双通道（`call_lifecycle.turnTcpFallbackUrl`）；回归锁 `test/call_ice_test.dart` **CS-05 / CS-20 / CS-21**；③🔴 **BUG-081 修复**（用户侧「呼叫后一直显示连接中」）—— `lib/remote/call_lifecycle.dart` 新增**应答后建连超时** `connectTimeout = 15s`，单路 / 多路都在 answer 后启动计时、`connected` / teardown 取消、到点发 `call.end(reason='media')` 并收尾（原先**永久停在「连接中」**）；主叫**等待应答**超时改为**先发 `call.end(reason='missed')` 通知对端**再本地收尾；回归锁 `test/call_lifecycle_test.dart` **CL-21~CL-28** / `test/call_service_webrtc_test.dart` **CS-35 / CS-40 / CS-42** / `test/multi_call_service_connect_test.dart` **MC-25**；④宿主全量门禁 **RC=0**（analyze / 功能层 **2297** / 压测 **24** / ratchet）+ 机器锁 **73/73**；⑤反漂移 7 落点逐位核对（`10277/10399`、`10285/10952`）。**本轮含 `lib/**` 改动 ⇒ 分母 10339 → 10399（+60）、分子 10217 → 10277（+60），`COVERAGE_MIN=98.8` 保持 / `MIN_COVERED` 10209 → 10269。**
 
 **★ 新增长期规则**
 - 🔴 **开工必查工作树**（第六十一轮新增）：`git status --short` 先判**四态**（可续做 / 未完成 / 坏产物 / 无关）。
@@ -2739,7 +2739,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 ② 🟡 仅剩 **A10**（用户未回复 ⇒ **继续挂起**）；
 ③ 🟡 可测面残差 **122 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减。
 
-**接力棒**：`docs/17 §104.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBX*`**）。
+**接力棒**：`docs/17 §105.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobBY*`**）。
 
 **历史（第五十三轮，已被超越）**：用户指令「多模拟器全部通路」⇒ 设备功能 22/22 + AOT 6 例 +
 远程命令 9/9（CRUD 8/8）；🔴 **抓修 BUG-079**（DB 迁移 v2→v3 漏补 `occurrences.quiet_exempt`

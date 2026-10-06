@@ -70,6 +70,55 @@ void main() {
     });
   });
 
+  group('CL 应答后建连超时（BUG-081：永久「连接中」）', () {
+    test('CL-21 未连通到点即超时，差 1ms 不算', () {
+      expect(connectTimedOut(connected: false, elapsedMs: 14999), isFalse);
+      expect(connectTimedOut(connected: false, elapsedMs: 15000), isTrue);
+      expect(connectTimedOut(connected: false, elapsedMs: 15001), isTrue);
+    });
+
+    test('CL-22 已 connected 后任何时长都不得判超时（否则通话中会被强拆）', () {
+      for (final ms in [15000, 60000, 999999]) {
+        expect(connectTimedOut(connected: true, elapsedMs: ms), isFalse,
+            reason: '媒体已通 → 残留计时器不得把进行中的通话判成失败');
+      }
+    });
+
+    test('CL-23 建连上限不为 0，且短于等待应答上限', () {
+      expect(connectTimeout.inMilliseconds, greaterThan(0),
+          reason: '为 0 会让每通电话刚应答就判失败');
+      expect(connectTimeout.inMilliseconds,
+          lessThan(callerAnswerTimeout.inMilliseconds),
+          reason: '"接起来好久连不上"不该比"没人接"还慢');
+    });
+  });
+
+  group('CL TURN TCP 回落推导（封 UDP 网络）', () {
+    test('CL-24 裸 turn: URL 推导出 ?transport=tcp', () {
+      expect(turnTcpFallbackUrl('turn:relay.example.com:3478'),
+          'turn:relay.example.com:3478?transport=tcp');
+    });
+
+    test('CL-25 已带 query 的 URL 不重复追加（尊重显式选择）', () {
+      expect(turnTcpFallbackUrl('turn:relay.example.com:3478?transport=udp'),
+          isNull);
+      expect(turnTcpFallbackUrl('turn:relay.example.com:3478?transport=tcp'),
+          isNull);
+    });
+
+    test('CL-26 非 turn: 或空串不推导（turns: 本就走 TCP）', () {
+      for (final u in <String>[
+        '',
+        '   ',
+        'turns:relay.example.com:5349',
+        'stun:stun.miwifi.com:3478',
+        'relay.example.com:3478',
+      ]) {
+        expect(turnTcpFallbackUrl(u), isNull, reason: '`$u` 不该被推导');
+      }
+    });
+  });
+
   group('CL `rc.call` 状态镜像解析', () {
     test('CL-04 三个已知状态解析正确', () {
       expect(parseRemoteCallState('ringing'), RemoteCallState.ringing);
@@ -406,6 +455,22 @@ void main() {
       expect(overlay, isNot(contains('acceptIncoming')),
           reason: '界面不应直接调 acceptIncoming（它需要 invite/peer/store 三件套，'
               '界面不该持有这些）');
+    });
+
+    test('CL-27 【BUG-081 回归锁】应答后必须启动建连计时，并在收尾取消', () {
+      expect(callService, contains('_startConnectTimer()'),
+          reason: '应答后不启动建连计时 → 又回到"永久连接中"（BUG-081）');
+      expect(callService, contains('_cancelConnectTimer()'),
+          reason: '收尾/连通时必须取消建连计时，不得泄漏 Timer');
+      expect(callService, contains('connectTimedOut'),
+          reason: '建连超时判定必须走纯逻辑，不得在服务里另写一套');
+    });
+
+    test('CL-28 【BUG-081】超时必须发信令通知对端（不得只本地收尾）', () {
+      expect(callService, contains("_sendEndSignal(reason: 'missed')"),
+          reason: '主叫超时只做本地收尾 → 被叫永久停在"连接中"');
+      expect(callService, contains("_sendEndSignal(reason: 'media')"),
+          reason: '建连失败也必须通知对端，否则一边退出一边卡住');
     });
   });
 }

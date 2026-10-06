@@ -77,6 +77,12 @@ class MultiCallSession {
 
   /// "等待应答"计时器（未接超时）。
   Timer? waitTimer;
+
+  /// 应答后"等媒体连通"计时器（BUG-081，与 `CallService._connectTimer` 同义）。
+  ///
+  /// 没有它：answer 一到就取消 `waitTimer`，之后 ICE 迟迟不通时本路
+  /// **永久停在「连接中…」**（既不报未接、也不报失败）。
+  Timer? connectTimer;
 }
 
 /// 多路视频同连（主控视角：同时连多台设备，点窗口切换目标）。
@@ -163,9 +169,12 @@ class MultiCallService {
       // 会话报成"对方无应答"）。
       s.answered = true;
       _cancelWaitTimer(s);
+      // 应答已到 → 启动"等媒体连通"计时（BUG-081）：ICE 不通就判失败收场。
+      _startConnectTimer(s);
     } on Object {
       // 信令异常：标记失败，让 UI 能显示"这路没连上"，而不是停在"连接中"。
       _cancelWaitTimer(s);
+      _cancelConnectTimer(s);
       s.phase = MultiCallPhase.failed;
       s.failure = '应答信令处理失败';
       _notify();
@@ -217,6 +226,33 @@ class MultiCallService {
     s.waitTimer = null;
   }
 
+  /// 启动"等媒体连通"计时（BUG-081，answer 到位后调用）。
+  ///
+  /// 上限复用 `call_lifecycle.dart` 的 [connectTimeout] / [connectTimedOut]，
+  /// 与 `CallService` 保持一致 —— 同一台设备在单路/多路下不该有不同结论。
+  void _startConnectTimer(MultiCallSession s) {
+    _cancelConnectTimer(s);
+    final sw = Stopwatch()..start();
+    s.connectTimer = Timer(connectTimeout, () {
+      // 到点复核：可能已经连通，也可能本路已被挂断移除。
+      if (!_sessions.containsKey(s.peer.deviceId)) return;
+      if (!connectTimedOut(
+          connected: s.phase == MultiCallPhase.connected,
+          elapsedMs: sw.elapsedMilliseconds)) {
+        return;
+      }
+      s.phase = MultiCallPhase.failed;
+      s.failure = '连接失败（多处于对称 NAT 时需配置 TURN）';
+      _notify();
+      unawaited(hangUp(s.peer.deviceId));
+    });
+  }
+
+  void _cancelConnectTimer(MultiCallSession s) {
+    s.connectTimer?.cancel();
+    s.connectTimer = null;
+  }
+
   /// 连接一台设备（发起一路 outbound 会话）。
   ///
   /// 返回 false 表示**没能发出** invite（缺本地媒体 / 建 PC 失败 / 端点离线）。
@@ -236,10 +272,9 @@ class MultiCallService {
     _notify();
 
     try {
-      final pc = s.pc = await createPeerConnection({
-        'iceServers': await CallService.iceServers(),
-        'sdpSemantics': 'unified-plan',
-      });
+      final pc = s.pc = await createPeerConnection(
+        await CallService.peerConnectionConfig(),
+      );
       // 复用同一条本地流：为 N 路各开一次摄像头既耗资源，
       // 也会在部分机型上直接失败（相机被占用）。
       //
@@ -267,14 +302,18 @@ class MultiCallService {
             // 但媒体通了"的极端情形下超时把一路通话报成"未接"。
             s.answered = true;
             _cancelWaitTimer(s);
+            // 媒体通了 → "等建连"计时到此结束（BUG-081）。
+            _cancelConnectTimer(s);
             s.phase = MultiCallPhase.connected;
           case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
             _cancelWaitTimer(s);
+            _cancelConnectTimer(s);
             s.phase = MultiCallPhase.failed;
             s.failure = '连接失败（多处于对称 NAT 时需配置 TURN）';
           case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
           case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
             _cancelWaitTimer(s);
+            _cancelConnectTimer(s);
             if (s.phase != MultiCallPhase.failed) {
               s.phase = MultiCallPhase.closed;
             }
@@ -363,6 +402,7 @@ class MultiCallService {
     final s = _sessions.remove(deviceId);
     if (s == null) return;
     _cancelWaitTimer(s);
+    _cancelConnectTimer(s);
     _byCallId.remove(s.callId);
     try {
       await s.pc?.close();
@@ -434,6 +474,7 @@ class MultiCallService {
   void debugClear() {
     for (final s in _sessions.values) {
       _cancelWaitTimer(s);
+      _cancelConnectTimer(s);
     }
     _sessions.clear();
     _byCallId.clear();

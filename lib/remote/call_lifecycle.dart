@@ -31,6 +31,50 @@ const Duration calleeRingTimeout = Duration(seconds: 45);
 int waitLimitMs({required bool isCaller}) =>
     (isCaller ? callerAnswerTimeout : calleeRingTimeout).inMilliseconds;
 
+/// 应答已交换、等待**媒体真正连通**（ICE 完成）的上限。
+///
+/// ## 为什么必须有（BUG-081：被叫自动接通后永久「连接中」）
+///
+/// 修之前：应答一旦发出/收到就 `_answered = true` 并**取消**了「等待应答」计时
+/// —— 于是「等对方接」和「等媒体连上」两段被并成一段，而后者**没有任何上限**。
+/// 症状：被叫自动接通后一直停在「连接中…」，主叫同理；一旦 ICE 因对称 NAT /
+/// 无 TURN 迟迟凑不齐，双方会**永久 connecting**（既不报未接，也不报失败，
+/// 用户只能杀进程）。
+///
+/// 取 15s：ICE 正常在 1–3s 内完成，15s 已足够覆盖慢网络；再久就是在等一个
+/// 几乎不会出现的成功 —— 早点判失败，用户才能换网络 / 去配 TURN。
+const Duration connectTimeout = Duration(seconds: 15);
+
+/// 应答后建连是否**已超时**（尚未 connected 且已超上限）。
+///
+/// ⚠️ `connected == true` 时**恒为 false**：媒体已通时，残留的计时器
+/// 不得把一通进行中的通话判成失败（与 [timedOutMeansMissed] 同范式）。
+bool connectTimedOut({
+  required bool connected,
+  required int elapsedMs,
+  Duration limit = connectTimeout,
+}) =>
+    !connected && elapsedMs >= limit.inMilliseconds;
+
+/// 由使用者配置的 TURN URL 推导 `?transport=tcp` 回落 URL；无法推导时返回 null。
+///
+/// ## 为什么需要（行业实践，全网调研结论）
+///
+/// 企业网 / 酒店 wifi / 部分移动运营商**封 UDP**：此时 `turn:host:3478`（UDP）
+/// 一条都通不了，而 `turn:host:3478?transport=tcp` 看起来就是普通 HTTPS 流量，
+/// 能穿过去。腾讯 TRTC、Stream 等生产实践都主张
+/// 「UDP 优先 → 失败退 TCP → 最后从 443 出」。
+///
+/// 只做**纯字符串**推导，不猜端口、不改 host、不加账号：
+/// - 已带 query（含 `?transport=`）的原样返回 null（尊重使用者显式选择）；
+/// - 只有 UDP 语义的 `turn:` scheme 才推导；`turns:`（TLS）本就走 TCP，不动。
+String? turnTcpFallbackUrl(String url) {
+  final u = url.trim();
+  if (u.isEmpty || u.contains('?')) return null;
+  if (!u.startsWith('turn:')) return null;
+  return '$u?transport=tcp';
+}
+
 /// 等待是否已超时。
 bool waitTimedOut({required int elapsedMs, required Duration limit}) =>
     elapsedMs >= limit.inMilliseconds;

@@ -610,10 +610,11 @@ void main() {
   // ══════════════════════════ 配置与远端信令 ══════════════════════════
 
   group('CS-G ICE 服务器配置与远端信令消费', () {
-    test('CS-35 iceServers：无 TURN 只有 STUN；配了 TURN 才带上凭据', () async {
+    test('CS-35 iceServers：无 TURN 只有 STUN；配了 TURN 才带上凭据（UDP+TCP）', () async {
       final plain = await CallService.iceServers();
-      expect(plain, hasLength(2));
+      expect(plain, isNotEmpty);
       expect(plain.every((s) => '${s['urls']}'.startsWith('stun:')), isTrue);
+      final stunCount = plain.length;
 
       await freshPrefs(<String, Object>{
         'rc_turn_url': 'turn:example.com:3478',
@@ -621,10 +622,15 @@ void main() {
         'rc_turn_cred': 'c1',
       });
       final withTurn = await CallService.iceServers();
-      expect(withTurn, hasLength(3));
-      expect(withTurn.last['urls'], 'turn:example.com:3478');
-      expect(withTurn.last['username'], 'u1');
-      expect(withTurn.last['credential'], 'c1');
+      final turns = withTurn
+          .where((s) => '${s['urls']}'.startsWith('turn:'))
+          .toList();
+      expect(turns, hasLength(2), reason: 'UDP + TCP 双通道');
+      expect(withTurn.length, stunCount + 2, reason: 'STUN 不被 TURN 顶掉');
+      expect(turns.first['urls'], 'turn:example.com:3478');
+      expect(turns.first['username'], 'u1');
+      expect(turns.first['credential'], 'c1');
+      expect(turns.last['urls'], 'turn:example.com:3478?transport=tcp');
     });
 
     test('CS-36 failureHint 必须指向可执行的下一步', () async {
@@ -772,6 +778,13 @@ void main() {
       expect(svc.inCall, isFalse);
       expect(svc.lastEndReason, CallEndReason.missed,
           reason: '到点必须记成"未接"（对方无应答），而不是含糊的失败');
+      // BUG-081：超时**必须通知对端**。修之前只做本地收尾，被叫（尤其自动接通
+      // 后卡在 connecting 的那种）收不到任何消息 ⇒ 主叫已退回、被叫永久"连接中"。
+      final ends = sent.where((m) => m.type == RcCmd.callEnd).toList();
+      expect(ends, isNotEmpty,
+          reason: '主叫超时只本地收尾 → 被叫永久停在"连接中"（BUG-081）');
+      expect(ends.last.payload['reason'], 'missed',
+          reason: '对端应按"未接"收场，而不是含糊失败');
     }, timeout: const Timeout(Duration(seconds: 90)));
   });
 
@@ -820,5 +833,42 @@ void main() {
       expect(svc.inCall, isFalse);
       expect(svc.lastEndReason, CallEndReason.missed);
     }, timeout: const Timeout(Duration(seconds: 180)));
+  });
+
+  // ══════════════════ CS-J 应答后建连上限（BUG-081：永久「连接中」） ══════════════════
+  //
+  // 应答一旦到位就**取消**"等待应答"计时 —— 若不再给"等媒体连通"一段上限，
+  // ICE 迟迟不通时两端会**永久停在「连接中…」**（既不报未接也不报失败）。
+  // 本组真等 ~16s，只取"到点真的收尾 + 真的通知对端"这条只能在真计时器上
+  // 拿到的证据（判定本身已由 `call_lifecycle_test.dart` 的 CL-21/22/23 锁死）。
+
+  group('CS-J 应答后建连上限（真实计时，BUG-081）', () {
+    test('CS-42 answer 到达但 ICE 不 connected → 到点判失败并通知对端', () async {
+      final id = await svc.startCall(peer('EP0081'), store);
+      expect(id, isNotNull, reason: '前置：主叫必须真的把 invite 发出去');
+      final callId = svc.callId!;
+      await svc.onAnswer(<String, dynamic>{
+        'callId': callId,
+        'sdp': 'answer-sdp',
+        'type': 'answer',
+      });
+      expect(svc.currentPhase, CallPhase.connecting,
+          reason: '前置：应答已收但媒体尚未连通，仍在 connecting');
+
+      // 替身不会把连接推到 connected（无真实 ICE）⇒ 只能靠建连上限。
+      final deadline = DateTime.now().add(const Duration(seconds: 60));
+      while (svc.currentPhase != CallPhase.idle &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+
+      expect(svc.currentPhase, CallPhase.idle,
+          reason: '到点必须收尾 —— 否则永久停在"连接中…"（BUG-081）');
+      expect(svc.lastEndReason, CallEndReason.failed,
+          reason: '媒体连不上记成"连接失败"，不是"对方无应答"');
+      final ends = sent.where((m) => m.type == RcCmd.callEnd).toList();
+      expect(ends, isNotEmpty, reason: '必须通知对端，避免一边退出一边卡住');
+      expect(ends.last.payload['reason'], 'media');
+    }, timeout: const Timeout(Duration(seconds: 90)));
   });
 }

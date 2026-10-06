@@ -27,28 +27,81 @@ class CallService {
   CallService._();
   static final CallService instance = CallService._();
 
+  /// 公共 STUN（**国内可达优先**）。
+  ///
+  /// ## 为什么要换掉清一色 Google（BUG-081：连接极慢/不可用）
+  ///
+  /// `stun.l.google.com` 在中国大陆基本**不可达**：STUN 请求打水漂 ⇒ 拿不到
+  /// 任何 `srflx`（服务器反射）候选 ⇒ 跨网（一方 4G、一方 wifi）时只剩 host
+  /// 候选，直连**必然失败**，还要白等满一轮 ICE 超时才报错 —— 用户看到的
+  /// 就是「连接太慢，基本不可用」。
+  ///
+  /// 这里换成国内主流公共 STUN（小米/哔哩哔哩/腾讯），并**保留** Google 一条
+  /// 作为海外网络回落（双方都在海外时它反而更快）。多候选并存不冲突：
+  /// ICE 会并行采集、择优使用。
   static const _stunServers = <Map<String, dynamic>>[
+    {'urls': 'stun:stun.miwifi.com:3478'},
+    {'urls': 'stun:stun.chat.bilibili.com:3478'},
+    {'urls': 'stun:stun.qq.com:3478'},
     {'urls': 'stun:stun.l.google.com:19302'},
-    {'urls': 'stun:stun1.l.google.com:19302'},
   ];
+
+  /// 预采集的 ICE 候选数。
+  ///
+  /// 取 4：覆盖 host+srflx 的典型基数，又不至于让每通电话都多开一堆 socket
+  /// （移动端耗电）。它在 `createPeerConnection` 时就并行开始收集候选，
+  /// 与 `createOffer` 重叠 ⇒ 省掉一段 gather 等待（建连提速）。
+  static const int iceCandidatePoolSize = 4;
 
   /// 组装 ICE 服务器列表：STUN 必备 + **可选** TURN 中继。
   ///
   /// 未配置 TURN 时只返回 STUN —— 打洞成功与否取决于双方 NAT 类型，
   /// 这是 WebRTC 的固有属性，不是缺陷。真正的问题在于"失败后不给原因"，
   /// 所以失败路径统一由 [failureHint] 给出可操作提示。
+  ///
+  /// ## TURN 的 UDP/TCP 双通道（行业实践）
+  ///
+  /// 使用者只填一条 `turn:host:port`，这里**自动补**一条
+  /// `?transport=tcp`（见 [turnTcpFallbackUrl]）：封 UDP 的企业网/酒店 wifi
+  /// 下 UDP 候选全灭，TCP 通道仍能打过去，否则整通电话直接连不上。
+  /// 顺序为 UDP 优先、TCP 兜底 —— 与腾讯 TRTC / Stream 的推荐一致。
   static Future<List<Map<String, dynamic>>> iceServers() async {
     final store = RemoteStore(await SharedPreferences.getInstance());
-    return [
-      ..._stunServers,
-      if (store.turnConfigured)
-        {
-          'urls': store.turnUrl,
-          if (store.turnUser.isNotEmpty) 'username': store.turnUser,
-          if (store.turnCred.isNotEmpty) 'credential': store.turnCred,
-        },
-    ];
+    final turn = <Map<String, dynamic>>[];
+    if (store.turnConfigured) {
+      // 凭据两条通道共用；无账号密码时不塞空字段（部分服务器不接受空凭据）。
+      final creds = <String, dynamic>{
+        if (store.turnUser.isNotEmpty) 'username': store.turnUser,
+        if (store.turnCred.isNotEmpty) 'credential': store.turnCred,
+      };
+      turn.add({'urls': store.turnUrl, ...creds});
+      final tcp = turnTcpFallbackUrl(store.turnUrl);
+      if (tcp != null) turn.add({'urls': tcp, ...creds});
+    }
+    return [..._stunServers, ...turn];
   }
+
+  /// `createPeerConnection` 的**统一配置**（单路 [CallService] 与多路
+  /// [MultiCallService] 共用，避免两处参数漂移）。
+  ///
+  /// 除 `iceServers` 外，这几个参数直接影响**建连速度与成功率**：
+  /// - `bundlePolicy: max-bundle`：媒体/数据复用同一条传输，少一轮 ICE；
+  /// - `rtcpMuxPolicy: require`：RTP/RTCP 同端口，候选数减半、打洞更快；
+  /// - `iceCandidatePoolSize`：预采集候选，省掉 gather 等待；
+  /// - `iceTransportPolicy: all`：**直连优先**，失败才走 relay
+  ///   （中继耗带宽、绕远路，只在打洞失败时兜底）。
+  ///
+  /// 以上键名均已由 flutter_webrtc 原生层解析
+  /// （`MethodCallHandlerImpl` 的 `iceTransportPolicy` / `bundlePolicy` /
+  /// `rtcpMuxPolicy` / `iceCandidatePoolSize`）。
+  static Future<Map<String, dynamic>> peerConnectionConfig() async => {
+        'iceServers': await iceServers(),
+        'iceTransportPolicy': 'all',
+        'bundlePolicy': 'max-bundle',
+        'rtcpMuxPolicy': 'require',
+        'iceCandidatePoolSize': iceCandidatePoolSize,
+        'sdpSemantics': 'unified-plan',
+      };
 
   /// ICE 失败时给使用者的可操作提示（**无 TURN 降级路径**）。
   ///
@@ -156,6 +209,13 @@ class CallService {
   // 这里只负责把它接到 Timer / 信令 / UI 上。
 
   Timer? _waitTimer;
+
+  /// 应答后"等媒体真正连通"的计时器（BUG-081）。
+  ///
+  /// 与 [_waitTimer] 是**两段不同的风险**：`_waitTimer` 等的是"对方接不接"，
+  /// 本计时器等的是"接起来后 ICE 能不能连上"。修之前只有前者 ⇒ 应答一到位
+  /// 就没有任何上限，被叫自动接通后一旦 ICE 凑不齐就**永久停在「连接中…」**。
+  Timer? _connectTimer;
 
   /// 手动振铃期间暂存的 invite（SDP 在里面），供用户稍后点「接听」时使用。
   ///
@@ -265,6 +325,12 @@ class CallService {
   Future<void> _onWaitTimeout({required bool isCaller}) async {
     if (isCaller) {
       // 主叫侧判定：被叫没应答（可能没上线、也可能被叫侧静默丢弃）。
+      //
+      // ⚠️ BUG-081：必须**先发信令**再收尾。修之前主叫超时只做本地收尾，
+      // 被叫（尤其自动接通后卡在 connecting 的那种）收不到任何通知 ⇒
+      // 主叫界面已退回、被叫却永久停在"连接中…"。这里补一条 `call.end`，
+      // 让对端也用同一个原因（missed → '对方无应答'）收场。
+      await _sendEndSignal(reason: 'missed');
       await _teardown(reason: CallEndReason.missed);
       return;
     }
@@ -279,6 +345,51 @@ class CallService {
       }
     }
     await _teardown(reason: CallEndReason.missed);
+  }
+
+  /// 启动"等媒体真正连通"计时（BUG-081，应答已交换后调用）。
+  ///
+  /// 到点仍未 `connected` → 判定媒体建连失败：通知对端 + 本地按
+  /// [CallEndReason.failed]（文案「连接失败」）收场，**不再永久 connecting**。
+  void _startConnectTimer() {
+    _cancelConnectTimer();
+    final sw = Stopwatch()..start();
+    _connectTimer = Timer(connectTimeout, () {
+      // 到点时复核：期间可能已经连通（connected），也可能已收尾（phase 变了）。
+      if (_phase != CallPhase.connecting) return;
+      if (!connectTimedOut(
+          connected: _phase == CallPhase.connected,
+          elapsedMs: sw.elapsedMilliseconds)) {
+        return;
+      }
+      unawaited(_onConnectTimeout());
+    });
+  }
+
+  void _cancelConnectTimer() {
+    _connectTimer?.cancel();
+    _connectTimer = null;
+  }
+
+  Future<void> _onConnectTimeout() async {
+    // 让对端也按"媒体失败"收场，避免一边退出一边卡住。
+    await _sendEndSignal(reason: 'media');
+    await _teardown(reason: CallEndReason.failed);
+  }
+
+  /// 尽力把 `call.end` 发给对端（**失败不改变本地收尾**）。
+  ///
+  /// 超时/建连失败时对端可能已不可达，因此这里只"尽力而为"：
+  /// 发不出去也不阻塞本地收尾（本地必须让用户看到结果，不能为了通知对端
+  /// 而把本端也卡住）。
+  Future<void> _sendEndSignal({required String reason}) async {
+    final peer = _peer;
+    final callId = _callId;
+    if (peer == null || callId == null) return;
+    final store = await _storeRef?.call();
+    if (store == null) return;
+    await _sendCallMsg(
+        RcCmd.callEnd, {'callId': callId, 'reason': reason}, peer, store);
   }
 
   // ---------------- 自动接通配置（合规：家人守护定位，见 docs/16 §6） ----------------
@@ -478,6 +589,9 @@ class CallService {
       // answer 已送出 → 把**振铃期间**缓存的候选补喂上（BUG-D）：
       // 不重放的话，主叫的 gathering 早已结束，ICE 永远凑不齐。
       await _flushPendingCandidates();
+      // 应答已交换 → 启动"等媒体连通"计时（BUG-081）：ICE 迟迟不通就收场，
+      // 绝不永久停在「连接中…」。
+      _startConnectTimer();
       return true;
     } on Object {
       await _teardown(reason: CallEndReason.failed);
@@ -538,6 +652,8 @@ class CallService {
       // 被叫的候选在 answer **之前**就发出了（`setLocalDescription(answer)`
       // 先于发信令）⇒ 它们会早于远端描述到达，必须在这里补喂（BUG-D）。
       await _flushPendingCandidates();
+      // 应答已交换 → 启动"等媒体连通"计时（BUG-081）：ICE 迟迟不通就收场。
+      _startConnectTimer();
     } on Object {
       await _teardown(reason: CallEndReason.failed);
     }
@@ -666,10 +782,9 @@ class CallService {
     // 就已到达并进了缓存 —— 在这里清掉就等于把 BUG-D 原样复现。
     // 缓存的生命周期是**一次会话**，由 `_teardown` / 会话起点负责清空。
     _remoteDescSet = false;
-    final pc = _pc = await createPeerConnection({
-      'iceServers': await iceServers(),
-      'sdpSemantics': 'unified-plan',
-    });
+    final pc = _pc = await createPeerConnection(
+      await CallService.peerConnectionConfig(),
+    );
     // ⚠️ BUG-077：addTrack **必须**把本地流一并传进去。
     //
     // flutter_webrtc 的 Dart 层写死了 `'streamIds': [stream?.id]`
@@ -705,6 +820,8 @@ class CallService {
         // 但媒体通了"的极端情形下 45s 后把通话报成"未接"。
         _answered = true;
         _cancelWaitTimer();
+        // 媒体通了 → "等建连"计时到此结束（BUG-081）。
+        _cancelConnectTimer();
         _setPhase(CallPhase.connected);
       } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         // 无 TURN 降级：把"失败"变成"可诊断的失败"（S5）。
@@ -791,6 +908,7 @@ class CallService {
   /// 用户会看到"对方无应答"被冲成空白（BUG-050）。
   Future<void> _teardown({CallEndReason? reason}) async {
     _cancelWaitTimer();
+    _cancelConnectTimer();
     _answered = false;
     // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
     // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。

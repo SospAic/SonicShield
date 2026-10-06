@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/remote/call_service.dart';
@@ -34,7 +36,7 @@ void main() {
           isFalse);
     });
 
-    test('CS-02 配置 TURN 后 STUN 仍在列，TURN 追加在后（可选叠加）', () async {
+    test('CS-02 配置 TURN 后 STUN 仍在列，TURN（UDP+TCP 双通道）追加在后', () async {
       final store = RemoteStore(await SharedPreferences.getInstance());
       await store.setTurn(
           url: 'turn:relay.example.com:3478', user: 'u', cred: 'p');
@@ -45,10 +47,17 @@ void main() {
           .where((s) => (s['urls'] as String).startsWith('stun:'))
           .length;
       expect(stunCount, greaterThan(0), reason: 'STUN 不应被 TURN 顶掉');
-      final turn = servers.last;
-      expect(turn['urls'], 'turn:relay.example.com:3478');
-      expect(turn['username'], 'u');
-      expect(turn['credential'], 'p');
+      final turns = servers
+          .where((s) => (s['urls'] as String).startsWith('turn:'))
+          .toList();
+      expect(turns, hasLength(2), reason: 'UDP + TCP 双通道，封 UDP 网络下仍能连');
+      // UDP 优先（质量最好），TCP 兜底 —— 顺序不能反。
+      expect(turns.first['urls'], 'turn:relay.example.com:3478');
+      expect(turns.last['urls'], 'turn:relay.example.com:3478?transport=tcp');
+      for (final t in turns) {
+        expect(t['username'], 'u');
+        expect(t['credential'], 'p', reason: '两条通道共用同一凭据');
+      }
     });
 
     test('CS-03 TURN 无账号密码时不塞空字段（部分服务器不接受空凭据）', () async {
@@ -56,10 +65,15 @@ void main() {
       await store.setTurn(
           url: 'turn:relay.example.com:3478', user: '', cred: '');
 
-      final turn = (await CallService.iceServers()).last;
+      final turns = (await CallService.iceServers())
+          .where((s) => (s['urls'] as String).startsWith('turn:'))
+          .toList();
 
-      expect(turn.containsKey('username'), isFalse);
-      expect(turn.containsKey('credential'), isFalse);
+      expect(turns, isNotEmpty, reason: '前置：TURN 已配置');
+      for (final t in turns) {
+        expect(t.containsKey('username'), isFalse);
+        expect(t.containsKey('credential'), isFalse);
+      }
     });
 
     test('CS-04 关闭 TURN 后回到纯 STUN', () async {
@@ -73,6 +87,48 @@ void main() {
           (await CallService.iceServers())
               .every((s) => (s['urls'] as String).startsWith('stun:')),
           isTrue);
+    });
+  });
+
+  group('CS STUN 可达性（BUG-081：连接极慢/不可用）', () {
+    test('CS-05 STUN 必须包含国内可达节点（不得回退成清一色 Google）', () async {
+      final stun = (await CallService.iceServers())
+          .where((s) => (s['urls'] as String).startsWith('stun:'))
+          .map((s) => s['urls'] as String)
+          .toList();
+
+      expect(stun, contains('stun:stun.miwifi.com:3478'));
+      expect(stun, contains('stun:stun.chat.bilibili.com:3478'));
+      final cn = stun.where((u) => !u.contains('google')).length;
+      expect(cn, greaterThanOrEqualTo(3),
+          reason: 'Google STUN 在中国大陆基本不可达，不能是唯一来源；'
+              '否则拿不到 srflx 候选 → 跨网直连必然失败（BUG-081）');
+    });
+  });
+
+  group('CS PeerConnection 统一配置（建连提速）', () {
+    test('CS-20 关键 ICE 参数齐备（单路/多路共用同一份）', () async {
+      final cfg = await CallService.peerConnectionConfig();
+
+      expect(cfg['bundlePolicy'], 'max-bundle');
+      expect(cfg['rtcpMuxPolicy'], 'require');
+      expect(cfg['iceCandidatePoolSize'], CallService.iceCandidatePoolSize);
+      expect(cfg['iceTransportPolicy'], 'all', reason: '直连优先，TURN 只兜底');
+      expect(cfg['sdpSemantics'], 'unified-plan');
+      expect(cfg['iceServers'], isA<List<dynamic>>());
+    });
+
+    test('CS-21 multi_call_service 必须复用同一份配置（不得各写一套）', () {
+      final f = [
+        'lib/remote/multi_call_service.dart',
+        '../lib/remote/multi_call_service.dart',
+      ].map(File.new).where((e) => e.existsSync()).toList();
+      expect(f, isNotEmpty, reason: '找不到 multi_call_service.dart');
+      final src = f.first.readAsStringSync();
+      expect(src, contains('CallService.peerConnectionConfig()'),
+          reason: '多路必须复用统一配置，否则"单路来电"与"多路同连"参数漂移');
+      expect(src, isNot(contains("'iceServers': await CallService.iceServers()")),
+          reason: '多路不得自己拼 iceServers（会漏掉 ICE 参数）');
     });
   });
 
