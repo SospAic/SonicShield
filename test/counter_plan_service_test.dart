@@ -411,14 +411,16 @@ void main() {
       expect(svc.autoOverridesUpdatedAt(), at);
     });
 
-    test('COV67-04 refreshHolidays：已启用但无计划本体 → 存表并提示（182–183）', () async {
+    test('COV67-04 refreshHolidays：已启用但无计划本体 → 仍只写表（不重排）', () async {
       SharedPreferences.setMockInitialValues({});
       final store = CounterPlanStore(await SharedPreferences.getInstance());
       await store.setEnabled(true); // 启用标志置真但没有落盘计划
       final svc = CounterPlanService(tasks: _FakeTasks(), store: store);
       final r = await svc.refreshHolidays({'2026-01-04': DayKind.workday});
       expect(r.ok, isTrue);
-      expect(r.message, contains('尚无反击计划'));
+      // 修前此处回「尚无反击计划，生成后即按新表排期」—— 该分支已随解耦一并删除：
+      // 无论有没有计划本体，本方法都**只写表**，不再分情况去碰反击计划。
+      expect(r.message, contains('已更新节假日表'));
       expect(store.autoOverrides()['2026-01-04'], DayKind.workday);
     });
   });

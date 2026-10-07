@@ -18,7 +18,8 @@ import 'package:sonic_shield/services/holiday_update_service.dart';
 /// - 多源按序回退、单年失败不影响其它年；
 /// - 全部失败 ⇒ **空表 + 如实报错**（不写空表、不冲内置表）；
 /// - 自动覆盖表优先级：手动覆盖 > 自动表 > 内置表 > 按星期几；
-/// - 落库往返 + `refreshHolidays` 存表并（启用时）重排。
+/// - 落库往返 + `refreshHolidays` **只写表**（不重排、不删除、不新建任务 ——
+///   与反击计划**完全解耦**：新表由"全局暂停窗口实时读表"与"`refreshIfNeeded` 续算"两条独立通路生效）。
 void main() {
   /// 中文正文必须以 UTF-8 声明，否则 `http.Response` 默认按 latin1 编码会抛错
   /// （与真实服务端返回 `charset=utf-8` 一致）。
@@ -223,7 +224,7 @@ void main() {
       expect(store.autoOverridesUpdatedAt(), isNull);
     });
 
-    test('HU-12 refreshHolidays：未启用 → 存表不报错；启用 → 落库并重排', () async {
+    test('HU-12 refreshHolidays：**只写表** —— 不重排、不删除、不新建任务', () async {
       SharedPreferences.setMockInitialValues({});
       final tasks = _FakeTasks();
       final store = CounterPlanStore(await SharedPreferences.getInstance());
@@ -241,15 +242,23 @@ void main() {
       expect(store.autoOverrides()['2026-01-04'], DayKind.workday);
       expect(replans, 0);
 
-      // 启用后再更新：走 apply 重排
+      // 启用之后再更新：**仍然只写表** —— 这是本轮修正点。
+      // 修前此处走 `apply(replace: true)`：按命名空间**整族删除** counter 任务再重建，
+      // 提示语还回「反击计划已生效：排入 N 条计划任务」（未声明的副作用 + 删历史）。
       await svc.apply(CounterPlan.defaults(), now: DateTime(2026, 3, 10));
       replans = 0;
+      tasks.deletedPlanIds.clear();
+      tasks.upserted.clear();
       final r2 = await svc.refreshHolidays(
           {'2026-03-11': DayKind.restday},
           now: DateTime(2026, 3, 10));
       expect(r2.ok, isTrue);
-      expect(replans, 1);
-      expect(tasks.deletedPlanIds, isNotEmpty); // replace=true 先删后建
+      expect(store.autoOverrides()['2026-03-11'], DayKind.restday);
+      expect(store.autoOverridesUpdatedAt(), DateTime(2026, 3, 10));
+      expect(replans, 0, reason: '节假日更新不得触发重排');
+      expect(tasks.deletedPlanIds, isEmpty, reason: '节假日更新不得删除任何反击任务');
+      expect(tasks.upserted, isEmpty, reason: '节假日更新不得新建/覆盖任务');
+      expect(r2.message, isNot(contains('反击计划已生效')));
 
       // 空表 = 清除
       final r3 = await svc.refreshHolidays(const {});

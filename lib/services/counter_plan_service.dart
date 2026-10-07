@@ -159,11 +159,26 @@ class CounterPlanService {
   /// 上次一键更新成功时间；从未更新 → null。
   DateTime? autoOverridesUpdatedAt() => _store.autoOverridesUpdatedAt();
 
-  /// 落库一张**联网拉回的节假日表**，并（若计划已启用）立即按新表重排。
+  /// 落库一张**联网拉回的节假日表**（**只写表，绝不触碰任务**）。
   ///
-  /// 与 [apply] 的分工：本方法只负责"存表 + 触发重排"，不解析任何网络格式
-  /// （解析在 `HolidayUpdateService`）。表空 ⇒ 视为清除（回到内置表）。
-  /// 计划未启用 / 尚无计划本体时**不算失败**：表已存下，下次启用即生效。
+  /// ## 为什么**不**在这里重排反击计划（修正）
+  /// 旧实现会在"计划已启用且有计划本体"时走 `apply(..., replace: true)` ——
+  /// 那是**先按命名空间整族删除** counter 任务再整体重建。后果有三，都不可接受：
+  /// 1. **未声明的副作用**：「一键更新节假日」在用户眼里只是拉一份日历数据，
+  ///    却把反击计划整族重建，提示语还回「反击计划已生效：排入 N 条计划任务」；
+  /// 2. **不可逆的数据损失**：`deleteCounterTasks` 连**已执行的历史任务**一起删；
+  /// 3. **职责错位**：节假日表是**数据**，反击计划是**另一条业务线**，
+  ///    刷新数据不该触发重建业务。
+  ///
+  /// 新契约：本方法**只写表**（自动覆盖表 + 时间戳），不解析任何网络格式
+  /// （解析在 `HolidayUpdateService`），也**不调用** [apply] / [refreshIfNeeded]。
+  /// 表空 ⇒ 视为清除（回到内置表）。
+  ///
+  /// ## 新表由两条**独立**通路生效
+  /// - **全局执行总开关**（v79）：`BackgroundEngine.pausedAt` 每轮 tick **实时读表**
+  ///   ⇒ 暂停窗口立刻按新表走，**无需**任何重排；
+  /// - **反击计划续算**：`refreshIfNeeded`（幂等、`replace = false` **不删除**）
+  ///   在 horizon 不足时按新表无删除续排，由 App 启动 / 引擎 tick 驱动。
   Future<CounterApplyResult> refreshHolidays(
     Map<String, DayKind> autoOv, {
     DateTime? now,
@@ -173,16 +188,9 @@ class CounterPlanService {
     if (autoOv.isEmpty) {
       return CounterApplyResult.ok2('已清除联网节假日表（回到内置表）');
     }
-    if (!_store.enabled) {
-      return CounterApplyResult.ok2(
-          '已更新节假日表（${autoOv.length} 天）；反击计划未启用，启用即按新表排期');
-    }
-    final plan = _store.loadPlan();
-    if (plan == null) {
-      return CounterApplyResult.ok2(
-          '已更新节假日表（${autoOv.length} 天）；尚无反击计划，生成后即按新表排期');
-    }
-    return apply(plan, planId: _store.planId, now: at, replace: true);
+    return CounterApplyResult.ok2(
+        '已更新节假日表（${autoOv.length} 天）；'
+        '节假日暂停窗口即刻按新表生效，反击计划将在下次续算时按新表排期');
   }
 }
 

@@ -12,6 +12,7 @@ coverage/
 .idea/
 *.iml
 .vscode/
+.trae/
 *.ipr
 *.iws
 
@@ -53,6 +54,9 @@ dist/
 #    一份基线副本就能让门禁第 1 步炸出 315 条问题（2026-09-24 实测）。
 #    它同时被 analysis_options.yaml 的 exclude 覆盖。
 _pt/
+
+# CI 产物下载区（apk / ipa / 各 run 取证材料，体积大；**不入库**）
+_artifacts/
 
 # WorkBuddy 工作区记忆（与 .workbuddy-ai/ 同源，不入库）
 .workbuddy/

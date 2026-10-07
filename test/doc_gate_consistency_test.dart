@@ -286,17 +286,20 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 598 + `main.dart` 65）。
+/// 设备层豁免**分母**（`background_engine.dart` 610 + `main.dart` 65）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
 ///
-/// ⚠️ 第七十九轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
-/// 可执行行 **598**（本轮新增 `run_pause` 接线使其由 582 增至 598）、`lib/main.dart` **65**，
-/// 豁免面分母 **663**（第七十八轮曾写 582 + 65 = 647，与实测漂移 +16，本轮以实测为准回刷）。
-const int kDeviceExemptLines = 598 + 65;
+/// ⚠️ 第八十轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
+/// 可执行行 **598 → 610**（本轮新增 `BackgroundEngine.extendCounterPlan()` 接线 + `;`
+/// 即 `refreshIfNeeded` 续算接入 tick/启动序列）、`lib/main.dart` **65**（不变），
+/// 豁免面分母 **663 → 675**。
+/// ⚠️ 本轮**同时**核对了两段独立产物（失败门禁的 lcov 与全量复跑后的 lcov）：
+/// 两段逐位一致 —— 豁免面 `8 / 675`、可测面分母 `12808`、全局分母 `13483`。
+const int kDeviceExemptLines = 610 + 65;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/582 ⇒ 8；`main.dart` 0/65）。
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/610 ⇒ 8；`main.dart` 0/65）。
 const int kDeviceExemptCovered = 8;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
@@ -462,7 +465,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 582 + 65，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 610 + 65，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1085,15 +1088,15 @@ void main() {
           reason: '全局**绝对分数**在两个根节里不一致 ⇒ 至少有一节没回刷');
     });
 
-    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 647 行；已覆盖 +8 行）', () {
+    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 675 行；已覆盖 +8 行）', () {
       final r12 = rootOf(d12);
       expect(r12, isNotNull);
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 582 + 65，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 610 + 65，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
-          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/582）');
+          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/610）');
     });
 
     test('BAS-04 ★ 7 个「当前基线」落点必须逐位含有根节的绝对分数', () {
@@ -1189,7 +1192,7 @@ void main() {
             baselineConsistencyViolation(
                 doc12: bad, doc17: d17, landingPoints: landing),
             isNotNull,
-            reason: '全局分母 − 可测面分母 ≠ 647 ⇒ 豁免面几何漂移');
+            reason: '全局分母 − 可测面分母 ≠ 675 ⇒ 豁免面几何漂移');
       });
 
       test('BAS-90e 根节塞进第二条不同的可测面基线 → 判红（防"只取第一条"的假绿）', () {

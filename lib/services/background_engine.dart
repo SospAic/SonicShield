@@ -1066,6 +1066,52 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
   }
 
+  /// **反击计划自动续算**（补线）。
+  ///
+  /// ## 为什么必须有这一步
+  /// 反击任务由 `CounterPlanMaterializer` 物化**未来 7 天**的固定时刻（`days: 7`），
+  /// 跑完即尽；而上面的 [replan] 只做**任务级**重算 —— 它用 `ScheduleEngine` 按
+  /// **每个已存在任务自己的触发器**排期，**不认识**「反击计划」这个概念，
+  /// 因此**无法**生成第 8 天起的新反击任务。
+  ///
+  /// 而 `CounterPlanService.refreshIfNeeded` 此前**全仓只有定义、无任何生产调用方**
+  /// （其 doc 自称"可在 App 启动 / 页面进入 / 引擎 tick 时安全重复调用"，
+  /// 但从未接线）⇒ 反击计划在 horizon 用尽后会**悄无声息地停掉**，
+  /// 界面上计划仍是"已启用"，却再也不触发 —— 典型的静默失效。
+  ///
+  /// ## 为什么放在 `replan` 之前
+  /// `refreshIfNeeded` 续排只 `upsertMany` **任务**，**计划条目**（occurrences）
+  /// 仍要由 [replan] 的 `occs.reconcile` 生成。先续任务、再重算，同一轮即可生效；
+  /// 反过来则新任务要等到下一轮 tick 才有条目（空窗 15s）。
+  ///
+  /// ## 幂等与安全
+  /// - `refreshIfNeeded` 内部**先判 horizon**（`minDaysAhead`），够长就直接返回、
+  ///   不写库；续排走 `apply(replace: false)` —— **只 upsert，绝不删除**，
+  ///   已执行的历史任务原样保留（与 `replace: true` 的整族重建相反）；
+  /// - 未启用 / 尚无计划本体 ⇒ 直接返回，不算失败；
+  /// - 任何异常只写一条审计，**绝不阻断**引擎主流程（与 [replan] 同一条纪律）。
+  Future<void> extendCounterPlan() async {
+    final store = CounterPlanStore(prefs);
+    if (!store.enabled) return; // 未启用：无事可做，且省掉一次 DB 查询
+    final svc = CounterPlanService(
+      tasks: tasksRepo,
+      store: store,
+      resolveAudioIds: (ids) async =>
+          resolvePresetAudioIds(await AssetRepository(db).listAll(), ids),
+      // 续排落库后立刻重算调度，让新任务的计划条目在同一轮内生成。
+      replan: replan,
+    );
+    final r = await svc.refreshIfNeeded();
+    if (r.taskCount > 0) {
+      await logs.append(
+        source: 'schedule',
+        action: 'counterExtend',
+        status: 'success',
+        message: '反击计划自动续算：${r.message}',
+      );
+    }
+  }
+
   /// 执行所有到期计划（幂等；带补执行上限与陈旧丢弃）。
   ///
   /// 重入守卫（A2-P0-2）：见 [executing] 的说明。
@@ -1704,6 +1750,11 @@ Future<void> _engineBody(ServiceInstance service) async {
   Timer.periodic(SchedulerConfig.engineTick, (_) {
     unawaited(stepGuarded('executeDue(tick)', executeDue));
     unawaited(() async {
+      // 先**续算反击计划**（幂等；未启用时只读一次 prefs 即返回），再重算任务级计划。
+      // 顺序不可颠倒：续排只写 `tasks`，计划条目由下面的 `replan` 的
+      // `occs.reconcile` 生成（`extendCounterPlan` 内部已带一次 `replan`，
+      // 故续排成功后 `pending` 变大、下面这次 `replan` 会被阈值自然跳过 —— 不重复劳动）。
+      await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
       final pending = await occs.pendingCountAfter(DateTime.now());
       if (pending < SchedulerConfig.planExtendThreshold.inHours) {
         await stepGuarded('replan(tick)', replan);
@@ -1723,6 +1774,9 @@ Future<void> _engineBody(ServiceInstance service) async {
   // **引擎永远不广播状态** ⇒ UI 的 `isRunning` 恒为 false ⇒
   // 「守护」页引擎开关与「守卫」页守卫开关**都打不开**，且页面零解释（BUG-A）。
   await stepGuarded('executeDue', executeDue);
+  // 反击计划续算必须**排在 replan 之前**（同 tick 内的理由）：续排只写任务，
+  // 计划条目由紧随其后的 `replan` 生成。
+  await stepGuarded('extendCounterPlan', extendCounterPlan);
   await stepGuarded('replan', replan);
   if (guardEnabled) {
     service.invoke('guard', {'enabled': true}); // 守卫自恢复

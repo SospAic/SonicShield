@@ -33,6 +33,14 @@ void main() {
   final dueBody = withoutLineComments(functionBlock(engine, 'Future<void> executeDue()'));
   final replanBody = withoutLineComments(functionBlock(engine, 'Future<void> replan()'));
 
+  // 反击计划续算接线 + 节假日更新解耦（同一批修正，见文件末尾 CEXT 组）。
+  final planSvc =
+      File('lib/services/counter_plan_service.dart').readAsStringSync();
+  final extendBody =
+      withoutLineComments(functionBodyBlock(engine, 'Future<void> extendCounterPlan()'));
+  final holidayBody = withoutLineComments(
+      functionBodyBlock(planSvc, 'Future<CounterApplyResult> refreshHolidays('));
+
   group('executeDue 重入守卫（源码契约锁）', () {
     test('REENT-00 抽取器锚定到正确的函数（防签名变更后锁空转）', () {
       expect(dueBody, isNotEmpty, reason: '抽不到 executeDue 的函数体 —— 签名变了？');
@@ -195,6 +203,189 @@ Future<void> executeDue() async {
       expect(finalStatusFromResult(okSample), isTrue, reason: '正面样本不得误报');
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 反击计划续算接线 + 节假日更新解耦（源码契约锁）
+  //
+  // ## 两个缺陷形状
+  // 1. **节假日更新联动导入反击计划**：`CounterPlanService.refreshHolidays` 在
+  //    "计划已启用且有计划本体"时走 `apply(..., replace: true)` —— 按命名空间
+  //    **整族删除** counter 任务再整体重建。用户点的是"一键更新节假日"（拉一份
+  //    日历数据），却把反击计划整族重建、连**已执行的历史任务**一起删，提示语
+  //    还回「反击计划已生效：排入 N 条计划任务」。未声明的副作用 + 不可逆数据损失。
+  // 2. **反击计划 7 天后静默停掉**：`CounterPlanService.refreshIfNeeded`（自动续算）
+  //    全仓**只有定义、无任何生产调用方**；而引擎的 `replan` 只做**任务级**重算
+  //    （`ScheduleEngine` 按每个已存在任务自己的触发器排期），**不认识**「反击计划」
+  //    这个概念 ⇒ 无法生成第 8 天起的新反击任务。horizon 用尽后计划仍显示"已启用"
+  //    却再也不触发 —— 典型的静默失效。
+  //
+  // ## 为什么是源码契约锁
+  // `_engineBody` 只在 `flutter_background_service` 的隔离里运行（真实 DB /
+  // 播放器 / 原生桥），宿主机上实例化不了 ⇒ 这里锁**结构**。与 REENT 组同一纪律：
+  // 断言必须**非恒真**，见 CEXT-90 的反面样本（含"把接线注释掉"）。
+  // ═══════════════════════════════════════════════════════════════════════
+  group('反击计划续算接线 + 节假日更新解耦（源码契约锁）', () {
+    test('CEXT-00 抽取器锚定到正确的函数（防签名变更后锁空转）', () {
+      expect(extendBody, isNotEmpty,
+          reason: '抽不到 `extendCounterPlan` 的函数体 —— 签名变了？');
+      expect(holidayBody, isNotEmpty,
+          reason: '抽不到 `refreshHolidays` 的函数体 —— 签名变了？');
+      expect(extendBody, contains('refreshIfNeeded('),
+          reason: '抽到的应确实是 `extendCounterPlan`（它必须调用 `refreshIfNeeded`）');
+      expect(holidayBody, contains('setAutoOverrides('),
+          reason: '抽到的应确实是 `refreshHolidays`（它必须写自动覆盖表）');
+      expect(
+          functionBlock(planSvc, 'Future<CounterApplyResult> noSuchFnXyz('), isEmpty);
+    });
+
+    test('CEXT-01 续算必须被 tick 与启动序列**真正调用**（不是只有定义）', () {
+      expect(wiredExtendInTick(engine), isTrue,
+          reason: '引擎 tick 里必须出现 `stepGuarded(\'extendCounterPlan(tick)\', '
+              'extendCounterPlan)`。缺它 ⇒ 反击计划物化 7 天用尽后静默停掉（缺陷 2）。');
+      expect(wiredExtendAtBoot(engine), isTrue,
+          reason: '启动序列里必须同样调用一次（通道B 唤醒 / 看门狗拉起后也要续算）。');
+    });
+
+    test('CEXT-02 续算必须排在 replan **之前**', () {
+      // 续排只写 `tasks`；计划条目（occurrences）由 `replan` 的 `occs.reconcile`
+      // 生成 ⇒ 顺序颠倒会让新任务白等一轮 tick（15s 空窗）。
+      final tickExtend = engine.indexOf("stepGuarded('extendCounterPlan(tick)'");
+      final tickReplan = engine.indexOf("stepGuarded('replan(tick)'");
+      expect(tickExtend, greaterThanOrEqualTo(0));
+      expect(tickReplan, greaterThan(tickExtend), reason: 'tick 内：先续算、后 replan');
+      final bootExtend = engine.indexOf("stepGuarded('extendCounterPlan'");
+      final bootReplan = engine.indexOf("stepGuarded('replan'");
+      expect(bootExtend, greaterThanOrEqualTo(0));
+      expect(bootReplan, greaterThan(bootExtend), reason: '启动序列内：先续算、后 replan');
+    });
+
+    test('CEXT-03 续算必须走 replace=false（只 upsert，绝不删历史）', () {
+      expect(extendBody, contains('refreshIfNeeded('));
+      final rifBody = functionBodyBlock(
+          planSvc, 'Future<CounterApplyResult> refreshIfNeeded(');
+      expect(rifBody, isNotEmpty, reason: '抽不到 `refreshIfNeeded` 函数体');
+      expect(rifBody, contains('replace: false'),
+          reason: '自动续算必须 `replace: false` —— 已执行的历史任务原样保留；'
+              '改成 true 就会在每轮 tick 上整族删除重建。');
+      expect(rifBody, isNot(contains('replace: true')));
+    });
+
+    test('CEXT-04 节假日更新必须与反击计划**完全解耦**', () {
+      expect(holidayDecoupled(holidayBody), isTrue,
+          reason: '`refreshHolidays` 只能写自动覆盖表：不得调用 `apply(`、'
+              '不得 `deleteCounterTasks`、也不得代跑 `refreshIfNeeded`。'
+              '新表由"全局暂停窗口实时读表"与"续算通路"两条独立路径生效。');
+    });
+
+    test('CEXT-90 ★ 反面样本必须被判红，正面样本不得误报（非恒真守卫）', () {
+      // ---- 反面 1：续算只有定义、没接线 ----
+      const unwired = '''
+Future<void> extendCounterPlan() async {
+  final r = await svc.refreshIfNeeded();
+}
+''';
+      expect(wiredExtendInTick(unwired), isFalse,
+          reason: '没接线必须判红 —— 证明 CEXT-01 不是恒真');
+      expect(wiredExtendAtBoot(unwired), isFalse);
+
+      // ---- 反面 2：节假日更新重新耦合回 apply(replace: true) ----
+      const recoupled = '''
+Future<CounterApplyResult> refreshHolidays(Map<String, DayKind> autoOv) async {
+  await _store.setAutoOverrides(autoOv);
+  return apply(plan, planId: _store.planId, replace: true);
+}
+''';
+      expect(holidayDecoupled(recoupled), isFalse,
+          reason: '重新耦合必须判红 —— 证明 CEXT-04 不是恒真');
+
+      // ---- 反面 3：续算改成 replace: true（破坏性） ----
+      const destructive = '''
+Future<CounterApplyResult> refreshIfNeeded() async {
+  return apply(plan, planId: id, replace: true);
+}
+''';
+      expect(destructive.contains('replace: false'), isFalse,
+          reason: '破坏性续算必须判红 —— 证明 CEXT-03 不是恒真');
+
+      // ---- 反面 4：把接线整行注释掉（锁不能被注释骗过） ----
+      const commentedOut = '''
+//      await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
+''';
+      expect(wiredExtendInTick(commentedOut), isFalse,
+          reason: '注释掉的接线必须判红 —— 证明锁不会被"注释掉代码"骗过');
+
+      // ---- 正面样本：与真实代码同构，必须**不**被误报 ----
+      const okSample = '''
+Future<CounterApplyResult> refreshHolidays(Map<String, DayKind> autoOv) async {
+  await _store.setAutoOverrides(autoOv);
+  return CounterApplyResult.ok2('已更新节假日表');
+}
+''';
+      expect(holidayDecoupled(okSample), isTrue, reason: '正面样本不得误报');
+      const wiredSample = '''
+      await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
+''';
+      expect(wiredExtendInTick(wiredSample), isTrue, reason: '正面样本不得误报');
+    });
+  });
+}
+
+/// 形态：源码里是否**真正**把反击计划续算接进了引擎 tick。
+///
+/// ⚠️ 先 `withoutLineComments` 再匹配：本项目有"源码文本锁被注释中毒"的教训
+/// （锁用 `indexOf(签名)` ⇒ 注释里写出同样文本即可骗过锁）。见 CEXT-90 反面 4。
+bool wiredExtendInTick(String src) => withoutLineComments(src).contains(
+    "await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);");
+
+/// 形态：源码里是否**真正**把反击计划续算接进了引擎启动序列。
+bool wiredExtendAtBoot(String src) => withoutLineComments(src).contains(
+    "await stepGuarded('extendCounterPlan', extendCounterPlan);");
+
+/// 形态：`refreshHolidays` 是否**已与反击计划完全解耦**（只写表）。
+///
+/// 正面判据：写自动覆盖表；反面判据：不 `apply(` / 不 `deleteCounterTasks` /
+/// 不代跑 `refreshIfNeeded`。
+bool holidayDecoupled(String body) =>
+    body.contains('setAutoOverrides(') &&
+    !body.contains('apply(') &&
+    !body.contains('deleteCounterTasks') &&
+    !body.contains('refreshIfNeeded');
+
+/// 取出 `signature` 之后**函数体**的第一对平衡花括号（含最外层大括号）。
+///
+/// 与 [functionBlock] 的区别：本函数**先跳过参数表**再从参数表闭合 `)` 之后的
+/// 第一个 `{` 开始计数 —— 因为 `refreshHolidays(Map<…> ov, {DateTime? now})`
+/// 这类签名里的**具名参数大括号**会被 [functionBlock] 误判成函数体
+/// （它只找"签名后第一个 `{`"）。参数表本身无嵌套花括号，故只需配对圆括号。
+String functionBodyBlock(String src, String signature) {
+  final start = src.indexOf(signature);
+  if (start < 0) return '';
+  final openParen = src.indexOf('(', start);
+  if (openParen < 0) return '';
+  var pd = 0;
+  var i = openParen;
+  for (; i < src.length; i++) {
+    final c = src[i];
+    if (c == '(') {
+      pd++;
+    } else if (c == ')') {
+      pd--;
+      if (pd == 0) break;
+    }
+  }
+  final open = src.indexOf('{', i);
+  if (open < 0) return '';
+  var depth = 0;
+  for (var j = open; j < src.length; j++) {
+    final c = src[j];
+    if (c == '{') {
+      depth++;
+    } else if (c == '}') {
+      depth--;
+      if (depth == 0) return src.substring(open, j + 1);
+    }
+  }
+  return '';
 }
 
 /// 取出 `signature` 之后第一对平衡花括号之间的内容（含最外层大括号）。
