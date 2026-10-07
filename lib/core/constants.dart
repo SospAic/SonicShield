@@ -31,7 +31,7 @@ class AppMeta {
   /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
   /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
   /// 并锁死界面不得再出现写死的版本号。
-  static const String buildNumber = '19';
+  static const String buildNumber = '20';
 
   /// 面向用户的完整版本串（含构建号），设置页「关于」区块显示的就是它。
   static String get displayVersion => '$version+$buildNumber';
@@ -111,8 +111,13 @@ abstract final class PrefsKeys {
 
   /// 夜间独立豁免**主开关**（v1.9，docs/20 §8.1）。默认 false。
   ///
-  /// 读取方：`background_engine.replan()`、`endpoint_service._rematerialize()`、
-  /// 设置页与任务编辑器（第二把钥匙的可见性）。
+  /// **v79 语义改造**：本开关是"批量默认值"，不再是**双钥匙**。任务级
+  /// `Task.quietExempt`（`bool?` 三态）= `null` 跟随本开关 / `true` 强制豁免 /
+  /// `false` 强制不豁免，**双向覆盖**（`exempt = taskExemptOverride ?? allowQuietExempt`）。
+  ///
+  /// 读取方：`background_engine.replan()`（关主开关时清除已落库的豁免计划，
+  /// 但**保留** `quietExempt == true` 的强制豁免例外）、
+  /// `endpoint_service._rematerialize()`、设置页与任务编辑器（三态回填与例外清单）。
   ///
   /// ⚠️ 为什么放 `SharedPreferences` 而不是 DB 的 kv 表：
   /// 本仓库把**全部用户级设置**（电源策略 / 免打扰时段 / 守卫开关）都放在
@@ -127,4 +132,22 @@ abstract final class PrefsKeys {
   /// 写入方：守卫页的「动态反击」开关。默认关闭 —— 这是会**主动出声**的
   /// 行为，必须由用户显式开启（与其它"会自动执行"的能力同一口径）。
   static const String reactiveCounterEnabled = 'reactive_counter_enabled';
+
+  /// **全局执行总开关**（v1.9，docs/20 §9）。取值：`auto` / `on` / `off`。
+  ///
+  /// - `auto`（默认）= 自动按法定休息日暂停：窗口为
+  ///   `[休息日前一天 20:00, 连续休息日最后一天 21:00)`，窗口内所有任务默认
+  ///   跳过，出窗自动恢复；
+  /// - `on`  = 强制开启（忽略自动窗口，永不暂停）；
+  /// - `off` = 强制关闭（始终暂停，只放行任务级例外 `Task.forceRun`）。
+  ///
+  /// 读取方：`background_engine.pausedAt()`（执行层裁决）、设置页与远程
+  /// `rc.status` 回执。判定真源在纯函数 `RunPause.paused`（`run_pause.dart`）。
+  ///
+  /// ⚠️ 与 [quietExemptMaster] 是**两个独立开关**：夜间豁免管"免打扰时段能否
+  /// 出声"，本开关管"整体是否停摆"，语义正交，互不覆盖。
+  /// ⚠️ 远程**可以**写本键（`RcCmd.runMasterSet`，须 `script` 权限位）——
+  /// 与「远程不得写 [quietExemptMaster]」的合规红线不同：那是单机护栏授权，
+  /// 这是用户自己的整体刹车，允许持权对端代为切换。
+  static const String runMasterMode = 'run_master_mode';
 }

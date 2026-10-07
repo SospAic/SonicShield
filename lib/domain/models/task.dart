@@ -17,7 +17,8 @@ class Task {
     required this.assetIds,
     required this.cooldownSec,
     required this.quietPolicy,
-    this.quietExempt = false,
+    this.quietExempt,
+    this.forceRun = false,
     this.condition,
     required this.priority,
     required this.createdAt,
@@ -40,13 +41,31 @@ class Task {
 
   final QuietPolicy quietPolicy;
 
-  /// 夜间独立豁免（v1.9，docs/20 §8）：**任务级**开关，默认 false = 受免打扰约束。
+  /// 夜间独立豁免的**任务级覆盖**（v79，docs/20 §8）：**三态**。
   ///
-  /// ⚠️ 单独为 true **不生效** —— 必须同时满足全局主开关
-  /// `SettingsRepository.quietExemptMaster()` 为 true（双重开关 / Two-Key Safety）。
-  /// 默认取 false 是因为它落在**更安全**的一侧：漏配 = 仍受护栏约束。
-  /// ⚠️ 远程不得开启：`TaskWire.fromWire` 显式丢弃入站该字段（docs/20 §8.2 约束 1）。
-  final bool quietExempt;
+  /// - `null`（默认）= **跟随主开关** `PrefsKeys.quietExemptMaster`：主开关开 → 豁免，
+  ///   关 → 不豁免。绝大多数任务都是这一态，**不会**出现在设置页「例外清单」里。
+  /// - `true` = **强制豁免**：即使主开关关闭，本任务仍在免打扰时段照常执行。
+  /// - `false` = **强制不豁免**：即使主开关开启，本任务仍按 `QuietPolicy` 跳过/平移。
+  ///
+  /// 判据真源：`ScheduleEngine._applyQuiet` 的 `exempt = taskExemptOverride ?? allowQuietExempt`。
+  ///
+  /// ⚠️ 主开关默认 false —— 未授权时默认全部任务**不豁免**（fail-safe 方向不变）；
+  /// 任一任务要豁免，要么用户开了主开关（默认态即豁免），要么该任务被**显式**设为 `true`。
+  /// ⚠️ 远程不得写主开关：`TaskWire.fromWire` 丢弃入站该字段并落 `null`
+  ///   （任务跟随**本机**主开关，docs/20 §8.2 约束 1）。
+  final bool? quietExempt;
+
+  /// **全局执行总开关强制例外**（v79，docs/…）：默认 `false`。
+  ///
+  /// 当全局执行总开关（`PrefsKeys.runMasterMode`）处于暂停窗口内（法定休息日
+  /// 前后自动关闭）或用户**强制关闭**时，任务默认被跳过；本字段为 `true`
+  /// 的任务按**显式例外**照常执行。
+  ///
+  /// ⚠️ 与 [quietExempt] 不同，本字段是**单向布尔**：没有"强制不执行"态
+  /// （要停就用任务自身的 `enabled=false`），因为它守护的是一个更粗的刹车。
+  /// ⚠️ 远程下发任务一律落 `false`（远程不得单方面给本机任务开例外）。
+  final bool forceRun;
 
   final TaskCondition? condition; // 执行前置条件（null=无条件，v1.3）
   final int priority; // 数值大者先执行（同刻冲突时）
@@ -64,6 +83,7 @@ class Task {
     int? cooldownSec,
     QuietPolicy? quietPolicy,
     bool? quietExempt,
+    bool? forceRun,
     TaskCondition? condition,
     int? priority,
     DateTime? updatedAt,
@@ -79,7 +99,10 @@ class Task {
         assetIds: assetIds ?? this.assetIds,
         cooldownSec: cooldownSec ?? this.cooldownSec,
         quietPolicy: quietPolicy ?? this.quietPolicy,
+        // ⚠️ 三态字段用 `??` 表达"未提供即保持"：因此 copyWith **无法把覆盖清回 null**。
+        // 当前无调用方需要该能力（要清回"跟随主开关"请显式构造 Task）。
         quietExempt: quietExempt ?? this.quietExempt,
+        forceRun: forceRun ?? this.forceRun,
         condition: condition ?? this.condition,
         priority: priority ?? this.priority,
         createdAt: createdAt,
@@ -97,7 +120,14 @@ class Task {
         'asset_ids': assetIds,
         'cooldown_sec': cooldownSec,
         'quiet_policy': quietPolicy.name,
-        'quiet_exempt': quietExempt ? 1 : 0,
+        // 三值编码（v79）：0=跟随主开关 / 1=强制豁免 / 2=强制不豁免。
+        // 注意 `occurrences.quiet_exempt` 仍是 bool（0/1），两列同名不同义，勿混。
+        'quiet_exempt': switch (quietExempt) {
+          null => 0,
+          true => 1,
+          false => 2,
+        },
+        'force_run': forceRun ? 1 : 0,
         'priority': priority,
         'condition_json':
             condition == null ? null : jsonEncode(condition!.toJson()),
@@ -116,9 +146,16 @@ class Task {
         assetIds: _decodeAssetIds(r['asset_ids']),
         cooldownSec: r['cooldown_sec'] as int,
         quietPolicy: QuietPolicy.values.byName(r['quiet_policy'] as String),
-        // 缺列/空值一律按 **false（不豁免）** 处理 —— 即"降级到更安全的一侧"。
-        // 建表默认值本就是 0，v2→v3 迁移补列后亦为 0，故此处不会掩盖真实配置。
-        quietExempt: (r['quiet_exempt'] as int? ?? 0) != 0,
+        // 三值反解（v79）：0=跟随主开关（`null`）/ 1=强制豁免 / 2=强制不豁免。
+        // 缺列/空值 → 0 → `null`（跟随主开关）。主开关默认 false，故老库升级后
+        // 行为与升级前一致（不豁免），一旦用户开启主开关即按新语义默认豁免。
+        quietExempt: switch (r['quiet_exempt'] as int? ?? 0) {
+          1 => true,
+          2 => false,
+          _ => null,
+        },
+        // 单向布尔：缺列/空值 → false（默认受总开关约束，更安全的一侧）。
+        forceRun: (r['force_run'] as int? ?? 0) == 1,
         condition: TaskCondition.fromJsonOrNull(r['condition_json'] as String?),
         priority: r['priority'] as int? ?? 0,
         createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),

@@ -112,7 +112,7 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
     final s = _steps[index];
 
     // 振动步自 v1.9 起**有可编辑参数**（mode + 各区间），走专用对话框
-    // （docs/20 §10.1）。固定节奏仍是"无可编辑参数"，但模式本身可切换。
+    // （docs/20 §11.1）。固定节奏仍是"无可编辑参数"，但模式本身可切换。
     if (s.kind == RcStepKind.vibrate) {
       final out = await showDialog<Map<String, dynamic>>(
         context: context,
@@ -457,7 +457,7 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
       );
 }
 
-/// 振动步骤编辑对话框（v1.9，docs/20 §10.1）。
+/// 振动步骤编辑对话框（v1.9，docs/20 §11.1）。
 ///
 /// 表单字段来自 [rcVibrateFieldsFor] —— 与端点执行器**共用同一份声明**，
 /// 于是"表单能填的键"与"执行器认识的键"在结构上不可能分叉（否则会静默取默认值）。

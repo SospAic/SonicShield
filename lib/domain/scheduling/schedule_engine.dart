@@ -70,7 +70,8 @@ class PlannedEntry {
 /// 2. 滚动物化：每次生成 [now, now+planHorizon] 内的条目；
 ///    已提交的条目由仓库层幂等合并（同 id 不重复）。
 /// 3. 免打扰（quiet hours）：命中者按 QuietPolicy 跳过或平移到免打扰结束点。
-///    例外：**双重开关皆开**的夜间独立豁免（v1.9，docs/20 §8）。
+///    例外：夜间独立豁免（v79，docs/20 §8）—— 判据为
+///    `exempt = taskExemptOverride ?? allowQuietExempt`（主开关即默认值 + 任务级双向覆盖）。
 /// 4. 冷却：物化期即保证同任务相邻条目间隔 >= cooldownSec。
 class ScheduleEngine {
   const ScheduleEngine(
@@ -81,11 +82,15 @@ class ScheduleEngine {
   final int quietStartHour;
   final int quietEndHour;
 
-  /// **主开关**：用户是否授权"夜间独立豁免"。
+  /// **主开关**：是否授权"夜间独立豁免"（v79 起为**全量默认值**）。
   ///
-  /// 默认 false。与任务级 [Task.quietExempt] 构成 Two-Key Safety：
-  /// 只有两者**同时**为真，命中免打扰时段的计划才会被放行。
-  /// 单独置真不生效 —— 任一把钥匙丢失即回到受约束状态（fail-safe 方向）。
+  /// 默认 false。任务的最终放行判据是
+  /// `exempt = taskExemptOverride ?? allowQuietExempt`：
+  /// - 任务级 [Task.quietExempt] 为 `null`（跟随，绝大多数任务）→ **完全由主开关决定**：
+  ///   主开关开 = 默认全部任务豁免；关 = 默认全部任务不豁免。
+  /// - 任务级为 `true`/`false` → **双向反向覆盖**主开关（主开关关也能强制豁免）。
+  ///
+  /// fail-safe 方向不变：主开关默认 false ⇒ 未授权 = 默认全部不豁免。
   final bool allowQuietExempt;
 
   /// 为任务物化未来计划。
@@ -119,7 +124,7 @@ class ScheduleEngine {
     final out = <PlannedEntry>[];
     for (final fire in raw) {
       final quiet = _applyQuiet(fire, task.quietPolicy, now,
-          taskExempt: task.quietExempt);
+          taskExemptOverride: task.quietExempt);
       if (quiet == null) continue;
       final resolved = quiet.at;
       final ms = resolved.millisecondsSinceEpoch;
@@ -178,11 +183,13 @@ class ScheduleEngine {
     DateTime fireAt,
     QuietPolicy policy,
     DateTime now, {
-    required bool taskExempt,
+    required bool? taskExemptOverride,
   }) {
-    // Two-Key Safety：主开关（本引擎的 allowQuietExempt）与任务级开关（taskExempt）
-    // **同时**为真才放行。任一为假 → 走原有 skip/shift 逻辑。
-    final exempt = allowQuietExempt && taskExempt;
+    // **主开关 = 全量默认值 + 任务级双向反向覆盖**（v79，docs/20 §8.1）：
+    //   · 任务级为 null（跟随）→ 取主开关：开 = 默认全部豁免，关 = 默认全部不豁免；
+    //   · 任务级为 true/false → 直接覆盖主开关（主开关关闭时也能强制豁免）。
+    // fail-safe 方向仍在：主开关默认 false ⇒ 未授权即默认全不豁免。
+    final exempt = taskExemptOverride ?? allowQuietExempt;
     final day = DateTime(fireAt.year, fireAt.month, fireAt.day);
     // 候选窗口：免打扰时段可能跨午夜（如 22:00-07:00），
     // 因此对任一时刻最多有两个“可能命中”的窗口（今晚 / 昨晚）。

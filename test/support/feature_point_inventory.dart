@@ -4,7 +4,7 @@
 ///
 /// ## 为什么需要它
 ///
-/// 需求规格里 57 个功能点，此前**没有任何机器可判的追溯**：
+/// 需求规格里 58 个功能点，此前**没有任何机器可判的追溯**：
 /// 用例散在 160+ 个测试文件里，"某功能点到底有没有用例"只能靠人肉记忆。
 /// 一旦有人删掉/改名一个用例文件，或新增需求却忘了补用例，
 /// **没有任何东西会报错** —— 这正是"测试覆盖率 100%"最容易变成口号的地方。
@@ -125,6 +125,8 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
       evidenceFile: 'test/quiet_exempt_lock_test.dart', token: 'quietExempted'),
   FeaturePoint('FR-39a', '振动失效安全（四条可停路径）',
       evidenceFile: 'test/vibrate_session_test.dart', token: 'VibrateSession'),
+  FeaturePoint('FR-39b', '全局执行总开关（节假日自动暂停）',
+      evidenceFile: 'test/run_pause_test.dart', token: 'inWindow'),
 
   // ── 1.5 后台执行与电源管理 ────────────────────────────────────────────
   FeaturePoint('FR-40', '前台服务常驻+常驻通知',
@@ -142,7 +144,7 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
   FeaturePoint('FR-45', 'iOS 前台/后台执行与通知兜底',
       evidenceFile: 'docs/20-振动能力设计（随机振动与持续振动）.md',
       token: 'FR-45',
-      note: 'iOS 能力边界为 UI 走查项（docs/20 §11 明示 FR-45），'
+      note: 'iOS 能力边界为 UI 走查项（docs/20 §12 明示 FR-45），'
           '本项目当前发布矩阵为 Android（docs/02 §3 平台约束），iOS 走查为人工验收'),
 
   // ── 1.6 声音守卫 ──────────────────────────────────────────────────────

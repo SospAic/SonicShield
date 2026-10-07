@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';
 
-/// `BackgroundServiceManager` 的振动转发（v1.9，docs/20 §10.2 / §10.1）。
+/// `BackgroundServiceManager` 的振动转发（v1.9，docs/20 §11.2 / §11.1）。
 ///
 /// 锁两件事：
 /// 1. `stopVibrate` **两条腿都要走**：转交引擎（清活跃表 → 停掉分片续发）

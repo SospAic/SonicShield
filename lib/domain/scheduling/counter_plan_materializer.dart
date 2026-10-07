@@ -233,7 +233,11 @@ abstract final class CounterPlanMaterializer {
         assetIds: assetIds,
         cooldownSec: plan.cooldownSec,
         quietPolicy: QuietPolicy.skip,
-        quietExempt: !plan.respectQuietHours,
+        // v79 三态映射（与旧行为逐字等价，但改走"主开关默认值"语义）：
+        // - 遵循免打扰（默认）= `false`（强制不豁免）—— 无论主开关如何都受护栏约束；
+        // - 不遵循免打扰     = `null`（跟随主开关）—— 只有**本机**主开关开启时才豁免，
+        //   任何对端/计划都无法单方面绕过本机合规护栏（docs/08 §2 红线）。
+        quietExempt: plan.respectQuietHours ? false : null,
         priority: 0,
         createdAt: created,
         updatedAt: created,

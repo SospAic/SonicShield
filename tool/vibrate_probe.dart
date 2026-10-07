@@ -1,5 +1,5 @@
 // ignore_for_file: avoid_print
-/// 声盾**振动能力探针**（P0 设备取证，docs/20 §13 / docs/17 §52⑦ 入口 1）。
+/// 声盾**振动能力探针**（P0 设备取证，docs/20 §14 / docs/17 §52⑦ 入口 1）。
 ///
 /// ## 它解决什么问题
 ///
@@ -89,7 +89,7 @@ class _ProbeAppState extends State<_ProbeApp> {
 
   Future<void> _run() async {
     final started = DateTime.now();
-    _emit('===== SonicShield 振动能力探针（P0 设备取证，docs/20 §13）=====');
+    _emit('===== SonicShield 振动能力探针（P0 设备取证，docs/20 §14）=====');
     _emit('时间 = ${started.toIso8601String()}');
     _emit('包名 = $kProbePackage（dumpsys 按此过滤）');
 

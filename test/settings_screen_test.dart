@@ -205,6 +205,12 @@ void main() {
           // 该 provider 自身的行为由 `quiet_exempt_lock_test.dart` QE-25
           // 在真实 DB 上验证 —— 界面用例只关心"渲染得对不对"。
           quietExemptCountProvider.overrideWith((ref) async => 0),
+          // 两个"例外清单"provider 同理：它们也要查库（`TaskRepository.listAll`），
+          // 真实 sqflite 往返在 FakeAsync 里会留下未完成的锁超时 Timer，
+          // 收尾判 "A Timer is still pending" 而失败并污染后续用例。
+          // 需要验证清单渲染的用例自带 override（见 SET-06）。
+          quietExemptOverrideTasksProvider.overrideWith((ref) async => <Task>[]),
+          forceRunTasksProvider.overrideWith((ref) async => <Task>[]),
           ...overrides,
         ],
         child: const MaterialApp(home: SettingsScreen()),
@@ -440,7 +446,7 @@ void main() {
       await settleSnackBars(tester);
     }, timeout: perTest);
 
-    testWidgets('SET-05c 确认 → 落库 true，且提示"仍需逐任务开启"',
+    testWidgets('SET-05c 确认 → 落库 true，且提示"所有任务默认豁免"',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
@@ -454,8 +460,10 @@ void main() {
           () => find.textContaining('已开启夜间豁免主开关').evaluate().isNotEmpty,
           reason: '应有成功提示');
       expect(await prefBool(PrefsKeys.quietExemptMaster), isTrue);
-      // 双钥匙：主开关开启**不等于**任务已豁免，文案必须说清
-      expect(find.textContaining('仍需在任务编辑器中逐任务开启'), findsOneWidget);
+      // v79：主开关即**默认值**（开启后所有任务默认豁免），文案必须说清
+      // —— 不能再是旧口径的"仍需逐任务开启"。（用完整前缀避免撞上开关副标题。）
+      expect(find.textContaining('已开启夜间豁免主开关：所有任务默认豁免'),
+          findsOneWidget);
       await settleSnackBars(tester);
     }, timeout: perTest);
 
@@ -486,6 +494,9 @@ void main() {
           overrides: [
             databaseProvider.overrideWith((ref) async => db),
             quietExemptCountProvider.overrideWith((ref) => Completer<int>().future),
+            // 例外清单 provider 同样要换掉，否则真实 sqflite 往返留下 pending Timer。
+            quietExemptOverrideTasksProvider.overrideWith((ref) async => <Task>[]),
+            forceRunTasksProvider.overrideWith((ref) async => <Task>[]),
           ],
           child: const MaterialApp(home: SettingsScreen()),
         ),
@@ -1688,6 +1699,96 @@ void main() {
 
       await tester.tap(find.text('导入 JSON'));
       await waitForText(tester, '导入失败：');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+  });
+
+  // ─────────────── SET-08 全局执行总开关与例外清单（v79） ───────────────
+
+  group('SET-08 全局执行总开关与例外清单（v79）', () {
+    Task mk(String id, {bool? quietExempt, bool forceRun = false}) => Task(
+          id: id,
+          name: '任务$id',
+          enabled: true,
+          triggerType: TriggerType.dailyAt,
+          trigger: const DailyTrigger(time: TimeSpec(hour: 10, minute: 0)),
+          actionType: ActionType.notify,
+          action: const NotifyAction(title: 'T', body: 'B'),
+          assetIds: const [],
+          cooldownSec: 60,
+          quietPolicy: QuietPolicy.skip,
+          priority: 0,
+          createdAt: DateTime(2024, 1, 1),
+          updatedAt: DateTime(2024, 1, 1),
+          quietExempt: quietExempt,
+          forceRun: forceRun,
+        );
+
+    /// 起页；两个"例外清单"provider 用**非空**结果注入，专门驱动列表分支。
+    ///
+    /// ⚠️ 视口要**足够高**（6000）：设置页 body 是惰性 `ListView`，只构建
+    /// 「视口 + cacheExtent」内的子项。4000 时刚好切在夜间豁免例外清单与
+    /// 总开关例外清单之间 —— 上面那条 `任务a` 建出来了、下面 `任务b` 没有，
+    /// 断言会毫无道理地找不到元素。
+    Future<void> pumpMaster(WidgetTester tester, {String? mode}) async {
+      SharedPreferences.setMockInitialValues(
+          {if (mode != null) PrefsKeys.runMasterMode: mode});
+      tester.view.physicalSize = const Size(1200, 6000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWith((ref) async => db),
+            quietExemptCountProvider.overrideWith((ref) async => 0),
+            quietExemptOverrideTasksProvider
+                .overrideWith((ref) async => [mk('a', quietExempt: true)]),
+            forceRunTasksProvider
+                .overrideWith((ref) async => [mk('b', forceRun: true)]),
+          ],
+          child: const MaterialApp(home: SettingsScreen()),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+      await waitFor(tester,
+          () => find.textContaining('全局执行总开关').evaluate().isNotEmpty,
+          reason: '设置页应渲染出总开关区块');
+      // ⚠️ 进页的 post-frame 回调会 `ref.invalidate(forceRunTasksProvider)`
+      // （settings_screen.dart initState），被覆盖的 provider 因此会**第二次**
+      // 解析 —— 中间有一瞬是 `AsyncLoading`（清单显示 0 条）。必须等它回到
+      // 非空态，否则断言会撞在这一瞬上（实测：`任务b` 找不到）。
+      await waitFor(tester,
+          () => find.textContaining('1 条暂停期间仍执行').evaluate().isNotEmpty,
+          reason: '总开关例外清单应完成 invalidate 后的第二次解析');
+    }
+
+    testWidgets('SET-08a 例外清单非空逐条列出（夜间豁免偏离 + 强制执行）',
+        (tester) async {
+      await pumpMaster(tester, mode: 'off');
+
+      expect(find.textContaining('任务a（强制豁免）'), findsOneWidget,
+          reason: '夜间豁免"例外清单"必须列出偏离主开关默认值的任务，'
+              '否则用户以为护栏完好、实则某条任务在免打扰时段照响');
+      expect(find.textContaining('任务b（强制执行）'), findsOneWidget,
+          reason: '总开关暂停期间仍执行的任务必须**显式列出**，'
+              '避免"以为全停了、其实还有几条在响"');
+      expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget,
+          reason: '强制关闭档的状态行必须如实说明"始终暂停"');
+      await settleSnackBars(tester);
+    }, timeout: perTest);
+
+    testWidgets('SET-08b 点「强制开启」→ 状态行改写并落库', (tester) async {
+      await pumpMaster(tester);
+
+      await tester.tap(find.text('强制开启'));
+      await waitFor(tester,
+          () => find.textContaining('强制开启：忽略自动窗口').evaluate().isNotEmpty,
+          reason: '切换到强制开启后状态行必须改写');
+      expect(
+          (await SharedPreferences.getInstance())
+              .getString(PrefsKeys.runMasterMode),
+          'on',
+          reason: '远程/本机都用同一个 prefs 键，点选必须真的落库');
       await settleSnackBars(tester);
     }, timeout: perTest);
   });

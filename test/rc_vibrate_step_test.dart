@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/remote/rc_script.dart';
 
-/// 远程指令组的**振动步骤参数化**回归锁（v1.9，docs/20 §10.1）。
+/// 远程指令组的**振动步骤参数化**回归锁（v1.9，docs/20 §11.1）。
 ///
 /// 两条不变量：
 /// 1. **协议向后兼容**：`{"kind":"vibrate"}`（老控制器发的空参数）行为一字不变 ——

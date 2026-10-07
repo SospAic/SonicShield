@@ -182,7 +182,7 @@ class OccurrenceRepository {
     return 1;
   }
 
-  /// 清除**全部**未执行的夜间豁免计划（v1.9，docs/20 §8）。
+  /// 清除**不再被授权**的未执行夜间豁免计划（v1.9 起，v79 改为定向清除）。
   ///
   /// ## 为什么必须存在
   /// `commitAll` 用 `ConflictAlgorithm.ignore`（"计划即审计"，已提交的计划不漂移）。
@@ -193,8 +193,20 @@ class OccurrenceRepository {
   ///
   /// 所以关闭开关时必须**主动清除**，而不是等重算。方向是 fail-safe：
   /// 宁可少响一次，也不能让已撤销的授权继续生效（与 S2「重启绝不续发」同一哲学）。
-  Future<int> deletePendingQuietExempt() => _db.db.delete(
-        'occurrences',
-        where: "status = 'pending' AND quiet_exempt = 1",
-      );
+  ///
+  /// ## v79：定向清除（`keepTaskIds`）
+  /// 新语义下任务级可**双向覆盖** —— 主开关关闭时，`quietExempt == true`（强制豁免）
+  /// 的任务**仍然豁免**，其计划必须保留。因此调用方（`background_engine.replan`）
+  /// 必须把这类任务的 id 传进 [keepTaskIds]；传空集合时退化为旧的"全清"行为。
+  Future<int> deletePendingQuietExempt(
+      {Iterable<String> keepTaskIds = const []}) {
+    final keep = keepTaskIds.toList();
+    const base = "status = 'pending' AND quiet_exempt = 1";
+    if (keep.isEmpty) {
+      return _db.db.delete('occurrences', where: base);
+    }
+    final placeholders = List.filled(keep.length, '?').join(', ');
+    return _db.db.delete('occurrences',
+        where: '$base AND task_id NOT IN ($placeholders)', whereArgs: keep);
+  }
 }

@@ -395,7 +395,8 @@ abstract final class RcPermGate {
         RcCmd.taskDelete ||
         RcCmd.guardSet ||
         RcCmd.planApply ||
-        RcCmd.planStop =>
+        RcCmd.planStop ||
+        RcCmd.runMasterSet =>
           'script',
         _ => denyAll,
       };

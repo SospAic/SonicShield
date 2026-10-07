@@ -948,6 +948,86 @@ void main() {
     expect(all.single.triggerType, TriggerType.randomWindow);
   }, timeout: perTest);
 
+  testWidgets('TEI-F8 本机保存 · 夜间豁免三态逐档写库（v79）', (tester) async {
+    // 三档各走一遍：跟随主开关（null，默认）/ 强制豁免（true）/ 强制不豁免（false）。
+    // 判据不是"控件被选中"，而是**落库后按 id 重新解析回来的值** ——
+    // `toRow`/`fromRow` 的三值编码（0/1/2）一旦写错，用户会看到
+    // "选了强制不豁免、重开又变回跟随"的静默回退。
+    const cases = <(String?, bool?)>[
+      (null, null),
+      ('强制豁免', true),
+      ('强制不豁免', false),
+    ];
+    for (final (label, expected) in cases) {
+      await pumpEditor(tester, viewport: const Size(1080, 8000));
+      if (label != null) {
+        await tester.tap(chip(label));
+        await tester.pump();
+      }
+      final name = '豁免三态-${label ?? '跟随'}';
+      await tester.enterText(find.byType(TextField).first, name);
+      await tester.pump();
+      await tapSave(tester);
+      await waitFor(tester, () => find.text('保存任务').evaluate().isEmpty,
+          reason: '本机保存成功后应 pop 回宿主页');
+      final all = await dbRead(tester, () => TaskRepository(db).listAll());
+      final saved = all.firstWhere((t) => t.name == name);
+      expect(saved.quietExempt, expected,
+          reason: '「$name」应落库为 $expected');
+    }
+  }, timeout: perTest);
+
+  testWidgets('TEI-F9 「暂停期间强制执行」本机落库；远程模式不渲染且恒 false',
+      (tester) async {
+    // 1) 本机：打开开关 → 真的落库。
+    await pumpEditor(tester, viewport: const Size(1080, 8000));
+    expect(find.text('暂停期间强制执行'), findsOneWidget,
+        reason: '本机模式应渲染"全局执行总开关 · 强制例外"区块');
+    await tester.tap(find.widgetWithText(SwitchListTile, '暂停期间强制执行'));
+    await tester.pump();
+    expect(switchValue(tester, '暂停期间强制执行'), isTrue);
+    await tester.enterText(find.byType(TextField).first, '强制例外任务');
+    await tester.pump();
+    await tapSave(tester);
+    await waitFor(tester, () => find.text('保存任务').evaluate().isEmpty,
+        reason: '本机保存成功后应 pop 回宿主页');
+    final all = await dbRead(tester, () => TaskRepository(db).listAll());
+    final saved = all.firstWhere((t) => t.name == '强制例外任务');
+    expect(saved.forceRun, isTrue, reason: '本机开"暂停期间强制执行"必须落库');
+
+    // 2) 远程：区块**不渲染**；即便初值带着 forceRun/quietExempt=true，
+    //    `_buildTask` 也必须把它们压回 false/null —— 远程不得给本机
+    //    "整体刹车"开例外，也不得替本机决定夜间豁免（红线同 QE-10）。
+    Task? sent;
+    await pumpEditor(
+      tester,
+      viewport: const Size(1080, 8000),
+      initialTask: task(
+        id: 'r1',
+        triggerType: TriggerType.randomWindow,
+        trigger: RandomWindowTrigger(
+          dateRange: DateRange(
+              start: DateTime(2026, 9, 1), end: DateTime(2026, 9, 30)),
+          windowStart: const TimeSpec(hour: 9),
+          windowEnd: const TimeSpec(hour: 18),
+          timesPerDay: 3,
+        ),
+        actionType: ActionType.playAudio,
+        action: const PlayAudioAction(),
+      ).copyWith(quietExempt: true, forceRun: true),
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+    );
+    expect(find.text('暂停期间强制执行'), findsNothing,
+        reason: '远程模式不得出现本机总开关例外区块');
+    await tapSave(tester);
+    expect(sent, isNotNull);
+    expect(sent!.forceRun, isFalse, reason: '远程保存不得带出 forceRun');
+    expect(sent!.quietExempt, isNull, reason: '远程保存不得带出 quietExempt');
+  }, timeout: perTest);
+
   testWidgets('TEI-F2 远程保存失败：必须提示，且不能假装成功关页',
       (tester) async {
     await pumpEditor(tester, remoteSave: (t) async => false, remoteName: '端点X');

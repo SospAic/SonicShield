@@ -1,10 +1,12 @@
 import 'dart:io';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sonic_shield/core/constants.dart';
+import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/log_repository.dart';
 import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
@@ -26,8 +28,11 @@ import 'support/source_text.dart';
 /// 用机器钉死，而不是靠注释和自觉。
 ///
 /// 三条不变量，任何一条被改坏都必须让本文件变红：
-/// 1. **双钥匙**：主开关 ∧ 任务级开关，缺一即回到受约束状态。
-/// 2. **远程不可开启**：`TaskWire.fromWire` 丢弃入站 `quietExempt`；
+/// 1. **默认值 + 双向覆盖**（v79）：判据 `exempt = taskExemptOverride ?? allowQuietExempt`
+///    —— 任务级 `null`（跟随，绝大多数）由主开关决定默认；`true`/`false` 可**双向**
+///    反向覆盖主开关（主开关关闭时 `true` 仍强制豁免）。fail-safe 方向不变：
+///    主开关默认 false ⇒ 未授权即默认全部不豁免。
+/// 2. **远程不可开启**：`TaskWire.fromWire` 丢弃入站 `quietExempt`（落 `null`）；
 ///    `lib/remote/` 与远程 UI 不得出现主开关的**写入口**。
 /// 3. **撤销即时生效**：关掉主开关后，已落库的豁免计划必须被清除，
 ///    不能靠"等重算"（`commitAll` 是 ignore 语义，不会覆盖已提交计划）。
@@ -35,12 +40,12 @@ import 'support/source_text.dart';
 /// ⚠️ 本文件还额外锁定 **BUG-070**（免打扰窗口设置从未被引擎读取）。
 void main() {
   // =====================================================================
-  // 1. 双钥匙（Two-Key Safety）
+  // 1. 默认值 + 双向覆盖（v79）
   // =====================================================================
-  group('QE 双钥匙', () {
+  group('QE 默认值 + 双向覆盖', () {
     Task task({
       required QuietPolicy quiet,
-      bool quietExempt = false,
+      bool? quietExempt,
       TimeSpec time = const TimeSpec(hour: 23, minute: 0),
     }) {
       final now = DateTime.now();
@@ -65,22 +70,41 @@ void main() {
     // 免打扰默认 22:00–07:00。取 23:00 作为触发点，必落在窗口内。
     final now = DateTime(2026, 9, 12, 12);
 
-    test('QE-01 主开关关 + 任务级开 ⇒ 仍然跳过（缺一把钥匙不生效）', () {
+    test('QE-01 主开关关 + 任务级强制豁免 ⇒ 放行（v79 双向覆盖）', () {
       const engine = ScheduleEngine(); // allowQuietExempt 默认 false
       final list = engine.materialize(
           task(quiet: QuietPolicy.skip, quietExempt: true), now);
-      expect(list.where((e) => e.fireAt.hour == 23), isEmpty,
-          reason: '只有任务级开关时，免打扰必须照常生效');
+      final at23 = list.where((e) => e.fireAt.hour == 23).toList();
+      expect(at23, isNotEmpty,
+          reason: '任务级显式 true 必须能反向覆盖"主开关关闭"的默认值');
+      expect(at23.first.quietExempted, isTrue,
+          reason: '强制豁免放行同样必须带标记，否则执行层写不出豁免审计');
     });
 
-    test('QE-02 主开关开 + 任务级关 ⇒ 仍然跳过（缺另一把钥匙不生效）', () {
+    test('QE-01b 主开关关 + 任务级未设置（跟随） ⇒ 跳过', () {
+      const engine = ScheduleEngine(); // allowQuietExempt 默认 false
+      final list =
+          engine.materialize(task(quiet: QuietPolicy.skip), now); // quietExempt=null
+      expect(list.where((e) => e.fireAt.hour == 23), isEmpty,
+          reason: '未设置即"跟随主开关"，主开关未授权时必须照常跳过');
+    });
+
+    test('QE-02 主开关开 + 任务级强制不豁免 ⇒ 仍然跳过（反向覆盖）', () {
       const engine = ScheduleEngine(allowQuietExempt: true);
       final list = engine.materialize(
           task(quiet: QuietPolicy.skip, quietExempt: false), now);
-      expect(list.where((e) => e.fireAt.hour == 23), isEmpty);
+      expect(list.where((e) => e.fireAt.hour == 23), isEmpty,
+          reason: '任务级显式 false 必须能反向覆盖"主开关开启"的默认豁免');
     });
 
-    test('QE-03 双钥匙皆开 ⇒ 放行，且条目标记 quietExempted', () {
+    test('QE-02b 主开关开 + 任务级未设置（跟随） ⇒ 放行（默认全豁免）', () {
+      const engine = ScheduleEngine(allowQuietExempt: true);
+      final list = engine.materialize(task(quiet: QuietPolicy.skip), now);
+      expect(list.where((e) => e.fireAt.hour == 23), isNotEmpty,
+          reason: '主开关开启后，未设置的任务默认全部豁免');
+    });
+
+    test('QE-03 主开关开 + 任务级强制豁免 ⇒ 放行，且条目标记 quietExempted', () {
       const engine = ScheduleEngine(allowQuietExempt: true);
       final list = engine.materialize(
           task(quiet: QuietPolicy.skip, quietExempt: true), now);
@@ -122,7 +146,7 @@ void main() {
   // 2. 远程不可开启
   // =====================================================================
   group('QE 远程不可开启', () {
-    test('QE-10 fromWire 丢弃入站 quietExempt（核心锁）', () {
+    test('QE-10 fromWire 丢弃入站 quietExempt / forceRun（核心锁）', () {
       final wire = <String, dynamic>{
         'id': 't1',
         'name': '对端任务',
@@ -134,13 +158,18 @@ void main() {
         'assetIds': <String>[],
         'cooldownSec': 300,
         'quietPolicy': 'skip',
-        // 对端**试图**打开豁免：
+        // 对端**试图**打开豁免与总开关例外：
         'quietExempt': true,
+        'forceRun': true,
       };
       final t = TaskWire.fromWire(wire);
       expect(t, isNotNull, reason: '合法定义不应因多一个字段而被拒');
-      expect(t!.quietExempt, isFalse,
-          reason: '入站 quietExempt 必须被丢弃 —— 否则已配对的对端可绕过本机合规护栏');
+      expect(t!.quietExempt, isNull,
+          reason: '入站 quietExempt 必须被丢弃（落 null = 跟随本机主开关）—— '
+              '否则已配对的对端可绕过本机合规护栏');
+      expect(t.forceRun, isFalse,
+          reason: '入站 forceRun 必须被丢弃（落 false）—— '
+              '否则对端可在本机整体停摆期间强行触发任务');
     });
 
     test('QE-11 toWire 携带 quietExempt（供对端只读展示）', () {
@@ -167,14 +196,18 @@ void main() {
       expect(TaskWire.toWire(t)['quietExempt'], isTrue);
     });
 
-    test('QE-12 源码扫描：task_wire 代码中不读取入站 quietExempt', () {
+    test('QE-12 源码扫描：task_wire 代码中不读取入站 quietExempt / forceRun', () {
       final code = stripComments(_read('lib/remote/task_wire.dart'));
       expect(code.contains("j['quietExempt']"), isFalse,
           reason: '入站解析不得引用该键 —— 即使"读出来再强制置 false"也不允许，'
               '因为下一个改动者很容易把那个 false 改成变量');
-      expect(code.contains('quietExempt: false'), isTrue,
-          reason: '必须是**显式** false，而不是省略参数（省略时靠默认值，'
-              '读者看不出这是有意的安全决策）');
+      expect(code.contains('quietExempt: null'), isTrue,
+          reason: '必须是**显式** null（跟随本机主开关），而不是省略参数'
+              '（省略时靠默认值，读者看不出这是有意的安全决策）');
+      expect(code.contains("j['forceRun']"), isFalse,
+          reason: '入站解析不得引用 forceRun 键（远程不得给本机任务开总开关例外）');
+      expect(code.contains('forceRun: false'), isTrue,
+          reason: '必须是**显式** false，理由同上');
     });
 
     test('QE-13 源码扫描：远程侧不得出现主开关的**写入口**', () {
@@ -459,6 +492,63 @@ void main() {
       expect(defaultWindow.materialize(t(6), now).where((e) => e.fireAt.hour == 6),
           isEmpty,
           reason: '默认 22–07 窗口下 06:00 必须被跳过 —— 与上一行构成对照');
+    });
+  });
+
+  // =====================================================================
+  // QE-P 例外清单 provider（真实库往返）
+  // =====================================================================
+  //
+  // 设置页（v79）右侧「例外清单」由两个 provider 驱动：`forceRunTasksProvider`
+  // 收「强制执行」的任务、`quietExemptOverrideTasksProvider` 收「显式设置过
+  // 夜间豁免（null 之外）」的任务。二者都刻意**不加 autoDispose**（清单要随
+  // 库变化刷新），且判据必须来自**真实 DB 往返**——否则"哪些任务算例外"的
+  // 口径一旦被写错，屏上会静默少列几条，用户根本发现不了。
+  group('QE-P 例外清单 provider（真实库往返）', () {
+    late AppDatabase pdb;
+    setUp(() async {
+      pdb = await AppDatabase.open(inMemoryDatabasePath);
+    });
+    tearDown(() async {
+      await pdb.close();
+    });
+
+    Task mk(String id, {bool? quietExempt, bool forceRun = false}) {
+      final base = DateTime(2024, 1, 1);
+      return Task(
+        id: id,
+        name: id,
+        enabled: true,
+        triggerType: TriggerType.dailyAt,
+        trigger: const DailyTrigger(time: TimeSpec(hour: 10, minute: 0)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'T', body: 'B'),
+        assetIds: const [],
+        cooldownSec: 60,
+        quietPolicy: QuietPolicy.skip,
+        priority: 0,
+        createdAt: base,
+        updatedAt: base,
+        quietExempt: quietExempt,
+        forceRun: forceRun,
+      );
+    }
+
+    test('QE-P1 forceRun 只收"强制执行"；quietExemptOverride 只收"显式设置过"', () async {
+      final repo = TaskRepository(pdb);
+      await repo.upsert(mk('A', forceRun: true));
+      await repo.upsert(mk('B', quietExempt: false));
+      await repo.upsert(mk('C')); // 二者皆默认：不该出现在任何清单里
+      final c = ProviderContainer(overrides: [
+        databaseProvider.overrideWith((_) async => pdb),
+      ]);
+      addTearDown(c.dispose);
+      final forced = await c.read(forceRunTasksProvider.future);
+      expect(forced.map((t) => t.id).toList(), ['A'],
+          reason: '只有 forceRun=true 的任务属于"强制执行"清单');
+      final ovr = await c.read(quietExemptOverrideTasksProvider.future);
+      expect(ovr.map((t) => t.id).toList(), ['B'],
+          reason: 'quietExempt=null 是"跟随主开关"，不算例外；只有显式 true/false 才算');
     });
   });
 }

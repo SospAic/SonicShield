@@ -212,7 +212,7 @@ abstract final class RcCmd {
   /// 端点预置音源分类：{} → rc.presets {categories}
   static const presetList = 'preset.list';
 
-  // ---- v1.9：振动（docs/20 §10.2）----
+  // ---- v1.9：振动（docs/20 §11.2）----
 
   /// 停止端点**全部**进行中的振动：{} → rc.ack {stopped}
   ///
@@ -253,6 +253,24 @@ abstract final class RcCmd {
 
   /// 下线端点反击计划（清空计划任务 + 置未启用）：{} → rc.ack {stopped}。
   static const planStop = 'plan.stop';
+
+  // ---- v1.9：全局执行总开关（docs/20 §9）----
+
+  /// 设置端点「全局执行总开关」：`{mode: 'auto'|'on'|'off'}` → rc.ack {mode}。
+  ///
+  /// 语义（真源 `RunPause`）：
+  /// - `auto`（默认）= 法定休息日自动暂停：`[休息日前一天 20:00, 连续休息日
+  ///   最后一天 21:00)` 窗口内所有任务默认跳过；
+  /// - `on`  = 强制开启（忽略自动窗口，永不暂停）；
+  /// - `off` = 强制关闭（始终暂停，仅放行任务级例外 `Task.forceRun`）。
+  ///
+  /// 与 [guardSet] 同属"允许远程写全局 pref"的既有先例：本开关是用户自己的
+  /// 整体刹车，不含绕过他人护栏的提权面。⚠️ 与夜间豁免主开关不同 ——
+  /// 后者是**单机护栏授权**，远程**绝不允许**写（QE-13/14 源码扫描锁死）。
+  ///
+  /// 需 `script` 权限位（`RcPermGate.requiredPerm` 登记）：切换整体刹车是有
+  /// 副作用的全局操作，同 [scriptRun] 一档。
+  static const runMasterSet = 'run.master.set';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------

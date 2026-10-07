@@ -217,6 +217,9 @@ class CounterPlanParams {
   final int cooldownSecMax;
 
   /// 生成出的计划是否遵循全局免打扰护栏。
+  ///
+  /// true = 物化为 `quietExempt: false`（强制不豁免）；
+  /// false = 物化为 `quietExempt: null`（跟随本机主开关默认值）。见 `CounterPlan`。
   final bool respectQuietHours;
 
   final PlanWindowParams workdayDay;

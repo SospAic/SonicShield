@@ -661,7 +661,7 @@ void main() {
   // TEV-E · 夜间独立豁免：第二把钥匙（编辑器侧）
   // ══════════════════════════════════════════════════════════════════════
 
-  testWidgets('TEV-16 夜间豁免 · 主开关已开时第二把钥匙可用且能双向切换',
+  testWidgets('TEV-16 夜间豁免 · 主开关已开时三态可选且默认跟随（v79）',
       (tester) async {
     SharedPreferences.setMockInitialValues(
         {PrefsKeys.quietExemptMaster: true});
@@ -669,36 +669,42 @@ void main() {
     // ⚠️ 必须走**本机模式**：`_quietExemptTile()` 只在 `remoteTarget == null`
     // 时渲染（远程任务属于端点设备，豁免权在本机设置里，不归端点）。
     await pumpEditor(tester);
-    // `_probeEnv` 读 prefs 是异步的 → 等开关变成可用。
+    // `_probeEnv` 读 prefs 是异步的 → 等主开关状态回填到说明行。
     await waitFor(
       tester,
-      () => tester
-          .widget<SwitchListTile>(
-              find.widgetWithText(SwitchListTile, '本任务豁免免打扰'))
-          .onChanged !=
-          null,
-      reason: '主开关已开时，任务级开关应解除置灰',
+      () => find.textContaining('主开关（设置页）：已开启').evaluate().isNotEmpty,
+      reason: '主开关已开时说明行应显示"已开启"',
     );
-    expect(switchValue(tester, '本任务豁免免打扰'), isFalse,
-        reason: '任务级默认关闭 —— 缺一把钥匙就回受约束的一侧');
-    expect(find.textContaining('主开关关闭时'), findsNothing);
+    // v79：主开关只是"批量默认值"，任务级默认「跟随主开关」→ 主开关开着即豁免。
+    expect(tester.widget<ChoiceChip>(chip('跟随主开关')).selected, isTrue);
+    expect(tester.widget<ChoiceChip>(chip('强制豁免')).selected, isFalse);
+    expect(tester.widget<ChoiceChip>(chip('强制不豁免')).selected, isFalse);
+    expect(find.textContaining('当前：豁免'), findsOneWidget);
+    expect(find.textContaining('照常执行，每次都会写日志'), findsOneWidget);
+    // 不再有"第二把钥匙置灰"——完全双向覆盖：默认态不写"显式设置"提示。
+    expect(find.textContaining('已作任务级显式设置'), findsNothing);
 
-    await tester.tap(find.widgetWithText(SwitchListTile, '本任务豁免免打扰'));
+    // 反向覆盖：主开关开着也能强制**不豁免**。
+    await tester.tap(chip('强制不豁免'));
     await tester.pump();
-    expect(switchValue(tester, '本任务豁免免打扰'), isTrue);
-    expect(switchSubtitle(tester, '本任务豁免免打扰'), contains('已开启'),
-        reason: '开启后要写明"照常执行且每次写日志"');
+    expect(tester.widget<ChoiceChip>(chip('强制不豁免')).selected, isTrue);
+    expect(find.textContaining('已作任务级显式设置'), findsOneWidget,
+        reason: '显式覆盖要提示它会进"夜间豁免例外清单"');
   }, timeout: perTest);
 
-  testWidgets('TEV-17 夜间豁免 · 主开关未开时置灰，且写明为什么', (tester) async {
+  testWidgets('TEV-17 夜间豁免 · 主开关未开时默认跟随且有效值为"不豁免"',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     addTearDown(() => SharedPreferences.setMockInitialValues({}));
     await pumpEditor(tester);
-    final tile =
-        tester.widget<SwitchListTile>(find.widgetWithText(SwitchListTile, '本任务豁免免打扰'));
-    expect(tile.onChanged, isNull, reason: '主开关未开时第二把钥匙必须不可用');
-    expect(tile.value, isFalse);
-    expect(find.textContaining('主开关关闭时，本开关不生效'), findsOneWidget);
+    await waitFor(
+      tester,
+      () => find.textContaining('主开关（设置页）：已关闭').evaluate().isNotEmpty,
+      reason: '主开关未开时说明行应显示"已关闭"',
+    );
+    expect(tester.widget<ChoiceChip>(chip('跟随主开关')).selected, isTrue);
+    expect(find.textContaining('当前：不豁免'), findsOneWidget);
+    expect(find.textContaining('按策略跳过或平移'), findsOneWidget);
   }, timeout: perTest);
 
   // ══════════════════════════════════════════════════════════════════════

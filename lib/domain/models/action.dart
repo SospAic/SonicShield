@@ -238,7 +238,7 @@ class VibrateAction extends ActionConfig {
   Map<String, dynamic> toJson() => {'kind': 'vibrate', 'patternMs': patternMs};
 }
 
-/// 振动参数的**结构健全性上界**（docs/20 §10.3）。
+/// 振动参数的**结构健全性上界**（docs/20 §11.3）。
 ///
 /// ⚠️ 这是「配置不可自相矛盾」的健全性边界，**不是产品护栏** ——
 /// 用户拍板 D1「持续振动不设时长硬上限」，所以这里取 24 小时这个

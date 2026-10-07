@@ -15,7 +15,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const int dbVersion = 4;
+  static const int dbVersion = 5;
   static AppDatabase? _instance;
 
   static Future<AppDatabase> open([String? dirOverride]) async {
@@ -86,7 +86,10 @@ class AppDatabase {
         asset_ids TEXT NOT NULL DEFAULT '[]',
         cooldown_sec INTEGER NOT NULL DEFAULT 300,
         quiet_policy TEXT NOT NULL DEFAULT 'skip',
+        -- 三值编码（v79）：0=跟随主开关 / 1=强制豁免 / 2=强制不豁免。
+        -- 注意 occurrences.quiet_exempt 仍是 bool（0/1），两列同名不同义。
         quiet_exempt INTEGER NOT NULL DEFAULT 0,
+        force_run INTEGER NOT NULL DEFAULT 0,
         priority INTEGER NOT NULL DEFAULT 0,
         condition_json TEXT,
         created_at INTEGER NOT NULL,
@@ -155,8 +158,11 @@ class AppDatabase {
     // v2 → v3：夜间独立豁免（2026-09，v1.9，docs/20 §8）。
     // v3 → v4：**修复"已升到 v3、却在 occurrences 上缺列"的历史库**（BUG-079 残留）。
     //
-    // 任务级开关，**默认 0 = 不豁免**；主开关另存于 kv，两者皆开才放行。
-    // 老库补列后全部为 0，等价于"功能未启用"，行为与升级前一致。
+    // 任务级 `quiet_exempt` 为**三值**（v79）：0=跟随主开关 / 1=强制豁免 /
+    // 2=强制不豁免；主开关 `quiet_exempt_master` 另存于 prefs，任务级可**双向覆盖**
+    // （`exempt = taskExemptOverride ?? allowQuietExempt`）。老库补列后全部为 0
+    // = 跟随主开关，行为与升级前一致（主开关默认 false ⇒ 不豁免）。
+    // ⚠️ `occurrences.quiet_exempt` 仍是 bool（0/1），两列**同名不同义**。
     //
     // 为什么必须有 v4：v3 刚上线时 `_onUpgrade` **只补了 tasks.quiet_exempt**，
     // occurrences.quiet_exempt 是第五十三轮才补上的（BUG-079）。**在那之前升到 v3
@@ -170,6 +176,15 @@ class AppDatabase {
     if (oldV < 4) {
       await _addIntColumnIfMissing(db, 'tasks', 'quiet_exempt');
       await _addIntColumnIfMissing(db, 'occurrences', 'quiet_exempt');
+    }
+    // v4 → v5：「全局执行总开关」的任务级强制例外（2026-10，v1.9，docs/20 §9）。
+    //
+    // 单向布尔 `force_run`，**默认 0 = 受总开关约束**（更安全的一侧）。老库补列后
+    // 全部为 0，等价于"没有例外"，行为与升级前一致（总开关默认 auto，
+    // 且 auto 在非暂停窗口内恒为"允许执行"）。仍按列存在性幂等补齐，
+    // 对全新库/缺列库均安全。
+    if (oldV < 5) {
+      await _addIntColumnIfMissing(db, 'tasks', 'force_run');
     }
   }
 

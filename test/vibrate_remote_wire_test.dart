@@ -5,7 +5,7 @@ import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/remote/task_wire.dart';
 
-/// 振动动作的**远程线格式**回归锁（v1.9，docs/20 §10.3）。
+/// 振动动作的**远程线格式**回归锁（v1.9，docs/20 §11.3）。
 ///
 /// ## 为什么这个文件必须存在
 ///

@@ -22,6 +22,7 @@ import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../domain/models/tts_voice.dart';
 import '../../domain/scheduling/counter_plan_random.dart';
+import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/holiday_update_service.dart';
 import '../../services/native_bridge.dart';
@@ -48,6 +49,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 存 `SharedPreferences`（与本页其它设置同一存储）。**不做 DB 读取** ——
   /// kv 表要走一次 sqflite 往返，会让整页 widget 测试留下未完成的锁超时 Timer。
   bool _quietExemptMaster = false;
+
+  /// 全局执行总开关（v79，docs/20 §9）。默认 [RunMasterMode.auto]。
+  ///
+  /// 与 [_quietExemptMaster] 是**两个独立开关**：本开关管"整体是否停摆"
+  /// （法定休息日自动暂停），夜间豁免管"免打扰时段能否出声"。
+  RunMasterMode _runMasterMode = RunMasterMode.auto;
 
   // ---------------- 语音与接口 / 反击计划（v2.0） ----------------
   //
@@ -289,6 +296,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // 框架直接断言拦下（实测：整页用例全红）。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) ref.invalidate(quietExemptCountProvider);
+      // 全局执行总开关的例外清单同样每次进入重算（provider 亦非 autoDispose）。
+      if (mounted) ref.invalidate(forceRunTasksProvider);
     });
   }
 
@@ -304,6 +313,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
           ComplianceGuardrails.defaultQuietEndHour;
       _quietExemptMaster = p.getBool(PrefsKeys.quietExemptMaster) ?? false;
+      _runMasterMode =
+          RunMasterMode.parse(p.getString(PrefsKeys.runMasterMode));
       _dsBaseUrl = cfg.baseUrl;
       _dsModel = cfg.model;
       _dsApiKey = cfg.apiKey;
@@ -320,6 +331,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 「月-日 时:分」友好格式；null（如强制模式无自动切换点）→ 「—」。
+  static String _fmtMd(DateTime? t) {
+    if (t == null) return '—';
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.month}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
   }
 
   // ---------------- 语音与接口（v2.0） ----------------
@@ -643,7 +661,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return out;
   }
 
-  /// 切换夜间独立豁免主开关（v1.9，docs/20 §8.1）。
+  /// 切换夜间独立豁免主开关（v79，docs/20 §8.1）。
   ///
   /// 开启前**必须**二次确认并写明后果：这是**削弱**合规护栏的操作
   /// （docs/08 §4 原本标注"不可绕过"），不能一键静默开启。
@@ -655,13 +673,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           title: const Text('开启夜间独立豁免？'),
           content: const SingleChildScrollView(
             child: Text(
-              '开启后，逐个任务还可以选择"豁免免打扰"。只有两处都开启时，'
-              '该任务才会在免打扰时段（默认 22:00–07:00）照常执行。\n\n'
+              '本开关是任务的**默认值**：开启后，所有任务默认在免打扰时段'
+              '（默认 22:00–07:00）照常执行；关闭后默认全部跳过或平移。\n\n'
+              '个别任务可在任务编辑器里单独反向设置（强制豁免 / 强制不豁免），'
+              '这些偏离默认值的任务会在下方「例外清单」中列出。\n\n'
               '这意味着：\n'
               '· 夜间可能响起你为这些任务配置的声音/震动；\n'
               '· 本应用定位为个人自动化工具，请勿用它干扰他人；\n'
               '· 每次豁免执行都会写入日志，本页可查看本月次数。\n\n'
-              '随时可在此关闭；关闭后已排入的豁免计划会被立即清除。',
+              '随时可在此关闭；关闭后已排入的豁免计划会被立即清除'
+              '（个别"强制豁免"的例外仍会保留）。',
             ),
           ),
           actions: [
@@ -679,14 +700,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final p = await SharedPreferences.getInstance();
     await p.setBool(PrefsKeys.quietExemptMaster, next);
     if (mounted) setState(() => _quietExemptMaster = next);
-    // 立刻重算：开启后豁免计划才会被物化；关闭后引擎会清除已落库的豁免计划。
+    // 立刻重算：开启后豁免计划才会被物化；关闭后引擎会清除已落库的豁免计划
+    // （仅保留 `quietExempt == true` 的强制豁免例外）。
     await BackgroundServiceManager.instance.replan();
     if (mounted) {
       ref.invalidate(quietExemptCountProvider);
+      ref.invalidate(quietExemptOverrideTasksProvider);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(next
-              ? '已开启夜间豁免主开关（仍需逐任务开启"豁免免打扰"）'
-              : '已关闭夜间豁免主开关，待执行的豁免计划已清除')));
+              ? '已开启夜间豁免主开关：所有任务默认豁免（个别可强制不豁免）'
+              : '已关闭夜间豁免主开关：所有任务默认不豁免（个别可强制豁免）')));
+    }
+  }
+
+  /// 切换「全局执行总开关」（v79，docs/20 §9）。
+  ///
+  /// 三态直接落 pref 并请求引擎重排 —— 引擎每轮重读，无需重启服务。
+  /// 强制关闭有"整体停摆"的后果，与夜间豁免同为**削弱执行**的操作，
+  /// 但不削弱合规护栏（只是不执行），故不做二次确认弹窗，仅留状态行说明。
+  Future<void> _saveRunMaster(RunMasterMode mode) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(PrefsKeys.runMasterMode, mode.name);
+    if (mounted) setState(() => _runMasterMode = mode);
+    await BackgroundServiceManager.instance.replan();
+    if (mounted) {
+      ref.invalidate(forceRunTasksProvider);
+      _snack('全局执行总开关：${mode.label}');
     }
   }
 
@@ -770,12 +809,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const Divider(height: 32),
           Text('夜间独立豁免', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          // ---- 夜间独立豁免（v1.9，docs/20 §8）：跨功能的 Two-Key Safety 主开关 ----
+          // ---- 夜间独立豁免（v79，docs/20 §8）：主开关即"默认值" + 任务级双向覆盖 ----
           Builder(builder: (context) {
             final enabled = _quietExemptMaster;
             // 计数走 provider：设置页只消费，且 widget 测试能把它换掉
             // （真实 sqflite 往返在 FakeAsync 里会留下未完成的 Timer）。
             final count = ref.watch(quietExemptCountProvider);
+            final overrides = ref.watch(quietExemptOverrideTasksProvider);
+            // 例外清单 = **显式反向设置**（偏离主开关默认值）的任务。
+            // `null`（跟随主开关）永不入列；主开关一变动，这里按当时的 [enabled]
+            // 重算，无需重查库。
+            final exceptions = (overrides.valueOrNull ?? const <Task>[])
+                .where((t) => t.quietExempt != enabled)
+                .toList();
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -784,8 +830,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   secondary: const Icon(Icons.nightlight_round),
                   title: const Text('夜间独立豁免（主开关）'),
                   subtitle: Text(enabled
-                      ? '已开启：仍需在任务编辑器中逐任务开启"豁免免打扰"'
-                      : '关闭中：所有任务在免打扰时段一律跳过或平移'),
+                      ? '已开启：所有任务默认豁免（在免打扰时段照常执行）'
+                      : '关闭中：所有任务默认不豁免（免打扰时段跳过或平移）'),
                   value: enabled,
                   onChanged: _toggleQuietExempt,
                 ),
@@ -807,6 +853,99 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     style: TextStyle(fontSize: 12),
                   ),
                 ),
+                // ---- 例外清单（偏离主开关默认值的任务）----
+                Padding(
+                  padding: const EdgeInsets.only(left: 56, bottom: 4),
+                  child: Text(
+                    '例外清单（${exceptions.length} 条偏离默认值）',
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                if (exceptions.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(left: 56, bottom: 8),
+                    child: Text('无：所有任务都跟随主开关默认值',
+                        style: TextStyle(fontSize: 12)),
+                  )
+                else
+                  for (final t in exceptions)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 56, bottom: 2),
+                      child: Text(
+                        '· ${t.name}'
+                        '（${t.quietExempt == true ? '强制豁免' : '强制不豁免'}）',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+              ],
+            );
+          }),
+          const Divider(height: 32),
+          // ---- 全局执行总开关（v79，docs/20 §9）：法定休息日自动暂停 ----
+          Text('全局执行总开关（节假日自动暂停）',
+              style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Builder(builder: (context) {
+            final mode = _runMasterMode;
+            final forceRun = ref.watch(forceRunTasksProvider);
+            final list = forceRun.valueOrNull ?? const <Task>[];
+            // 状态行：如实说明当前是否处于暂停窗口 / 下次切换时刻（仅 auto 有意义）。
+            final now = DateTime.now();
+            final paused = RunPause.paused(mode, now);
+            final nextAt = RunPause.nextTransition(mode, now);
+            final status = switch (mode) {
+              RunMasterMode.auto => paused
+                  ? '自动暂停中：到 ${_fmtMd(nextAt)} 自动恢复执行'
+                  : '自动运行中：到 ${_fmtMd(nextAt)} 自动暂停',
+              RunMasterMode.on => '强制开启：忽略自动窗口，始终执行',
+              RunMasterMode.off => '强制关闭：始终暂停，仅执行下方例外任务',
+            };
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SegmentedButton<RunMasterMode>(
+                  segments: [
+                    for (final m in RunMasterMode.values)
+                      ButtonSegment(value: m, label: Text(m.label)),
+                  ],
+                  selected: {mode},
+                  onSelectionChanged: (s) => _saveRunMaster(s.first),
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(top: 6, bottom: 4),
+                  child: Text(
+                    '自动模式：法定休息日前一天 20:00 → 休息日最后一天 21:00 暂停'
+                    '（含普通周末）；窗口内全部任务默认跳过，出窗自动恢复。',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text('当前状态：$status',
+                      style: const TextStyle(fontSize: 12)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    '例外清单（${list.length} 条暂停期间仍执行）',
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                if (list.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Text('无：暂停期间不执行任何任务',
+                        style: TextStyle(fontSize: 12)),
+                  )
+                else
+                  for (final t in list)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text('· ${t.name}（强制执行）',
+                          style: const TextStyle(fontSize: 12)),
+                    ),
               ],
             );
           }),

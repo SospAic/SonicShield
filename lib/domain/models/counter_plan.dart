@@ -241,9 +241,10 @@ class CounterPlan {
 
   /// 是否遵循全局免打扰护栏。
   ///
-  /// true（默认，更安全）= 夜间时段仍受免打扰约束，命中则跳过；
-  /// false = 计划内任务标记 `quietExempt` —— **但仍需全局主开关同时开启**
-  /// 才生效（Two-Key Safety，见 `ScheduleEngine.allowQuietExempt`）。
+  /// true（默认，更安全）= 物化为 `quietExempt: false`（强制不豁免），
+  /// 无论主开关如何都受免打扰约束；
+  /// false = 物化为 `quietExempt: null`（**跟随本机主开关默认值**）——
+  /// 只有本机主开关开启时才豁免，计划本身**无法**单方面绕过护栏（v79）。
   final bool respectQuietHours;
 
   final CounterWindow workdayDay;

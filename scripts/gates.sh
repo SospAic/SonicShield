@@ -544,7 +544,15 @@ COVERAGE_MIN="${COVERAGE_MIN:-98.8}"
 #   `RTCRtpSender.setParameters` 编码档位，主叫/被叫/多路全部接线），**含 `lib/**` 改动**
 #   ⇒ 可测面分母 11905 → 12618（+713）、分子 11773 → 12484（+711）；功能层 **2563**；
 #   机器锁 **75/75** 不变。
-MIN_COVERED="${MIN_COVERED:-12476}"
+# 第七十九轮（2026-10-07）实测可测面 **98.85%**（12666/12813；全局 12674/13476）→ 比率阈值
+#   **不动**（98.8；98.85 − 98.8 = 0.05pt，**不小于** 0.05pt ⇒ 无需再下一档），**只抬绝对下限**：
+#   **12476 → 12658**（实测 − 8 行抖动余量）。⚠️ 本轮为**夜间豁免三态化**（`Task.quietExempt`
+#   `bool → bool?`：null 跟随主开关 / true 强制豁免 / false 强制不豁免）+ **节假日全局执行总开关**
+#   （新增 `lib/domain/scheduling/run_pause.dart`：`RunMasterMode{auto,on,off}` + 暂停窗口
+#   `[休息日前一天 20:00, 连休最后一天 21:00)`；`Task.forceRun` 强制例外；DB v4 → v5 幂等补列；
+#   远程命令 `run.master.set`），**含 `lib/**` 改动** ⇒ 可测面分母 12618 → 12813（+195）、
+#   分子 12484 → 12666（+182）；功能层 **2603**；机器锁 **75/75** 不变。
+MIN_COVERED="${MIN_COVERED:-12658}"
 #   ⚠️ 第四十五轮（2026-09-28）实测可测面分子 **8898** → 阈值 8680 → **8892**（实测 − 6 行抖动余量）。
 #      ⚠️ 本轮分母 **9584 → 9586 / 10074 → 10076（+2）**（新增注入缝自身的行）；真实进度
 #      **8688 → 8900（+212 行）**，其中 **+210** 来自两个新增 WebRTC 行为测试文件、
@@ -943,7 +951,7 @@ if [ "${WITH_DEVICE:-0}" = "1" ]; then
       cache_real_apk || true
       run_device_test "设备冒烟（app_smoke_test，4 例）" integration_test/app_smoke_test.dart device_smoke
       run_device_test "设备桥接（native_bridge_test，6 例）" integration_test/native_bridge_test.dart device_bridge
-      # 振动能力 P0 取证（docs/20 §13）：四条能力 + usage 传递 + 包络一致性 + 停止。
+      # 振动能力 P0 取证（docs/20 §14）：四条能力 + usage 传递 + 包络一致性 + 停止。
       # ⚠️ 本文件是 **BUG-074**（Kotlin `Long`→`Int` 赋值导致 Android 端从未构建成功）
       #    的天然回归锁 —— 它一旦被跑，就必然先过 `assembleDebug`。
       run_device_test "设备振动（vibrate_device_test，6 例）" integration_test/vibrate_device_test.dart device_vibrate

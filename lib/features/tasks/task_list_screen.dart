@@ -407,6 +407,7 @@ class _TaskTile extends ConsumerWidget {
                     // （如原任务"仅充电时执行"，副本却无条件执行）。
                     condition: t.condition,
                     quietExempt: t.quietExempt,
+                    forceRun: t.forceRun,
                     priority: t.priority,
                     createdAt: now,
                     updatedAt: now,

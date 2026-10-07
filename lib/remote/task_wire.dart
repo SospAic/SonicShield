@@ -53,7 +53,7 @@ abstract final class TaskWire {
   /// 震动模式步数上限（与 Android Vibrator 模式串长度上限同量级）。
   static const maxVibrateSteps = VibrateLimits.maxPatternSteps;
 
-  // ---- v1.9 振动传输层夹紧（docs/20 §10.3）----
+  // ---- v1.9 振动传输层夹紧（docs/20 §11.3）----
   //
   // ⚠️ 这几个常量**不是产品护栏**，与 D1「持续振动本地不设时长硬上限」不矛盾：
   // 它们是**入站数据不可信**这条安全边界上的取值上界 —— 对端可以发任何数字，
@@ -73,7 +73,7 @@ abstract final class TaskWire {
   /// 会让 `fold` 溢出成 `Infinity`，随后 `roll` 恒为 NaN —— 选中逻辑静默失效。
   static const maxActionSetWeight = 1e6;
 
-  /// **入站振动一律遵循系统勿扰**（v1.9，docs/20 §10.3 第 4 条）。
+  /// **入站振动一律遵循系统勿扰**（v1.9，docs/20 §11.3 第 4 条）。
   ///
   /// `respectDnd=false` 会让原生侧改用 `USAGE_ALARM`，即**穿透系统勿扰**。
   /// 允许已配对的对端打开它，等于让对端绕过本机的合规护栏 —— 与 `quietExempt`
@@ -172,10 +172,13 @@ abstract final class TaskWire {
         'assetIds': t.assetIds,
         'cooldownSec': t.cooldownSec,
         'quietPolicy': t.quietPolicy.name,
-        // 夜间独立豁免（v1.9）：**出站携带，入站无视**（见 [fromWire] 的注记）。
-        // 出站带上是为了让对端界面能显示"该任务在端点侧夜间不受约束"（透明性），
-        // 但不代表对端有权设置它。
+        // 夜间独立豁免（v79 三态）：**出站携带，入站无视**（见 [fromWire] 的注记）。
+        // 出站带上（null/true/false）是为了让对端界面能显示"该任务在端点侧夜间
+        // 的豁免意向"（透明性），但不代表对端有权设置它。
         'quietExempt': t.quietExempt,
+        // 全局执行总开关的任务级强制例外（v79）：出站携带供对端透明展示，
+        // 入站不采信（见 [fromWire]）—— 例外只能由本机持有者设置。
+        'forceRun': t.forceRun,
         'priority': t.priority,
         if (t.condition != null) 'condition': t.condition!.toJson(),
         'createdAt': t.createdAt.millisecondsSinceEpoch,
@@ -236,19 +239,28 @@ abstract final class TaskWire {
         assetIds: assetIds,
         cooldownSec: cooldown,
         quietPolicy: quiet,
-        // ⚠️ **入站一律 false，绝不读 `j['quietExempt']`**（v1.9，docs/20 §8.2 约束 1）。
+        // ⚠️ **入站一律 null（跟随本机主开关），绝不读 `j['quietExempt']`**
+        // （v79，docs/20 §8.2 约束 1）。
         //
         // 夜间豁免是"允许任务绕过 22:00–07:00 免打扰护栏"的授权。
         // 若允许已配对的对端通过 `task.upsert` 打开它，等于**让对端绕过本机的合规护栏** ——
         // 直接触碰项目红线（"未授权控制他人设备"，见 docs/08 §2）。
-        // 因此这里**显式**写 false，而不是"省略该参数"：
+        // 因此这里**显式**写 `null`，而不是"透传对端值"：
+        // `null` = 该任务跟随**本机**主开关默认值（本机主开关默认关闭 ⇒ 不豁免），
+        // 即对端无论如何都**无法**为本机任务单方面授予豁免。
         // 显式写法让"有人把它接上"这件事必须**主动删掉一行**才能做到，
         // 且 `test/quiet_exempt_lock_test.dart` 会同时断言
         // 「出站含该键」与「入站忽略该键」这一非对称契约。
         //
-        // 副作用（**安全方向，已接受**）：对端更新任务会清掉该任务在本机的豁免。
+        // 副作用（**安全方向，已接受**）：对端更新任务会把该任务的豁免拉回"跟随主开关"
+        // —— 若本机此前对它做过「强制豁免」的例外设置，会被这次远程更新抹掉。
         // 端点侧会为此写一条审计（见 `endpoint_service._upsertTask`），不静默。
-        quietExempt: false,
+        quietExempt: null,
+        // ⚠️ 全局执行总开关的**任务级强制例外一律落 false**（v79）：与
+        // `quietExempt: null` 同理但更严 —— 它守护的是更粗的刹车（节假日自动
+        // 暂停）。若允许对端打开，等于让对端在"本机整体停摆"期间仍能强行触发
+        // 出声任务，直接触碰 docs/08 §2 红线。本机持有者可在任务编辑器自行开启。
+        forceRun: false,
         condition: _condition(j['condition']),
         priority: priority,
         createdAt: _epoch(j['createdAt']) ??
@@ -323,7 +335,7 @@ abstract final class TaskWire {
               if (e is num) e.toInt().clamp(0, VibrateLimits.maxPatternStepMs)
           ];
       case 'randomVibrate':
-        // ⚠️ **不补这个分支的后果**（docs/20 §10.3）：落进 `default:` → 原样透传
+        // ⚠️ **不补这个分支的后果**（docs/20 §11.3）：落进 `default:` → 原样透传
         // → release 下 assert 被剥离 → 自相矛盾配置（`amplitudeMin > amplitudeMax`）
         // 写入 DB → 物化期崩。这是本文件开头已经写明的教训，新 kind 必须遵守。
         final m = Map<String, dynamic>.from(j);

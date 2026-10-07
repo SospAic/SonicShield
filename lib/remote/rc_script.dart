@@ -9,7 +9,7 @@ import '../domain/models/action.dart';
 /// - play    {volume(0..1), durationSec, presetCategory?}   随机播放（可指定分类）
 /// - tts     {text, volume, voiceId?}   v2.0 起可指定音色（缺省=系统默认女声）
 /// - notify  {title, body}
-/// - vibrate {mode?, ...}   v1.9 参数化（docs/20 §10.1）。
+/// - vibrate {mode?, ...}   v1.9 参数化（docs/20 §11.1）。
 ///           ⚠️ `mode` 缺省 = `fixed` ⇒ **老控制器发的 `{}` 行为一字不变**
 ///           （协议向后兼容，不是"顺手加的默认值"）。
 /// - record  {seconds}
@@ -17,7 +17,7 @@ import '../domain/models/action.dart';
 
 enum RcStepKind { play, tts, notify, vibrate, record, delay }
 
-/// 振动步模式（v1.9，docs/20 §10.1）。
+/// 振动步模式（v1.9，docs/20 §11.1）。
 enum RcVibrateMode { fixed, random, continuous }
 
 /// 解析线格式里的 `mode`。**未知/缺失一律按 `fixed`** —— 这是老协议的唯一语义，
@@ -169,7 +169,7 @@ List<RcVibrateField> rcVibrateStartFieldsFor(RcVibrateMode m) =>
 ///
 /// 与 [RcStep.vibrateConfig] 同一纪律：**先夹紧再构造**（`ActionConfig` 的区间
 /// 约束靠 `assert`，release 会被剥离），并**强制 `respectDnd = true`**（远程
-/// 路径不提供穿透系统勿扰的能力，docs/20 §10.3）。
+/// 路径不提供穿透系统勿扰的能力，docs/20 §11.3）。
 ///
 /// `fixed` = 恒定振动（强度 min==max、时长 min==max、无波动），
 /// 表达为 [ContinuousVibrateAction] 的**退化区间** —— 从而执行引擎零改动，
@@ -390,7 +390,7 @@ class RcStep {
 
   static String _pct(double v) => '${(v * 100).round()}%';
 
-  /// **入站振动一律遵循勿扰**（v1.9，docs/20 §10.3 第 4 条）。
+  /// **入站振动一律遵循勿扰**（v1.9，docs/20 §11.3 第 4 条）。
   ///
   /// `respectDnd=false` 会让原生侧改用 `USAGE_ALARM`，即**穿透系统勿扰**。
   /// 允许已配对的对端打开它，等于让对端绕过本机的合规护栏 —— 与

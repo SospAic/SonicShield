@@ -286,15 +286,15 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 582 + `main.dart` 65）。
+/// 设备层豁免**分母**（`background_engine.dart` 598 + `main.dart` 65）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
 ///
-/// ⚠️ 第七十八轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
-/// 可执行行 **582**、`lib/main.dart` **65**，豁免面分母 **647**（第七十六/七十七轮文档曾写
-/// 584 + 67 = 651，与实测漂移 +4，本轮以实测为准回刷）。
-const int kDeviceExemptLines = 582 + 65;
+/// ⚠️ 第七十九轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
+/// 可执行行 **598**（本轮新增 `run_pause` 接线使其由 582 增至 598）、`lib/main.dart` **65**，
+/// 豁免面分母 **663**（第七十八轮曾写 582 + 65 = 647，与实测漂移 +16，本轮以实测为准回刷）。
+const int kDeviceExemptLines = 598 + 65;
 
 /// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/582 ⇒ 8；`main.dart` 0/65）。
 const int kDeviceExemptCovered = 8;

@@ -40,6 +40,7 @@ import 'package:sonic_shield/domain/models/vibrate_caps.dart';
 import 'package:sonic_shield/domain/scheduling/china_holidays.dart';
 import 'package:sonic_shield/domain/scheduling/counter_plan_materializer.dart';
 import 'package:sonic_shield/domain/scheduling/counter_plan_random.dart';
+import 'package:sonic_shield/domain/scheduling/run_pause.dart';
 import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
 import 'package:sonic_shield/domain/scheduling/vibrate_resolve.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';

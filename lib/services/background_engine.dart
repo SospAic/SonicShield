@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/constants.dart';
 import '../data/db/app_database.dart';
 import '../data/repositories/api_config_store.dart';
+import '../data/repositories/counter_plan_store.dart';
 import '../data/repositories/log_repository.dart';
 import '../data/repositories/occurrence_repository.dart';
 import '../data/repositories/task_repository.dart';
@@ -25,6 +26,7 @@ import '../domain/models/counter_plan.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
 import '../domain/models/tts_voice.dart';
+import '../domain/scheduling/run_pause.dart';
 import '../domain/scheduling/schedule_engine.dart';
 import '../domain/scheduling/vibrate_resolve.dart';
 import '../features/guard/guard_orchestration.dart';
@@ -686,6 +688,28 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
   }
 
+  /// 当前是否处于「全局执行总开关」的**暂停关闭**状态（v79，docs/20 §9）。
+  ///
+  /// 判据真源在纯函数层 [RunPause.paused]：模式取自 `PrefsKeys.runMasterMode`
+  /// （`auto` / `on` / `off`，读不懂 → `auto`），`auto` 下再由节假日判定窗口
+  /// `[休息日前一天 20:00, 连续休息日最后一天 21:00)` 决定。
+  ///
+  /// **每轮重读**（不缓存）：用户在引擎运行期间改模式，下一轮 tick 即生效，
+  /// 无需重启服务 —— 与夜间豁免主开关、免打扰窗口同一口径。
+  ///
+  /// 节假日覆盖表沿用反击计划的同一份（`CounterPlanStore`：手动覆盖 + 联网整年表），
+  /// 不另立存储，保证"休息日认定"全局唯一。
+  bool pausedAt(DateTime at) {
+    final mode = RunMasterMode.parse(prefs.getString(PrefsKeys.runMasterMode));
+    final store = CounterPlanStore(prefs);
+    return RunPause.paused(
+      mode,
+      at,
+      overrides: store.overrides(),
+      autoOverrides: store.autoOverrides(),
+    );
+  }
+
   /// 统一的执行前裁决（条件 → 概率），供**声音**与**远程立即执行**两个入口复用。
   ///
   /// 定时入口 `executeDue` 因重入/乐观置状态的结构约束，把同样两条门**同序**
@@ -693,6 +717,19 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 返回 null = 通过；否则写审计并返回未通过原因。
   Future<String?> admitExecution(Task task, ConditionEnv env, String source,
       {String? occurrenceId}) async {
+    // 全局执行总开关（v79，docs/20 §9）：暂停期间除显式例外一律不放行。
+    // 放在最前 —— 它是比条件/概率更粗的刹车，不该先做无谓的平台读取与随机掷骰。
+    if (!task.forceRun && pausedAt(DateTime.now())) {
+      const msg = '节假日自动暂停中（全局执行总开关），跳过';
+      await logs.append(
+          source: source,
+          action: 'runPause',
+          status: 'skipped',
+          taskId: task.id,
+          occurrenceId: occurrenceId,
+          message: msg);
+      return msg;
+    }
     final condFail = conditionFailedIn(task, env);
     if (condFail != null) {
       await logs.append(
@@ -969,13 +1006,19 @@ Future<void> _engineBody(ServiceInstance service) async {
         // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
         // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
         // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
-        final purged = await occs.deletePendingQuietExempt();
+        //
+        // ⚠️ v79：任务级可**双向覆盖** —— `quietExempt == true`（强制豁免）的任务
+        // 在主开关关闭时**仍然豁免**，其计划必须**保留**，不能一并清掉。
+        final forceExemptIds =
+            all.where((t) => t.quietExempt == true).map((t) => t.id);
+        final purged =
+            await occs.deletePendingQuietExempt(keepTaskIds: forceExemptIds);
         if (purged > 0) {
           await logs.append(
               source: 'schedule',
               action: 'quietExempt',
               status: 'skipped',
-              message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划');
+              message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划（已保留强制豁免例外）');
         }
       }
       final engine = ScheduleEngine(
@@ -1042,6 +1085,10 @@ Future<void> _engineBody(ServiceInstance service) async {
     try {
       final now = DateTime.now();
       final due = await occs.due(now, limit: SchedulerConfig.catchUpLimit);
+      // 全局执行总开关（v79，docs/20 §9）：**轮首算一次**，轮内所有到期计划复用。
+      // 暂停期间仍逐条落 `skipped`（而非在计划层过滤）—— 换取"窗口一结束下轮 tick
+      // 立即恢复执行"与"远程改模式即时生效"，无需任何补算/重建机制。
+      final pausedNow = pausedAt(now);
       // 本轮环境快照：**首次需要时**读一次，轮内所有到期任务复用。
       // 惰性 → 若所有计划都在下面的"过期丢弃"分支被跳过，则一次平台读取都不会发生。
       final env = RoundConditionEnv(read: readConditionEnv);
@@ -1059,6 +1106,19 @@ Future<void> _engineBody(ServiceInstance service) async {
         final task = await tasksRepo.get(o.taskId);
         if (task == null || !task.enabled) {
           await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          continue;
+        }
+        // 全局执行总开关（v79，docs/20 §9）：暂停期间除**显式例外**外一律跳过。
+        // 例外以**任务当前配置**为准（`forceRun`），并写审计如实告知"为何没响"。
+        if (pausedNow && !task.forceRun) {
+          await occs.markStatus(o.id, OccurrenceStatus.skipped);
+          await logs.append(
+              source: 'schedule',
+              action: 'runPause',
+              status: 'skipped',
+              taskId: task.id,
+              occurrenceId: o.id,
+              message: '节假日自动暂停中（全局执行总开关），跳过');
           continue;
         }
         // 条件层（v1.3）：不满足则跳过并审计。
@@ -1115,7 +1175,7 @@ Future<void> _engineBody(ServiceInstance service) async {
               status: ok ? 'success' : 'failed',
               taskId: task.id,
               occurrenceId: o.id,
-              message: '用户豁免免打扰（任务级）');
+              message: '用户豁免免打扰（主开关默认 / 任务级强制）');
         }
       }
       if (due.isNotEmpty) await broadcast();
@@ -1461,7 +1521,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     await service.stopSelf();
   });
 
-  /// 远程 `vibrate.stop`（v1.9，docs/20 §10.2）：停止**全部**进行中的振动。
+  /// 远程 `vibrate.stop`（v1.9，docs/20 §11.2）：停止**全部**进行中的振动。
   ///
   /// ⚠️ 必须落在**引擎隔离**里，只调用原生 `vibrateStop()` 是不够的：
   /// 持续振动是「20 秒一片 + 3 秒 keep-alive」分片续发的（docs/20 §6），
@@ -1589,7 +1649,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   });
 
-  /// 远程指令组里的**振动步骤**（v1.9，docs/20 §10.1）。
+  /// 远程指令组里的**振动步骤**（v1.9，docs/20 §11.1）。
   ///
   /// ⚠️ 为什么必须转交引擎、而不是在主 isolate 直接调 `NativeBridge`：
   /// `VibrateSession` 是**唯一**持有「活跃振动表 + 分片续发 + S1–S4 失效安全」

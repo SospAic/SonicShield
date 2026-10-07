@@ -3,8 +3,9 @@
 // 覆盖 docs/08 三条红线在 domain 层的落实：
 //   1. 免打扰窗口归一化：损坏/缺失配置必须回落默认 22:00–07:00（BUG-070 兜底）；
 //   2. 最小冷却 60s：即使任务配 cooldownSec < 60，物化间隔仍 >= 60s；
-//   3. 夜间豁免 Two-Key：任务级 quietExempt=true 但引擎主开关关闭时，
-//      免打扰时段计划不得放行（单钥匙不生效，fail-safe）。
+//   3. 夜间独立豁免（v79 三态）：`exempt = taskExemptOverride ?? allowQuietExempt`。
+//      主开关关闭时，跟随（null）的任务不得放行（fail-safe）；任务级 true/false
+//      可双向覆盖主开关。
 //
 // 纯 Dart 测试：不触碰 sqflite / 平台通道，可在宿主直接运行。
 import 'package:flutter_test/flutter_test.dart';
@@ -20,7 +21,7 @@ Task _task({
   TriggerType triggerType = TriggerType.fixedOnce,
   int cooldownSec = 300,
   QuietPolicy quietPolicy = QuietPolicy.skip,
-  bool quietExempt = false,
+  bool? quietExempt,
 }) {
   final now = DateTime(2026, 9, 25, 12);
   return Task(
@@ -86,19 +87,44 @@ void main() {
     });
   });
 
-  group('合规护栏：夜间豁免 Two-Key（docs/08 红线 3）', () {
+  group('合规护栏：夜间独立豁免三态（docs/08 红线 3，v79）', () {
     final fire = DateTime(2026, 9, 25, 23, 30); // 命中默认免打扰 22:00–07:00
 
-    test('skip 策略：免打扰时段计划被丢弃（即使任务级豁免已开、主开关未开）', () {
+    test('主开关关闭 + 任务级跟随(null)：免打扰时段计划被丢弃（fail-safe）', () {
       final task = _task(
         trigger: FixedOnceTrigger(at: fire),
         quietPolicy: QuietPolicy.skip,
-        quietExempt: true, // 只有任务级这一把钥匙
+        quietExempt: null, // 跟随主开关（默认 false）
       );
       final entries =
           const ScheduleEngine().materialize(task, DateTime(2026, 9, 25, 12));
       expect(entries, isEmpty,
-          reason: '引擎主开关默认 false，单钥匙不得放行夜间执行');
+          reason: '引擎主开关默认 false，跟随者不得放行夜间执行');
+    });
+
+    test('主开关关闭 + 任务级 true：强制豁免放行（双向覆盖，v79 改造）', () {
+      final task = _task(
+        trigger: FixedOnceTrigger(at: fire),
+        quietPolicy: QuietPolicy.skip,
+        quietExempt: true, // 强制豁免，覆盖主开关
+      );
+      final entries =
+          const ScheduleEngine().materialize(task, DateTime(2026, 9, 25, 12));
+      expect(entries, isNotEmpty,
+          reason: '任务级 true 是强制豁免，主开关关闭也应放行');
+      expect(entries.first.quietExempted, isTrue);
+    });
+
+    test('主开关开启 + 任务级 false：强制不豁免，仍被丢弃', () {
+      final task = _task(
+        trigger: FixedOnceTrigger(at: fire),
+        quietPolicy: QuietPolicy.skip,
+        quietExempt: false, // 强制不豁免，覆盖主开关
+      );
+      final entries = const ScheduleEngine(allowQuietExempt: true)
+          .materialize(task, DateTime(2026, 9, 25, 12));
+      expect(entries, isEmpty,
+          reason: '任务级 false 是强制不豁免，主开关开启也应丢弃');
     });
 
     test('shift 策略：计划平移到免打扰结束点之后，不落在 22:00–07:00 内', () {

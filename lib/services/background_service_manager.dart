@@ -217,7 +217,7 @@ class BackgroundServiceManager {
         reqId, 'runNow', {'taskId': taskId, 'reqId': reqId}, timeout);
   }
 
-  /// 远程指令组里的振动步骤（v1.9，docs/20 §10.1）。
+  /// 远程指令组里的振动步骤（v1.9，docs/20 §11.1）。
   ///
   /// 与 [runNow] 同构：转交引擎隔离执行并等回投。引擎没跑时直接返回失败 ——
   /// 不在主 isolate 私自下发，因为那样会绕过分片续发与 `vibrate.stop`（见

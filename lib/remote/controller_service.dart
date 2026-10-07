@@ -72,6 +72,16 @@ class RcControllerService {
       _ep.sendTo(
           endpoint, RcMessage.now(RcCmd.guardSet, {'enabled': enabled}), store);
 
+  /// 设置端点「全局执行总开关」（v79，docs/20 §9）：`auto` / `on` / `off`。
+  ///
+  /// 端点回 `rc.ack`，并在 `rc.status` 中回执 `runMasterMode/paused/
+  /// inPauseWindow/nextTransitionAt`，供控制端如实展示。传字符串而非枚举，
+  /// 以贴合线协议（[RcMessage] payload 为 JSON）。
+  Future<bool> sendRunMasterSet(
+          PairedEndpoint endpoint, RemoteStore store, String mode) =>
+      _ep.sendTo(
+          endpoint, RcMessage.now(RcCmd.runMasterSet, {'mode': mode}), store);
+
   // ---------------- 随机反击计划（v2.0） ----------------
 
   /// 下发并应用一份反击计划（端点侧走同一 `CounterPlanService.apply`）。

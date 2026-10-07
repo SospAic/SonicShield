@@ -8,6 +8,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/core/router.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
+import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';
 import 'package:sonic_shield/features/local/local_section.dart';
 import 'package:sonic_shield/features/logs/logs_section.dart';
@@ -96,7 +97,17 @@ void main() {
   /// `_ticker.cancel()` 撞上已销毁的 ref）。
   Future<GoRouter> boot(WidgetTester tester, {String at = '/'}) async {
     final container = ProviderContainer(
-      overrides: [databaseProvider.overrideWith((_) async => db)],
+      overrides: [
+        databaseProvider.overrideWith((_) async => db),
+        // ⚠️ 本轮（v79）设置页新增的两个「例外清单」provider 也要查库
+        // （`TaskRepository.listAll`）。真实 sqflite 往返在 `FakeAsync` 里会
+        // 留下未完成的锁超时 `Timer`（10s），RTR-06 渲染 `/settings` 时收尾
+        // 判 "A Timer is still pending" 而失败。与 `settings_screen_test.dart`
+        // 同范式：界面用例只关心"分组页渲染得对不对"，清单内容本身另有
+        // 专项用例在真实 DB 上验证。
+        forceRunTasksProvider.overrideWith((ref) async => <Task>[]),
+        quietExemptOverrideTasksProvider.overrideWith((ref) async => <Task>[]),
+      ],
     );
     addTearDown(container.dispose);
     addTearDown(() => teardownTree(tester));

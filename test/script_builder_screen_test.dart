@@ -449,7 +449,7 @@ void main() {
       await tester.tap(_tile('震动'));
       await tester.pumpAndSettle();
       // v1.8 及以前这里是「（无可编辑参数）」；v1.9 起振动可参数化
-      // （docs/20 §10.1）。默认模式仍是 `fixed` → 明确告知"固定节奏无可编辑
+      // （docs/20 §11.1）。默认模式仍是 `fixed` → 明确告知"固定节奏无可编辑
       // 参数"，同时把模式选择器摆出来，而不是给一个空白框让用户猜。
       expect(find.textContaining('固定节奏无可编辑参数'), findsOneWidget);
       expect(find.text('振动模式'), findsOneWidget);
@@ -496,7 +496,7 @@ void main() {
     });
   });
 
-  group('SBS-V 振动步骤参数化（v1.9，docs/20 §10.1）', () {
+  group('SBS-V 振动步骤参数化（v1.9，docs/20 §11.1）', () {
     Future<void> openVibrate(WidgetTester tester) async {
       await tester.tap(_tile('震动'));
       await tester.pumpAndSettle();

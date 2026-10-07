@@ -179,6 +179,32 @@ final quietExemptCountProvider = FutureProvider<int>((ref) async {
   return repo.countQuietExemptSince(DateTime(now.year, now.month));
 });
 
+/// 夜间豁免「例外清单」候选：所有**带任务级显式设置**（`quietExempt != null`）的任务
+/// （v79，主开关默认值 + 任务级双向覆盖）。
+///
+/// 这里只筛「是否显式设置过」，**不筛**是否与当前主开关偏离 —— 偏离与否取决于
+/// **实时**的主开关取值（开启时"强制不豁免"才是例外，关闭时反之），
+/// 由设置页按当时的 `enabled` 再过滤一次（`t.quietExempt != enabled`）。
+/// 这样主开关一变动，清单无需重查库即可正确重算。
+///
+/// 同 [quietExemptCountProvider]：**刻意不加 `autoDispose`**（理由见上）。
+final quietExemptOverrideTasksProvider = FutureProvider<List<Task>>((ref) async {
+  final repo = await ref.watch(taskRepoProvider.future);
+  final all = await repo.listAll();
+  return all.where((t) => t.quietExempt != null).toList();
+});
+
+/// 全局执行总开关的「例外清单」：所有**开启强制例外**（`forceRun == true`）的任务
+/// （v79，docs/20 §9）。暂停期间这些任务照常执行，因此设置页必须在总开关下
+/// **显式列出**，避免"以为全停了、其实还有几条在响"。
+///
+/// 同 [quietExemptCountProvider]：**刻意不加 `autoDispose`**（理由见上）。
+final forceRunTasksProvider = FutureProvider<List<Task>>((ref) async {
+  final repo = await ref.watch(taskRepoProvider.future);
+  final all = await repo.listAll();
+  return all.where((t) => t.forceRun).toList();
+});
+
 /// 音源仓储（音源库界面的**唯一**数据入口：列表/批量导入/删除都走它，
 /// 界面不再直接持有 `db` —— 否则批量写入与原子性无从复用）。
 final assetRepoProvider = FutureProvider<AssetRepository>((ref) async {

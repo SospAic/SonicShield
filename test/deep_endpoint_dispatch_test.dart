@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/log_repository.dart';
 import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
@@ -280,6 +281,78 @@ void main() {
 
     test('logs.recent → 不抛异常（_send 在宿主为 no-op）', () async {
       await svc.debugDispatch(cmd(RcCmd.logsRecent, {'limit': 10}), peer);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // v79：全局执行总开关的**远程写入口** `run.master.set`（docs/20 §9）。
+  // 该处理器此前**一条执行型用例都没有** —— 生产唯一调用者是真实 MQTT
+  // 入站监听器，宿主连不上 broker 就永远驱动不到；而它恰恰是"远程能改
+  // 整体刹车"的入口，属于最不该留白的一类盲区。本组按真实副作用断言
+  // （prefs 落库 / 审计日志 / 是否请求引擎重排），不看"没抛异常"。
+  // ─────────────────────────────────────────────────────────────────
+  group('ED-RM run.master.set 远程写全局执行总开关', () {
+    Future<String?> mode() async => (await SharedPreferences.getInstance())
+        .getString(PrefsKeys.runMasterMode);
+
+    test('ED-RM1 合法 mode=off → 落库 off + 审计成功 + 请求引擎重排', () async {
+      var replanCalls = 0;
+      BackgroundServiceManager.replanHook = () async => replanCalls++;
+
+      await svc.debugDispatch(cmd(RcCmd.runMasterSet, {'mode': 'off'}), peer);
+
+      expect(await mode(), 'off', reason: '远程设"强制关闭"必须真的落库');
+      expect(replanCalls, 1,
+          reason: '写完必须请求引擎立即重排，否则要等重启才生效（与设置页同一效果）');
+      expect(
+          await hasLog(
+              action: 'run.master.set',
+              status: 'success',
+              contains: '强制关闭'),
+          isTrue,
+          reason: '改了整体刹车却不在审计里留痕 = 事后无法解释"为什么那晚没响"');
+    });
+
+    test('ED-RM2 合法 mode=auto / on 逐档都落库', () async {
+      BackgroundServiceManager.replanHook = () async {};
+      for (final m in ['auto', 'on']) {
+        await svc.debugDispatch(cmd(RcCmd.runMasterSet, {'mode': m}), peer);
+        expect(await mode(), m, reason: 'mode=$m 必须原样落库');
+      }
+    });
+
+    test('ED-RM3 非法 mode → 显式失败且不写库（不静默回落 auto）', () async {
+      await svc.debugDispatch(cmd(RcCmd.runMasterSet, {'mode': 'bogus'}), peer);
+
+      expect(await mode(), isNull,
+          reason: '对端发了垃圾，绝不能当成 auto 写下去 —— 那是"假成功"');
+      expect(
+          await hasLog(
+              action: 'run.master.set', status: 'failed', contains: '非法 mode'),
+          isTrue);
+    });
+
+    test('ED-RM4 缺 mode 参数 → 失败（对齐 taskToggle 的"缺参必须报错"口径）',
+        () async {
+      await svc.debugDispatch(cmd(RcCmd.runMasterSet), peer);
+
+      expect(await mode(), isNull);
+      expect(await hasLog(action: 'run.master.set', status: 'failed'), isTrue);
+    });
+
+    test('ED-RM5 已写库但引擎重排失败 → 审计如实失败 + 回执区分 replan=failed',
+        () async {
+      BackgroundServiceManager.replanHook =
+          () async => throw StateError('no engine');
+
+      await svc.debugDispatch(cmd(RcCmd.runMasterSet, {'mode': 'on'}), peer);
+
+      expect(await mode(), 'on',
+          reason: '写库这一半成功了，失败的只是重排，必须如实区分而不是整体报失败');
+      expect(
+          await hasLog(
+              action: 'run.master.set', status: 'failed', contains: '重排失败'),
+          isTrue);
     });
   });
 }

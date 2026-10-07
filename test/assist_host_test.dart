@@ -358,6 +358,7 @@ void main() {
         RcCmd.taskUpsert: 'script',
         RcCmd.taskDelete: 'script',
         RcCmd.guardSet: 'script',
+        RcCmd.runMasterSet: 'script',
       };
       cases.forEach((cmd, perm) {
         expect(RcAssistHost.requiredPerm(cmd), perm, reason: cmd);

@@ -41,7 +41,7 @@ RcStepKind? stepKindOfAction(ActionConfig a) => switch (a) {
       // 只会生成 `VibrateAction`（固定节奏），映射过去会在保存时把随机脉冲串
       // **静默降级**成固定节奏 —— 与 BUG-058 是同一类错误。
       // 因此返回 null，由 `_setPreserved` 原样保留。
-      // ⚠️ 若将来把 `RcStepKind.vibrate` 参数化（docs/20 §10.1），
+      // ⚠️ 若将来把 `RcStepKind.vibrate` 参数化（docs/20 §11.1），
       // 需要同步放开这里，并补一条"参数不丢"的往返锁。
       RandomVibrateAction() => null,
       ContinuousVibrateAction() => null,
@@ -155,7 +155,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   bool _loopFill = false;
   int _rampUpSec = 0;
 
-  // ---------------- 振动族（v1.9，docs/20 §4/§9） ----------------
+  // ---------------- 振动族（v1.9，docs/20 §4/§10） ----------------
 
   /// 固定节奏：`[起始延迟, 振, 停, 振, …]`（毫秒）。默认与 `VibrateAction` 一致。
   List<int> _vibPattern = const [0, 300, 200, 300];
@@ -182,13 +182,18 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   /// 承诺了振幅/锐度就必须说清"这台设备做不到"。
   VibrateCaps? _caps;
 
-  /// 夜间独立豁免（任务级，v1.9，docs/20 §8）。默认 false。
-  /// 主开关关闭时界面**置灰不可点**（Two-Key Safety）。
-  bool _quietExempt = false;
+  /// 夜间独立豁免（任务级三态，v79，docs/20 §8）。
+  /// `null` = 跟随主开关默认值（默认）；`true` = 强制豁免；`false` = 强制不豁免。
+  /// 主开关**不再置灰**本控件 —— 任务级可**双向覆盖**主开关。
+  bool? _quietExempt;
 
   /// 主开关（设置页）当前状态。**只读** —— 编辑器不提供开启入口。
   /// 读 `SharedPreferences`（不做 DB 往返，避免 widget 测试里的假故障）。
   bool _quietExemptMaster = false;
+
+  /// 全局执行总开关（节假日自动暂停）的**任务级强制例外**（v79，docs/20 §9）。
+  /// `false`（默认）= 暂停期间跟随总开关（被跳过）；`true` = 暂停期间照常执行。
+  bool _forceRun = false;
 
   // 声景混音（v1.3）
   final List<SoundscapeTrack> _scTracks = [];
@@ -326,6 +331,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       // 夜间独立豁免（v1.9）：**必须回填**，否则"打开编辑器再保存"
       // 会把用户已开的豁免静默关掉（保存路径显式写 `_quietExempt`）。
       _quietExempt = t.quietExempt;
+      // 全局执行总开关的任务级例外（v79）：同样必须回填，否则"打开编辑器再保存"
+      // 会把用户已开的"暂停期间强制执行"静默关掉。
+      _forceRun = t.forceRun;
       // 音源池回填（P1-06）：不回填的话，"打开编辑器再保存"会把已点名的
       // 音源整体清空 —— 与"编辑即静默改配置"同类错误。
       _assetIds
@@ -521,6 +529,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           if (widget.remoteTarget == null) ...[
             _section(context, '夜间独立豁免'),
             _quietExemptTile(),
+            const SizedBox(height: 16),
+            _section(context, '全局执行总开关 · 强制例外'),
+            _forceRunTile(),
           ],
           const SizedBox(height: 16),
           _section(context, '执行条件'),
@@ -1307,37 +1318,74 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     );
   }
 
-  /// 任务级夜间豁免开关（v1.9，docs/20 §8.1）。
+  /// 任务级夜间豁免（v79 三态，docs/20 §8.1）。
   ///
-  /// **主开关关闭时置灰不可点** —— Two-Key Safety 的第二把钥匙只有在
-  /// 第一把（设置页主开关）已开启时才有意义。置灰而不是隐藏：
-  /// 让用户看得见"这个能力存在、但需要先去设置页授权"，
-  /// 否则他只会以为本应用不支持。
+  /// 三选一：**跟随主开关**（默认）/ **强制豁免** / **强制不豁免**。
+  /// 与旧版不同，这里**不再置灰** —— 主开关只是"批量默认值"，
+  /// 单个任务可以**双向覆盖**它（用户明确选择"完全双向覆盖"）。
+  /// 底部按「主开关当前状态 + 本任务选择」给出**有效行为**的说明，
+  /// 避免"选了强制豁免却没生效"的困惑。
   Widget _quietExemptTile() {
     final master = _quietExemptMaster;
+    final effective = _quietExempt ?? master; // 与 ScheduleEngine 判据一致
+    final followHint = master ? '跟随主开关（当前：豁免）' : '跟随主开关（当前：不豁免）';
+    final effectiveHint = effective
+        ? '当前有效：本任务在免打扰时段（含夜间）照常执行，每次都会写日志'
+        : '当前有效：本任务在免打扰时段按策略跳过或平移';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('本任务豁免免打扰'),
-          subtitle: Text(master
-              ? (_quietExempt
-                  ? '已开启：本任务在免打扰时段（含夜间）照常执行，每次都会写日志'
-                  : '关闭中：本任务在免打扰时段按策略跳过或平移')
-              : '需要先在「设置 → 夜间独立豁免（主开关）」中开启，本开关才会生效'),
-          value: _quietExempt && master,
-          onChanged: master ? (v) => setState(() => _quietExempt = v) : null,
+        Text('本任务豁免免打扰（夜间独立豁免）',
+            style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          children: [
+            ChoiceChip(
+              label: const Text('跟随主开关'),
+              selected: _quietExempt == null,
+              onSelected: (_) => setState(() => _quietExempt = null),
+            ),
+            ChoiceChip(
+              label: const Text('强制豁免'),
+              selected: _quietExempt == true,
+              onSelected: (_) => setState(() => _quietExempt = true),
+            ),
+            ChoiceChip(
+              label: const Text('强制不豁免'),
+              selected: _quietExempt == false,
+              onSelected: (_) => setState(() => _quietExempt = false),
+            ),
+          ],
         ),
-        if (!master)
+        const SizedBox(height: 4),
+        Text('主开关（设置页）：${master ? '已开启' : '已关闭'} · 本任务：$followHint',
+            style: const TextStyle(fontSize: 12)),
+        Text(effectiveHint, style: const TextStyle(fontSize: 12)),
+        if (_quietExempt != null)
           const Padding(
-            padding: EdgeInsets.only(bottom: 4),
-            child: Text('主开关关闭时，本开关不生效（双重开关设计，防止误开）。',
+            padding: EdgeInsets.only(top: 4),
+            child: Text('已作任务级显式设置 —— 会出现在「设置 → 夜间豁免例外清单」中。',
                 style: TextStyle(fontSize: 12)),
           ),
       ],
     );
   }
+
+  /// 任务级「全局执行总开关」强制例外（v79，docs/20 §9）。
+  ///
+  /// 单向布尔（只有"强制执行"）：本任务在节假日自动暂停窗口内**照常执行**。
+  /// 反向"强制不执行"与任务自身的启用开关语义重叠，故不提供。
+  Widget _forceRunTile() => SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        secondary: const Icon(Icons.play_circle_outline),
+        title: const Text('暂停期间强制执行'),
+        subtitle: Text(_forceRun
+            ? '已开启：全局执行总开关暂停时，本任务仍照常执行（会出现在「设置 → 全局执行总开关例外清单」中）'
+            : '关闭中：全局执行总开关暂停时，本任务随之跳过'),
+        value: _forceRun,
+        onChanged: (v) => setState(() => _forceRun = v),
+      );
 
   /// 随机指令集编辑（v1.8）：候选动作列表 + 权重滑条。
   /// 触发命中后按权重随机选一执行——"随机播放声音中的某一个 / 随机执行某一指令"。
@@ -1691,12 +1739,16 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       assetIds: _assetIds.toList(),
       cooldownSec: _editing?.cooldownSec ?? 300,
       quietPolicy: _editing?.quietPolicy ?? QuietPolicy.skip,
-      // 夜间独立豁免（v1.9）：
-      // · 本机模式 → 用编辑器里的开关值；
-      // · **远程模式恒 false**（docs/20 §8.2 约束 1）：端点侧 `TaskWire.fromWire`
-      //   本来就会丢弃入站该字段，此处显式置 false 是为了让控制端**不产生**
+      // 夜间独立豁免（v79 三态）：
+      // · 本机模式 → 用编辑器里的选择（null=跟随主开关 / true=强制豁免 / false=强制不豁免）；
+      // · **远程模式恒 null**（docs/20 §8.2 约束 1）：端点侧 `TaskWire.fromWire`
+      //   本来就会丢弃入站该字段并落 null，此处显式写 null 是为了让控制端**不产生**
       //   "我开了豁免"的错觉 —— 界面也不显示这个开关。
-      quietExempt: widget.remoteTarget == null ? _quietExempt : false,
+      quietExempt: widget.remoteTarget == null ? _quietExempt : null,
+      // 全局执行总开关的任务级例外（v79，docs/20 §9）：
+      // · 本机模式 → 用编辑器里的开关值；
+      // · **远程模式恒 false**：与 quietExempt 同理，远程不得为任务开"整体刹车"例外。
+      forceRun: widget.remoteTarget == null ? _forceRun : false,
       // 注意 `!_condSkipCall`：关掉通话保护时必须落库一个显式 false 的条件对象，
       // 否则引擎的默认条件（skipInCall=true）会把它覆盖回去，使用者的关闭动作
       // 表现为"开关按了没用"。
@@ -1739,7 +1791,7 @@ enum ActionKindChoice {
   notify,
   composite,
   randomFrom,
-  // ---- 振动族（v1.9，docs/20 §9）----
+  // ---- 振动族（v1.9，docs/20 §10）----
   // ⚠️ 这三个必须存在：在它们出现之前，`ActionType.vibrate` 的任务
   // **在编辑器里根本没有对应选项** —— 打开就落回默认的 `play`，
   // 一按保存就把震动任务**静默改成播放任务**（连 `action_json` 都被覆盖）。

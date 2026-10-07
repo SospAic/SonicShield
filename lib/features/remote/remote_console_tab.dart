@@ -574,6 +574,32 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         ),
         _volumePanel(),
         const SizedBox(height: 12),
+        _section('全局执行总开关（v1.9 · 节假日自动暂停）'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            // v79：远程控制端点的整体刹车。三态与端点设置页一致
+            // （`auto` 法定休息日自动暂停 / `on` 强制开启 / `off` 强制关闭）。
+            // 门控位为 `script`（见 RcPermGate），协助会话未放行即灰化。
+            OutlinedButton(
+                onPressed: _allowed(RcCmd.runMasterSet)
+                    ? () => _send(RcCmd.runMasterSet, {'mode': 'auto'}, '总开关=自动')
+                    : null,
+                child: const Text('自动')),
+            OutlinedButton(
+                onPressed: _allowed(RcCmd.runMasterSet)
+                    ? () => _send(RcCmd.runMasterSet, {'mode': 'on'}, '总开关=强制开启')
+                    : null,
+                child: const Text('强制开启')),
+            OutlinedButton(
+                onPressed: _allowed(RcCmd.runMasterSet)
+                    ? () => _send(RcCmd.runMasterSet, {'mode': 'off'}, '总开关=强制关闭')
+                    : null,
+                child: const Text('强制关闭')),
+          ],
+        ),
+        const SizedBox(height: 12),
         _section('指令组（宏）'),
         Wrap(
           spacing: 8,

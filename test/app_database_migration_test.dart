@@ -11,9 +11,10 @@ import 'package:sonic_shield/domain/models/task.dart';
 ///
 /// ## 为什么必须补这一块
 ///
-/// `AppDatabase._onUpgrade` 里两条 `ALTER TABLE` 是**用户升级才会走到的路径**：
+/// `AppDatabase._onUpgrade` 里几条 `ALTER TABLE` 是**用户升级才会走到的路径**：
 /// - v1 → v2：补 `condition_json`（任务条件层，v1.3）
 /// - v2 → v3：补 `quiet_exempt`（夜间独立豁免，v1.9，docs/20 §8）
+/// - v4 → v5：补 `force_run`（全局执行总开关的强制例外，v79，docs/20 §9）
 ///
 /// 此前**从没有任何测试造过一个旧版库去驱动它们** —— 所有用例都从
 /// `inMemoryDatabasePath`（`:memory:`）起步，落进 `_onCreate` 直接建到 v3，
@@ -111,11 +112,14 @@ void main() {
     final cols = await taskColumns(db);
     expect(cols, contains('condition_json'), reason: 'v1→v2 必须补条件层列');
     expect(cols, contains('quiet_exempt'), reason: 'v2→v3 必须补夜间豁免列');
+    expect(cols, contains('force_run'), reason: 'v4→v5 必须补总开关强制例外列');
 
     final row = (await db.db.query('tasks')).single;
     expect(row['id'], 'legacy-1', reason: '升级不得丢数据');
     expect(row['quiet_exempt'], 0,
-        reason: '老库补列后必须为 0（= 未豁免）—— 否则升级完就静默豁免了免打扰');
+        reason: '老库补列后必须为 0（v79 三值：0=跟随主开关）—— 否则升级完就静默改变了护栏');
+    expect(row['force_run'], 0,
+        reason: '老库补列后必须为 0（= 受总开关约束，更安全的一侧）');
     expect(row['condition_json'], isNull, reason: '老任务没有条件层，必须是 null');
   });
 
@@ -135,10 +139,12 @@ void main() {
     addTearDown(db.close);
 
     expect(await taskColumns(db), contains('quiet_exempt'));
+    expect(await taskColumns(db), contains('force_run'));
     final row = (await db.db.query('tasks')).single;
     expect(row['condition_json'], '{"kind":"timeWindow"}',
         reason: 'v2 已有数据必须原样保留 —— 重跑 v1→v2 会抛 duplicate column name');
     expect(row['quiet_exempt'], 0);
+    expect(row['force_run'], 0);
   });
 
   test('MIG-06 BUG-079 v2 老库 → v3：occurrences.quiet_exempt 也必须补上（fail-safe 清除不得再抛 no such column）',
@@ -273,6 +279,7 @@ void main() {
             'no such column，任务物化整链失败（三机实机取证）');
     // tasks 列已存在 ⇒ 幂等补列必须空操作（不得抛 duplicate column name）。
     expect(await taskColumns(db), contains('quiet_exempt'));
+    expect(await taskColumns(db), contains('force_run'));
 
     final rows = await db.db.query('occurrences');
     expect(rows, hasLength(1), reason: '升级不得丢已提交计划');
@@ -292,6 +299,56 @@ void main() {
         .query('occurrences', where: 'id = ?', whereArgs: ['new-occ']);
     expect(inserted.single['quiet_exempt'], 1,
         reason: '补列后带豁免标记的计划必须能落库并读回');
+  });
+
+  test('MIG-08 v4 老库（缺 tasks.force_run）→ v5：按列存在性补齐且默认 0（受约束）',
+      () async {
+    final dir = newTmpDir();
+    final path = p.join(dir.path, 'sonic_shield.db');
+    // v4 形状 = tasks 有 condition_json + quiet_exempt，occurrences 有 quiet_exempt；
+    // **没有** force_run（v79 才引入）。v4 老库升级到 v5 必须补列且默认 0。
+    final legacy = await openDatabase(
+      path,
+      version: 4,
+      onCreate: (db, v) async {
+        await db.execute(v1Tasks);
+        await db.execute('ALTER TABLE tasks ADD COLUMN condition_json TEXT');
+        await db.execute(
+            'ALTER TABLE tasks ADD COLUMN quiet_exempt INTEGER NOT NULL DEFAULT 0');
+        await db.execute('''
+          CREATE TABLE occurrences (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            fire_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            volume REAL,
+            duration_ms INTEGER,
+            quiet_exempt INTEGER NOT NULL DEFAULT 0
+          )''');
+        await db.insert('tasks', {
+          'id': 'legacy-1',
+          'name': '老任务',
+          'enabled': 1,
+          'trigger_type': 'dailyAt',
+          'trigger_json': '{"kind":"dailyAt"}',
+          'action_type': 'playAudio',
+          'action_json': '{"kind":"playAudio"}',
+          'created_at': 1,
+          'updated_at': 1,
+        });
+      },
+    );
+    await legacy.close();
+
+    final db = await AppDatabase.open(dir.path);
+    addTearDown(db.close);
+
+    expect(await taskColumns(db), contains('force_run'),
+        reason: 'v4→v5 必须补 tasks.force_run —— 否则引擎执行链每次读该列都抛'
+            'no such column，任务物化整链失败');
+    final row = (await db.db.query('tasks')).single;
+    expect(row['force_run'], 0,
+        reason: '补列默认 0 = 受总开关约束（更安全的一侧），老任务不会被静默开例外');
   });
 
   test('MIG-03 通用 JSON 列辅助往返 + inject 单例注入生效', () async {

@@ -24,6 +24,7 @@ import '../domain/models/action.dart';
 import '../domain/models/counter_plan.dart';
 import '../domain/models/task.dart';
 import '../domain/models/trigger.dart';
+import '../domain/scheduling/run_pause.dart';
 import '../domain/scheduling/schedule_engine.dart';
 import '../services/background_service_manager.dart';
 import '../services/counter_plan_service.dart';
@@ -1093,6 +1094,15 @@ class RcEndpointService {
         final next = await occ.pendingWithin(
             DateTime.now(), DateTime.now().add(const Duration(days: 7)),
             limit: 1);
+        // 全局执行总开关状态（v79，docs/20 §9）：随 status 一并回执，让控制端
+        // 能如实展示"端点是否处于节假日自动暂停 / 下次何时切换"。
+        final stPrefs = await SharedPreferences.getInstance();
+        final stMode =
+            RunMasterMode.parse(stPrefs.getString(PrefsKeys.runMasterMode));
+        final stStore = CounterPlanStore(stPrefs);
+        final stOv = stStore.overrides();
+        final stAuto = stStore.autoOverrides();
+        final stAt = DateTime.now();
         await _send(
             RcMessage.now(RcEvt.status, {
               'engine': BackgroundServiceManager.instance.isRunning,
@@ -1100,6 +1110,14 @@ class RcEndpointService {
               'nextFireAt':
                   next.isEmpty ? null : next.first.fireAt.millisecondsSinceEpoch,
               'version': AppMeta.version,
+              'runMasterMode': stMode.name,
+              'paused': RunPause.paused(stMode, stAt,
+                  overrides: stOv, autoOverrides: stAuto),
+              'inPauseWindow': RunPause.inWindow(stAt,
+                  overrides: stOv, autoOverrides: stAuto),
+              'nextTransitionAt': RunPause.nextTransition(stMode, stAt,
+                      overrides: stOv, autoOverrides: stAuto)
+                  ?.millisecondsSinceEpoch,
             }),
             targetPeerId: msg.from);
       case RcCmd.taskList:
@@ -1208,6 +1226,8 @@ class RcEndpointService {
         await _sendRemotePlan(msg, db, tasks);
       case RcCmd.planStop:
         await _stopRemotePlan(msg, peer, logs, db, tasks);
+      case RcCmd.runMasterSet:
+        await _setRunMaster(msg, peer, logs);
       case RcCmd.logsRecent:
         final limit = (msg.payload['limit'] as num?)?.toInt() ?? 50;
         final rows = await logs.recent(limit: limit);
@@ -1561,11 +1581,15 @@ class RcEndpointService {
     await tasks.upsert(task);
     final dropped = await occ.deletePendingForTask(task.id);
     final planned = await _rematerialize(task, occ);
-    // 远程更新会**清掉**该任务在本机的夜间豁免（入站 `quietExempt` 一律被丢弃，
-    // docs/20 §8.2 约束 1）。这是安全方向，但**不得静默** —— 用户会看到
-    // "夜间提醒突然不响了"，必须有一条能对上的日志。
-    final exemptCleared = (prev?.quietExempt ?? false) && !task.quietExempt;
-    // 入站振动一律强制「遵循系统勿扰」（docs/20 §10.3 第 4 条）。
+    // 远程更新会**清掉**该任务在本机的夜间豁免（入站 `quietExempt` 一律被丢弃、
+    // 置为「跟随主开关」，docs/20 §8.2 约束 1）。这是安全方向，但**不得静默** ——
+    // 用户会看到"夜间提醒突然不响了"，必须有一条能对上的日志。
+    // v79 三态：仅当本机此前是「强制豁免」（true）而被拉回「跟随/强制不豁免」时才算清除。
+    final exemptCleared = prev?.quietExempt == true && task.quietExempt != true;
+    // 同理：远程更新的任务 `forceRun` 恒为 false（`TaskWire.fromWire`），
+    // 若本机此前给它开过「暂停期间强制执行」，会被这次更新清除，同样不得静默。
+    final forceRunCleared = (prev?.forceRun ?? false) && !task.forceRun;
+    // 入站振动一律强制「遵循系统勿扰」（docs/20 §11.3 第 4 条）。
     // 对端若试图关掉它，必须留痕 —— 否则用户只会发现"怎么半夜还会震"。
     final dndForced = TaskWire.inboundDndDowngrade(j['action']);
     await logs.append(
@@ -1576,6 +1600,7 @@ class RcEndpointService {
         message: 'by ${peer.name} · ${existed ? '更新' : '新建'}'
             '「${task.name}」· 清理 $dropped 条旧计划 · 新计划 $planned 条'
             '${exemptCleared ? ' · 夜间豁免已被本次远程更新清除' : ''}'
+            '${forceRunCleared ? ' · 全局执行总开关例外已被本次远程更新清除' : ''}'
             '${dndForced ? ' · 对端请求关闭「遵循勿扰」已被拒绝（远程不得绕过本机护栏）' : ''}');
     await _send(
         RcMessage.now(RcEvt.task, {
@@ -1980,6 +2005,56 @@ class RcEndpointService {
     await _ack(msg, outcome.ok, data: outcome.ok ? null : outcome.reason);
   }
 
+  /// `run.master.set`（v79，docs/20 §9）：远程切换「全局执行总开关」。
+  ///
+  /// 与 [_setRemoteGuard] 同属"允许远程写全局 pref"的既有先例（见 [RcCmd.runMasterSet]
+  /// 的注记）：该开关是用户自己的整体刹车，不构成绕过他人护栏的提权面；
+  /// 而**夜间豁免主开关**（`PrefsKeys.quietExemptMaster`）是单机护栏授权，
+  /// 远程**绝不允许**写 —— QE-13/14 源码扫描会锁死这一处也不得出现该键。
+  ///
+  /// 载荷：`{mode: 'auto'|'on'|'off'}`。非法/缺失 mode ⇒ **显式失败**，
+  /// 不静默回落（对齐 taskToggle 的"缺参数必须报错"口径）。
+  /// 成功后请求引擎重排 —— 与用户在设置页切换同一效果，无需重启服务。
+  Future<void> _setRunMaster(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final raw = msg.payload['mode'];
+    final mode = RunMasterMode.parse(raw);
+    // `parse` 对读不懂的值回落 auto（UI 侧容错），但远程**必须**区分
+    // "用户就是要 auto" 与 "对端发了垃圾" —— 后者要如实报错，不能假装成功。
+    final valid = raw == RunMasterMode.auto.name ||
+        raw == RunMasterMode.on.name ||
+        raw == RunMasterMode.off.name;
+    if (!valid) {
+      await logs.append(
+          source: 'remote',
+          action: 'run.master.set',
+          status: 'failed',
+          message: 'by ${peer.name} · 非法 mode=$raw（应为 auto/on/off）');
+      await _ack(msg, false, data: 'mode 必须为 auto/on/off');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(PrefsKeys.runMasterMode, mode.name);
+    try {
+      await BackgroundServiceManager.instance.replan();
+    } on Object catch (e) {
+      await logs.append(
+          source: 'remote',
+          action: 'run.master.set',
+          status: 'failed',
+          message: 'by ${peer.name} · 已写入但请求引擎重排失败：$e');
+      await _ack(msg, true, data: 'mode=${mode.name};replan=failed');
+      return;
+    }
+    await logs.append(
+        source: 'remote',
+        action: 'run.master.set',
+        status: 'success',
+        message: 'by ${peer.name} · 全局执行总开关设为 ${mode.label}');
+    await _ack(msg, true,
+        data: 'mode=${mode.name};replan=requested');
+  }
+
   /// 被叫：收到 invite → 按 `calleeActionFor` 决定自动接通 / 振铃等用户 / 回占线。
   ///
   /// ⚠️ **BUG-056**：这里原先把 `onManualRing` 实现成**立刻 `acceptIncoming`**
@@ -2260,7 +2335,7 @@ class RcEndpointService {
                 done: done, skipped: stepNotes))));
   }
 
-  /// 执行指令组里的一个振动步骤（v1.9，docs/20 §10.1）。
+  /// 执行指令组里的一个振动步骤（v1.9，docs/20 §11.1）。
   ///
   /// 两条路径**必须分开**，不允许"随机/持续不支持就退回固定节奏"：
   /// - `fixed`（含老控制器发的 `{}`）→ [vibrateHandler]，行为与 v1.8 一字不差；
