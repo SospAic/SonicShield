@@ -220,7 +220,11 @@ void main() {
       // `pump(150ms)` 推 fake 时钟推不动它。
       await tester.runAsync(() async {
         final g = await tester.startGesture(tester.getCenter(_micButton));
-        await Future<void>.delayed(const Duration(milliseconds: 150));
+        // 同 PTT-04：不写死 150ms —— 有界轮询等到录音路径**真被进入**（桩见到 `hasPermission`，
+        // 即 `pttStartStream` 已开始）再取消，避免全量并发下"取消早于 start"的负载型假红。
+        for (var i = 0; i < 240 && !rec.calls.contains('hasPermission'); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
         await g.cancel();
         await Future<void>.delayed(const Duration(milliseconds: 150));
       });
