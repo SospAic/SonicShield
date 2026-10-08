@@ -141,9 +141,17 @@ void main() {
       // （症状是"没调用过 hasPermission"，不是抛错）。
       // 同时 100ms `didExceedDeadline` 也是 `Timer`（`tap.dart:308-311`），
       // 真实 zone 下按才拿得到真实计时器。
+      //
+      // ⚠️ 松手前**不能写死固定时长**（第八十一轮复跑实测）：全量并发（CPU 高负载）下
+      // 「权限申请 → `pttStartStream`」的真实异步往返可能 >150ms，届时 `g.up()` 会早于
+      // `_start()` 的 P2-25 守卫（`if (!_pressing) return;`）⇒ `pttStartStream` 根本不被
+      // 调用 ⇒ `rec.calls` 为空 ⇒ 假红（`gate81d` 实测）。改为**有界轮询**：
+      // 等录音桩真的收到 `hasPermission` 再松手（上限 6s），使判据与机器负载无关。
       await tester.runAsync(() async {
         final g = await tester.startGesture(tester.getCenter(_micButton));
-        await Future<void>.delayed(const Duration(milliseconds: 150));
+        for (var i = 0; i < 240 && !rec.calls.contains('hasPermission'); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+        }
         await g.up();
         await Future<void>.delayed(const Duration(milliseconds: 150));
       });
