@@ -15,7 +15,10 @@
 功能层 **2609/2609** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步 RC=0**（**真实复跑**，经计划任务中继）（可测面 **98.85%（12661/12808）**；比率阈值 `COVERAGE_MIN=98.8` **保持**、绝对下限 `MIN_COVERED=12653`）；
 机器学习锁 **75/75**（含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例** + 🔴 **`version` 组 6 例（第七十七轮 4 → 6：新增「APP 显示版本每轮同步」两把锁）**；`GEC` 10 例含 CI ratchet / 设备层 BLOCKED 一致锁）。
 🔴 **本轮产出 = 节假日更新与反击计划「完全解耦」（`refreshHolidays` 只写表，不再 `apply(replace: true)` 整族重建 —— 修掉「下载节假日信息会顺手把反击计划整族重建」的副作用）+ 反击计划自动续算接线（`refreshIfNeeded` 由死代码转为活路径，新增 `BackgroundEngine.extendCounterPlan()` 接入引擎 tick 与启动序列，两处都排在 `replan` 之前；见 `docs/12 §113`）**（含 `lib/**` 改动）**；以下为第七十九轮（上一轮）产出 = 夜间豁免三态化（`Task.quietExempt` `bool → bool?`）+ 节假日全局执行总开关（`lib/domain/scheduling/run_pause.dart`）；以下为第七十八轮产出 = 通话爆卡优化（`lib/remote/call_media_profile.dart` 单一真源 + 逐路 `RTCRtpSender.setParameters`）；以下为第七十七轮产出 = ① 新基线「每次迭代 APP 显示版本每轮同步」（`AppMeta.displayVersion` = `version+build`；设置页「关于」只从常量取、禁写死；`version` 组 +2 锁）；② 反击计划生成参数化（新增 `lib/domain/models/counter_plan_params.dart` + 设置页 `_PlanParamsDialog` 全参数可调，本机随机与 AI 同源）；以下为第七十六轮产出：① **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类，重生成 10 条招人烦音效（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等，`annoy_*`）；② **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程）；③ **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart`（本机按规则随机，时长区间与 AI 一致）+ `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**）+ 远程 `plan.*`（`lib/remote/protocol.dart` / `assist.dart`）；④ **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制）；⑤ **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（`String.fromEnvironment('DEEPSEEK_API_KEY', defaultValue: …)`），**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认；⑥ 该轮含 `lib/**` 改动 ⇒ 可测面分母 10399 → **11546（+1147）**、分子 10277 → **11413（+1136）**。
-⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛、无线真机安装 v20（设备已离网）、DST 时区专项、A10 决策（见 `docs/12 §113`）。
+⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛（设备 `23116PN5BC` **已上线**、v21 已装，剩另两台 versionCode 实测 + 动态反击端到端）、DST 时区专项（见 `docs/12 §113`）。
+⚠️ **「待拍板项」已全部更正为「已闭环」**：**A10 / A12–A15 / F-3 / `rotatedPairingCode` UI 入口** 经实证**全部已闭环**
+（A10 第 36 轮收敛到 `test/support/source_text.dart` 的 `methodBody()`；A12–A15、F-3、`rotatedPairingCode` UI 均第七十轮闭环）——
+早期轮次「待拍板 / 继续挂起」表述系**过期文案**，证据见 `docs/12 §113.6` 更正块。
 残差逐行归类见 `_pt/covgap.py` / `_pt/covblocks.py` 输出；**100% 仍不可达**的量化裁决见 `docs/12 §104.1`。
 详见 `docs/12 §113` / `docs/17 §110`。
 **设备层（第十六轮复验全绿）**：真机不在线 ⇒ 三机模拟器（API 36 / x86_64，`emulator-5554/5556/5558`）复验 **F-3 开机自启**（`isForeground=true types=0x00000002`）+ **集成 7 文件 22 例** + **AOT 6 例** + **远程命令 9/9（CRUD 8/8）** —— **十六轮（50/53/54/56/57/60/61/62/63/64/65/66/67/68/69/70）**同编排全绿。
@@ -385,6 +388,8 @@ ASE-03/ASE-04 剥注释开口；新增自锁 `test/support_source_text_test.dart
    （前两者语义几乎相同，候选抽共享 `switchBody`；**本轮刻意未做**，需先改调用点）。
 3. 🟡 A10 / A12–A15；F-3 待用户拍板；盐的长期分歧无自愈；`rotatedPairingCode` 无 UI 入口；
    Kotlin 运行期行为只到编译级；`play()` 收尾登记表宿主锁不到；原生 → Dart 审计通道缺失。
+   > ⚠️ **第八十轮更正（2026-10-08）**：本项为**第 36 轮历史快照**。其中 **A10 / A12–A15 / F-3 / `rotatedPairingCode` UI 入口** 现已**全部闭环**（A10 第 36 轮收敛到 `test/support/source_text.dart` 的 `methodBody()`；A12–A15、F-3、`rotatedPairingCode` UI 第七十轮闭环）；
+   > 仅「盐的长期分歧无自愈」「原生 → Dart 审计通道缺失」等**仍开放**。证据见 `docs/12 §113.6` 更正块。
 
 
 **产品定位**（不可动摇，docs/08）：合法个人音频自动化与自我保护工具。
@@ -2740,9 +2745,9 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   多模拟器 = 通路分工（不做双机并发 Gradle）/ 带载门禁作废 / Gradle 超时 ≥ 2700s /
   环境三件套（JAVA_HOME + ANDROID_HOME + WITH_DEVICE）/ 持久化类型位必配迁移 / `MSYS_NO_PATHCONV`。
 
-**未闭环**：① 🟡 真机 arm64 专项（厂商确认框 / 降级链 / BUG-075 扫码流）需设备在线方可执行；
-② 🟡 仅剩 **A10**（用户未回复 ⇒ **继续挂起**）；
-③ 🟡 可测面残差 **147 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减。
+**未闭环**：① 🟡 真机 arm64 专项（厂商确认框 / 降级链 / BUG-075 扫码流）—— **设备已上线**（`23116PN5BC`，v21 已装、versionCode 19 → 21 实测），剩另两台 versionCode 实测 + 动态反击真机端到端；
+② 🟢 **A10 / A12–A15 / F-3 / `rotatedPairingCode` UI 入口 全部已闭环**（第八十轮更正：A10 第 36 轮收敛到 `test/support/source_text.dart` 的 `methodBody()`；A12–A15、F-3、`rotatedPairingCode` UI 第七十轮闭环）—— 不再列为待拍板项，证据见 `docs/12 §113.6`；
+③ 🟡 可测面残差 **147 行**为终态碎片（`covblocks.py` 实测最大块 ≤6 行）⇒ 覆盖率冲刺收益递减（**用户决策：收手不再冲**）。
 
 **接力棒**：`docs/17 §110.5`（本文件 §6 第 0 项同源；命名空间顺延 **`jobCB*`**）。
 
@@ -2774,8 +2779,8 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 不可达桶登记进 `docs/12 §82.6` 后停止重复投入）；
 ② 🟡 长尾 `ptt_tab` 22 / `call_service` 14 / `multi_call_service` 12 / `remote_scripts_tab` 12 /
 `remote_screen` 10；③ 🟡 未有替身的域逐个量化：`permission_handler` / `geolocator` /
-`share_plus` / `file_picker` / `flutter_tts`；④ 🟡 A10/A12–A15、F-3 待拍板、
-`rotatedPairingCode` 无 UI 入口；⑤ 🟡 BUG-075 的**扫码流真机**补证（BUG-076/077 设备侧已由
+`share_plus` / `file_picker` / `flutter_tts`；④ 🟡 ~~A10/A12–A15、F-3 待拍板、~~ **第八十轮更正：A10/A12–A15/F-3/`rotatedPairingCode` UI 已全部闭环**（见 `docs/12 §113.6`）、
+~~`rotatedPairingCode` 无 UI 入口~~；⑤ 🟡 BUG-075 的**扫码流真机**补证（BUG-076/077 设备侧已由
 本轮模拟器全量覆盖 —— assist_e2e 真 broker 端到端 + 全套设备用例）；⑥ 🟡 真机（MIUI arm64）
 依旧不在线 —— 模拟器已可作为**常规设备层测试面**，真机专项（厂商确认框/降级链）仍待设备。
 

@@ -15,11 +15,25 @@
 ///
 /// ⚠️ 本文件是 `test()` 而非 `testWidgets()`：`play()` 内部用真实
 /// `Future.delayed` 轮询（`_waitPlayWindow` 50ms/tick），不是 fake-async，
-/// 因此**不需要** `tester.runAsync`。也正因如此，每个用例都设了硬上界
-/// （`Timeout`），防止替身漏掉某个方法名时整轮门禁被吊死。
+/// 因此**不需要** `tester.runAsync`。
 ///
 /// ⚠️ 所有 `play` 用例的 `maxDurationMs` 都刻意取小（≤ 400ms），
 /// 让"文件时长 > 目标时长"与"文件时长 < 目标时长"两条分支都能在毫秒级跑完。
+///
+/// ## 为什么是**文件级** `@Timeout` 而不是组级 `timeout:`
+///
+/// `flutter_test` 的 `group()` **没有** `timeout` 具名参数
+/// （`flutter_test/lib/src/test_compat.dart:208`：
+/// `void group(Object description, void Function() body, {dynamic skip, int? retry})`）
+/// ⇒ 写 `group(..., timeout: Timeout(...))` **编译不过**（2026-10-08 实测）。
+/// 文件级注解覆盖本文件**全部**用例，正是这里要的「反挂死护栏」语义
+/// （同仓既有写法：`test/bi_gap_closure2_test.dart:22`、
+/// `test/call_service_webrtc_test.dart:42`）。
+///
+/// 3 分钟 = `_waitUntil` 最长 120s 的 1.5× 余量；**默认 30s 会先杀掉用例**
+/// （带载下 `Future.delayed(5ms)` 实测被拉长到 ~0.5s，渐强 40 步要 ~20s+）。
+/// 它仍防「替身漏掉某个方法名 ⇒ 整轮门禁被吊死」。
+@Timeout(Duration(minutes: 3))
 library;
 
 import 'package:flutter_test/flutter_test.dart';
@@ -42,6 +56,38 @@ import 'support/just_audio_stub.dart';
 /// 立刻返回 / 取了 maxDurationMs(0)）；上界只留一个足够宽的护栏，真正的
 /// "挂死"由用例默认超时（30s）兜底。放松上界**不放宽**任何业务判据。
 const int _playWallCeilingMs = 8000;
+
+/// 有界轮询直到 [cond] 为真（到点仍未满足则**照常失败**，不静默放行）。
+///
+/// ## 为什么渐强/淡入必须轮询，不能固定墙钟等待
+///
+/// `_rampUp` / `_fadeIn` 在 `playback_service.dart` 里是 **`unawaited`** 的，
+/// 与播放窗口**并行**跑；`play()` 返回只代表**窗口**到点，**不代表**渐强爬到终点。
+/// 门禁在 `--coverage` + 整层默认并发下会把每个 `Future.delayed(5ms)` 拉长数倍 ——
+/// 2026-10-04 实测：标称 200ms 的 40 步渐强，窗口（400ms）结束时只到 **0.363**；
+/// 2026-10-08 实测同一用例在 5s 内只爬到 **0.705**（`PA-05`）⇒ 固定等待 / 短超时
+/// 必然假红，且**两次落在不同用例**（`PA-05` / `PA-06`）⇒ 是竞态，不是回归。
+///
+/// [timeout] 只是**反挂死护栏**，不是业务判据：到点仍未满足时本函数直接返回，
+/// 由调用方的 `expect` 报出**真实末值**（比"等到用例超时"更好诊断）。
+///
+/// ⚠️ 为什么是 **120s** 而不是"够用就行"：宿主**带载**（本机实测 CPU 70~80%，
+/// 来自 WSL2/Docker + 模拟器）且整层默认并发（30+ 个 `flutter_tester`/`dart`
+/// 超订）时，被拖长的**不是** `setVolume`（替身无延迟），而是**定时器本身** ——
+/// `Future.delayed(5ms)` 实测要 ~0.5s 才回调（≈100×）。此时渐强 40 步要
+/// **~20s+**，20s 上限会**假红**（2026-10-08 门禁实测：20s 只爬到 **0.743** / 37 步）。
+/// 120s 给足 ~3× 余量；**不放松任何业务判据**（终点仍必须兑现目标音量）。
+/// ⚠️ 调用方必须配用例级超时 —— `package:test` 默认 30s 会**先**杀掉用例
+/// （本文件在**文件级**设了 `@Timeout(Duration(minutes: 3))`）。
+Future<void> _waitUntil(
+  bool Function() cond, {
+  Duration timeout = const Duration(seconds: 120),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!cond() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
 
 void main() {
   // ★ 必须先初始化 binding：`AudioSession` 的**构造器**会调用
@@ -173,14 +219,13 @@ void main() {
       //    之外：窗口（400ms）与渐强（200ms）虽然标称同时起步，但渐强要排 40 个
       //    `Future.delayed`、窗口只排 8 个 —— 门禁在 `--coverage` + 整层默认并发下，
       //    前者的实际延迟被拉长得更多，窗口结束时渐强可能只爬到一半
-      //    （2026-10-04 门禁实测末值 **0.363**，远未到 0.8）。
+      //    （2026-10-04 门禁实测末值 **0.363**；2026-10-08 实测 5s 内仅 **0.705**）。
       //    判据要的是"**终点**兑现目标音量"，所以有界轮询到渐强末步真正落地再断言 ——
       //    确定性，且不放松任何业务判据（反而把"渐强真的爬到终点"锁得更死）。
-      final rampDeadline = DateTime.now().add(const Duration(seconds: 5));
-      while (audio.volumes.last < 0.79 &&
-          DateTime.now().isBefore(rampDeadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
+      //    超时 5s → **120s**（[_waitUntil] 默认）：5s / 20s 在**带载 + 并发**下
+      //    都不够（2026-10-08 门禁实测：20s 只到 **0.743**，定时器被饿死 ≈100×）；
+      //    120s 只是**反挂死护栏**，不改变任何业务判据。
+      await _waitUntil(() => audio.volumes.last >= 0.79);
       expect(audio.volumes.last, closeTo(0.8, 1e-9),
           reason: '_rampUp 末步 = 0.05 + 0.95 = 1.0 ⇒ 恰好目标音量');
       expect(audio.volumes.length, greaterThan(10), reason: '确实是"线性爬升"');
@@ -205,6 +250,12 @@ void main() {
       // [0] = 激活期 1.0；[1] = 服务先设的目标音量 1.0；[2] = 淡入首步 = target * 1/20。
       expect(audio.volumes[1], closeTo(1.0, 1e-9));
       expect(audio.volumes[2], closeTo(0.05, 1e-9), reason: '淡入首步 = target * 1/20');
+      // ⚠️ `_fadeIn` 同样是 **unawaited** 且与窗口**并行**（理由同 PA-05）：
+      //    `play()` 返回时淡入可能仍在半途 —— 2026-10-08 门禁实测末值 **0.95**
+      //    （`Expected within <1e-9> of <1.0>`，与 PA-05 是同源竞态，两次落在不同用例）。
+      //    轮询到淡入末步真正落地再断言：业务判据**不变**（仍要求终点 = target），
+      //    只是不再把"插桩把 20 步 `Future.delayed` 拉长"误判成"淡入没兑现"。
+      await _waitUntil(() => audio.volumes.last >= 0.99);
       expect(audio.volumes.last, closeTo(1.0, 1e-9));
     });
 
