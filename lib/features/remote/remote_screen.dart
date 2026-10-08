@@ -268,7 +268,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('远程中心 · 设置')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           Card(
             color: _enabled
@@ -354,7 +354,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
                         '${_brokerPort ?? RemoteStore.defaultBrokerPort}'
                         '${_brokerUser.isEmpty ? '' : ' · 用户名 $_brokerUser'}'
                         '（保存后重启远程模块生效）',
-                style: const TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
               isThreeLine: _brokerHost.isEmpty,
               trailing: const Icon(Icons.edit, size: 18),
@@ -370,7 +370,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
                 _turnUrl.isEmpty
                     ? '未配置：仅用 STUN 打洞。双方均为对称 NAT 时通话会直连失败'
                     : '$_turnUrl（已启用中继）',
-                style: const TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
               isThreeLine: _turnUrl.isEmpty,
               trailing: const Icon(Icons.edit, size: 18),
@@ -402,7 +402,7 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
           if (_endpoints.isEmpty)
             const Card(
                 child: Padding(
-                    padding: EdgeInsets.all(14),
+                    padding: EdgeInsets.all(AppSpacing.lg),
                     child: Text('尚未配对端点。在另一台设备上打开声盾 → 远程遥控 → '
                         '复制其设备 ID 与配对码，在此处添加配对。'))),
           for (final e in _endpoints)
@@ -443,16 +443,16 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
             ),
           const SizedBox(height: 12),
           const Card(
-            color: Color(0x14C62828),
+            color: AppColors.dangerWash,
             child: Padding(
-              padding: EdgeInsets.all(12),
+              padding: EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '⚠️ 安全与合规：\n'
                 '· 仅与本人或已获明确授权的设备配对；\n'
                 '· 远程播放/指令组的滥用同样受噪声与治安法规约束；\n'
                 '· 接收端全程审计留痕，通知栏可见且可随时终止；\n'
                 '· 全部流量端到端加密（AES-256-GCM），代理服务器不可见内容。',
-                style: TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -514,7 +514,7 @@ class _TurnDialogState extends State<_TurnDialog> {
             const Text(
               '仅在双方都处于对称 NAT（常见于 4G/5G、企业网）时才需要。'
               '留空即关闭中继。',
-              style: TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
             const SizedBox(height: 12),
             TextField(
@@ -606,7 +606,7 @@ class _BrokerAdvancedDialogState extends State<_BrokerAdvancedDialog> {
               '自建 EMQX/Mosquitto 时填写。自定义主机留空即用默认公共节点；'
               '无论连哪个代理，传输都固定走 TLS（不支持明文端口）。'
               '保存后重启远程模块生效。',
-              style: TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
             const SizedBox(height: 12),
             TextField(
@@ -692,7 +692,7 @@ class _PttSheetState extends State<_PttSheet> {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -709,7 +709,7 @@ class _PttSheetState extends State<_PttSheet> {
               child: CircleAvatar(
                 radius: 44,
                 backgroundColor:
-                    _recording ? AppTheme.danger : AppTheme.shieldMid,
+                    _recording ? AppColors.dangerDeep : AppTheme.shieldMid,
                 child: Icon(_recording ? Icons.stop : Icons.mic,
                     size: 40, color: Colors.white),
               ),
@@ -736,7 +736,7 @@ class _HowItWorks extends StatelessWidget {
       title: Text('工作原理'),
       children: [
         Padding(
-          padding: EdgeInsets.all(12),
+          padding: EdgeInsets.all(AppSpacing.md),
           child: Text(
             '1. 两台设备均开启端点并连接同一 MQTT 代理；\n'
             '2. 互相输入对方设备 ID + 配对码完成配对'
@@ -745,7 +745,7 @@ class _HowItWorks extends StatelessWidget {
             '4. 端点收到指令组立即执行：通知栏显示发送方与进度，'
             '可点【终止执行】或由发送方远程终止；\n'
             '5. 执行完成通知自动消失，全程审计留痕。',
-            style: TextStyle(fontSize: 12),
+            style: AppText.bodySmall,
           ),
         ),
       ],

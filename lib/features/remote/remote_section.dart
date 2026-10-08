@@ -6,6 +6,7 @@ import 'device_list_screen.dart';
 import 'remote_console_tab.dart';
 import 'remote_scripts_tab.dart';
 import 'remote_tasks_tab.dart';
+import '../../core/theme.dart';
 
 /// 「远程」分组页（新 IA）：远程遥控中心。
 ///
@@ -94,7 +95,7 @@ class _DevicesTab extends StatelessWidget {
     return Column(
       children: [
         Card(
-          margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          margin: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.md, AppSpacing.md, AppSpacing.xs),
           child: Column(
             children: [
               ListTile(
@@ -136,7 +137,7 @@ class RemoteCallEntry extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       children: [
         Card(
           child: ListTile(
@@ -180,11 +181,11 @@ class RemoteCallEntry extends StatelessWidget {
         Card(
           color: scheme.surfaceContainerHighest,
           child: const Padding(
-            padding: EdgeInsets.all(12),
+            padding: EdgeInsets.all(AppSpacing.md),
             child: Text(
               '合规提示：视频通话与对讲仅限家人守护（老人/儿童看护）与本人设备。'
               '接通即亮屏，系统摄像头指示灯正常工作，不提供隐蔽模式。',
-              style: TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
           ),
         ),

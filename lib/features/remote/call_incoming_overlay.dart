@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_keys.dart';
+import '../../core/theme.dart';
 import '../../remote/call_lifecycle.dart';
 import '../../remote/call_service.dart';
 import '../../remote/remote_store.dart';
@@ -224,15 +225,14 @@ class _CallViewState extends ConsumerState<_CallView> {
                                 phase == CallPhase.ringing
                                     ? '来电…'
                                     : connectingText(svc.remoteState),
-                                style: const TextStyle(
-                                    color: Colors.white, fontSize: 18),
+                                style: AppText.titleMedium.copyWith(color: Colors.white),
                               ),
                             ],
                           ),
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 32),
+                  padding: const EdgeInsets.only(bottom: AppSpacing.xxl),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -241,7 +241,7 @@ class _CallViewState extends ConsumerState<_CallView> {
                       if (phase == CallPhase.ringing && !svc.isCaller)
                         FloatingActionButton.large(
                           heroTag: 'accept',
-                          backgroundColor: Colors.green,
+                          backgroundColor: AppColors.success,
                           child: const Icon(Icons.call,
                               color: Colors.white,
                               // P2-31：语义名称，TalkBack/VoiceOver 才能区分接听/拒接。
@@ -258,7 +258,7 @@ class _CallViewState extends ConsumerState<_CallView> {
                         ),
                       FloatingActionButton.large(
                         heroTag: 'decline',
-                        backgroundColor: Colors.red,
+                        backgroundColor: AppColors.danger,
                         onPressed: _endCall,
                         child: Icon(Icons.call_end,
                             color: Colors.white,

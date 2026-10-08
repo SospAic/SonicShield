@@ -16,6 +16,7 @@ import 'guard_orchestration.dart';
 import 'guard_toggle.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
+import '../../core/theme.dart';
 
 /// 声音守卫页：灵敏度/冷却配置、开关守卫、实时电平表。
 /// 说明：实时电平在引擎隔离内产生，v1 UI 以开关与状态展示为主；
@@ -173,7 +174,7 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     return Scaffold(
       appBar: widget.embedded ? null : AppBar(title: const Text('声音守卫')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           Card(
             child: SwitchListTile(
@@ -280,11 +281,11 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
           const SizedBox(height: 12),
           const Card(
             child: Padding(
-              padding: EdgeInsets.all(12),
+              padding: EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '隐私说明：音频数据仅在设备内存中计算能量电平，不存储、不上传；'
                 '触发「录音取证」动作时才会写入本机私有目录。',
-                style: TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -344,9 +345,9 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
         Text('候选任务（不选 = 全部声音触发任务）', style: theme.textTheme.bodySmall),
         if (_soundTasks.isEmpty)
           const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
             child: Text('还没有「声音触发」类型的任务：请先在「自动化 · 任务」里新建。',
-                style: TextStyle(fontSize: 12)),
+                style: AppText.bodySmall),
           )
         else
           Card(

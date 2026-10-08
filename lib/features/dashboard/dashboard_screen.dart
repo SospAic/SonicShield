@@ -8,6 +8,7 @@ import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
 import 'quick_scripts_card.dart';
+import '../../core/theme.dart';
 
 /// 守护仪表盘：引擎开关 / 下一触发倒计时 / 今日执行统计 / 权限体检。
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -50,7 +51,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('声盾 SonicShield')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           _EngineCard(
             running: state?.running ?? false,
@@ -78,7 +79,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           const SizedBox(height: 12),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [

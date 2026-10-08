@@ -304,10 +304,24 @@ const int kDeviceExemptCovered = 8;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
-/// 「机器锁」= 门禁之外的 4 份**契约锁**文件（与 `_pt/jobBX4.sh` 的复跑清单同源）。
+/// 「机器锁」= 门禁之外的 4 份**跨文件契约锁**文件（与 `_pt/lock*.sh` 的复跑清单同源）。
 ///
-/// 🔴 这是一个**显式清单**：将来新增第 5 把锁时**必须**同时加进来，否则
-/// 「自述计数」会漏算新锁（那正是本锁要防的漂移，只是换了个来源）。
+/// 🔴 这是一个**显式清单**：将来往这 4 个文件里**新增**锁时，其 `test(` 会被
+/// 静态统计自动计入（无需改本清单）；但**新开一个锁文件**时必须先判断它是不是
+/// 这一族，是才加进来 —— 否则「自述计数」会漏算新锁（那正是本锁要防的漂移）。
+///
+/// ## 收录判据（第八十一轮补记，防「同族不同命」）
+///
+/// 本族的判据是**「跨文件的文档 / 版本 / 门禁 / 编码一致性契约」**：
+/// 历史上新增的 `DGC`/`BAS`/`BRL`/`MCL`/`CCL`/`RCL`/`SSL` **全部并入既有 4 文件之一
+/// （`doc_gate_consistency_test.dart`），从未新增文件**。
+///
+/// 因此**源码风格**类契约锁**不属于**本族 —— 与既有 9 个 `test/*_lock_test.dart`
+/// （`silent_failure_locks` / `release_r8_lock` / `device_exemption_lock` /
+/// `android_compat_lock` / `engine_vibrate_ack_lock` / `foreground_service_lock` /
+/// `rc_location_gate` / `rc_transport_lock` / `release_webrtc_keep_lock` /
+/// `feature_point_coverage_lock`）同族，**都不计入**自述计数。
+/// 第八十一轮新增的 `test/style_consistency_lock_test.dart`（STY 系列）即按此判据**不入列**。
 const List<String> kMachineLockFiles = <String>[
   'test/doc_gate_consistency_test.dart',
   'test/gate_entrypoint_consistency_test.dart',

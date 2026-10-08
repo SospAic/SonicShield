@@ -16,6 +16,7 @@ import '../../domain/models/vibrate_caps.dart';
 import '../../domain/scheduling/vibrate_resolve.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
+import '../../core/theme.dart';
 
 /// 「随机指令集」子动作 → [RcStepKind] 的回填映射；**不可表示的类型返回 null**。
 ///
@@ -479,7 +480,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       ),
       bottomNavigationBar: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: FilledButton.icon(
             icon: const Icon(Icons.save),
             label: const Text('保存任务'),
@@ -488,7 +489,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           TextFormField(
             controller: _nameCtrl,
@@ -585,7 +586,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
       if (_scTracks.length < 4)
         Padding(
-          padding: const EdgeInsets.only(top: 4),
+          padding: const EdgeInsets.only(top: AppSpacing.xs),
           child: Wrap(
             spacing: 6,
             runSpacing: 6,
@@ -593,7 +594,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               for (final e in categories.entries)
                 ActionChip(
                   label:
-                      Text('＋${e.value}', style: const TextStyle(fontSize: 12)),
+                      Text('＋${e.value}', style: AppText.bodySmall),
                   onPressed: () => setState(() =>
                       _scTracks.add(SoundscapeTrack(presetCategory: e.key))),
                 ),
@@ -623,11 +624,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
       ),
       const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 12),
+        padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
         child: Text(
             '声景混音将多轨音源同时叠加播放（如雨声+雷声+风扇），'
             '到点后自动渐出。需先在音源库导入预置音效。',
-            style: TextStyle(fontSize: 12)),
+            style: AppText.bodySmall),
       ),
     ];
   }
@@ -737,7 +738,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   }
 
   Widget _section(BuildContext ctx, String title) => Padding(
-        padding: const EdgeInsets.only(bottom: 8, top: 4),
+        padding: const EdgeInsets.only(bottom: AppSpacing.sm, top: AppSpacing.xs),
         child: Text(title,
             style: Theme.of(ctx)
                 .textTheme
@@ -890,10 +891,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
         if (empty)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
             child: Text('请至少选择一条音源（或点击对话框里的“全库随机”全选当前音源库）。',
-                style: TextStyle(
-                    fontSize: 12, color: Theme.of(ctx).colorScheme.error)),
+                style: AppText.bodySmall.copyWith(color: Theme.of(ctx).colorScheme.error)),
           ),
       ],
     );
@@ -994,7 +994,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             onChanged: (v) => _ttsText = v,
           ),
           const SizedBox(height: 8),
-          const Text('音色', style: TextStyle(fontSize: 12)),
+          const Text('音色', style: AppText.bodySmall),
           SizedBox(width: double.infinity, child: _ttsVoiceDropdown()),
         ];
       case ActionKindChoice.record:
@@ -1043,7 +1043,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           DropdownMenuItem(
             enabled: false,
             value: '__header_${d.name}',
-            child: Text(d.label, style: const TextStyle(fontSize: 12)),
+            child: Text(d.label, style: AppText.bodySmall),
           ),
           for (final v in TtsVoices.all.where((v) => v.dialect == d))
             DropdownMenuItem(
@@ -1068,7 +1068,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       return const [
         SizedBox(height: 8),
         Text('无法读取本机振动能力（桥不可用），实际效果以设备为准。',
-            style: TextStyle(fontSize: 12)),
+            style: AppText.bodySmall),
       ];
     }
     final notes = vibrateDegradations(caps, action);
@@ -1078,7 +1078,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       Card(
         margin: EdgeInsets.zero,
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1086,8 +1086,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                   style: TextStyle(fontWeight: FontWeight.bold)),
               for (final n in notes)
                 Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text('· $n', style: const TextStyle(fontSize: 12)),
+                  padding: const EdgeInsets.only(top: AppSpacing.xs),
+                  child: Text('· $n', style: AppText.bodySmall),
                 ),
             ],
           ),
@@ -1102,7 +1102,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     return [
       const SizedBox(height: 8),
       const Text('按固定节奏振动（毫秒序列：起始延迟、振、停、振…）。',
-          style: TextStyle(fontSize: 12)),
+          style: AppText.bodySmall),
       const SizedBox(height: 8),
       Wrap(
         spacing: 8,
@@ -1119,7 +1119,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       ),
       const SizedBox(height: 4),
       Text('点击任一格 +50ms（超过 1000ms 回到 50ms）。共 ${_vibPattern.length} 步。',
-          style: const TextStyle(fontSize: 11)),
+          style: AppText.labelSmall),
       ..._vibrateCapHint(a),
     ];
   }
@@ -1143,7 +1143,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       const SizedBox(height: 8),
       const Text('每个脉冲的时长、间隔与强度都在区间内随机（"计划即审计"：'
           '实际取值在物化期敲定并落库，重启不漂移）。',
-          style: TextStyle(fontSize: 12)),
+          style: AppText.bodySmall),
       _RangeSliderTile(
         label: '总时长（秒）',
         min: 1,
@@ -1232,7 +1232,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     return [
       const SizedBox(height: 8),
       const Text('持续振动：可在设定时长内保持振动，并让强度随机波动。',
-          style: TextStyle(fontSize: 12)),
+          style: AppText.bodySmall),
       _RangeSliderTile(
         label: '总时长（秒）',
         min: 1,
@@ -1360,13 +1360,13 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         ),
         const SizedBox(height: 4),
         Text('主开关（设置页）：${master ? '已开启' : '已关闭'} · 本任务：$followHint',
-            style: const TextStyle(fontSize: 12)),
-        Text(effectiveHint, style: const TextStyle(fontSize: 12)),
+            style: AppText.bodySmall),
+        Text(effectiveHint, style: AppText.bodySmall),
         if (_quietExempt != null)
           const Padding(
-            padding: EdgeInsets.only(top: 4),
+            padding: EdgeInsets.only(top: AppSpacing.xs),
             child: Text('已作任务级显式设置 —— 会出现在「设置 → 夜间豁免例外清单」中。',
-                style: TextStyle(fontSize: 12)),
+                style: AppText.bodySmall),
           ),
       ],
     );
@@ -1404,12 +1404,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       if (_setItems.isEmpty)
         const Card(
             child: Padding(
-                padding: EdgeInsets.all(12),
+                padding: EdgeInsets.all(AppSpacing.md),
                 child: Text('从下方添加至少 2 个候选动作（每个可设权重）。'))),
       for (var i = 0; i < _setItems.length; i++)
         Card(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs, vertical: 2),
             child: Column(
               children: [
                 Row(
@@ -1418,7 +1418,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                         size: 18, color: Theme.of(ctx).colorScheme.primary),
                     const SizedBox(width: 6),
                     Text(_setLabel(_setItems[i].kind),
-                        style: const TextStyle(fontSize: 13)),
+                        style: AppText.bodyMedium),
                     const Spacer(),
                     IconButton(
                         icon: const Icon(Icons.delete_outline, size: 18),
@@ -1430,7 +1430,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                   children: [
                     const SizedBox(width: 8),
                     Text('权重 ${_setItems[i].weight.round()}',
-                        style: const TextStyle(fontSize: 11)),
+                        style: AppText.labelSmall),
                     Expanded(
                       child: Slider(
                         value: _setItems[i].weight,
@@ -1451,11 +1451,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       if (_setPreserved.isNotEmpty)
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(AppSpacing.md),
             child: Text(
               '另有 ${_setPreserved.length} 个子动作（复合 / 声景 / 嵌套动作组）'
               '在此编辑器中没有对应控件，已按原配置保留，保存时不会丢失。',
-              style: const TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
           ),
         ),
@@ -1467,7 +1467,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             for (final (k, label, icon) in kinds)
               ActionChip(
                 avatar: Icon(icon, size: 16),
-                label: Text('＋$label', style: const TextStyle(fontSize: 12)),
+                label: Text('＋$label', style: AppText.bodySmall),
                 onPressed: () => setState(() {
                   _setItems.add((kind: k, weight: 3));
                 }),
@@ -1475,11 +1475,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           ],
         ),
       const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 12),
+        padding: EdgeInsets.symmetric(horizontal: AppSpacing.md),
         child: Text(
             '权重 0 = 不选中。全部为 0 时按等概率兜底。执行会审计记录'
             '"权重 → 选中"以便回溯。',
-            style: TextStyle(fontSize: 12)),
+            style: AppText.bodySmall),
       ),
     ];
   }
@@ -1916,7 +1916,7 @@ class _RangeSliderTile extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
           child: Text('$label：${format(start)} ~ ${format(end)}'),
         ),
         RangeSlider(
@@ -1995,7 +1995,7 @@ class _AssetPickerDialogState extends State<_AssetPickerDialog> {
                             subtitle: a.tags.isEmpty
                                 ? null
                                 : Text(a.tags.join(' · '),
-                                    style: const TextStyle(fontSize: 11)),
+                                    style: AppText.labelSmall),
                             onChanged: (v) => setState(() => v == true
                                 ? _picked.add(a.id)
                                 : _picked.remove(a.id)),

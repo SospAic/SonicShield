@@ -31,7 +31,7 @@ class AppMeta {
   /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
   /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
   /// 并锁死界面不得再出现写死的版本号。
-  static const String buildNumber = '21';
+  static const String buildNumber = '22';
 
   /// 面向用户的完整版本串（含构建号），设置页「关于」区块显示的就是它。
   static String get displayVersion => '$version+$buildNumber';

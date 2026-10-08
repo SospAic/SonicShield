@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../remote/assist.dart';
 import '../../remote/assist_host.dart';
+import '../../core/theme.dart';
 
 /// 端点侧「临时协助会话」页（docs/18 §4.4 / S2）。
 ///
@@ -49,7 +50,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
         builder: (context, snap) {
           final s = snap.data;
           return ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(AppSpacing.lg),
             children: [
               _banner(context),
               const SizedBox(height: 12),
@@ -108,7 +109,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
   Widget _intro(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -136,7 +137,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
     final scheme = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           children: [
             const Text('请把下面两个值口述给对方'),
@@ -165,7 +166,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
                     child: Text(
                       '已拒绝 ${s.failures} 次密码错误的接入尝试'
                       '（连续 ${RcAssist.maxFailures} 次将作废本场会话）',
-                      style: TextStyle(color: scheme.error, fontSize: 12),
+                      style: AppText.bodySmall.copyWith(color: scheme.error),
                     ),
                   ),
                 ],
@@ -189,7 +190,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
       children: [
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(AppSpacing.xl),
             child: Column(
               children: [
                 CircleAvatar(
@@ -214,7 +215,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Padding(
-                padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+                padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xs),
                 child: Text('允许对方做什么（默认全部不允许）'),
               ),
               for (final e in AssistPerms.labels.entries)
@@ -226,11 +227,11 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
                   onChanged: (v) => _host.grant(s.perms.withFlag(e.key, v)),
                 ),
               const Padding(
-                padding: EdgeInsets.fromLTRB(16, 4, 16, 14),
+                padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, AppSpacing.lg),
                 child: Text(
                   '关闭某项会立即生效：对方再发该类命令会被拒绝并记入审计。'
                   '「录音取证」不在可授权范围内，协助会话下一律拒绝。',
-                  style: TextStyle(fontSize: 12),
+                  style: AppText.bodySmall,
                 ),
               ),
             ],
@@ -243,13 +244,12 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
   Widget _footnote(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Text(
           '安全说明：会话密钥由「临时码 + 访问密码」经 HKDF-SHA256 派生，'
           'MQTT 服务器（中继）只见密文；会话一次性、最长 10 分钟、'
           '凭据仅存内存。连续 ${RcAssist.maxFailures} 次密码错误会立即作废会话。',
-          style: TextStyle(
-              fontSize: 12, color: Theme.of(context).colorScheme.outline),
+          style: AppText.bodySmall.copyWith(color: Theme.of(context).colorScheme.outline),
         ),
       ),
     );
@@ -280,12 +280,11 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
     final scheme = Theme.of(context).colorScheme;
     return Column(
       children: [
-        Text(label, style: TextStyle(fontSize: 12, color: scheme.outline)),
+        Text(label, style: AppText.bodySmall.copyWith(color: scheme.outline)),
         const SizedBox(height: 4),
         SelectableText(
           value,
-          style: TextStyle(
-            fontSize: large ? 32 : 20,
+          style: (large ? AppText.headlineLarge : AppText.titleLarge).copyWith(
             fontWeight: FontWeight.w700,
             letterSpacing: 6,
             fontFamily: 'monospace',
@@ -312,15 +311,15 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
   }
 
   static Widget? _permHint(String key) => switch (key) {
-        'media' => const Text('播放本机音源', style: TextStyle(fontSize: 12)),
-        'tts' => const Text('文字转语音喊话', style: TextStyle(fontSize: 12)),
-        'vibrate' => const Text('震动提醒', style: TextStyle(fontSize: 12)),
-        'volume' => const Text('调整媒体/闹钟音量', style: TextStyle(fontSize: 12)),
-        'location' => const Text('回传本机位置（敏感）', style: TextStyle(fontSize: 12)),
-        'video' => const Text('摄像头视频通话与拍照（敏感）', style: TextStyle(fontSize: 12)),
+        'media' => const Text('播放本机音源', style: AppText.bodySmall),
+        'tts' => const Text('文字转语音喊话', style: AppText.bodySmall),
+        'vibrate' => const Text('震动提醒', style: AppText.bodySmall),
+        'volume' => const Text('调整媒体/闹钟音量', style: AppText.bodySmall),
+        'location' => const Text('回传本机位置（敏感）', style: AppText.bodySmall),
+        'video' => const Text('摄像头视频通话与拍照（敏感）', style: AppText.bodySmall),
         'script' =>
-          const Text('执行指令组、增删改任务与守卫开关', style: TextStyle(fontSize: 12)),
-        'audit' => const Text('读取本机审计日志（敏感）', style: TextStyle(fontSize: 12)),
+          const Text('执行指令组、增删改任务与守卫开关', style: AppText.bodySmall),
+        'audit' => const Text('读取本机审计日志（敏感）', style: AppText.bodySmall),
         _ => null,
       };
 }

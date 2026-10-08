@@ -12,6 +12,7 @@ import '../../data/repositories/task_repository.dart';
 import '../../domain/models/action.dart';
 import '../../services/playback_service.dart';
 import '../../services/preset_import.dart';
+import '../../core/theme.dart';
 
 /// 音源库：SAF 导入（免存储权限）+ 一键导入内置预置音效库
 /// （60 条程序化合成，12 分类，见 tool/gen_sfx.dart）+ 单条试听。
@@ -245,7 +246,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         title: widget.embedded ? null : const Text('音源库'),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.only(right: AppSpacing.sm),
             child: FilledButton.tonalIcon(
               icon: _importingPresets
                   ? const SizedBox(
@@ -271,7 +272,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
           if (items.isEmpty) {
             return const Center(
               child: Padding(
-                padding: EdgeInsets.all(24),
+                padding: EdgeInsets.all(AppSpacing.xl),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [

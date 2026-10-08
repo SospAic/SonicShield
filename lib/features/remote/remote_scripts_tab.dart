@@ -10,6 +10,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 import '../../remote/script_progress.dart';
+import '../../core/theme.dart';
 
 /// 指令组 Tab（v1.6）：收藏模板列表（一键发往选中端点/编辑/删除）
 /// + 新建组装器入口。数据来自 RemoteStore.savedScripts。
@@ -289,7 +290,7 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
               },
             ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           if (ch != null)
             Card(
@@ -304,7 +305,7 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
             Card(
               child: Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
                 child: DropdownButtonFormField<String>(
                   initialValue: _selectedId.isEmpty ? null : _selectedId,
                   decoration: const InputDecoration(
@@ -341,7 +342,7 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
           if (_saved.isEmpty)
             Card(
                 child: Padding(
-                    padding: const EdgeInsets.all(14),
+                    padding: const EdgeInsets.all(AppSpacing.lg),
                     child: Text(ch == null
                         ? '暂无收藏的指令组。点击右下角「新建指令组」组装动作与时延序列，'
                             '发送前可勾选「存为模板」。'
@@ -383,12 +384,12 @@ class _RemoteScriptsTabState extends ConsumerState<RemoteScriptsTab> {
           const SizedBox(height: 12),
           const Card(
             child: Padding(
-              padding: EdgeInsets.all(12),
+              padding: EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '指令组 = 动作 + 时延的有序序列（最多 50 步）。端点收到后立即执行，'
                 '执行进度会实时回传本页（端点每进入一步广播一次），'
                 '端点通知栏全程显示发送方与进度，可随时终止；全程审计留痕。',
-                style: TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),

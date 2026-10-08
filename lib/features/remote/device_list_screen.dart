@@ -6,6 +6,7 @@ import '../../remote/device_group.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../core/theme.dart';
 
 /// 「最近连接」的相对时间文案。
 ///
@@ -282,7 +283,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
         : _endpoints.isEmpty
             ? _emptyState()
             : ListView(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(AppSpacing.md),
                 children: [
                   _groupSection(scheme),
                   for (final e in _endpoints) _deviceCard(e, scheme),
@@ -307,7 +308,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
 
   Widget _emptyState() => Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -335,7 +336,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   Widget _groupSection(ColorScheme scheme) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.sm, AppSpacing.sm),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -357,7 +358,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
             ),
             if (_groups.isEmpty)
               Padding(
-                padding: const EdgeInsets.only(left: 8, bottom: 8),
+                padding: const EdgeInsets.only(left: AppSpacing.sm, bottom: AppSpacing.sm),
                 child: Text(
                   '还没有设备组：勾选下面的设备，再点「建组」。',
                   style: Theme.of(context)
@@ -369,7 +370,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
             else
               for (final g in _groups)
                 ListTile(
-                  contentPadding: const EdgeInsets.only(left: 8),
+                  contentPadding: const EdgeInsets.only(left: AppSpacing.sm),
                   leading: const Icon(Icons.devices_other),
                   title: Text(g.name),
                   subtitle: Text('${g.memberIds.length} 台设备'),
@@ -409,13 +410,13 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
             Expanded(child: Text(e.displayName)),
             if (isCurrent)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: 2),
                 decoration: BoxDecoration(
                   color: scheme.primary,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text('当前',
-                    style: TextStyle(fontSize: 11, color: scheme.onPrimary)),
+                    style: AppText.labelSmall.copyWith(color: scheme.onPrimary)),
               ),
           ],
         ),

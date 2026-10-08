@@ -8,6 +8,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/multi_call_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../core/theme.dart';
 
 /// 多视频同连：同时保持多路视频，点窗口切换当前目标并**在保持连接的情况下**
 /// 向该终端发远程指令。
@@ -148,7 +149,7 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
           if (sessions.isEmpty) {
             return Center(
               child: Padding(
-                padding: const EdgeInsets.all(24),
+                padding: const EdgeInsets.all(AppSpacing.xl),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -172,7 +173,7 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
               Expanded(
                 child: GridView.count(
                   crossAxisCount: sessions.length == 1 ? 1 : 2,
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(AppSpacing.sm),
                   mainAxisSpacing: 8,
                   crossAxisSpacing: 8,
                   children: [
@@ -288,11 +289,11 @@ class _VideoTileState extends State<_VideoTile> {
               left: 6,
               bottom: 6,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: 2),
                 color: Colors.black54,
                 child: Text(
                   '${s.peer.displayName}${widget.active ? ' · 当前' : ''}',
-                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  style: AppText.bodySmall.copyWith(color: Colors.white),
                 ),
               ),
             ),
@@ -325,7 +326,7 @@ class _CommandBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = session;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: Row(
         children: [

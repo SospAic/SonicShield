@@ -11,6 +11,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 import '../../remote/task_wire.dart';
+import '../../core/theme.dart';
 
 /// 远程「任务」子页：管理**端点设备上**的自动化任务。
 ///
@@ -319,7 +320,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
       body: RefreshIndicator(
         onRefresh: refresh,
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+          padding: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.md, AppSpacing.md, 96),
           children: [
             _endpointSelector(),
             const SizedBox(height: 10),
@@ -351,7 +352,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
             if (_tasks.isEmpty)
               const Card(
                 child: Padding(
-                  padding: EdgeInsets.all(16),
+                  padding: EdgeInsets.all(AppSpacing.lg),
                   child: Text('端点暂无自动化任务。\n'
                       '点右下角「新建端点任务」即可在端点设备上创建 —— '
                       '与本机任务使用同一个编辑器。'),
@@ -362,12 +363,12 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
             const SizedBox(height: 12),
             const Card(
               child: Padding(
-                padding: EdgeInsets.all(12),
+                padding: EdgeInsets.all(AppSpacing.md),
                 child: Text(
                   '说明：远程任务与端点本地任务共用同一份调度数据；'
                   '新建/编辑会立即在端点重新物化计划，启停与跳过即时生效，'
                   '全部操作写入端点审计日志（source=remote）。',
-                  style: TextStyle(fontSize: 12),
+                  style: AppText.bodySmall,
                 ),
               ),
             ),
@@ -382,9 +383,9 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
     final id = t['id'] as String? ?? '';
     final assets = (t['assetIds'] as List?)?.length ?? 0;
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
+      margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
       child: ListTile(
-        contentPadding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+        contentPadding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.sm, AppSpacing.sm),
         leading: Icon(
           enabled ? Icons.play_circle_outline : Icons.pause_circle_outline,
           color: enabled
@@ -392,19 +393,17 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
               : Theme.of(context).disabledColor,
         ),
         title: Text(t['name'] as String? ?? '（未命名）',
-            style: const TextStyle(fontSize: 14)),
+            style: AppText.bodyMedium),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const SizedBox(height: 2),
-            Text(_triggerDetail(t), style: const TextStyle(fontSize: 12)),
+            Text(_triggerDetail(t), style: AppText.bodySmall),
             Text(
               '${_actionDetail(t)}'
               '${assets > 0 ? ' · 音源池 $assets 条' : ''}'
               ' · 冷却 ${_cooldown(t)}',
-              style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant),
+              style: AppText.bodySmall.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
             ),
           ],
         ),
@@ -477,7 +476,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
     final scheme = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Row(
           children: [
             CircleAvatar(
@@ -495,14 +494,13 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(ep?.name ?? '端点',
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600)),
+                      style: AppText.bodyMedium.copyWith(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
                   Text(
                     online
                         ? '待执行 ${pending ?? '—'} 条 · 版本 ${_status['version'] ?? '?'}'
                         : '等待端点响应…',
-                    style: const TextStyle(fontSize: 12),
+                    style: AppText.bodySmall,
                   ),
                 ],
               ),
@@ -515,7 +513,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
 
   Widget _endpointSelector() => Card(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
           child: DropdownButtonFormField<String>(
             initialValue: _selectedId.isEmpty ? null : _selectedId,
             decoration: const InputDecoration(
@@ -538,7 +536,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
 
   Widget _noEndpoint() => Center(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(AppSpacing.xxl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -547,7 +545,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
               const SizedBox(height: 12),
               const Text('尚未配对端点设备'),
               const SizedBox(height: 8),
-              const Text('先完成配对，才能查看并操作对端任务。', style: TextStyle(fontSize: 12)),
+              const Text('先完成配对，才能查看并操作对端任务。', style: AppText.bodySmall),
               const SizedBox(height: 16),
               FilledButton.icon(
                 icon: const Icon(Icons.qr_code_scanner),
@@ -561,7 +559,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
 
   Widget _disabled() => Center(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.all(AppSpacing.xxl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -571,7 +569,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
               const Text('远程模块未开启'),
               const SizedBox(height: 8),
               const Text('端点服务未运行：收不到命令，也收不到对端回执。',
-                  style: TextStyle(fontSize: 12)),
+                  style: AppText.bodySmall),
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: () => context.push('/remote/settings'),

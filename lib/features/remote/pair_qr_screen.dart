@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../core/theme.dart';
 
 /// 扫码配对（v1.5）：
 /// - 「我的二维码」：展示本机设备 ID + 配对码（对端扫码即配对本机）；
@@ -523,7 +524,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
     return Card(
       color: Theme.of(context).colorScheme.errorContainer,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -565,7 +566,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('扫码配对')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           if (_scanning) ...[
             SizedBox(
@@ -604,12 +605,12 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
             const Text(
               '对准另一台设备「我的设备」页出示的配对码',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
             // P0-4：检测到「是二维码但不是声盾配对码」的一次性去抖提示。
             if (_foreignQrNotice)
               Padding(
-                padding: const EdgeInsets.only(top: 8),
+                padding: const EdgeInsets.only(top: AppSpacing.sm),
                 child: Text(
                   '这不是声盾配对码，请扫描对方的声盾配对二维码',
                   textAlign: TextAlign.center,
@@ -633,7 +634,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
           ] else ...[
             Card(
               child: Padding(
-                padding: const EdgeInsets.all(20),
+                padding: const EdgeInsets.all(AppSpacing.xl),
                 child: Column(
                   children: [
                     Text('我的配对二维码',
@@ -644,7 +645,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
                     else ...[
                       Container(
                         color: Colors.white,
-                        padding: const EdgeInsets.all(8),
+                        padding: const EdgeInsets.all(AppSpacing.sm),
                         child: QrImageView(
                           data: _myUri(),
                           size: 220,
@@ -658,7 +659,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
                           style: Theme.of(context).textTheme.bodyLarge),
                       const SizedBox(height: 6),
                       const Text('对端扫码即与本机配对（物理在场 = 授权确认）',
-                          style: TextStyle(fontSize: 12)),
+                          style: AppText.bodySmall),
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
                         icon: const Icon(Icons.autorenew),
@@ -687,7 +688,7 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
               Card(
                 color: Theme.of(context).colorScheme.errorContainer,
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(AppSpacing.lg),
                   child: Column(
                     children: [
                       Icon(Icons.no_photography_outlined,
@@ -735,12 +736,12 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
             const SizedBox(height: 12),
             const Card(
               child: Padding(
-                padding: EdgeInsets.all(12),
+                padding: EdgeInsets.all(AppSpacing.md),
                 child: Text(
                   '安全说明：配对码即共享秘密（HKDF→AES-256-GCM 派生密钥）。'
                   '仅与本人或已获明确授权的设备配对；配对完成即永久互信，'
                   '可随时在「远程遥控」页取消。',
-                  style: TextStyle(fontSize: 12),
+                  style: AppText.bodySmall,
                 ),
               ),
             ),

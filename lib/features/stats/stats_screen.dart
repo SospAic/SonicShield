@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
 import '../../data/repositories/log_repository.dart';
+import '../../core/theme.dart';
 
 /// 统计看板（v2.0）：7 天执行趋势（柱状图）+ 动作分布 + 状态占比。
 /// 数据全部来自本地 exec_logs 聚合（SQL），无任何外传。
@@ -58,7 +59,7 @@ class _StatsScreenState extends ConsumerState<StatsScreen> {
           return RefreshIndicator(
             onRefresh: () async => setState(_reload),
             child: ListView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppSpacing.lg),
               children: [
                 Text('近 7 天执行趋势',
                     style: Theme.of(context).textTheme.titleMedium),
@@ -124,7 +125,7 @@ class _DailyBarChart extends StatelessWidget {
     final max = daily.fold<int>(1, (m, d) => d.total > m ? d.total : m);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: SizedBox(
           height: 140,
           child: Row(
@@ -133,7 +134,7 @@ class _DailyBarChart extends StatelessWidget {
               for (final d in daily)
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
@@ -182,12 +183,12 @@ class _BreakdownRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
       child: Row(
         children: [
           SizedBox(
               width: 110,
-              child: Text(label, style: const TextStyle(fontSize: 12))),
+              child: Text(label, style: AppText.bodySmall)),
           Expanded(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(4),
@@ -202,7 +203,7 @@ class _BreakdownRow extends StatelessWidget {
               width: 40,
               child: Text('$value',
                   textAlign: TextAlign.right,
-                  style: const TextStyle(fontSize: 12))),
+                  style: AppText.bodySmall)),
         ],
       ),
     );

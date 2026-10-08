@@ -6,6 +6,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
+import '../../core/theme.dart';
 
 /// 首页快捷指令组卡（v1.3）：展示收藏的指令组模板，一键发往第一配对端点。
 /// 离线时自动进入 outbox，端点上线后冲刷（docs/14 §4）。
@@ -66,7 +67,7 @@ class QuickScriptsCardState extends ConsumerState<QuickScriptsCard> {
     if (_saved.isEmpty) return const SizedBox.shrink();
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -85,7 +86,7 @@ class QuickScriptsCardState extends ConsumerState<QuickScriptsCard> {
                 title: Text(s.name),
                 subtitle: Text(
                     '目标：${_firstEndpoint.isEmpty ? '未配对端点' : _firstEndpoint}',
-                    style: const TextStyle(fontSize: 11)),
+                    style: AppText.labelSmall),
                 trailing: FilledButton.tonal(
                   onPressed: _firstEndpoint.isEmpty ? null : () => _send(s),
                   child: const Text('执行'),

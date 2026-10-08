@@ -30,6 +30,7 @@ import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
 
 import 'evidence_screen.dart';
+import '../../core/theme.dart';
 
 /// 设置页：电源模式 / 免打扰时段 / 保活引导 / 合规信息。
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -556,14 +557,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final out = <Widget>[];
     for (final d in TtsDialect.values) {
       out.add(Padding(
-        padding: const EdgeInsets.only(left: 16, top: 6),
+        padding: const EdgeInsets.only(left: AppSpacing.lg, top: AppSpacing.sm),
         child: Text(d.label, style: Theme.of(context).textTheme.labelLarge),
       ));
       for (final v in TtsVoices.all.where((v) => v.dialect == d)) {
         out.add(ListTile(
           key: ValueKey<String>('voice_${v.id}'),
           dense: true,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
           title: Text('${v.name}（${v.gender.label}）'),
           subtitle: Text(v.summary),
           trailing: Icon(_previewVoiceId == v.id
@@ -601,7 +602,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ]) {
         out.add(ListTile(
           dense: true,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
           title: Text(e.$1),
           subtitle:
               Text(e.$2.enabled ? describeWindow(e.$2) : '未启用（该时段不反击）'),
@@ -748,7 +749,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           Text('电源策略', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -762,9 +763,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onSelectionChanged: (s) => _savePower(s.first),
           ),
           const Padding(
-            padding: EdgeInsets.symmetric(vertical: 6),
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
             child: Text('省电模式下，电量 < 15% 且未充电时自动暂停随机类任务与守卫，仅保留固定定时。',
-                style: TextStyle(fontSize: 12)),
+                style: AppText.bodySmall),
           ),
           const Divider(height: 32),
           Text('强制免打扰时段（合规护栏）', style: Theme.of(context).textTheme.titleMedium),
@@ -800,10 +801,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const Padding(
-            padding: EdgeInsets.symmetric(vertical: 6),
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
             child: Text(
                 '合规护栏：默认 22:00–07:00 强制免打扰。此处只能把窗口**调窄**，不能调宽。',
-                style: TextStyle(fontSize: 12)),
+                style: AppText.bodySmall),
           ),
           const SizedBox(height: 4),
           const Divider(height: 32),
@@ -836,37 +837,36 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onChanged: _toggleQuietExempt,
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(left: 56, bottom: 4),
+                  padding: const EdgeInsets.only(left: 56, bottom: AppSpacing.xs),
                   child: Text(
                     // 读不到时显示"—"而不是 0：把"读失败"显示成"没豁免过"
                     // 会让用户以为护栏完好，属于误导。
                     '本月豁免次数：${count.valueOrNull?.toString() ?? '—'}'
                     '（每次豁免执行都会写入日志）',
-                    style: const TextStyle(fontSize: 12),
+                    style: AppText.bodySmall,
                   ),
                 ),
                 const Padding(
-                  padding: EdgeInsets.only(left: 56, bottom: 8),
+                  padding: EdgeInsets.only(left: 56, bottom: AppSpacing.sm),
                   child: Text(
                     '⚠️ 开启豁免即削弱合规护栏，仅限个人场景（夜间静默提醒/闹钟）。'
                     '远程对端无法开启本开关，也无法为任务开启豁免。',
-                    style: TextStyle(fontSize: 12),
+                    style: AppText.bodySmall,
                   ),
                 ),
                 // ---- 例外清单（偏离主开关默认值的任务）----
                 Padding(
-                  padding: const EdgeInsets.only(left: 56, bottom: 4),
+                  padding: const EdgeInsets.only(left: 56, bottom: AppSpacing.xs),
                   child: Text(
                     '例外清单（${exceptions.length} 条偏离默认值）',
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600),
+                    style: AppText.bodyMedium.copyWith(fontWeight: FontWeight.w600),
                   ),
                 ),
                 if (exceptions.isEmpty)
                   const Padding(
-                    padding: EdgeInsets.only(left: 56, bottom: 8),
+                    padding: EdgeInsets.only(left: 56, bottom: AppSpacing.sm),
                     child: Text('无：所有任务都跟随主开关默认值',
-                        style: TextStyle(fontSize: 12)),
+                        style: AppText.bodySmall),
                   )
                 else
                   for (final t in exceptions)
@@ -875,7 +875,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       child: Text(
                         '· ${t.name}'
                         '（${t.quietExempt == true ? '强制豁免' : '强制不豁免'}）',
-                        style: const TextStyle(fontSize: 12),
+                        style: AppText.bodySmall,
                       ),
                     ),
               ],
@@ -913,38 +913,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onSelectionChanged: (s) => _saveRunMaster(s.first),
                 ),
                 const Padding(
-                  padding: EdgeInsets.only(top: 6, bottom: 4),
+                  padding: EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.xs),
                   child: Text(
                     '自动模式：法定休息日前一天 20:00 → 休息日最后一天 21:00 暂停'
                     '（含普通周末）；窗口内全部任务默认跳过，出窗自动恢复。',
-                    style: TextStyle(fontSize: 12),
+                    style: AppText.bodySmall,
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
                   child: Text('当前状态：$status',
-                      style: const TextStyle(fontSize: 12)),
+                      style: AppText.bodySmall),
                 ),
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.only(bottom: AppSpacing.xs),
                   child: Text(
                     '例外清单（${list.length} 条暂停期间仍执行）',
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600),
+                    style: AppText.bodyMedium.copyWith(fontWeight: FontWeight.w600),
                   ),
                 ),
                 if (list.isEmpty)
                   const Padding(
-                    padding: EdgeInsets.only(bottom: 8),
+                    padding: EdgeInsets.only(bottom: AppSpacing.sm),
                     child: Text('无：暂停期间不执行任何任务',
-                        style: TextStyle(fontSize: 12)),
+                        style: AppText.bodySmall),
                   )
                 else
                   for (final t in list)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 2),
                       child: Text('· ${t.name}（强制执行）',
-                          style: const TextStyle(fontSize: 12)),
+                          style: AppText.bodySmall),
                     ),
               ],
             );
@@ -1001,9 +1000,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: _editOnlineTts,
           ),
           const Padding(
-            padding: EdgeInsets.only(left: 16, top: 6, bottom: 2),
+            padding: EdgeInsets.only(left: AppSpacing.lg, top: AppSpacing.sm, bottom: 2),
             child: Text('音色（离线优先，可选中后试听）',
-                style: TextStyle(fontSize: 12)),
+                style: AppText.bodySmall),
           ),
           ..._voiceWidgets(context),
           ListTile(
@@ -1118,7 +1117,7 @@ class _FieldsDialogState extends State<_FieldsDialog> {
               children: [
                 for (var i = 0; i < widget.fields.length; i++)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.only(bottom: AppSpacing.sm),
                     child: TextField(
                       controller: _ctrls[i],
                       obscureText: widget.fields[i].obscure,
@@ -1232,7 +1231,7 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text('调好的参数同时作用于「本机随机生成」与「一键 AI 生成」。',
-                  style: TextStyle(fontSize: 12)),
+                  style: AppText.bodySmall),
               _section('排期模式'),
               Wrap(
                 spacing: 6,
@@ -1314,7 +1313,7 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
   }
 
   Widget _section(String title) => Padding(
-        padding: const EdgeInsets.only(top: 12, bottom: 2),
+        padding: const EdgeInsets.only(top: AppSpacing.md, bottom: 2),
         child: Text(title, style: Theme.of(context).textTheme.titleSmall),
       );
 
@@ -1324,8 +1323,8 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
       case PlanScheduleMode.single:
         return const <Widget>[
           Padding(
-            padding: EdgeInsets.only(top: 4),
-            child: Text('在接下来的一周内随机反击 1 次。', style: TextStyle(fontSize: 12)),
+            padding: EdgeInsets.only(top: AppSpacing.xs),
+            child: Text('在接下来的一周内随机反击 1 次。', style: AppText.bodySmall),
           ),
         ];
       case PlanScheduleMode.several:
@@ -1354,7 +1353,7 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
         const names = <String>['一', '二', '三', '四', '五', '六', '日'];
         return <Widget>[
           Padding(
-            padding: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.only(top: AppSpacing.sm),
             child: Wrap(
               spacing: 6,
               children: [
@@ -1505,9 +1504,9 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(top: 6),
+          padding: const EdgeInsets.only(top: AppSpacing.sm),
           child: Text('$label：${fmt(a)} – ${fmt(b)}',
-              style: const TextStyle(fontSize: 12)),
+              style: AppText.bodySmall),
         ),
         RangeSlider(
           min: min,
