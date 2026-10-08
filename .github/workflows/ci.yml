@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手动触发：配合「临时公开仓库 → 免费跑 CI → 构建完成即恢复私有」的既定流程
+  # （账号 Actions 计费受限时的按需构建：Android 默认本机构建，iOS 走 CI）。
+  # 公开仓库的 Actions 免费且不限量；构建完成后立刻改回 private。
+  workflow_dispatch:
+    inputs:
+      run_emulator:
+        description: '是否运行 emulator-test（默认否；仅要 iOS/Android 产物时可跳过）'
+        type: boolean
+        default: false
 
 jobs:
   analyze-test:
@@ -101,6 +110,9 @@ jobs:
   emulator-test:
     runs-on: ubuntu-latest
     needs: analyze-test
+    # 手动 dispatch 时默认跳过（该 job 依赖托管 runner 的虚拟化栈，历史上有基建级假红；
+    # 且 iOS/Android 产物不依赖它）。push/PR 仍照常运行。
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_emulator }}
     steps:
       - uses: actions/checkout@v4
 
