@@ -1022,12 +1022,14 @@ void main() {
           'usage': {'prompt_tokens': 1, 'completion_tokens': 1},
         });
 
-    /// `TtsService` 替身：系统音色成功（或按 [fail] 抛错），在线音色成功。
+    /// `TtsService` 替身：系统音色成功（或按 [fail] 抛错），在线音色成功；
+    /// 神经音色恒 false ⇒ 走系统回落（与既有「系统成功」桩一致）。
     Override ttsOverride({bool fail = false}) =>
         ttsServiceProvider.overrideWith((ref) async => TtsService(
               speakSystem: (t, v, m) async {
                 if (fail) throw StateError('boom');
               },
+              speakNeural: (t, v) async => false,
               speakOnline: (t, v, n) async => true,
             ));
 

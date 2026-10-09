@@ -44,6 +44,10 @@ enum TtsProvider {
 
   /// 在线语音服务（联网 + Key；音色固定、含东北话）。
   online,
+
+  /// 内置神经 TTS（离线、免费、自然；模型随包发布，见 [neuralVoices]）。
+  /// 由 sherpa-onnx 本地合成，不依赖系统引擎、不需要联网与 Key。
+  neural,
 }
 
 /// 一个可选音色。
@@ -77,9 +81,15 @@ class TtsVoice {
 
   bool get isOnline => provider == TtsProvider.online;
 
-  /// 一句话说明（UI 副标题："普通话·女·离线" / "东北话·男·在线"）。
-  String get summary =>
-      '${dialect.label}·${gender.label}·${isOnline ? '在线' : '离线'}';
+  /// 一句话说明（UI 副标题："普通话·女·神经" / "东北话·男·在线"）。
+  String get summary {
+    final kind = switch (provider) {
+      TtsProvider.online => '在线',
+      TtsProvider.neural => '神经',
+      TtsProvider.system => '离线',
+    };
+    return '${dialect.label}·${gender.label}·$kind';
+  }
 }
 
 abstract final class TtsVoices {
@@ -103,6 +113,14 @@ abstract final class TtsVoices {
       dialect: TtsDialect.mandarin,
       provider: TtsProvider.system,
       systemMatch: <String>['male', '男', 'yunxi', 'kangkang'],
+    ),
+    TtsVoice(
+      id: 'nn_zh_female',
+      name: '神经女声（自然·离线）',
+      gender: TtsGender.female,
+      dialect: TtsDialect.mandarin,
+      provider: TtsProvider.neural,
+      // 神经引擎自带模型，不需要系统/在线匹配参数。
     ),
     TtsVoice(
       id: 'az_zh_female_xiaoxiao',
@@ -163,6 +181,28 @@ abstract final class TtsVoices {
     return all.first;
   }
 
+  /// 大小写不敏感、且**带词边界**的包含匹配：仅当 [key] 前后都不是 ASCII 字母
+  /// 时才算命中。这是选男声却听到女声的根因修复 —— 系统语音名里常出现
+  /// `Female` / `Male`，朴素 `contains('male')` 会把 `Female` 误中。
+  static bool _hits(String text, String key) {
+    var i = text.indexOf(key);
+    while (i >= 0) {
+      final before = i == 0 ? '' : text[i - 1];
+      final after = i + key.length >= text.length ? '' : text[i + key.length];
+      if (!_isAsciiLetter(before) && !_isAsciiLetter(after)) return true;
+      i = text.indexOf(key, i + 1);
+    }
+    return false;
+  }
+
+  /// 单个字符是否为 ASCII 字母（A–Z / a–z）。中文等非 ASCII 字符一律视为
+  /// "非字母"，因此中文关键词（如「男」「女」）不受词边界约束，永远按需命中。
+  static bool _isAsciiLetter(String ch) {
+    if (ch.isEmpty) return false;
+    final c = ch.codeUnitAt(0);
+    return (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A);
+  }
+
   /// 从系统 TTS 的语音列表里，挑出与 [match] **首个命中**的一条。
   ///
   /// 输入是 `FlutterTts.getVoices()` 的**原样结构**（`List<Map>`，每项含
@@ -170,7 +210,7 @@ abstract final class TtsVoices {
   /// `flutter_tts`：入参是 `Object?`，因此这个"怎么猜音色"的决策是**纯函数**，
   /// 宿主测试能穷举（对照 `remote_playback.PlaybackSelector` 的注入风格）。
   ///
-  /// 匹配规则：对每个关键词做**大小写不敏感**的 `name`/`locale` 包含匹配，
+  /// 匹配规则：对每个关键词做**大小写不敏感 + 词边界**的 `name`/`locale` 匹配，
   /// 关键词按 [match] 顺序优先。**返回 `null` = 交给系统默认音色**（不是错误，
   /// 只是降级 —— 机型上装没装对应引擎不归我们管）。
   static Map<String, String>? pickSystemVoice(Object? voices, List<String> match) {
@@ -183,8 +223,7 @@ abstract final class TtsVoices {
         final name = (raw['name'] ?? '').toString();
         final locale = (raw['locale'] ?? '').toString();
         if (name.isEmpty) continue;
-        if (name.toLowerCase().contains(k) ||
-            locale.toLowerCase().contains(k)) {
+        if (_hits(name.toLowerCase(), k) || _hits(locale.toLowerCase(), k)) {
           return <String, String>{'name': name, 'locale': locale};
         }
       }
@@ -199,4 +238,12 @@ abstract final class TtsVoices {
   /// 在线音色。
   static List<TtsVoice> get onlineVoices =>
       all.where((v) => v.provider == TtsProvider.online).toList();
+
+  /// 内置神经 TTS 音色（离线、自然，模型随包发布）。
+  static List<TtsVoice> get neuralVoices =>
+      all.where((v) => v.provider == TtsProvider.neural).toList();
+
+  /// 所有**离线**音色（系统 + 神经），用于「不需要联网」场景的优先展示。
+  static List<TtsVoice> get offlineVoices =>
+      all.where((v) => v.provider != TtsProvider.online).toList();
 }

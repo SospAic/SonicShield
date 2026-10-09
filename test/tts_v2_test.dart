@@ -84,6 +84,43 @@ void main() {
       // 空关键词表 = 不挑音色
       expect(TtsVoices.pickSystemVoice(<Object?>[], const <String>[]), isNull);
     });
+
+    test('TV-08 性别边界匹配：female 名里的 male 不再误中（选男声听女声的根因）', () {
+      // 系统语音名常出现 Female/Male：「Microsoft Female」含子串 male，
+      // 朴素 contains('male') 会误中它。边界匹配应只挑真正的 Male 语音。
+      final voices = <Map<String, String>>[
+        {'name': 'Microsoft Female', 'locale': 'zh-CN'},
+        {'name': 'Microsoft Male', 'locale': 'zh-CN'},
+      ];
+      expect(TtsVoices.pickSystemVoice(voices, <String>['male'])!['name'],
+          'Microsoft Male');
+      // 反向：选女声命中 Female，不受 Male 同名子串干扰。
+      expect(TtsVoices.pickSystemVoice(voices, <String>['female'])!['name'],
+          'Microsoft Female');
+      // 中文关键词不受词边界约束：'男' 仍正常命中。
+      final zh = <Map<String, String>>[
+        {'name': '中文女声', 'locale': 'zh-CN'},
+        {'name': '中文男声', 'locale': 'zh-CN'},
+      ];
+      expect(TtsVoices.pickSystemVoice(zh, <String>['男'])!['name'], '中文男声');
+    });
+
+    test('TV-09 neural 提供方与离线聚合', () {
+      expect(TtsVoices.neuralVoices, isNotEmpty);
+      expect(TtsVoices.neuralVoices.first.provider, TtsProvider.neural);
+      expect(
+        TtsVoices.offlineVoices,
+        containsAll(
+            <Object>[...TtsVoices.systemVoices, ...TtsVoices.neuralVoices]),
+      );
+      expect(TtsVoices.byId('nn_zh_female').summary, contains('神经'));
+    });
+
+    test('TV-10 summary 覆盖三种通路（离线/在线/神经）', () {
+      expect(TtsVoices.byId('sys_zh_female').summary, '普通话·女·离线');
+      expect(TtsVoices.byId('az_zh_female_xiaoxiao').summary, '普通话·女·在线');
+      expect(TtsVoices.byId('nn_zh_female').summary, '普通话·女·神经');
+    });
   });
 
   group('TSVC 统一 TTS 入口', () {
@@ -91,6 +128,7 @@ void main() {
       var called = false;
       final svc = TtsService(
         speakSystem: (t, v, m) async => called = true,
+        speakNeural: (t, v) async => false,
         speakOnline: (t, v, n) async {
           called = true;
           return true;
@@ -110,6 +148,7 @@ void main() {
           gotVol = v;
           gotMatch = m;
         },
+        speakNeural: (t, v) async => false,
         speakOnline: (t, v, n) async => fail('不应走在线'),
       );
       final r = await svc.say('你好', voiceId: 'sys_zh_male', volume: 3);
@@ -123,6 +162,7 @@ void main() {
       String? gotVoice;
       final svc = TtsService(
         speakSystem: (t, v, m) async => fail('不应走系统'),
+        speakNeural: (t, v) async => false,
         speakOnline: (t, v, n) async {
           gotVoice = n;
           return false;
@@ -137,6 +177,7 @@ void main() {
     test('TSVC-04 委托抛错被收敛成失败结果，异常不外泄', () async {
       final sys = TtsService(
         speakSystem: (t, v, m) async => throw StateError('无引擎'),
+        speakNeural: (t, v) async => false,
         speakOnline: (t, v, n) async => true,
       );
       final r1 = await sys.say('你好', voiceId: 'sys_zh_female');
@@ -145,12 +186,59 @@ void main() {
 
       final on = TtsService(
         speakSystem: (t, v, m) async {},
+        speakNeural: (t, v) async => false,
         speakOnline: (t, v, n) async => throw StateError('网络炸了'),
       );
       final r2 = await on.say('你好', voiceId: 'az_zh_female_xiaoxiao');
       expect(r2.ok, isFalse);
       expect(r2.online, isTrue);
       expect(r2.message, contains('网络炸了'));
+    });
+  });
+
+  group('TSVC-N 神经 TTS 路由', () {
+    test('TSVC-N-01 neural 音色走 speakNeural；发声成功 → ok', () async {
+      var called = false;
+      final svc = TtsService(
+        speakSystem: (t, v, m) async => fail('不应走系统'),
+        speakNeural: (t, v) async {
+          called = true;
+          return true;
+        },
+        speakOnline: (t, v, n) async => fail('不应走在线'),
+      );
+      final r = await svc.say('你好', voiceId: 'nn_zh_female', volume: 0.7);
+      expect(r.ok, isTrue);
+      expect(r.online, isFalse);
+      expect(called, isTrue);
+    });
+
+    test('TSVC-N-02 neural 发声失败 → 优雅回落系统默认音色（ok，不报错）', () async {
+      var fellBack = false;
+      final svc = TtsService(
+        speakSystem: (t, v, m) async {
+          // 回落时不应挑具体音色（match 为空 = 系统默认音色）。
+          expect(m, isEmpty);
+          fellBack = true;
+        },
+        speakNeural: (t, v) async => false,
+        speakOnline: (t, v, n) async => fail('不应走在线'),
+      );
+      final r = await svc.say('你好', voiceId: 'nn_zh_female');
+      expect(fellBack, isTrue);
+      expect(r.ok, isTrue);
+      expect(r.message, contains('回落'));
+    });
+
+    test('TSVC-N-03 neural 委托抛错 → 失败结果，异常不外泄', () async {
+      final svc = TtsService(
+        speakSystem: (t, v, m) async {},
+        speakNeural: (t, v) async => throw StateError('引擎炸了'),
+        speakOnline: (t, v, n) async => true,
+      );
+      final r = await svc.say('你好', voiceId: 'nn_zh_female');
+      expect(r.ok, isFalse);
+      expect(r.message, contains('引擎炸了'));
     });
   });
 

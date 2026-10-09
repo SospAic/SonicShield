@@ -103,6 +103,7 @@ import 'package:sonic_shield/services/evidence_files.dart';
 import 'package:sonic_shield/services/export_crypto.dart';
 import 'package:sonic_shield/services/holiday_update_service.dart';
 import 'package:sonic_shield/services/native_bridge.dart';
+import 'package:sonic_shield/services/neural_tts.dart';
 import 'package:sonic_shield/services/notification_service.dart';
 import 'package:sonic_shield/services/online_tts_client.dart';
 import 'package:sonic_shield/services/permission_flow.dart';

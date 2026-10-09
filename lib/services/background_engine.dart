@@ -34,6 +34,7 @@ import 'condition_env.dart';
 import 'counter_plan_service.dart';
 import 'notification_service.dart';
 import 'native_bridge.dart';
+import 'neural_tts.dart';
 import 'online_tts_client.dart';
 import 'playback_service.dart';
 import 'reactive_counter_service.dart';
@@ -41,6 +42,14 @@ import 'retention_maintenance.dart';
 import 'sound_guard_service.dart';
 import 'tts_service.dart';
 import 'vibrate_session.dart';
+
+/// 引擎隔离内的神经 TTS 单例：与 UI 隔离共享同一份模型资产落盘目录，
+/// 首次 speak 才构造原生句柄；失败返回 false，由 [TtsService] 回落系统音色。
+final NeuralTtsEngine _neuralTts = NeuralTtsEngine();
+
+/// 引擎隔离内神经 TTS 播报委托（签名匹配 [NeuralTtsSpeak]）。
+Future<bool> _speakNeuralTts(String text, double volume) =>
+    _neuralTts.speak(text, volume);
 
 /// 后台引擎状态快照（服务 -> UI 广播）。
 class EngineState {
@@ -590,6 +599,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     // 所以"本机用的音色"和"远程发的音色"语义不会分叉。
     final tts = TtsService(
       speakSystem: speakSystemTts,
+      speakNeural: _speakNeuralTts,
       speakOnline: (text, volume, voiceName) => speakOnlineTts(
         text,
         volume,
@@ -1425,6 +1435,7 @@ Future<void> _engineBody(ServiceInstance service) async {
       speak: (text, {required String voiceId, required double volume}) =>
           TtsService(
         speakSystem: speakSystemTts,
+        speakNeural: _speakNeuralTts,
         speakOnline: (t, v, name) =>
             speakOnlineTts(t, v, name, ApiConfigStore(prefs)),
       ).say(text, voiceId: voiceId, volume: volume),
