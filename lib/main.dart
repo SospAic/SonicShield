@@ -22,6 +22,7 @@ import 'services/notification_service.dart';
 import 'services/online_tts_client.dart';
 import 'services/playback_service.dart';
 import 'services/tts_service.dart';
+import 'services/neural_tts.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -85,9 +86,12 @@ Future<void> _wireRemoteEndpoint() async {
   // v2.0：语音播报统一走 `TtsService` —— 按音色 id 决定用**系统 TTS**（离线）
   // 还是**在线语音**（含东北话，需配置 Key）。两条路都在这里装配成闭包，
   // 于是"选哪条路、失败报什么"的决策留在可测的 `tts_service.dart`，
-  // 本文件只承担平台胶水（FlutterTts 实例 / 临时文件 / 播放器）。
+  // 本文件只承担平台胶水（FlutterTts 实例 / 临时文件 / 播放器 / 神经引擎）。
+  // 神经引擎为长生命周期单例：首次 speak 才把模型资产落到私有目录并构造原生句柄。
+  final neuralTts = NeuralTtsEngine();
   final tts = TtsService(
     speakSystem: _speakSystemTts,
+    speakNeural: neuralTts.speak,
     speakOnline: (text, volume, voiceName) =>
         _speakOnlineTts(text, volume, voiceName, apiCfg, playback),
   );

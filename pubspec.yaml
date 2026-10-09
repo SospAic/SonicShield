@@ -36,6 +36,11 @@ dependencies:
   record: ^7.1.1                    # 麦克风采流（守卫模式 VAD 数据源）
   flutter_tts: ^4.0.2               # TTS 喊话动作（如「已开启录音取证」）
 
+  # ---- 离线神经 TTS（Plan A：内置自然语音，无需联网/Key）----
+  # sherpa-onnx 1.13.8（Apache-2.0）：VITS / Matcha / Kokoro 等离线语音合成。
+  # 模型文件落地在 assets/tts/（见 flutter.assets），运行时拷贝到应用私有目录后加载。
+  sherpa_onnx: ^1.13.8
+
   # ---- 后台与调度 ----
   flutter_background_service: ^5.0.10   # Android 前台服务 + Dart 后台隔离
   flutter_local_notifications: ^17.2.3  # 通知 / iOS 日历触发 / 全屏意图
@@ -101,3 +106,4 @@ flutter:
   assets:
     - assets/audio/
     - assets/audio/presets/
+    - assets/tts/                      # 离线神经 TTS 模型（vits-piper-zh_CN-xiao_ya-medium）

@@ -36,6 +36,9 @@ void main() {
   const Map<String, String> requiredMarkers = <String, String>{
     'lib/services/background_engine.dart': "@pragma('vm:entry-point')",
     'lib/main.dart': 'runApp(',
+    // 神经 TTS 引擎：只有构造 `sherpa.OfflineTts`（onnxruntime 原生 FFI）
+    // 这条路才能发声 —— 该标记存在即证明此文件仍依赖宿主不可达的原生库。
+    'lib/services/neural_tts.dart': 'sherpa.OfflineTts(',
   };
 
   final toolSrc = File('tool/coverage_report.dart').readAsStringSync();

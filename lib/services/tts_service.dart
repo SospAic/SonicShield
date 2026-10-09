@@ -18,6 +18,13 @@ typedef SystemTtsSpeak = Future<void> Function(
 typedef OnlineTtsSpeak = Future<bool> Function(
     String text, double volume, String onlineVoiceName);
 
+/// 内置神经 TTS 播报委托：本地合成 + 播放，返回**是否真的发声**。
+///
+/// 与 [SystemTtsSpeak] / [OnlineTtsSpeak] 同构：平台胶水（模型加载、合成、
+/// 写 WAV、播放器）全部封在 `neural_tts.dart` 的 [NeuralTtsEngine] 里，这里
+/// 只持有签名。失败时返回 `false`，由 [say] 负责优雅回落系统默认音色。
+typedef NeuralTtsSpeak = Future<bool> Function(String text, double volume);
+
 /// 一次 TTS 播报的结果（含"走的是在线还是离线"，供审计与回执）。
 class TtsResult {
   const TtsResult({required this.ok, required this.online, this.message});
@@ -34,10 +41,15 @@ class TtsResult {
 /// - 在线音色但委托没发声 → **失败**（不假成功，控制端不会以为"已经喊了"）。
 /// - 系统/在线委托抛错 → 包成失败结果，**异常不外泄**（调用点无需 try）。
 class TtsService {
-  const TtsService({required this.speakSystem, required this.speakOnline});
+  const TtsService({
+    required this.speakSystem,
+    required this.speakOnline,
+    required this.speakNeural,
+  });
 
   final SystemTtsSpeak speakSystem;
   final OnlineTtsSpeak speakOnline;
+  final NeuralTtsSpeak speakNeural;
 
   /// 按 [voiceId] 解析音色并播报 [text]。
   ///
@@ -55,6 +67,24 @@ class TtsService {
           ok: false, online: voice.isOnline, message: '播报文本为空');
     }
     final v = volume.clamp(0.0, 1.0).toDouble();
+
+    // 内置神经 TTS（离线、自然）：失败则优雅回落系统默认音色，不让喊话静默失败。
+    if (voice.provider == TtsProvider.neural) {
+      try {
+        final ok = await speakNeural(t, v);
+        if (ok) return const TtsResult(ok: true, online: false);
+        // 神经引擎不可用（模型缺失/合成失败）→ 回落系统默认音色（不挑具体音色）。
+        await speakSystem(t, v, const <String>[]);
+        return const TtsResult(
+          ok: true,
+          online: false,
+          message: '神经引擎不可用，已回落系统默认音色',
+        );
+      } on Object catch (e) {
+        return TtsResult(ok: false, online: false, message: e.toString());
+      }
+    }
+
     if (voice.isOnline) {
       try {
         final ok = await speakOnline(t, v, voice.onlineVoiceName);
