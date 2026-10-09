@@ -112,6 +112,7 @@ import 'package:sonic_shield/services/power_service.dart';
 import 'package:sonic_shield/services/preset_import.dart';
 import 'package:sonic_shield/services/ptt_stream_sink.dart';
 import 'package:sonic_shield/services/reactive_counter_service.dart';
+import 'package:sonic_shield/services/remote_tts_presets.dart';
 import 'package:sonic_shield/services/retention_maintenance.dart';
 import 'package:sonic_shield/services/sound_guard_service.dart';
 import 'package:sonic_shield/services/tts_service.dart';

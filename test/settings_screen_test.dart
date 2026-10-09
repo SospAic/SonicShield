@@ -1303,8 +1303,8 @@ void main() {
       // 5) 「恢复默认」→ 回到出厂区间；再「保存」落库。
       await tester.tap(find.widgetWithText(TextButton, '恢复默认'));
       await tester.pump();
-      expect(find.text('白天时段：8:00 – 20:00'), findsOneWidget,
-          reason: '恢复默认应回到出厂白天时段');
+      expect(find.text('白天时段：6:00 – 21:00'), findsOneWidget,
+          reason: '恢复默认应回到出厂白天时段（昼夜导向：06:00–21:00）');
 
       await tester.tap(find.text('保存'));
       await waitForText(tester, '生成参数已保存');
@@ -1312,8 +1312,8 @@ void main() {
       expect(raw, isNotNull);
       final saved =
           CounterPlanParams.fromJson(jsonDecode(raw!) as Map<String, dynamic>);
-      expect(saved.dayStartHour, 8);
-      expect(saved.dayEndHour, 20);
+      expect(saved.dayStartHour, 6);
+      expect(saved.dayEndHour, 21);
       await settleSnackBars(tester);
     }, timeout: perTest);
 

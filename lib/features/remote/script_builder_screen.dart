@@ -8,6 +8,7 @@ import '../../remote/remote_store.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/script_executor.dart';
 import '../../domain/models/tts_voice.dart';
+import '../../services/remote_tts_presets.dart';
 import '../../core/theme.dart';
 
 /// 远程指令组装器：把 play/tts/notify/vibrate/record/delay 组装为序列，
@@ -405,6 +406,36 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
       ? widget.voiceId
       : '';
 
+  /// 5 个可自定义预置位（异步载入；载入前先用出厂默认，避免闪空）。
+  List<String> _presets = RemoteTtsPresets.defaults;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPresets();
+  }
+
+  Future<void> _loadPresets() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _presets = RemoteTtsPresets.read(prefs));
+  }
+
+  /// 打开「自定义预置位」对话框并持久化（**独立对话框**：本对话框必须只保留
+  /// 1 个 `TextField`，否则 SBS-06/07 的 `find.byType(TextField)` 会报
+  /// "Too many elements"）。
+  Future<void> _editPresets() async {
+    final prefs = await SharedPreferences.getInstance();
+    final out = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _TtsPresetsDialog(presets: _presets),
+    );
+    if (out == null || !mounted) return;
+    await RemoteTtsPresets.write(prefs, out);
+    if (!mounted) return;
+    setState(() => _presets = RemoteTtsPresets.normalize(out));
+  }
+
   @override
   void dispose() {
     _ctrl.dispose();
@@ -414,38 +445,68 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         title: const Text('编辑步骤 · 语音播报'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              controller: _ctrl,
-              decoration: const InputDecoration(labelText: '播报文本'),
-            ),
-            const SizedBox(height: 12),
-            const Text('音色', style: AppText.bodySmall),
-            DropdownButton<String>(
-              isExpanded: true,
-              value: _voiceId,
-              items: [
-                const DropdownMenuItem(value: '', child: Text('系统默认（自动）')),
-                for (final d in TtsDialect.values) ...[
-                  DropdownMenuItem(
-                    enabled: false,
-                    value: '__header_${d.name}',
-                    child: Text(d.label, style: AppText.bodySmall),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _ctrl,
+                decoration: const InputDecoration(labelText: '播报文本'),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('预置位', style: AppText.bodySmall),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: _editPresets,
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('自定义'),
                   ),
-                  for (final v in TtsVoices.all.where((v) => v.dialect == d))
-                    DropdownMenuItem(
-                      value: v.id,
-                      child: Text(
-                          '${v.name}（${v.gender.label}${v.isOnline ? '·在线' : ''}）'),
+                ],
+              ),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (var i = 0; i < _presets.length; i++)
+                    ActionChip(
+                      label: Text(
+                        _presets[i].length > 10
+                            ? '${_presets[i].substring(0, 10)}…'
+                            : _presets[i],
+                      ),
+                      onPressed: () =>
+                          setState(() => _ctrl.text = _presets[i]),
                     ),
                 ],
-              ],
-              onChanged: (v) => setState(() => _voiceId = v ?? ''),
-            ),
-          ],
+              ),
+              const SizedBox(height: 12),
+              const Text('音色', style: AppText.bodySmall),
+              DropdownButton<String>(
+                isExpanded: true,
+                value: _voiceId,
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('系统默认（自动）')),
+                  for (final d in TtsDialect.values) ...[
+                    DropdownMenuItem(
+                      enabled: false,
+                      value: '__header_${d.name}',
+                      child: Text(d.label, style: AppText.bodySmall),
+                    ),
+                    for (final v in TtsVoices.all.where((v) => v.dialect == d))
+                      DropdownMenuItem(
+                        value: v.id,
+                        child: Text(
+                            '${v.name}（${v.gender.label}${v.isOnline ? '·在线' : ''}）'),
+                      ),
+                  ],
+                ],
+                onChanged: (v) => setState(() => _voiceId = v ?? ''),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -454,6 +515,62 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
               onPressed: () => Navigator.pop(
                   context, _TtsStepResult(_ctrl.text, _voiceId)),
               child: const Text('确定')),
+        ],
+      );
+}
+
+/// 「自定义预置位」对话框：5 行输入，保存后持久化。
+///
+/// 独立于 [_TtsStepDialog]（后者必须只保留 1 个 `TextField`）。
+class _TtsPresetsDialog extends StatefulWidget {
+  const _TtsPresetsDialog({required this.presets});
+
+  final List<String> presets;
+
+  @override
+  State<_TtsPresetsDialog> createState() => _TtsPresetsDialogState();
+}
+
+class _TtsPresetsDialogState extends State<_TtsPresetsDialog> {
+  late final List<TextEditingController> _ctrls = [
+    for (var i = 0; i < RemoteTtsPresets.slotCount; i++)
+      TextEditingController(
+          text: i < widget.presets.length ? widget.presets[i] : ''),
+  ];
+
+  @override
+  void dispose() {
+    for (final c in _ctrls) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('自定义预置位'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < _ctrls.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: TextField(
+                    controller: _ctrls[i],
+                    decoration: InputDecoration(labelText: '预置位 ${i + 1}'),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+              onPressed: () =>
+                  Navigator.pop(context, [for (final c in _ctrls) c.text]),
+              child: const Text('保存')),
         ],
       );
 }

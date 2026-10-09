@@ -13,13 +13,16 @@
 /// - [validate] 是**质量门**：返回人类可读的中文问题列表，供"一键生成"在落库
 ///   前先拦一道（AI 返回不合格 → 回灌错误重试一次，见 `deepseek_service`）。
 ///
-/// ## 与用户约定的区间（默认值即此约定）
-/// | 时段 | 音量 | 动作时长 |
-/// |---|---|---|
-/// | 工作日·白天 | 50%–80% | 3–8s |
-/// | 工作日·夜间 | 30%–50% | 3–5s |
-/// | 休息日·白天（**可选**） | 50%–80% | 3–8s |
-/// | 休息日·夜间（**可选**） | 10%–30% | 3–5s |
+/// ## 昼夜导向（默认值即此约定）
+///
+/// 白天 = `[dayStartHour, dayEndHour)`（出厂 **06:00–21:00**），夜间 = 其余小时。
+///
+/// | 时段 | 音量 | 时长 | 动作配比（音效 / TTS / 震动） |
+/// |---|---|---|---|
+/// | 白天 | 70%–100%（**大音量**） | 3–8s | **80% / 0% / 20%**（不喊话；少量高强度震动） |
+/// | 夜间 | 10%–30%（**轻幅度**） | 3–5s | 10% / **60% / 30%**（以喊话为主 + 震动配合） |
+///
+/// 震动强度：白天 80%–100%（**高强度**），夜间 40%–80%。
 ///
 /// `enabled` 默认：工作日两段**开**、休息日两段**关**（"休息日反击可选"）——
 /// 默认落在"更安静"的一侧，需要时由用户显式打开。
@@ -82,6 +85,10 @@ class CounterWindow {
     this.durationSecMin = 3,
     this.durationSecMax = 8,
     this.actionsPerHour = 1,
+    this.ttsWeight = 0.5,
+    this.vibrateWeight = 0.0,
+    this.vibrateAmplitudeMin = 0.4,
+    this.vibrateAmplitudeMax = 1.0,
   });
 
   /// 该时段是否参与反击。休息日两段默认关闭（"可选"）。
@@ -95,11 +102,30 @@ class CounterWindow {
   /// 每小时期望的反击次数（0 = 不主动安排，仅保留时段开关语义）。
   final int actionsPerHour;
 
+  /// **动作配比**：该时段内每次反击选 **TTS** 的概率（0..1）。
+  ///
+  /// 与 [vibrateWeight] 共同决定三类动作的占比：
+  /// - TTS = [ttsWeight]；
+  /// - 震动 = [vibrateWeight]；
+  /// - 播放音效 = `1 - ttsWeight - vibrateWeight`（下限 0，见 [clamped] 归一化）。
+  ///
+  /// 这是"昼夜导向"的落点：白天 [ttsWeight] = 0（**不喊话**，只放噪音+震动），
+  /// 夜间 [ttsWeight] 占主导（**以喊话为主**，配轻噪音与震动）。
+  final double ttsWeight;
+
+  /// **动作配比**：该时段内每次反击选 **震动** 的概率（0..1）。
+  final double vibrateWeight;
+
+  /// 震动强度区间（0..1；无振幅控制的设备会被系统一律拉满）。
+  final double vibrateAmplitudeMin;
+  final double vibrateAmplitudeMax;
+
   /// 结构上界（防止畸形 JSON 把分片表算爆）。
   static const int maxActionsPerHour = 12;
   static const int maxDurationSec = 600;
 
-  /// 返回**保证合法**的副本：越界值夹到边界、`min > max` 时交换。
+  /// 返回**保证合法**的副本：越界值夹到边界、`min > max` 时交换、
+  /// 两个动作权重之和 > 1 时**按比例归一化**（保证音效概率非负）。
   ///
   /// 存在的意义：`PlayAudioAction` 的构造函数带 assert，脏数据直接构造会**炸断言**。
   /// 所有"从外部输入进入本模型"的路径都必须先过这里。
@@ -118,6 +144,21 @@ class CounterWindow {
       dMin = dMax;
       dMax = t;
     }
+    var tts = ttsWeight.clamp(0.0, 1.0).toDouble();
+    var vib = vibrateWeight.clamp(0.0, 1.0).toDouble();
+    final sum = tts + vib;
+    if (sum > 1.0) {
+      // 归一化到和为 1：音效概率 = 0，但比例关系保留。
+      tts = tts / sum;
+      vib = vib / sum;
+    }
+    var aMin = vibrateAmplitudeMin.clamp(0.0, 1.0).toDouble();
+    var aMax = vibrateAmplitudeMax.clamp(0.0, 1.0).toDouble();
+    if (aMin > aMax) {
+      final t = aMin;
+      aMin = aMax;
+      aMax = t;
+    }
     return CounterWindow(
       enabled: enabled,
       volumeMin: vMin,
@@ -125,8 +166,16 @@ class CounterWindow {
       durationSecMin: dMin,
       durationSecMax: dMax,
       actionsPerHour: actionsPerHour.clamp(0, maxActionsPerHour).toInt(),
+      ttsWeight: tts,
+      vibrateWeight: vib,
+      vibrateAmplitudeMin: aMin,
+      vibrateAmplitudeMax: aMax,
     );
   }
+
+  /// 音效概率（= `1 - ttsWeight - vibrateWeight`，下限 0）。
+  double get audioWeight =>
+      (1.0 - ttsWeight - vibrateWeight).clamp(0.0, 1.0).toDouble();
 
   /// 容错解析。[fallback] 提供该时段应有的默认值（各时段默认不同）。
   factory CounterWindow.fromJson(Object? raw, CounterWindow fallback) {
@@ -139,6 +188,12 @@ class CounterWindow {
       durationSecMin: _int(j['durationSecMin'], fallback.durationSecMin),
       durationSecMax: _int(j['durationSecMax'], fallback.durationSecMax),
       actionsPerHour: _int(j['actionsPerHour'], fallback.actionsPerHour),
+      ttsWeight: _num(j['ttsWeight'], fallback.ttsWeight),
+      vibrateWeight: _num(j['vibrateWeight'], fallback.vibrateWeight),
+      vibrateAmplitudeMin:
+          _num(j['vibrateAmplitudeMin'], fallback.vibrateAmplitudeMin),
+      vibrateAmplitudeMax:
+          _num(j['vibrateAmplitudeMax'], fallback.vibrateAmplitudeMax),
     ).clamped();
   }
 
@@ -149,6 +204,10 @@ class CounterWindow {
         'durationSecMin': durationSecMin,
         'durationSecMax': durationSecMax,
         'actionsPerHour': actionsPerHour,
+        'ttsWeight': ttsWeight,
+        'vibrateWeight': vibrateWeight,
+        'vibrateAmplitudeMin': vibrateAmplitudeMin,
+        'vibrateAmplitudeMax': vibrateAmplitudeMax,
       };
 
   static double _num(Object? v, double fallback) =>
@@ -163,22 +222,54 @@ class CounterPlan {
     this.schema = schemaId,
     this.name = '全天候随机反击',
     this.version = 1,
-    this.dayStartHour = 8,
-    this.dayEndHour = 20,
+    this.dayStartHour = 6,
+    this.dayEndHour = 21,
     this.cooldownSec = 600,
     this.respectQuietHours = true,
-    this.workdayDay = const CounterWindow(),
-    this.workdayNight = const CounterWindow(
-      volumeMin: 0.3,
-      volumeMax: 0.5,
-      durationSecMax: 5,
+    // 白天（06:00–21:00）：**尽量不喊话**（ttsWeight=0）—— 以**大量大音量噪音**
+    // 为主、**少量高强度震动**为辅。
+    this.workdayDay = const CounterWindow(
+      volumeMin: 0.7,
+      volumeMax: 1.0,
+      durationSecMin: 3,
+      durationSecMax: 8,
+      ttsWeight: 0.0,
+      vibrateWeight: 0.2,
+      vibrateAmplitudeMin: 0.8,
+      vibrateAmplitudeMax: 1.0,
     ),
-    this.restdayDay = const CounterWindow(enabled: false),
+    // 夜间：**以 TTS 说烦人的话为主** + 震动配合 + **轻幅度噪音**。
+    this.workdayNight = const CounterWindow(
+      volumeMin: 0.1,
+      volumeMax: 0.3,
+      durationSecMin: 3,
+      durationSecMax: 5,
+      ttsWeight: 0.6,
+      vibrateWeight: 0.3,
+      vibrateAmplitudeMin: 0.4,
+      vibrateAmplitudeMax: 0.8,
+    ),
+    this.restdayDay = const CounterWindow(
+      enabled: false,
+      volumeMin: 0.7,
+      volumeMax: 1.0,
+      durationSecMin: 3,
+      durationSecMax: 8,
+      ttsWeight: 0.0,
+      vibrateWeight: 0.2,
+      vibrateAmplitudeMin: 0.8,
+      vibrateAmplitudeMax: 1.0,
+    ),
     this.restdayNight = const CounterWindow(
       enabled: false,
       volumeMin: 0.1,
       volumeMax: 0.3,
+      durationSecMin: 3,
       durationSecMax: 5,
+      ttsWeight: 0.6,
+      vibrateWeight: 0.3,
+      vibrateAmplitudeMin: 0.4,
+      vibrateAmplitudeMax: 0.8,
     ),
     this.presetIds = defaultPresetIds,
     this.ttsTexts = defaultTtsTexts,
@@ -223,10 +314,12 @@ class CounterPlan {
   static const String schemaId = 'sonicshield.counterPlan/1';
 
   /// 白天起点小时（含），夜间 = 其余部分（跨午夜）。
-  static const int defaultDayStartHour = 8;
+  ///
+  /// 出厂导向：**06:00–21:00** 为白天（此时段尽量不喊话）。
+  static const int defaultDayStartHour = 6;
 
   /// 白天终点小时（不含），也是夜间起点。
-  static const int defaultDayEndHour = 20;
+  static const int defaultDayEndHour = 21;
 
   final String schema;
   final String name;
@@ -370,6 +463,22 @@ class CounterPlan {
       if (w.actionsPerHour < 0 ||
           w.actionsPerHour > CounterWindow.maxActionsPerHour) {
         errs.add('$label 每小时次数必须在 0–${CounterWindow.maxActionsPerHour}');
+      }
+      if (w.ttsWeight < 0 ||
+          w.ttsWeight > 1 ||
+          w.vibrateWeight < 0 ||
+          w.vibrateWeight > 1) {
+        errs.add('$label 动作配比（TTS/震动权重）必须在 0–1');
+      } else if (w.ttsWeight + w.vibrateWeight > 1.0001) {
+        errs.add('$label TTS 与震动权重之和不能超过 1（否则音效概率为负）');
+      }
+      if (w.vibrateAmplitudeMin < 0 ||
+          w.vibrateAmplitudeMin > 1 ||
+          w.vibrateAmplitudeMax < 0 ||
+          w.vibrateAmplitudeMax > 1) {
+        errs.add('$label 震动强度必须在 0–1');
+      } else if (w.vibrateAmplitudeMin > w.vibrateAmplitudeMax) {
+        errs.add('$label 震动强度下限不能大于上限');
       }
     }
 
@@ -628,8 +737,10 @@ String? counterPlanIdOf(String taskId) {
   return i <= 0 ? null : rest.substring(0, i);
 }
 
-/// 供 UI 展示的时长/音量描述（"白天 50%–80% · 3–8 秒"）。
+/// 供 UI 展示的时长/音量/配比描述（"70%–100% · 3–8 秒 · 音效80%/TTS0%/震动20%"）。
 String describeWindow(CounterWindow w) {
   final v = '${(w.volumeMin * 100).round()}%–${(w.volumeMax * 100).round()}%';
-  return '$v · ${w.durationSecMin}–${w.durationSecMax} 秒 · 每小时 ${w.actionsPerHour} 次';
+  final mix = '音效${(w.audioWeight * 100).round()}%/'
+      'TTS${(w.ttsWeight * 100).round()}%/震动${(w.vibrateWeight * 100).round()}%';
+  return '$v · ${w.durationSecMin}–${w.durationSecMax} 秒 · 每小时 ${w.actionsPerHour} 次 · $mix';
 }

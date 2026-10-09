@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/script_builder_screen.dart';
 import 'package:sonic_shield/remote/rc_script.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
+import 'package:sonic_shield/services/remote_tts_presets.dart';
 
 /// 指令组装器（`/remote/script-builder/:endpointId`）的宿主测试。
 ///
@@ -316,6 +317,42 @@ void main() {
           reason: '系统音色必须落进 params.voiceId');
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
+    });
+
+    testWidgets('SBS-06p 语音播报：5 个可自定义预置位（点即填入 + 自定义落库）',
+        (tester) async {
+      await _pump(tester, endpoints: [_ep('devA', '客厅音箱')]);
+      await _addStep(tester, '语音播报');
+
+      await tester.tap(_tile('播报「请注意，声盾远程指令」'));
+      await tester.pumpAndSettle();
+
+      // 主对话框里恰好 5 个预置位 chip（内容为出厂默认）。
+      final chips = find.descendant(
+          of: find.byType(AlertDialog), matching: find.byType(ActionChip));
+      expect(chips, findsNWidgets(RemoteTtsPresets.slotCount));
+
+      // 点第 2 个预置位 → 文本被填入。
+      await tester.tap(chips.at(1));
+      await tester.pumpAndSettle();
+      expect(_dialogText(tester), RemoteTtsPresets.defaults[1]);
+
+      // 「自定义」→ 5 行输入 → 改第 1 条 → 保存 → 落库。
+      await tester.tap(find.text('自定义'));
+      await tester.pumpAndSettle();
+      final presetsDlg = find.widgetWithText(AlertDialog, '自定义预置位');
+      final fields =
+          find.descendant(of: presetsDlg, matching: find.byType(TextField));
+      expect(fields, findsNWidgets(RemoteTtsPresets.slotCount));
+      await tester.enterText(fields.at(0), '自定义一号');
+      await tester.tap(find.descendant(of: presetsDlg, matching: find.text('保存')));
+      await tester.pumpAndSettle();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(RemoteTtsPresets.read(prefs)[0], '自定义一号',
+          reason: '自定义内容必须落库');
+      expect(find.text('自定义一号'), findsOneWidget,
+          reason: '主对话框的 chip 应随自定义内容更新');
     });
 
     testWidgets('SBS-06e 选回「系统默认（自动）」→ 旧 voiceId 被清掉，不残留（v2.0）',
