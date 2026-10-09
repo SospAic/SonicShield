@@ -98,6 +98,11 @@ abstract final class CounterPlanRandom {
       durationSecMin: dLo,
       durationSecMax: dHi < dLo ? dLo : dHi,
       actionsPerHour: aLo,
+      // 动作配比是"导向"而非抖动项：**原样带入**产物窗口（不随机）。
+      ttsWeight: w.ttsWeight,
+      vibrateWeight: w.vibrateWeight,
+      vibrateAmplitudeMin: w.vibrateAmplitudeMin,
+      vibrateAmplitudeMax: w.vibrateAmplitudeMax,
     ).clamped();
   }
 

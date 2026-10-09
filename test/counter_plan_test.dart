@@ -258,7 +258,7 @@ void main() {
             assetIdPool: const {'annoy_spit', 'annoy_jeek'},
             now: null);
 
-    test('MT-01 工作日：白天/夜间任务的区间严格落在约定值内', () {
+    test('MT-01 工作日：白天/夜间任务落在新约定内，且白天**不喊话**', () {
       final list = tasksFor(DateTime(2026, 3, 10)); // 周二
       expect(list, isNotEmpty);
       final dayTasks = list.where((t) => t.name.contains('白天')).toList();
@@ -268,22 +268,28 @@ void main() {
       for (final t in dayTasks) {
         expect(t.trigger, isA<FixedOnceTrigger>());
         final at = (t.trigger as FixedOnceTrigger).at;
-        expect(at.hour >= 8 && at.hour < 20, isTrue);
+        expect(at.hour >= 6 && at.hour < 21, isTrue);
+        // 昼夜导向核心：白天窗口 ttsWeight=0 ⇒ **永不喊话**（只音效/震动）。
+        expect(t.actionType, isNot(ActionType.tts));
         if (t.action is PlayAudioAction) {
           final a = t.action as PlayAudioAction;
-          expect(a.volumeMin, greaterThanOrEqualTo(0.5));
-          expect(a.volumeMax, lessThanOrEqualTo(0.8));
+          expect(a.volumeMin, greaterThanOrEqualTo(0.7));
+          expect(a.volumeMax, lessThanOrEqualTo(1.0));
           expect(a.durationSecMin, greaterThanOrEqualTo(3));
           expect(a.durationSecMax, lessThanOrEqualTo(8));
+        } else {
+          final v = t.action as RandomVibrateAction;
+          expect(v.amplitudeMin, greaterThanOrEqualTo(0.8));
+          expect(v.amplitudeMax, lessThanOrEqualTo(1.0));
         }
       }
       for (final t in nightTasks) {
         final at = (t.trigger as FixedOnceTrigger).at;
-        expect(at.hour >= 20 || at.hour < 8, isTrue);
+        expect(at.hour >= 21 || at.hour < 6, isTrue);
         if (t.action is PlayAudioAction) {
           final a = t.action as PlayAudioAction;
-          expect(a.volumeMin, greaterThanOrEqualTo(0.3));
-          expect(a.volumeMax, lessThanOrEqualTo(0.5));
+          expect(a.volumeMin, greaterThanOrEqualTo(0.1));
+          expect(a.volumeMax, lessThanOrEqualTo(0.3));
           expect(a.durationSecMax, lessThanOrEqualTo(5));
         }
       }
@@ -383,13 +389,19 @@ void main() {
       for (var seed = 0; seed < 40; seed++) {
         final p = CounterPlanRandom.generate(seed: seed, restdayDay: true, restdayNight: true);
         expect(p.validate(), isEmpty, reason: 'seed=$seed');
-        expect(p.workdayDay.volumeMin, greaterThanOrEqualTo(0.5));
-        expect(p.workdayDay.volumeMax, lessThanOrEqualTo(0.8));
+        // 白天：大音量噪音 + 不喊话（ttsWeight=0）+ 少量高强度震动。
+        expect(p.workdayDay.volumeMin, greaterThanOrEqualTo(0.7));
+        expect(p.workdayDay.volumeMax, lessThanOrEqualTo(1.0));
         expect(p.workdayDay.durationSecMin, greaterThanOrEqualTo(3));
         expect(p.workdayDay.durationSecMax, lessThanOrEqualTo(8));
-        expect(p.workdayNight.volumeMin, greaterThanOrEqualTo(0.3));
-        expect(p.workdayNight.volumeMax, lessThanOrEqualTo(0.5));
+        expect(p.workdayDay.ttsWeight, 0.0);
+        expect(p.workdayDay.vibrateAmplitudeMin, greaterThanOrEqualTo(0.8));
+        // 夜间：轻幅度噪音 + 以喊话为主 + 震动配合。
+        expect(p.workdayNight.volumeMin, greaterThanOrEqualTo(0.1));
+        expect(p.workdayNight.volumeMax, lessThanOrEqualTo(0.3));
         expect(p.workdayNight.durationSecMax, lessThanOrEqualTo(5));
+        expect(p.workdayNight.ttsWeight, greaterThan(0));
+        expect(p.workdayNight.vibrateWeight, greaterThan(0));
         expect(p.restdayNight.volumeMin, greaterThanOrEqualTo(0.1));
         expect(p.restdayNight.volumeMax, lessThanOrEqualTo(0.3));
         expect(p.ttsTexts, isNotEmpty);
@@ -411,21 +423,26 @@ void main() {
   });
 
   group('PP 生成参数（参数化选择）', () {
-    test('PP-01 出厂参数与约定一致且通过校验', () {
+    test('PP-01 出厂参数=昼夜导向且通过校验', () {
       final p = CounterPlanParams.defaults();
       expect(p.validate(), isEmpty);
-      expect(p.workdayDay.volumeMin, 0.5);
-      expect(p.workdayDay.volumeMax, 0.8);
+      // 白天（06:00–21:00）：大音量噪音 + **不喊话**（ttsWeight=0）+ 少量高强度震动。
+      expect(p.workdayDay.volumeMin, 0.7);
+      expect(p.workdayDay.volumeMax, 1.0);
       expect(p.workdayDay.durationSecMin, 3);
       expect(p.workdayDay.durationSecMax, 8);
-      expect(p.workdayNight.volumeMin, 0.3);
-      expect(p.workdayNight.volumeMax, 0.5);
+      expect(p.workdayDay.ttsWeight, 0.0);
+      expect(p.workdayDay.vibrateWeight, greaterThan(0));
+      // 夜间：轻幅度噪音 + 以喊话为主 + 震动配合。
+      expect(p.workdayNight.volumeMin, 0.1);
+      expect(p.workdayNight.volumeMax, 0.3);
+      expect(p.workdayNight.ttsWeight, greaterThan(0));
       expect(p.restdayDay.enabled, isFalse);
       expect(p.restdayNight.enabled, isFalse);
       expect(p.cooldownSecMin, 600);
       expect(p.cooldownSecMax, 2400);
-      expect(p.dayStartHour, 8);
-      expect(p.dayEndHour, 20);
+      expect(p.dayStartHour, 6);
+      expect(p.dayEndHour, 21);
     });
 
     test('PP-02 toJson/fromJson 往返一致（含各区间与开关）', () {

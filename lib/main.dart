@@ -112,8 +112,13 @@ Future<void> _wireRemoteEndpoint() async {
     ..pttStreamOpener = playback.openPttStream
     // v2.0：携带 `voiceId`。`TtsService.say` 内部把"空文本/在线未配置/委托抛错"
     // 一律收敛成失败结果，**不向外抛** —— 指令组执行链路不会因一次播报失败而中断。
+    // **返回是否真的发声**：控制端据此得到"喊话成功/失败"的真实回执。
+    // ⚠️ 必须用**块体**（不能写成 `=> ...`）：箭头体的 body 是 expression，
+    // 而级联也是 expression —— 不括起来会把后面的 `..vibrateHandler` 吃进来
+    // （见下方 `..vibrateHandler` 处的注记）。
     ..ttsHandler = (text, volume, {String voiceId = ''}) async {
-      await tts.say(text, voiceId: voiceId, volume: volume);
+      final r = await tts.say(text, voiceId: voiceId, volume: volume);
+      return r.ok;
     }
     // ⚠️ 箭头函数**必须加括号**：`..a = (x) => f(x)` 的 body 是 `expression`，
     // 而级联也是 expression —— 不括起来，`=>` 会一路把后面的 `..vibrateActionHandler`
