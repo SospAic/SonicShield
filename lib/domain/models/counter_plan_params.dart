@@ -29,6 +29,10 @@ class PlanWindowParams {
     this.durationSecMax = 8,
     this.actionsPerHourMin = 1,
     this.actionsPerHourMax = 3,
+    this.ttsWeight = 0.5,
+    this.vibrateWeight = 0.0,
+    this.vibrateAmplitudeMin = 0.4,
+    this.vibrateAmplitudeMax = 1.0,
   });
 
   /// 该时段是否参与生成（休息日两段默认关闭 = "可选"）。
@@ -45,6 +49,20 @@ class PlanWindowParams {
   /// 生成时每小时期望动作次数的下/上限。
   final int actionsPerHourMin;
   final int actionsPerHourMax;
+
+  /// **动作配比**：生成出的窗口里 TTS 动作的占比（0..1）。
+  ///
+  /// 与 [vibrateWeight] 一起把「白天不喊话 / 夜里喊话」写进生成参数：
+  /// 白天 [ttsWeight] = 0，夜间 [ttsWeight] 占主导。**直接带入产物窗口**，
+  /// 不在区间内随机（配比是"导向"而不是"抖动项"）。
+  final double ttsWeight;
+
+  /// **动作配比**：生成出的窗口里震动动作的占比（0..1）。
+  final double vibrateWeight;
+
+  /// 生成时震动强度区间的下/上限（0..1）。
+  final double vibrateAmplitudeMin;
+  final double vibrateAmplitudeMax;
 
   /// 结构上界（与 [CounterWindow] 同源，防止畸形输入把物化期算爆）。
   static const int maxDurationSec = CounterWindow.maxDurationSec;
@@ -73,6 +91,20 @@ class PlanWindowParams {
       aLo = aHi;
       aHi = t;
     }
+    var tts = ttsWeight.clamp(0.0, 1.0).toDouble();
+    var vib = vibrateWeight.clamp(0.0, 1.0).toDouble();
+    final sum = tts + vib;
+    if (sum > 1.0) {
+      tts = tts / sum;
+      vib = vib / sum;
+    }
+    var vAmpLo = vibrateAmplitudeMin.clamp(0.0, 1.0).toDouble();
+    var vAmpHi = vibrateAmplitudeMax.clamp(0.0, 1.0).toDouble();
+    if (vAmpLo > vAmpHi) {
+      final t = vAmpLo;
+      vAmpLo = vAmpHi;
+      vAmpHi = t;
+    }
     return PlanWindowParams(
       enabled: enabled,
       volumeMin: vLo,
@@ -81,6 +113,10 @@ class PlanWindowParams {
       durationSecMax: dHi,
       actionsPerHourMin: aLo,
       actionsPerHourMax: aHi,
+      ttsWeight: tts,
+      vibrateWeight: vib,
+      vibrateAmplitudeMin: vAmpLo,
+      vibrateAmplitudeMax: vAmpHi,
     );
   }
 
@@ -98,6 +134,12 @@ class PlanWindowParams {
           _int(j['actionsPerHourMin'], fallback.actionsPerHourMin),
       actionsPerHourMax:
           _int(j['actionsPerHourMax'], fallback.actionsPerHourMax),
+      ttsWeight: _num(j['ttsWeight'], fallback.ttsWeight),
+      vibrateWeight: _num(j['vibrateWeight'], fallback.vibrateWeight),
+      vibrateAmplitudeMin:
+          _num(j['vibrateAmplitudeMin'], fallback.vibrateAmplitudeMin),
+      vibrateAmplitudeMax:
+          _num(j['vibrateAmplitudeMax'], fallback.vibrateAmplitudeMax),
     ).clamped();
   }
 
@@ -109,6 +151,10 @@ class PlanWindowParams {
         'durationSecMax': durationSecMax,
         'actionsPerHourMin': actionsPerHourMin,
         'actionsPerHourMax': actionsPerHourMax,
+        'ttsWeight': ttsWeight,
+        'vibrateWeight': vibrateWeight,
+        'vibrateAmplitudeMin': vibrateAmplitudeMin,
+        'vibrateAmplitudeMax': vibrateAmplitudeMax,
       };
 
   PlanWindowParams copyWith({
@@ -119,6 +165,10 @@ class PlanWindowParams {
     int? durationSecMax,
     int? actionsPerHourMin,
     int? actionsPerHourMax,
+    double? ttsWeight,
+    double? vibrateWeight,
+    double? vibrateAmplitudeMin,
+    double? vibrateAmplitudeMax,
   }) =>
       PlanWindowParams(
         enabled: enabled ?? this.enabled,
@@ -128,13 +178,22 @@ class PlanWindowParams {
         durationSecMax: durationSecMax ?? this.durationSecMax,
         actionsPerHourMin: actionsPerHourMin ?? this.actionsPerHourMin,
         actionsPerHourMax: actionsPerHourMax ?? this.actionsPerHourMax,
+        ttsWeight: ttsWeight ?? this.ttsWeight,
+        vibrateWeight: vibrateWeight ?? this.vibrateWeight,
+        vibrateAmplitudeMin: vibrateAmplitudeMin ?? this.vibrateAmplitudeMin,
+        vibrateAmplitudeMax: vibrateAmplitudeMax ?? this.vibrateAmplitudeMax,
       ).clamped();
 
   /// 面向用户的区间摘要（设置页展示用）。
   String describe() =>
       '音量 ${_pct(volumeMin)}–${_pct(volumeMax)} · '
       '时长 $durationSecMin–$durationSecMax 秒 · '
-      '每小时 $actionsPerHourMin–$actionsPerHourMax 次';
+      '每小时 $actionsPerHourMin–$actionsPerHourMax 次 · '
+      '音效${_pct(audioWeight)}/TTS${_pct(ttsWeight)}/震动${_pct(vibrateWeight)}';
+
+  /// 音效占比（= `1 - ttsWeight - vibrateWeight`，下限 0）。
+  double get audioWeight =>
+      (1.0 - ttsWeight - vibrateWeight).clamp(0.0, 1.0).toDouble();
 
   /// 校验区间自洽；把问题追加进 [errs]（文案面向使用者）。
   void validateInto(String label, List<String> errs) {
@@ -159,6 +218,22 @@ class PlanWindowParams {
     } else if (actionsPerHourMin > actionsPerHourMax) {
       errs.add('$label 每小时次数区间下限不能大于上限');
     }
+    if (ttsWeight < 0 ||
+        ttsWeight > 1 ||
+        vibrateWeight < 0 ||
+        vibrateWeight > 1) {
+      errs.add('$label 动作配比（TTS/震动权重）必须在 0–1');
+    } else if (ttsWeight + vibrateWeight > 1.0001) {
+      errs.add('$label TTS 与震动权重之和不能超过 1');
+    }
+    if (vibrateAmplitudeMin < 0 ||
+        vibrateAmplitudeMin > 1 ||
+        vibrateAmplitudeMax < 0 ||
+        vibrateAmplitudeMax > 1) {
+      errs.add('$label 震动强度区间必须在 0–1');
+    } else if (vibrateAmplitudeMin > vibrateAmplitudeMax) {
+      errs.add('$label 震动强度区间下限不能大于上限');
+    }
   }
 
   static double _num(Object? v, double fallback) =>
@@ -171,25 +246,62 @@ class PlanWindowParams {
 class CounterPlanParams {
   const CounterPlanParams({
     this.schema = schemaId,
-    this.dayStartHour = 8,
-    this.dayEndHour = 20,
+    this.dayStartHour = 6,
+    this.dayEndHour = 21,
     this.cooldownSecMin = 600,
     this.cooldownSecMax = 2400,
     this.respectQuietHours = true,
-    this.workdayDay = const PlanWindowParams(),
-    this.workdayNight = const PlanWindowParams(
-      volumeMin: 0.3,
-      volumeMax: 0.5,
-      durationSecMax: 5,
-      actionsPerHourMax: 2,
+    // 白天（06:00–21:00）：**不喊话**（ttsWeight=0）—— 大音量噪音为主 + 少量高强度震动。
+    this.workdayDay = const PlanWindowParams(
+      volumeMin: 0.7,
+      volumeMax: 1.0,
+      durationSecMin: 3,
+      durationSecMax: 8,
+      actionsPerHourMin: 1,
+      actionsPerHourMax: 3,
+      ttsWeight: 0.0,
+      vibrateWeight: 0.2,
+      vibrateAmplitudeMin: 0.8,
+      vibrateAmplitudeMax: 1.0,
     ),
-    this.restdayDay = const PlanWindowParams(enabled: false),
+    // 夜间：**以 TTS 为主** + 震动配合 + 轻幅度噪音。
+    this.workdayNight = const PlanWindowParams(
+      volumeMin: 0.1,
+      volumeMax: 0.3,
+      durationSecMin: 3,
+      durationSecMax: 5,
+      actionsPerHourMin: 1,
+      actionsPerHourMax: 2,
+      ttsWeight: 0.6,
+      vibrateWeight: 0.3,
+      vibrateAmplitudeMin: 0.4,
+      vibrateAmplitudeMax: 0.8,
+    ),
+    this.restdayDay = const PlanWindowParams(
+      enabled: false,
+      volumeMin: 0.7,
+      volumeMax: 1.0,
+      durationSecMin: 3,
+      durationSecMax: 8,
+      actionsPerHourMin: 1,
+      actionsPerHourMax: 3,
+      ttsWeight: 0.0,
+      vibrateWeight: 0.2,
+      vibrateAmplitudeMin: 0.8,
+      vibrateAmplitudeMax: 1.0,
+    ),
     this.restdayNight = const PlanWindowParams(
       enabled: false,
       volumeMin: 0.1,
       volumeMax: 0.3,
+      durationSecMin: 3,
       durationSecMax: 5,
+      actionsPerHourMin: 1,
       actionsPerHourMax: 2,
+      ttsWeight: 0.6,
+      vibrateWeight: 0.3,
+      vibrateAmplitudeMin: 0.4,
+      vibrateAmplitudeMax: 0.8,
     ),
     this.presetIds = CounterPlan.defaultPresetIds,
     this.ttsTexts = CounterPlan.defaultTtsTexts,
@@ -263,7 +375,8 @@ class CounterPlanParams {
   static const int maxSpanDays = CounterPlan.maxSpanDays;
   static const int maxCooldownSec = CounterPlan.maxCooldownSec;
 
-  /// 出厂默认参数：与用户约定的区间一致（工作日白天 50–80% / 3–8s 等）。
+  /// 出厂默认参数：昼夜导向 —— 白天（06:00–21:00）**不喊话**（大音量噪音为主 +
+  /// 少量高强度震动），夜间**以喊话为主**（+ 震动配合 + 轻幅度噪音）。
   static CounterPlanParams defaults() => const CounterPlanParams();
 
   /// 取某日类型 + 时段对应的区间参数。
@@ -474,7 +587,9 @@ class CounterPlanParams {
     String w(PlanWindowParams p) => p.enabled
         ? '音量${_two(p.volumeMin)}-${_two(p.volumeMax)}、'
             '时长${p.durationSecMin}-${p.durationSecMax}、'
-            '每小时${p.actionsPerHourMin}-${p.actionsPerHourMax}'
+            '每小时${p.actionsPerHourMin}-${p.actionsPerHourMax}、'
+            '配比(音效${_two(p.audioWeight)}/TTS${_two(p.ttsWeight)}/震动${_two(p.vibrateWeight)})、'
+            '震动强度${_two(p.vibrateAmplitudeMin)}-${_two(p.vibrateAmplitudeMax)}'
         : '关闭';
     // 排期只给"模式 + 关键参数"，让 AI 回填同名 JSON 字段（与 [toJson] 一一对应）。
     final sched = switch (scheduleMode) {
@@ -487,8 +602,10 @@ class CounterPlanParams {
       PlanScheduleMode.recurringRandom =>
         '排期=循环随机(${_weekdayLabel(weekdays)})',
     };
-    return '生成一份 24 小时全天候随机反击计划。参数要求：$sched；'
-        '白天 $dayStartHour-$dayEndHour 时；动作间隔 $cooldownSecMin-$cooldownSecMax 秒；'
+    return '生成一份 24 小时全天候随机反击计划。昼夜导向：白天（$dayStartHour-$dayEndHour 时）'
+        '尽量不包含 TTS 语音，以大量大音量噪音为主、少量高强度震动为辅；'
+        '夜间以 TTS 说烦人的话为主、震动配合、轻幅度噪音。'
+        '参数要求：$sched；动作间隔 $cooldownSecMin-$cooldownSecMax 秒；'
         '工作日白天(${w(workdayDay)})；工作日夜(${w(workdayNight)})；'
         '休息日白天(${w(restdayDay)})；休息日夜(${w(restdayNight)})。';
   }

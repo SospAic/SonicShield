@@ -228,8 +228,10 @@ void main() {
 
     test('ESR-06 装配后文本、音量与音色原样交给能力层', () async {
       final spoken = <({String text, double vol, String voice})>[];
-      svc.ttsHandler = (text, vol, {String voiceId = ''}) async =>
-          spoken.add((text: text, vol: vol, voice: voiceId));
+      svc.ttsHandler = (text, vol, {String voiceId = ''}) async {
+        spoken.add((text: text, vol: vol, voice: voiceId));
+        return true;
+      };
 
       await svc.debugDispatch(
         runCmd(script([
@@ -250,8 +252,10 @@ void main() {
 
     test('ESR-06b 未带音色 id 时交给能力层的是空串（由音色目录回落默认）', () async {
       final spoken = <String>[];
-      svc.ttsHandler = (text, vol, {String voiceId = ''}) async =>
-          spoken.add(voiceId);
+      svc.ttsHandler = (text, vol, {String voiceId = ''}) async {
+        spoken.add(voiceId);
+        return true;
+      };
 
       await svc.debugDispatch(
         runCmd(script([const RcStep(RcStepKind.tts, {'text': '你好'})])),
