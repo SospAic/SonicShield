@@ -175,7 +175,7 @@ if (($out -join "`n") -match "All tests passed") {
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
     $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.8' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12653' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12658' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。

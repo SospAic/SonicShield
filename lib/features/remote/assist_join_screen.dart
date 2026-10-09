@@ -6,6 +6,7 @@ import '../../remote/assist_join.dart';
 import '../../remote/command_channel.dart';
 import 'remote_console_tab.dart';
 import 'remote_scripts_tab.dart';
+import '../../core/theme.dart';
 
 /// 控制端「接入协助会话」页（docs/18 S3）。
 ///
@@ -67,11 +68,11 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('接入协助会话')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -86,10 +87,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                       FilteringTextInputFormatter.digitsOnly,
                       LengthLimitingTextInputFormatter(9),
                     ],
-                    style: const TextStyle(
-                        fontSize: 24,
-                        letterSpacing: 4,
-                        fontFamily: 'monospace'),
+                    style: AppText.headlineSmall.copyWith(letterSpacing: 4, fontFamily: 'monospace'),
                     decoration: const InputDecoration(
                       labelText: '临时码（9 位数字）',
                       hintText: '000 000 000',
@@ -105,10 +103,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                       FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
                       LengthLimitingTextInputFormatter(8),
                     ],
-                    style: const TextStyle(
-                        fontSize: 24,
-                        letterSpacing: 4,
-                        fontFamily: 'monospace'),
+                    style: AppText.headlineSmall.copyWith(letterSpacing: 4, fontFamily: 'monospace'),
                     decoration: const InputDecoration(
                       labelText: '访问密码（8 位）',
                       hintText: 'ABCD EFGH',
@@ -160,13 +155,13 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
           const SizedBox(height: 12),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '安全说明：临时码是"门牌号"，访问密码才是真正的共享秘密 ——\n'
                 '会话主题由两者共同派生，只拿到临时码的人既无法订阅也无法接入。\n'
                 '接入后端点会常驻显示"正在被 X 协助"，你可执行的能力由端点逐项放行；\n'
                 '未放行的命令会被端点拒绝并记入其审计日志。',
-                style: TextStyle(fontSize: 12, color: scheme.outline),
+                style: AppText.bodySmall.copyWith(color: scheme.outline),
               ),
             ),
           ),
@@ -211,7 +206,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
             Container(
               width: double.infinity,
               color: scheme.primaryContainer,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
               child: Row(
                 children: [
                   Icon(Icons.verified_user,
@@ -221,8 +216,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                     child: Text(
                       '临时协助会话进行中 · 剩余 ${_mmss(info.remaining)}'
                       '${info.sessionId.isEmpty ? '' : ' · ${info.sessionId}'}',
-                      style: TextStyle(
-                          fontSize: 12, color: scheme.onPrimaryContainer),
+                      style: AppText.bodySmall.copyWith(color: scheme.onPrimaryContainer),
                     ),
                   ),
                 ],
@@ -290,7 +284,7 @@ class _AuditSheet extends StatelessWidget {
         final log = client.auditLog;
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.lg),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -301,12 +295,12 @@ class _AuditSheet extends StatelessWidget {
                 Text(
                   '端点侧同时落库到审计日志（source=assist）。'
                   '未放行的命令会被端点拒绝并在此显示原因。',
-                  style: TextStyle(fontSize: 12, color: scheme.outline),
+                  style: AppText.bodySmall.copyWith(color: scheme.outline),
                 ),
                 const SizedBox(height: 12),
                 if (log.isEmpty)
                   const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
+                    padding: EdgeInsets.symmetric(vertical: AppSpacing.xl),
                     child: Text('本会话尚无收发记录'),
                   )
                 else
@@ -326,14 +320,12 @@ class _AuditSheet extends StatelessWidget {
                           leading: Icon(icon, size: 18, color: color),
                           title: Text(
                             '${e.outbound ? '发出' : '收到'} · ${e.type}',
-                            style: const TextStyle(fontSize: 13),
+                            style: AppText.bodyMedium,
                           ),
                           subtitle: Text(
                             '${_hms(e.at)}'
                             '${e.detail.isEmpty ? '' : ' · ${e.detail}'}',
-                            style: TextStyle(
-                                fontSize: 12,
-                                color: e.ok ? scheme.outline : scheme.error),
+                            style: AppText.bodySmall.copyWith(color: e.ok ? scheme.outline : scheme.error),
                           ),
                         );
                       },
@@ -365,7 +357,7 @@ class _AssistTasksUnavailable extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.all(AppSpacing.xl),
       children: [
         Icon(Icons.checklist, size: 48, color: scheme.outline),
         const SizedBox(height: 12),
@@ -380,7 +372,7 @@ class _AssistTasksUnavailable extends StatelessWidget {
           '如需管理对方的任务，请让对端与你完成一次正式配对（扫码）后再操作；'
           '协助会话目前覆盖「控制台」与「指令组」。',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 13, color: scheme.outline),
+          style: AppText.bodyMedium.copyWith(color: scheme.outline),
         ),
       ],
     );

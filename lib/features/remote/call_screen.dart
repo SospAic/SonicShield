@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/theme.dart';
 import '../../remote/call_lifecycle.dart';
 import '../../remote/call_permission.dart';
 import '../../remote/call_service.dart';
@@ -177,7 +178,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('视频通话')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           Card(
             child: SwitchListTile(
@@ -197,7 +198,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
           if (_endpoints.isEmpty)
             const Card(
                 child: Padding(
-                    padding: EdgeInsets.all(14),
+                    padding: EdgeInsets.all(AppSpacing.lg),
                     child: Text('尚未配对端点。请先在「远程遥控」页完成配对。'))),
           RadioGroup<String>(
             groupValue: _selected,
@@ -235,14 +236,14 @@ class _CallScreenState extends ConsumerState<CallScreen> {
           ),
           const SizedBox(height: 16),
           const Card(
-            color: Color(0x14C62828),
+            color: AppColors.dangerWash,
             child: Padding(
-              padding: EdgeInsets.all(12),
+              padding: EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '⚠️ 合规提示：自动接通用于家人守护（老人/儿童看护）与本人设备间协作。'
                 '在他人不知情时开启其摄像头属于侵犯隐私的违法行为，本应用不提供'
                 '任何隐蔽接通方式——接通即亮屏、系统指示灯正常工作。',
-                style: TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -282,14 +283,14 @@ class _ConnectingView extends StatelessWidget {
           const SizedBox(height: 16),
           Text(
             connectingText(remote),
-            style: const TextStyle(color: Colors.white, fontSize: 18),
+            style: AppText.titleMedium.copyWith(color: Colors.white),
           ),
           const Spacer(),
           Padding(
             padding: const EdgeInsets.only(bottom: 40),
             child: FloatingActionButton.large(
               heroTag: 'caller-hangup',
-              backgroundColor: Colors.red,
+              backgroundColor: AppColors.danger,
               // P2-31：补语义标签（原来只有图标，读屏无法播报"挂断"）。
               tooltip: '挂断',
               // 挂断入口是**必须**的：没有它，用户在这 45s 里无法取消呼叫。

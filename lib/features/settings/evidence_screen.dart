@@ -3,6 +3,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../services/evidence_files.dart';
+import '../../core/theme.dart';
 
 /// 取证文件管理页（P2-11）：浏览 / 导出 / 手动清理。
 ///
@@ -103,7 +104,7 @@ class _EvidenceScreenState extends State<EvidenceScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
                 child: Text(
                   '共 ${items.length} 个文件 · ${_fmtSize(total)}\n'
                   '取证文件为本机用户资产，永不自动删除；仅在下方手动清理。',
@@ -115,7 +116,7 @@ class _EvidenceScreenState extends State<EvidenceScreen> {
                 child: items.isEmpty
                     ? const Center(
                         child: Padding(
-                          padding: EdgeInsets.all(24),
+                          padding: EdgeInsets.all(AppSpacing.xl),
                           child: Text(
                             '暂无录音取证文件。\n'
                             '当带「录音取证」动作的任务被触发时，录音会保存到这里。',

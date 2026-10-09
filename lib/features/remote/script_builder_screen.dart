@@ -8,6 +8,7 @@ import '../../remote/remote_store.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/script_executor.dart';
 import '../../domain/models/tts_voice.dart';
+import '../../core/theme.dart';
 
 /// 远程指令组装器：把 play/tts/notify/vibrate/record/delay 组装为序列，
 /// 一键发送至已配对端点（端点收到后立即执行，通知栏可随时终止）。
@@ -221,7 +222,7 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
       ),
       bottomNavigationBar: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: FilledButton.icon(
             icon: const Icon(Icons.send),
             label: const Text('发送并立即执行'),
@@ -230,7 +231,7 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
         ),
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
           TextField(
             controller: _nameCtrl,
@@ -243,7 +244,7 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
           if (_steps.isEmpty)
             const Card(
                 child: Padding(
-                    padding: EdgeInsets.all(14),
+                    padding: EdgeInsets.all(AppSpacing.lg),
                     child: Text('从下方添加动作与时延元素。端点收到后会立即依次执行，'
                         '通知栏全程显示进度并可随时终止。'))),
           for (var i = 0; i < _steps.length; i++)
@@ -285,11 +286,11 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
           const SizedBox(height: 16),
           const Card(
             child: Padding(
-              padding: EdgeInsets.all(12),
+              padding: EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '合规提示：远程指令组仅可用于本人设备或已获明确授权的场景。'
                 '接收端执行全程审计留痕，通知栏可见并可随时终止。',
-                style: TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -422,7 +423,7 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
               decoration: const InputDecoration(labelText: '播报文本'),
             ),
             const SizedBox(height: 12),
-            const Text('音色', style: TextStyle(fontSize: 12)),
+            const Text('音色', style: AppText.bodySmall),
             DropdownButton<String>(
               isExpanded: true,
               value: _voiceId,
@@ -432,7 +433,7 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
                   DropdownMenuItem(
                     enabled: false,
                     value: '__header_${d.name}',
-                    child: Text(d.label, style: const TextStyle(fontSize: 12)),
+                    child: Text(d.label, style: AppText.bodySmall),
                   ),
                   for (final v in TtsVoices.all.where((v) => v.dialect == d))
                     DropdownMenuItem(
@@ -548,9 +549,9 @@ class _VibrateStepDialogState extends State<_VibrateStepDialog> {
               const SizedBox(height: 8),
               if (fields.isEmpty)
                 const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8),
+                  padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
                   child: Text('固定节奏无可编辑参数（协议向后兼容：`{}` 语义不变）',
-                      style: TextStyle(fontSize: 12)),
+                      style: AppText.bodySmall),
                 ),
               for (final f in fields)
                 TextField(

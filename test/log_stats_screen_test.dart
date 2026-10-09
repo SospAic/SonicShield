@@ -310,9 +310,14 @@ void main() {
       final bad = colorOf(rowTitle(t0 + 1000, status: 'failed'));
       final skip = colorOf(rowTitle(t0 + 2000, status: 'skipped'));
 
-      expect(ok, Colors.green);
-      expect(bad, Colors.red);
-      expect(skip, Colors.orange, reason: '未知/跳过走兜底色，不能与成功混淆');
+      // 第八十一轮：语义色收敛到 AppColors（值等值保真，见 lib/core/theme.dart）。
+      // ⚠️ 必须比 ARGB 数值，不能比对象 —— `Colors.green` 是 `MaterialColor`，
+      //    而 `AppColors.success` 是普通 `Color`，`ColorSwatch.operator==` 要求
+      //    `runtimeType` 相同 ⇒ 比对象会因「类型不同」而假红（同 deep_pure_logic_test.dart）。
+      expect(ok.toARGB32(), Colors.green.toARGB32());
+      expect(bad.toARGB32(), Colors.red.toARGB32());
+      expect(skip.toARGB32(), Colors.orange.toARGB32(),
+          reason: '未知/跳过走兜底色，不能与成功混淆');
       expect({ok, bad, skip}, hasLength(3), reason: '三种状态必须互相可区分');
     });
 

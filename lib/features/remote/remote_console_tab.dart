@@ -13,6 +13,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
+import '../../core/theme.dart';
 
 /// 远程控制台（v1.6）：对已配对端点的完全控制——
 /// ping/状态快照/任务查看与开关/音效播放/守卫开关/音量调节/拍照/定位。
@@ -427,7 +428,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       children: [
         if (widget.channel == null && !_enabled) _enableHint(),
         if (widget.channel != null) _sessionBanner() else _endpointSelector(),
@@ -548,9 +549,9 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           _section('Ping'),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(AppSpacing.md),
               child: Text('往返 ${_lastPingAt!['rtt']} ms',
-                  style: const TextStyle(fontSize: 12)),
+                  style: AppText.bodySmall),
             ),
           ),
         ],
@@ -650,11 +651,11 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           _section('状态回执（status.get）'),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '端点待执行 ${_lastStatus!['pendingCount']} 条 · '
                 '版本 ${_lastStatus!['version'] ?? '?'}',
-                style: const TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -663,12 +664,12 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           _section('设备快照回执'),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(AppSpacing.md),
               child: Text(
                 '电量 ${_lastDevice!['batteryLevel']}%'
                 '${(_lastDevice!['charging'] as bool?) == true ? '（充电中）' : ''}\n'
                 '待执行 ${_lastDevice!['pendingCount']} 条 · 版本 ${_lastDevice!['version']}',
-                style: const TextStyle(fontSize: 12),
+                style: AppText.bodySmall,
               ),
             ),
           ),
@@ -699,7 +700,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           _section('拍照回执'),
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(AppSpacing.sm),
               child: _PhotoView(b64: _photoB64!),
             ),
           ),
@@ -734,7 +735,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     }
     return Card(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         child: DropdownButtonFormField<String>(
           initialValue: _selectedId.isEmpty ? null : _selectedId,
           decoration: const InputDecoration(
@@ -757,7 +758,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   }
 
   Widget _section(String title) => Padding(
-        padding: const EdgeInsets.only(top: 10, bottom: 6),
+        padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.sm),
         child: Text(title,
             style: Theme.of(context)
                 .textTheme
@@ -782,7 +783,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
             '仅 Android 生效，iOS 当前不支持（I-4）';
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.xs, AppSpacing.md, AppSpacing.sm),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -790,7 +791,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
               const Icon(Icons.volume_up, size: 20),
               const SizedBox(width: 8),
               Expanded(child: Text(volumeLabelForPercent(pct))),
-              Text('$pct%', style: const TextStyle(fontSize: 12)),
+              Text('$pct%', style: AppText.bodySmall),
             ]),
             Slider(
               value: _volumePct,
@@ -820,7 +821,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
               ],
             ),
             const SizedBox(height: 4),
-            Text(note, style: const TextStyle(fontSize: 11)),
+            Text(note, style: AppText.labelSmall),
           ],
         ),
       ),
@@ -838,14 +839,14 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     return Card(
       color: scheme.errorContainer,
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Row(children: [
           Icon(Icons.cloud_off, size: 18, color: scheme.onErrorContainer),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               '$name 已离线（broker 离线哨兵）：命令将入队，端点上线后自动执行',
-              style: TextStyle(fontSize: 12, color: scheme.onErrorContainer),
+              style: AppText.bodySmall.copyWith(color: scheme.onErrorContainer),
             ),
           ),
         ]),
@@ -863,19 +864,19 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (loc['error'] == true) {
       return const Card(
         child: Padding(
-          padding: EdgeInsets.all(12),
+          padding: EdgeInsets.all(AppSpacing.md),
           child: Text('定位失败（端点未授权定位或定位服务未开启）',
-              style: TextStyle(fontSize: 12)),
+              style: AppText.bodySmall),
         ),
       );
     }
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Text(
           'lat ${loc['lat']}, lng ${loc['lng']}'
           '（精度 ±${(loc['acc'] as num?)?.round() ?? '?'} m）',
-          style: const TextStyle(fontSize: 12),
+          style: AppText.bodySmall,
         ),
       ),
     );
@@ -890,14 +891,14 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (rows.isEmpty) {
       return const Card(
         child: Padding(
-          padding: EdgeInsets.all(12),
-          child: Text('端点暂无执行日志', style: TextStyle(fontSize: 12)),
+          padding: EdgeInsets.all(AppSpacing.md),
+          child: Text('端点暂无执行日志', style: AppText.bodySmall),
         ),
       );
     }
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -908,7 +909,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                   child: Text(
                     '${_fmtClock(raw['t'])} · ${raw['source']}/${raw['action']}'
                     ' · ${raw['status']}',
-                    style: const TextStyle(fontSize: 12),
+                    style: AppText.bodySmall,
                   ),
                 ),
           ],
@@ -927,21 +928,21 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (rows.isEmpty) {
       return const Card(
         child: Padding(
-          padding: EdgeInsets.all(12),
-          child: Text('端点音源库为空（可先在端点导入音源或预置库）', style: TextStyle(fontSize: 12)),
+          padding: EdgeInsets.all(AppSpacing.md),
+          child: Text('端点音源库为空（可先在端点导入音源或预置库）', style: AppText.bodySmall),
         ),
       );
     }
     return Card(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
               child: Text('共 $_assetsTotal 条（点选即指定播放）',
-                  style: const TextStyle(fontSize: 12)),
+                  style: AppText.bodySmall),
             ),
             for (final raw in rows.take(50))
               if (raw is Map)
@@ -950,11 +951,11 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                   visualDensity: VisualDensity.compact,
                   leading: const Icon(Icons.play_arrow, size: 18),
                   title: Text(raw['name'] as String? ?? '（未命名）',
-                      style: const TextStyle(fontSize: 13)),
+                      style: AppText.bodyMedium),
                   subtitle: Text(
                     '${_fmtDuration(raw['durationMs'])}'
                     '${_tagSuffix(raw['tags'])}',
-                    style: const TextStyle(fontSize: 11),
+                    style: AppText.labelSmall,
                   ),
                   onTap: () => _playAsset(raw['id'] as String?),
                 ),
@@ -973,14 +974,14 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (cats.isEmpty) {
       return const Card(
         child: Padding(
-          padding: EdgeInsets.all(12),
-          child: Text('端点无预置音源分类（尚未导入预置库）', style: TextStyle(fontSize: 12)),
+          padding: EdgeInsets.all(AppSpacing.md),
+          child: Text('端点无预置音源分类（尚未导入预置库）', style: AppText.bodySmall),
         ),
       );
     }
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: Wrap(
           spacing: 8,
           runSpacing: 8,
@@ -1064,10 +1065,10 @@ class _PhotoView extends StatelessWidget {
       return Image.memory(
         base64Decode(b64),
         errorBuilder: (_, __, ___) =>
-            const Text('图片解码失败', style: TextStyle(fontSize: 12)),
+            const Text('图片解码失败', style: AppText.bodySmall),
       );
     } on Object {
-      return const Text('图片解码失败', style: TextStyle(fontSize: 12));
+      return const Text('图片解码失败', style: AppText.bodySmall);
     }
   }
 }
@@ -1166,7 +1167,7 @@ class _VibrateStartDialogState extends State<_VibrateStartDialog> {
       children: [
         Text(
           '${f.label}：${f.fraction ? cur.toStringAsFixed(2) : cur.round()}',
-          style: const TextStyle(fontSize: 12),
+          style: AppText.bodySmall,
         ),
         Slider(
           min: lo,

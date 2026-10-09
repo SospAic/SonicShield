@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/providers.dart';
 import '../../domain/models/task.dart';
 import '../../services/background_service_manager.dart';
+import '../../core/theme.dart';
 
 /// 任务列表：启停开关 / 下一触发时间 / 长按删除 / **批量操作**。
 ///
@@ -122,7 +123,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       return Align(
         alignment: Alignment.centerRight,
         child: Padding(
-          padding: const EdgeInsets.only(right: 8),
+          padding: const EdgeInsets.only(right: AppSpacing.sm),
           child: TextButton.icon(
             key: const Key('task_batch_enter'),
             icon: const Icon(Icons.checklist),
@@ -137,7 +138,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
         child: Wrap(
           spacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
@@ -253,7 +254,7 @@ class _EmptyHint extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(AppSpacing.xxl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -293,7 +294,7 @@ class _TaskTile extends ConsumerWidget {
     final next = model.nextFireAt;
     final theme = Theme.of(context);
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
       child: ListTile(
         leading: selectionMode
             ? Checkbox(value: selected, onChanged: (_) => onToggle?.call())

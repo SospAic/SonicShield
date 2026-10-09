@@ -64,6 +64,11 @@ class ApiConfigStore {
   ///
   /// 编译器可用 `--dart-define=ONLINE_TTS_ENDPOINT=...` 覆盖。它走与 Azure 同一批
   /// 神经网络音色（含东北话），但无需账号 —— 出厂即可用（"在线语音需配置"的落点）。
+  ///
+  /// ⚠️ 关于 URL 里的 `TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4`：
+  /// 这是 **Microsoft Edge 浏览器「大声朗读」内置的公开固定值**（非机密、非本项目的
+  /// 凭据），Edge 客户端本身就以明文硬编码它。此处保留是为了免账号即可合成；
+  /// 它**不构成密钥泄露**，安全审计时请勿误判为硬编码凭据。
   static const String _builtInTtsEndpoint = String.fromEnvironment(
     'ONLINE_TTS_ENDPOINT',
     defaultValue: 'wss://speech.platform.bing.com/consumer/speech/synthesize/'

@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/providers.dart';
+import '../../core/theme.dart';
 
 enum _LogFilter { all, success, failed, skipped }
 
@@ -98,7 +99,7 @@ class _LogScreenState extends ConsumerState<LogScreen> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
             child: SegmentedButton<_LogFilter>(
               segments: const [
                 ButtonSegment(value: _LogFilter.all, label: Text('全部')),
@@ -139,9 +140,9 @@ class _LogScreenState extends ConsumerState<LogScreen> {
                           r['created_at'] as int);
                       final status = r['status'] as String? ?? '';
                       final color = switch (status) {
-                        'success' => Colors.green,
-                        'failed' => Colors.red,
-                        _ => Colors.orange,
+                        'success' => AppColors.success,
+                        'failed' => AppColors.danger,
+                        _ => AppColors.warning,
                       };
                       return ListTile(
                         dense: true,
@@ -158,7 +159,7 @@ class _LogScreenState extends ConsumerState<LogScreen> {
                         ),
                         title: Text(
                           '${df.format(ts)} · ${r['source']} · ${r['action']} · $status',
-                          style: const TextStyle(fontSize: 13),
+                          style: AppText.bodyMedium,
                         ),
                         subtitle: Text(
                           [
@@ -170,7 +171,7 @@ class _LogScreenState extends ConsumerState<LogScreen> {
                                 (r['message'] as String).isNotEmpty)
                               r['message'] as String,
                           ].join(' · '),
-                          style: const TextStyle(fontSize: 11),
+                          style: AppText.labelSmall,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),

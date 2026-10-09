@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/theme.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
@@ -139,16 +140,16 @@ class _PttTabState extends State<PttTab> {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       children: [
         if (_endpoints.isEmpty)
           const Card(
               child: Padding(
-                  padding: EdgeInsets.all(14), child: Text('尚未配对端点。请先完成扫码配对。')))
+                  padding: EdgeInsets.all(AppSpacing.lg), child: Text('尚未配对端点。请先完成扫码配对。')))
         else
           Card(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
               child: DropdownButtonFormField<String>(
                 initialValue: _selectedId.isEmpty ? null : _selectedId,
                 decoration: const InputDecoration(
@@ -185,7 +186,7 @@ class _PttTabState extends State<PttTab> {
                 child: CircleAvatar(
                   radius: 52,
                   backgroundColor:
-                      _recording ? Colors.red : Colors.deepOrange.shade400,
+                      _recording ? AppColors.danger : AppColors.warm,
                   child: Icon(
                       _recording ? Icons.radio_button_checked : Icons.mic,
                       size: 48,
@@ -200,9 +201,7 @@ class _PttTabState extends State<PttTab> {
               if (_lastResult != null) ...[
                 const SizedBox(height: 8),
                 Text(_lastResult!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.primary,
-                        fontSize: 13)),
+                    style: AppText.bodyMedium.copyWith(color: Theme.of(context).colorScheme.primary)),
               ],
             ],
           ),
@@ -210,12 +209,12 @@ class _PttTabState extends State<PttTab> {
         const SizedBox(height: 24),
         const Card(
           child: Padding(
-            padding: EdgeInsets.all(12),
+            padding: EdgeInsets.all(AppSpacing.md),
             child: Text(
               '对讲语音与遥控命令走同一端到端加密通道（AES-256-GCM），'
               'broker 不可见内容；音频仅由接收端在本地播放并审计留痕。'
               'v2 流式：边说边发、边收边放（约 0.5 秒一片）。',
-              style: TextStyle(fontSize: 12),
+              style: AppText.bodySmall,
             ),
           ),
         ),
