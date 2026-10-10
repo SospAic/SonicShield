@@ -426,6 +426,7 @@ class _TtsStepDialogState extends State<_TtsStepDialog> {
   /// "Too many elements"）。
   Future<void> _editPresets() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return; // await 之后必须重新确认挂载，否则 context 跨异步间隙使用
     final out = await showDialog<List<String>>(
       context: context,
       builder: (_) => _TtsPresetsDialog(presets: _presets),

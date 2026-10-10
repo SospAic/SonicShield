@@ -66,7 +66,12 @@ void main() {
           assignFromCtorRe.firstMatch(line);
       if (m != null) {
         dirVars.add(m.group(1)!);
-        apiFilesFound.add(m.group(2) ?? 'Directory');
+        // ⚠️ `assignFromCtorRe` 只有 **1 个**捕获组，`assignFromApiRe` 有 2 个。
+        // 直接写 `m.group(2)` 会在"构造函数赋值"形态上抛
+        // `RangeError: Value not in range: 2` —— 历史上没有文件写
+        // `final d = Directory(...)`，所以这个坑一直没被踩到（2026-10-10 被
+        // `lib/services/neural_tts.dart` 首次踩中）。用 groupCount 判一下。
+        apiFilesFound.add(m.groupCount >= 2 ? m.group(2)! : 'Directory');
       }
     }
     final bad = <(int, String)>[];
@@ -130,6 +135,16 @@ void main() {
       await Share.shareXFiles([XFile('\${dir.path}/a.enc')]);
       ''';
       expect(scan(ok), isEmpty, reason: '正确写法不能误报');
+
+      // 第三种形态：**构造函数赋值**（`final d = Directory(...)`）。
+      // 它走 `assignFromCtorRe`（只有 1 个捕获组），曾让 scan 抛 RangeError ——
+      // 这里把它钉住：既能检出，也不许崩。
+      const ctorForm = '''
+      final d = Directory(p.join(root, 'x'));
+      final path = '\$d/y.json';
+      ''';
+      expect(scan(ctorForm), hasLength(1),
+          reason: '构造函数赋值形态必须被检出（且不得抛 RangeError）');
     });
 
     test('DIP-03 每个目录 API 调用点都被识别（防 API 改名后锁空转）', () {
