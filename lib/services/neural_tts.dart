@@ -97,7 +97,8 @@ class NeuralTtsEngine {
     try {
       final audio = tts.generate(text: t, sid: 0, speed: 1.0);
       final wav = encodeWav(audio.samples, audio.sampleRate);
-      final support = await _supportDir();
+      // 同 ensureLoaded：目录 API 的返回值必须显式赋给局部变量（DIP 锁要求）。
+      final support = await getApplicationSupportDirectory();
       final tmp = File(
           p.join(support.path, 'sonic_shield_tts', 'tts_${_hash(t)}.wav'));
       await tmp.writeAsBytes(wav);
