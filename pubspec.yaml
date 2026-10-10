@@ -107,3 +107,6 @@ flutter:
     - assets/audio/
     - assets/audio/presets/
     - assets/tts/                      # 离线神经 TTS 模型（vits-piper-zh_CN-xiao_ya-medium）
+    # ⚠️ Flutter 的 assets 目录条目是**非递归**的：`assets/tts/` 只含该目录**直属**文件，
+    # 不会下钻到模型子目录。必须显式再列一层，否则模型不会打进包（曾致离线神经音色静默不可用）。
+    - assets/tts/vits-piper-zh_CN-xiao_ya-medium/
