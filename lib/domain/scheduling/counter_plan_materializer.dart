@@ -195,11 +195,60 @@ abstract final class CounterPlanMaterializer {
           '${i.toString().padLeft(2, '0')}';
       final taskId = '$taskPrefix$planId:$key';
       // 每次反击独立抽动作（种子绑定到具体时刻 ⇒ 与排序无关，可复现）。
+      //
+      // **按窗口的"动作配比"抽**（TTS / 震动 / 音效）——这是"昼夜导向"的落点：
+      // 白天窗口 `ttsWeight=0` ⇒ **永不喊话**（只放噪音 + 少量震动）；
+      // 夜间窗口 `ttsWeight` 占主导 ⇒ **以喊话为主**。不可用的一类（无音源 /
+      // 无文案）权重置零后**重新归一化**，只要任一类可用就一定抽得到。
       final arng = Random(planSeed('$taskId#act', fireAt));
+      final wTts = hasTts ? w.ttsWeight : 0.0;
+      final wVib = w.vibrateWeight;
+      final wAud = hasAudio ? w.audioWeight : 0.0;
+      final total = wTts + wVib + wAud;
+      final roll = arng.nextDouble() * (total > 0 ? total : 1.0);
       final ActionConfig action;
       final ActionType type;
       final List<String> assetIds;
-      if (hasAudio && (!hasTts || arng.nextBool())) {
+      if (wTts > 0 && roll < wTts) {
+        assetIds = const <String>[];
+        action = TtsAction(
+          text: plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)],
+          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
+          channel: AudioChannel.media,
+          voiceId: plan.voiceId,
+        );
+        type = ActionType.tts;
+      } else if (wVib > 0 && roll < wTts + wVib) {
+        assetIds = const <String>[];
+        action = RandomVibrateAction(
+          durationSecMin: w.durationSecMin,
+          durationSecMax: w.durationSecMax,
+          amplitudeMin: w.vibrateAmplitudeMin,
+          amplitudeMax: w.vibrateAmplitudeMax,
+        );
+        type = ActionType.randomVibrate;
+      } else if (wAud > 0) {
+        assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
+        action = PlayAudioAction(
+          volumeMin: w.volumeMin,
+          volumeMax: w.volumeMax,
+          durationSecMin: w.durationSecMin,
+          durationSecMax: w.durationSecMax,
+          channel: AudioChannel.media,
+          respectDnd: true,
+        );
+        type = ActionType.playAudio;
+      } else if (hasTts) {
+        // 兜底（配比与可用性完全对不上时）：退到 TTS。
+        assetIds = const <String>[];
+        action = TtsAction(
+          text: plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)],
+          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
+          channel: AudioChannel.media,
+          voiceId: plan.voiceId,
+        );
+        type = ActionType.tts;
+      } else if (hasAudio) {
         assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
         action = PlayAudioAction(
           volumeMin: w.volumeMin,
@@ -211,15 +260,7 @@ abstract final class CounterPlanMaterializer {
         );
         type = ActionType.playAudio;
       } else {
-        assetIds = const <String>[];
-        final text = plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)];
-        action = TtsAction(
-          text: text,
-          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
-          channel: AudioChannel.media,
-          voiceId: plan.voiceId,
-        );
-        type = ActionType.tts;
+        continue; // 不可达（物化入口已保证至少一类可用）。
       }
       tasks.add(Task(
         id: taskId,

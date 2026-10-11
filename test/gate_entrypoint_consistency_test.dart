@@ -95,33 +95,40 @@ void main() {
         reason: '★ 反例必须与真源不同 ⇒ GEC-02 在同一判据下会判红 ⇒ 判据非恒真');
   });
 
-  // ───────────────────── 阶段 D：CI ratchet 与设备层 BLOCKED（P2-27 / P2-28） ─────────────────────
+  // ───────────────────── 阶段 D：CI 收敛为 iOS IPA 构建（P2-27 收窄） ─────────────────────
+  // 2026-10-10：CI 收敛为「只构建未签名 iOS IPA」—— 覆盖率 ratchet / analyze /
+  // 宿主测试 / Android 构建 / 模拟器集成测试全部裁撤（改由本地 `scripts/gates.sh`
+  // 承担）。因此这里不再要求 CI 带 `--gate`/`--min-covered`，而是**锁住新形状**：
+  // 只剩 ios-build，且产出未签名 IPA。反例保证判据非恒真。
   final ci = File('.github/workflows/ci.yml').readAsStringSync();
 
-  /// ci.yml 里覆盖率 ratchet 步骤的 `--gate=<x>` / `--min-covered=<y>`。
-  String? ciGate() => RegExp(r'--gate=([0-9.]+)').firstMatch(ci)?.group(1);
-  String? ciMinCovered() =>
-      RegExp(r'--min-covered=([0-9]+)').firstMatch(ci)?.group(1);
+  /// 新 CI 判据：只保留 iOS IPA 构建，其余 job 一律不得存在。
+  bool ciIsIpaOnly(String src) =>
+      src.contains('ios-build') &&
+      src.contains('sonic_shield-unsigned.ipa') &&
+      !src.contains('analyze-test') &&
+      !src.contains('android-build') &&
+      !src.contains('emulator-test') &&
+      !src.contains('--min-covered=');
 
-  test('GEC-06 ★ CI 的覆盖率 ratchet 与 gates.sh 同阈值（PR 不得"全绿但覆盖下降"）', () {
-    expect(ciGate(), isNotNull,
-        reason: 'CI 里没有 `--gate=` ⇒ 覆盖率 ratchet 缺失，PR 可静默降覆盖（P2-27）');
-    expect(ciMinCovered(), isNotNull,
-        reason: 'CI 里没有 `--min-covered=` ⇒ 分母稀释防线在 CI 上不存在');
-    expect(double.tryParse(ciGate()!), shCovMin(),
-        reason: 'CI 的 --gate 必须与 gates.sh 默认值逐字一致，否则 CI 成了更松的门');
-    expect(int.tryParse(ciMinCovered()!), shMinCovered(),
-        reason: 'CI 的 --min-covered 必须与 gates.sh 默认值逐字一致');
+  test('GEC-06 ★ CI 收敛为「只构建 iOS IPA」（其余 job 已裁撤）', () {
+    expect(ciIsIpaOnly(ci), isTrue,
+        reason: 'CI 必须只剩 ios-build 并产出未签名 IPA；analyze/test/coverage/'
+            'android/emulator 均应裁撤（改由本地 gates.sh 承担）');
   });
 
-  test('GEC-06r 反例：把 CI 的 --gate 改小 → 与真源不一致（证明 GEC-06 非恒真）', () {
-    final bad = ci.replaceFirstMapped(
-        RegExp(r'--gate=([0-9.]+)'), (m) => '--gate=72.5');
-    expect(bad, isNot(ci), reason: '反例样本没构造成功 —— 替换没生效');
-    final badGate =
-        double.tryParse(RegExp(r'--gate=([0-9.]+)').firstMatch(bad)!.group(1)!);
-    expect(badGate, isNot(shCovMin()),
-        reason: '★ 反例必须与真源不同 ⇒ GEC-06 的相等判据会判红 ⇒ 判据非恒真');
+  test('GEC-06r 反例：旧形状（android/emulator/覆盖率 ratchet/无 iOS）都判红', () {
+    expect(ciIsIpaOnly('$ci\n  android-build:\n    runs-on: ubuntu-latest\n'),
+        isFalse, reason: '塞回 android-build 必须判红');
+    expect(ciIsIpaOnly('$ci\n  emulator-test:\n'), isFalse,
+        reason: '塞回 emulator-test 必须判红');
+    expect(
+        ciIsIpaOnly('$ci\n      run: dart run tool/coverage_report.dart '
+            '--gate=98.8 --min-covered=12653\n'),
+        isFalse,
+        reason: '塞回覆盖率 ratchet 必须判红');
+    expect(ciIsIpaOnly(ci.replaceAll('ios-build', 'X')), isFalse,
+        reason: '没有 iOS job 必须判红');
   });
 
   /// 设备套件"无 adb / 无设备"分支必须落在 BLOCKED，且由 ALLOW_DEVICE_SKIP 显式放行 ——

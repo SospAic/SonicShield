@@ -224,7 +224,11 @@ class RcEndpointService {
   /// 才是子类型，所以新增它会让老的两参闭包**不再兼容** —— 全库唯一的显式
   /// 赋值点（`test/endpoint_script_run_test.dart` ESR-06）已同步为该形态。
   /// 空串 ⇒ 由 `TtsVoices.byId` 回落系统默认音色（读不懂的配置回到最安全默认）。
-  Future<void> Function(String text, double volume, {String voiceId})?
+  ///
+  /// **返回 `bool`：是否真的发声**。`false`（音色不可用 / 合成失败 / 播放失败）
+  /// 会被执行器记进 `stepNotes` 并随终态回执回传 —— 否则控制端会看到
+  /// "回执成功但实际没出声"的**假阳性**（与播放步 `play` 同一口径，R-4②）。
+  Future<bool> Function(String text, double volume, {String voiceId})?
       ttsHandler;
   Future<void> Function(List<int> pattern)? vibrateHandler;
 
@@ -2277,13 +2281,22 @@ class RcEndpointService {
             // 入站数据不可信：音色 id 只做长度夹紧（未知 id 由 `TtsVoices.byId`
             // 回落默认音色，不需要在这里判"认不认识"）。
             final rawVoice = step.params['voiceId'] as String? ?? '';
-            await ttsHandler!(
+            final spoke = await ttsHandler!(
                 step.params['text'] as String? ?? '',
                 ((step.params['volume'] as num?)?.toDouble() ?? 0.8),
                 voiceId:
                     rawVoice.length > _maxVoiceIdLen
                         ? rawVoice.substring(0, _maxVoiceIdLen)
                         : rawVoice);
+            if (!spoke) {
+              // 结果回执：**没出声就如实记账**，随终态回传（避免假阳性）。
+              stepNotes.add('步骤 ${stepIndex + 1}（tts）未发声：合成或播放失败');
+              await logs.append(
+                  source: 'remote',
+                  action: 'script.run',
+                  status: 'failed',
+                  message: '步骤 ${stepIndex + 1}（tts）未发声：合成或播放失败');
+            }
           } else {
             stepNotes.add('步骤 ${stepIndex + 1}（tts）未执行：端点未装配语音播报能力');
             await logs.append(

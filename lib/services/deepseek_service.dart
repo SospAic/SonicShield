@@ -185,11 +185,18 @@ class DeepSeekService {
 "scheduleMode":"recurringRandom","occurrenceCount":3,"spanDays":3,
 "specificDate":null,"rangeStart":null,"rangeEnd":null,"weekdays":[1,2,3,4,5,6,7]}
 W={"enabled":true/false,"volumeMin":0-1,"volumeMax":0-1,
-"durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12}
+"durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12,
+"ttsWeight":0-1,"vibrateWeight":0-1,"vibrateAmplitudeMin":0-1,"vibrateAmplitudeMax":0-1}
 硬性要求：至少一个 enabled=true；presetIds 与 ttsTexts 不能同时为空；
-ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限。
-区间约定：工作日白天音量0.50-0.80、时长3-8；工作日夜0.30-0.50、3-5；
-休息日白天(可关)0.50-0.80、3-8；休息日夜(可关)0.10-0.30、3-5。
+ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限；ttsWeight+vibrateWeight≤1。
+ttsWeight/vibrateWeight 是**动作配比**：该时段每次反击选 TTS / 震动的概率，其余为音效。
+昼夜导向（必须遵守）：白天(6-21时)**尽量不喊话**——白天窗口 ttsWeight=0、
+vibrateWeight≈0.2、音量0.70-1.00（大量大音量噪音为主）、震动强度0.80-1.00（少量高强度震动）；
+夜间 ttsWeight≈0.6（以说烦人的话为主）、vibrateWeight≈0.3（震动配合）、
+音量0.10-0.30（轻幅度噪音）、震动强度0.40-0.80。
+区间约定：工作日白天音量0.70-1.00、时长3-8、配比(音效0/TTS0/震动0.2)；
+工作日夜0.10-0.30、3-5、配比(0.1/0.6/0.3)；休息日白天(可关)0.70-1.00、3-8、配比(0/0/0.2)；
+休息日夜(可关)0.10-0.30、3-5、配比(0.1/0.6/0.3)。
 排期：默认 scheduleMode="recurringRandom"（周一至周日循环随机）。
 presetIds 只能从此清单选择（可多选，建议3-6个）：
 $_allowedPresets
@@ -203,7 +210,11 @@ $_allowedPresets
     String w(PlanWindowParams x) => x.enabled
         ? '音量${x.volumeMin.toStringAsFixed(2)}-${x.volumeMax.toStringAsFixed(2)}、'
             '时长${x.durationSecMin}-${x.durationSecMax}、'
-            '每小时${x.actionsPerHourMin}-${x.actionsPerHourMax}'
+            '每小时${x.actionsPerHourMin}-${x.actionsPerHourMax}、'
+            '配比(音效${x.audioWeight.toStringAsFixed(2)}/'
+            'TTS${x.ttsWeight.toStringAsFixed(2)}/震动${x.vibrateWeight.toStringAsFixed(2)})、'
+            '震动强度${x.vibrateAmplitudeMin.toStringAsFixed(2)}-'
+            '${x.vibrateAmplitudeMax.toStringAsFixed(2)}'
         : 'enabled=false（不反击）';
     return '''
 你是「声盾」随机反击计划生成器。只输出一个 JSON 对象，禁止解释与代码块。
@@ -216,9 +227,13 @@ $_allowedPresets
 "occurrenceCount":1-96,"spanDays":1-92,"specificDate":"yyyy-MM-dd或null",
 "rangeStart":"yyyy-MM-dd或null","rangeEnd":"yyyy-MM-dd或null","weekdays":[1-7]}
 W={"enabled":true/false,"volumeMin":0-1,"volumeMax":0-1,
-"durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12}
+"durationSecMin":1-600,"durationSecMax":1-600,"actionsPerHour":0-12,
+"ttsWeight":0-1,"vibrateWeight":0-1,"vibrateAmplitudeMin":0-1,"vibrateAmplitudeMax":0-1}
 硬性要求：至少一个 enabled=true；presetIds 与 ttsTexts 不能同时为空；
-ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限。
+ttsTexts 每条不超过 20 字；音量/时长下限不得大于上限；ttsWeight+vibrateWeight≤1。
+ttsWeight/vibrateWeight 是**动作配比**：该时段每次反击选 TTS / 震动的概率，其余为音效。
+昼夜导向（必须遵守）：白天(${p.dayStartHour}-${p.dayEndHour}时)**尽量不喊话**（ttsWeight=0）；
+夜间以 TTS 说烦人的话为主 + 震动配合 + 轻幅度噪音。
 区间约定（**必须落在下列区间内**）：
 工作日白天(${w(p.workdayDay)})；工作日夜(${w(p.workdayNight)})；
 休息日白天(${w(p.restdayDay)})；休息日夜(${w(p.restdayNight)})；

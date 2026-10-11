@@ -22,6 +22,7 @@ import '../services/holiday_update_service.dart';
 import '../services/online_tts_client.dart';
 import '../services/playback_service.dart';
 import '../services/tts_service.dart';
+import '../services/neural_tts.dart';
 
 /// 全局单例数据库（main 阶段 open；UI 层只读句柄）。
 final databaseProvider = FutureProvider<AppDatabase>((_) => AppDatabase.open());
@@ -40,17 +41,24 @@ final deepseekServiceProvider = FutureProvider<DeepSeekService>((ref) async {
   return DeepSeekService(client: http.Client(), config: cfg);
 });
 
-/// 统一 TTS 入口（v2.0）：供设置页「试听」按音色走系统 TTS / 在线语音。
+/// 统一 TTS 入口（v2.0）：供设置页「试听」按音色走系统 TTS / 在线语音 / 神经 TTS。
 ///
 /// 与 `main.dart` / `background_engine.dart` 的设备层装配同源：都是把
-/// 「FlutterTts + 在线客户端 + 播放器」两个原语注入 [TtsService]，决策逻辑
-/// 仍留在可测的 `tts_service.dart`。装配本身不触碰任何插件——只在真正
-/// `say()` 时才拉起平台通道，因此宿主 `pump` 阶段是安全的。
+/// 「FlutterTts + 在线客户端 + 神经引擎 + 播放器」原语注入 [TtsService]，
+/// 决策逻辑仍留在可测的 `tts_service.dart`。装配本身不触碰任何插件——只在
+/// 真正 `say()` 时才拉起平台通道，因此宿主 `pump` 阶段是安全的。
+///
+/// 神经引擎是长生命周期单例：首次 `speak` 时才把模型资产拷贝到私有目录并
+/// 构造原生句柄（[NeuralTtsEngine.ensureLoaded]），失败只返回 false、由
+/// [TtsService] 回落系统音色，App 永不因此崩溃。
+final _neuralTts = NeuralTtsEngine();
+
 final ttsServiceProvider = FutureProvider<TtsService>((ref) async {
   final cfg = await ref.watch(apiConfigStoreProvider.future);
   final playback = PlaybackService();
   return TtsService(
     speakSystem: (text, volume, match) => _speakSystemTts(text, volume, match),
+    speakNeural: _neuralTts.speak,
     speakOnline: (text, volume, voiceName) async {
       // 选通路（Edge 免 Key WebSocket / Azure REST）由 `buildOnlineTtsClient`
       // 统一决策；返回 null = 未配置或端点不可用，直接判失败、不发请求。

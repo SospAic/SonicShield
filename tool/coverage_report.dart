@@ -78,6 +78,18 @@ const Map<String, String> _deviceOnly = <String, String>{
       '应用装配入口：main() 是 runApp 之前的原生插件装配链（本地通知渠道、'
           '后台服务 init、FlutterTts），并以 runApp(const ProviderScope(...)) 收尾；'
           '宿主测试调用它等于把整个 App 真正跑起来。覆盖方：真机冷启动冒烟。',
+
+  // ── 内置神经 TTS 引擎（sherpa-onnx 原生 FFI）──────────────────────────
+  // 未覆盖的是 ensureLoaded/speak/dispose：把模型资产从 rootBundle 拷到应用
+  // 私有目录、构造 `sherpa.OfflineTts`（onnxruntime 原生 FFI）、合成 WAV、
+  // 用 just_audio 出声 —— 全部依赖真机/模拟器上的原生库与音频设备，
+  // 宿主测试物理上加载不了原生库。纯逻辑（选路/回落）在 `tts_service.dart`，
+  // 已由宿主测试覆盖。由谁覆盖：真机「神经音色试听/喊话」集成路径。
+  'lib/services/neural_tts.dart':
+      '内置神经 TTS 引擎：ensureLoaded/speak/dispose 依赖 sherpa-onnx '
+          'onnxruntime 原生 FFI 与 just_audio 播放器、rootBundle 资产拷贝，'
+          '宿主测试无法加载原生库与音频设备；纯选路逻辑在 tts_service.dart 已覆盖。'
+          '覆盖方：真机神经音色试听/喊话集成路径。',
 };
 
 /// 声明式数据文件白名单：**整文件只有 `static const` 声明，没有可执行语句**。
