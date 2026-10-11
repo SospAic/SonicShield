@@ -186,6 +186,15 @@ void main() {
     );
   }
 
+  /// 当前用例要打开的 TAB（第八十二轮：设置页由超长单页改为 4 个 TAB）。
+  ///
+  /// 各 group 用 `setUp(() => settingsTab = N)` 声明自己需要哪个 TAB；默认 0 =
+  /// 「执行与护栏」。⚠️ `TabBarView` 是**惰性**的 —— 非活动 TAB 的子树不在
+  /// widget 树里，`find.text(...)` 找不到它们，必须先切过去。
+  int settingsTab = 0;
+  // 每个用例都从 TAB 0 起（组内 setUp 再按需覆盖）。
+  setUp(() => settingsTab = 0);
+
   Future<void> pumpSettings(
     WidgetTester tester, {
     List<Override> overrides = const [],
@@ -222,6 +231,13 @@ void main() {
       () => find.text('电源策略').evaluate().isNotEmpty,
       reason: '设置页应渲染出分区标题',
     );
+    if (settingsTab != 0) {
+      // 切到目标 TAB：`TabBarView` 惰性构建，不切过去就找不到该页的控件。
+      await tester.tap(find.byType(Tab).at(settingsTab));
+      await tester.pump();
+      // 切页动画约 300ms；不用 pumpAndSettle（本项目 FakeAsync 下语义不可靠）。
+      await tester.pump(const Duration(milliseconds: 400));
+    }
   }
 
   Future<String?> prefString(String key) async =>
@@ -254,17 +270,23 @@ void main() {
   // ─────────────────── SET-01 渲染 ───────────────────
 
   group('SET-01 渲染', () {
-    testWidgets('SET-01 五个分区与全部可操作项都在（不静默缺项）', (tester) async {
+    testWidgets('SET-01 四个 TAB 与「执行与护栏」分区/可操作项都在（不静默缺项）',
+        (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
 
       expect(find.widgetWithText(AppBar, '设置'), findsOneWidget);
+      // 第八十二轮：设置页由「超长单页」拆成 4 个 TAB（TabBar 常驻可见）。
+      for (final t in ['执行与护栏', '保活与备份', '语音与音色', '数据与合规']) {
+        expect(find.text(t), findsOneWidget, reason: 'TAB「$t」');
+      }
+      // TAB 0「执行与护栏」的分区与可操作项。
+      // （其余 TAB 的分区/控件由各自分组的用例覆盖：SET-04/05/06 = 保活与备份、
+      //   SET-07 = 语音与音色、SET-04/SET-01d = 数据与合规。）
       for (final section in [
         '电源策略',
         '强制免打扰时段（合规护栏）',
         '夜间独立豁免', // v1.9 新增分区
-        '后台保活',
-        '任务备份',
       ]) {
         expect(find.text(section), findsOneWidget, reason: '分区「$section」');
       }
@@ -272,12 +294,6 @@ void main() {
       for (final seg in ['性能优先', '平衡', '省电']) {
         expect(find.text(seg), findsOneWidget, reason: '电源段 $seg');
       }
-      // 保活两项 + 备份两项 + 合规一项
-      expect(find.text('电池优化白名单与厂商引导'), findsOneWidget);
-      expect(find.text('精确闹钟权限（Android 12+）'), findsOneWidget);
-      expect(find.text('导出任务（JSON）'), findsOneWidget);
-      expect(find.text('导入任务（JSON）'), findsOneWidget);
-      expect(find.text('合规使用须知'), findsOneWidget);
       // v1.9：夜间独立豁免主开关（合规护栏的**削弱**入口，必须在页面上可见）
       expect(find.text('夜间独立豁免（主开关）'), findsOneWidget);
       expect(find.textContaining('本月豁免次数'), findsOneWidget);
@@ -318,6 +334,7 @@ void main() {
     testWidgets('SET-01d 「关于」显示 AppMeta.displayVersion（含构建号，不写死）',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
+      settingsTab = 3; // 「数据与合规」TAB
       await pumpSettings(tester);
 
       expect(find.text('关于'), findsOneWidget);
@@ -517,6 +534,7 @@ void main() {
   group('SET-04 弹窗与深链', () {
     testWidgets('SET-04 点「合规使用须知」→ 弹窗有正文，可关闭', (tester) async {
       SharedPreferences.setMockInitialValues({});
+      settingsTab = 3; // 「数据与合规」TAB
       await pumpSettings(tester);
 
       await tester.tap(find.text('合规使用须知'));
@@ -531,6 +549,7 @@ void main() {
     testWidgets('SET-04b 点「电池优化白名单与厂商引导」→ 底部引导弹窗（含通用步骤）',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
+      settingsTab = 1; // 「保活与备份」TAB
       await pumpSettings(tester);
 
       await tester.tap(find.text('电池优化白名单与厂商引导'));
@@ -545,6 +564,7 @@ void main() {
     testWidgets('SET-04c 点「精确闹钟权限」→ 打到 sonic_shield/native 的 openExactAlarmSettings',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
+      settingsTab = 1; // 「保活与备份」TAB
       await pumpSettings(tester);
 
       await tester.tap(find.text('精确闹钟权限（Android 12+）'));
@@ -562,6 +582,7 @@ void main() {
   // ─────────────────── SET-05 导出 ───────────────────
 
   group('SET-05 导出任务', () {
+    setUp(() => settingsTab = 1); // 「保活与备份」TAB
     testWidgets('SET-05 无任务 → 明确说「没有可导出的任务」，且**不生成文件**',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
@@ -748,6 +769,7 @@ void main() {
   // ─────────────────── SET-06 导入 ───────────────────
 
   group('SET-06 导入任务', () {
+    setUp(() => settingsTab = 1); // 「保活与备份」TAB
     /// 造一个"导出格式"的备份文件。
     File writeBackup(String name, Map<String, dynamic> payload) {
       final f = File('${tmp.path}/$name');
@@ -898,6 +920,7 @@ void main() {
   // ─────────────── SET-07 语音与接口 / 反击计划（v2.0） ───────────────
 
   group('SET-07 语音与接口与反击计划', () {
+    setUp(() => settingsTab = 2); // 「语音与接口」TAB
     testWidgets('SET-07a 语音与接口：配置入口 + 音色分组 + 试听都在', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
@@ -1646,6 +1669,8 @@ void main() {
     testWidgets('SET-07o 点「取证文件管理」→ 打开取证页（导航真的发生）',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
+      // 「取证文件管理」在「数据与合规」TAB（不是本组默认的语音 TAB）。
+      settingsTab = 3;
       // 取证页默认 store 基于应用文档目录 —— 给通道一个真实空目录，避免
       // 未打桩时抛 MissingPlatformDirectoryException 掩盖导航是否发生。
       messenger().setMockMethodCallHandler(kPathProvider, (call) async {
@@ -1703,10 +1728,14 @@ void main() {
     }, timeout: perTest);
   });
 
-  // ─────────────── SET-08 全局执行总开关与例外清单（v79） ───────────────
+  // ─────────────── SET-08 夜间豁免例外清单（v79） ───────────────
+  //
+  // ⚠️ 第八十二轮：「全局执行总开关」已**移植到守护首页** —— 其渲染/切档用例
+  // 随之移到 `guard_screen_test.dart`（GRM 组）。本组只保留仍在本页的
+  // **夜间独立豁免**例外清单。
 
-  group('SET-08 全局执行总开关与例外清单（v79）', () {
-    Task mk(String id, {bool? quietExempt, bool forceRun = false}) => Task(
+  group('SET-08 夜间豁免例外清单（v79）', () {
+    Task mk(String id, {bool? quietExempt}) => Task(
           id: id,
           name: '任务$id',
           enabled: true,
@@ -1721,18 +1750,15 @@ void main() {
           createdAt: DateTime(2024, 1, 1),
           updatedAt: DateTime(2024, 1, 1),
           quietExempt: quietExempt,
-          forceRun: forceRun,
         );
 
-    /// 起页；两个"例外清单"provider 用**非空**结果注入，专门驱动列表分支。
+    /// 起页：夜间豁免例外清单用**非空**结果注入，专门驱动列表分支。
     ///
     /// ⚠️ 视口要**足够高**（6000）：设置页 body 是惰性 `ListView`，只构建
-    /// 「视口 + cacheExtent」内的子项。4000 时刚好切在夜间豁免例外清单与
-    /// 总开关例外清单之间 —— 上面那条 `任务a` 建出来了、下面 `任务b` 没有，
-    /// 断言会毫无道理地找不到元素。
-    Future<void> pumpMaster(WidgetTester tester, {String? mode}) async {
-      SharedPreferences.setMockInitialValues(
-          {if (mode != null) PrefsKeys.runMasterMode: mode});
+    /// 「视口 + cacheExtent」内的子项；视口太矮时列表项没被建出来，断言会
+    /// 毫无道理地找不到元素。
+    Future<void> pumpExempt(WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(const {});
       tester.view.physicalSize = const Size(1200, 6000);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
@@ -1743,52 +1769,22 @@ void main() {
             quietExemptCountProvider.overrideWith((ref) async => 0),
             quietExemptOverrideTasksProvider
                 .overrideWith((ref) async => [mk('a', quietExempt: true)]),
-            forceRunTasksProvider
-                .overrideWith((ref) async => [mk('b', forceRun: true)]),
           ],
           child: const MaterialApp(home: SettingsScreen()),
         ),
       );
       await tester.pump(const Duration(milliseconds: 50));
       await waitFor(tester,
-          () => find.textContaining('全局执行总开关').evaluate().isNotEmpty,
-          reason: '设置页应渲染出总开关区块');
-      // ⚠️ 进页的 post-frame 回调会 `ref.invalidate(forceRunTasksProvider)`
-      // （settings_screen.dart initState），被覆盖的 provider 因此会**第二次**
-      // 解析 —— 中间有一瞬是 `AsyncLoading`（清单显示 0 条）。必须等它回到
-      // 非空态，否则断言会撞在这一瞬上（实测：`任务b` 找不到）。
-      await waitFor(tester,
-          () => find.textContaining('1 条暂停期间仍执行').evaluate().isNotEmpty,
-          reason: '总开关例外清单应完成 invalidate 后的第二次解析');
+          () => find.textContaining('任务a（强制豁免）').evaluate().isNotEmpty,
+          reason: '夜间豁免例外清单应完成 provider 解析并渲染');
     }
 
-    testWidgets('SET-08a 例外清单非空逐条列出（夜间豁免偏离 + 强制执行）',
-        (tester) async {
-      await pumpMaster(tester, mode: 'off');
+    testWidgets('SET-08a 夜间豁免例外清单非空逐条列出', (tester) async {
+      await pumpExempt(tester);
 
       expect(find.textContaining('任务a（强制豁免）'), findsOneWidget,
           reason: '夜间豁免"例外清单"必须列出偏离主开关默认值的任务，'
               '否则用户以为护栏完好、实则某条任务在免打扰时段照响');
-      expect(find.textContaining('任务b（强制执行）'), findsOneWidget,
-          reason: '总开关暂停期间仍执行的任务必须**显式列出**，'
-              '避免"以为全停了、其实还有几条在响"');
-      expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget,
-          reason: '强制关闭档的状态行必须如实说明"始终暂停"');
-      await settleSnackBars(tester);
-    }, timeout: perTest);
-
-    testWidgets('SET-08b 点「强制开启」→ 状态行改写并落库', (tester) async {
-      await pumpMaster(tester);
-
-      await tester.tap(find.text('强制开启'));
-      await waitFor(tester,
-          () => find.textContaining('强制开启：忽略自动窗口').evaluate().isNotEmpty,
-          reason: '切换到强制开启后状态行必须改写');
-      expect(
-          (await SharedPreferences.getInstance())
-              .getString(PrefsKeys.runMasterMode),
-          'on',
-          reason: '远程/本机都用同一个 prefs 键，点选必须真的落库');
       await settleSnackBars(tester);
     }, timeout: perTest);
   });

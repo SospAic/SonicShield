@@ -84,6 +84,47 @@ void main() {
       // 空关键词表 = 不挑音色
       expect(TtsVoices.pickSystemVoice(<Object?>[], const <String>[]), isNull);
     });
+
+    test('TV-08 ★ 边界规则：`male` 不得命中 `female`（否则「男声」挑到女声）', () {
+      // Android 系统音色名形如 `zh-cn-x-ccc#female_1-local` / `#male_1-local`，
+      // 而 `'male'` 是 `'female'` 的子串 —— 直接 contains 会让男声命中女声。
+      final voices = <Map<String, String>>[
+        {'name': 'zh-cn-x-ccc#female_1-local', 'locale': 'zh-CN'},
+        {'name': 'zh-cn-x-ccc#male_1-local', 'locale': 'zh-CN'},
+      ];
+      expect(TtsVoices.pickSystemVoice(voices, <String>['male', '男'])!['name'],
+          'zh-cn-x-ccc#male_1-local');
+      expect(
+          TtsVoices.pickSystemVoice(voices, <String>['female', '女'])!['name'],
+          'zh-cn-x-ccc#female_1-local');
+    });
+
+    test('TV-09 边界规则不误伤：词首/词尾/分隔符边界仍命中；CJK 按包含匹配', () {
+      // 词首：'male_1' 在名字开头
+      expect(
+          TtsVoices.pickSystemVoice(<Map<String, String>>[
+            {'name': 'male_1', 'locale': 'zh-CN'},
+          ], <String>['male'])!['name'],
+          'male_1');
+      // 分隔符两侧：'#male_1-local'
+      expect(
+          TtsVoices.pickSystemVoice(<Map<String, String>>[
+            {'name': 'x#male-local', 'locale': 'zh-CN'},
+          ], <String>['male'])!['name'],
+          'x#male-local');
+      // CJK 关键词不含 ASCII 字母 ⇒ 退化为包含匹配
+      expect(
+          TtsVoices.pickSystemVoice(<Map<String, String>>[
+            {'name': '女声引擎', 'locale': 'zh-CN'},
+          ], <String>['女'])!['name'],
+          '女声引擎');
+      // 'female' 整体仍可命中（它自己的边界是合法的）
+      expect(
+          TtsVoices.pickSystemVoice(<Map<String, String>>[
+            {'name': 'x#female_1-local', 'locale': 'zh-CN'},
+          ], <String>['female'])!['name'],
+          'x#female_1-local');
+    });
   });
 
   group('TSVC 统一 TTS 入口', () {

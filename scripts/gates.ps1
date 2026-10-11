@@ -49,6 +49,12 @@
 #                            ⇒ 分子 12666 → **12661**，**分母同减 5**（12813 → 12808）⇒ 比率 98.85% 逐位不变。
 #                            即"覆盖率下降"全部来自**生产代码净删**，**不是**测试退化（用例数 2603 → 2609，只增不减）。
 #                            按 floor 同步下调 5 行，以保住「实测 − 8 行抖动余量」这条纪律（12661 − 8 = 12653）。
+#   第 81 轮（2026-10-08）：MIN_COVERED 12653 → **12658**（**正向抬升 5 行**）；可测面 98.87%（12666/12811）
+#                            / 全局 93.98%（12674/13486）；COVERAGE_MIN 保持 98.8。样式收敛轮（含 lib/** 改动）。
+#   第 82 轮（2026-10-11）：MIN_COVERED 12658 → **12702**（**正向抬升 44 行**）；可测面 98.86%（12710/12857）
+#                            / 全局 93.96%（12718/13536）；功能层 2624 → 2627；COVERAGE_MIN 保持 98.8。
+#                            UI 结构重构轮（总开关移植守护页 + 设置页拆 4 TAB + 离线 TTS 根因修复，含 lib/** 改动）。
+#                            MIN_COVERED = 实测分子 12710 − 8 行抖动余量 = 12702。
 #   $env:SKIP_COVERAGE = '1'             # 只在排查覆盖率工具本身时用
 # 任何一步失败立即退出非零 —— CI 与本地同一套判据。
 # ⚠️ 覆盖率阈值是 **ratchet 地板，只升不降，不是目标值**：
@@ -175,7 +181,7 @@ if (($out -join "`n") -match "All tests passed") {
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
     $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.8' }
-    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12658' }
+    $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12702' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {
         # 没有产物**不等于**通过 —— 与"设备没接上"同源（未执行 ≠ 成功）。

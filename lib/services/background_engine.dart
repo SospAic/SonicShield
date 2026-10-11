@@ -536,7 +536,14 @@ Future<void> _engineBody(ServiceInstance service) async {
           // 音色匹配是增强：拿不到列表/设置失败都不该让播报失败。
         }
       }
-      await tts.speak(text).timeout(const Duration(seconds: 15));
+      // ★ 离线播报「没声音」的根因修复：`speak` 在 Android/iOS 上**默认立即返回**
+      //   （原生仅在 `awaitSpeakCompletion && QUEUE_FLUSH` 时才挂起 result），于是
+      //   下面 finally 里的 `stop()` 会把刚排队的朗读**当场取消**。开启「等朗读
+      //   完成」后 speak 真正等到 `onDone`，stop() 变成无害清理。
+      await tts.awaitSpeakCompletion(true).timeout(const Duration(seconds: 3));
+      // 朗读预算按字数估（中文约 4 字/秒）+ 8s 余量，夹在 15..120s。
+      final secs = (8 + text.length ~/ 4).clamp(15, 120).toInt();
+      await tts.speak(text).timeout(Duration(seconds: secs));
     } finally {
       try {
         await tts.stop().timeout(const Duration(seconds: 3));

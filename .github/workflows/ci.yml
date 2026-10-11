@@ -36,10 +36,10 @@ jobs:
         run: flutter test --coverage
 
       # 覆盖率 ratchet（P2-27）：与本地 `scripts/gates.sh` 门禁 4/4 **同判据同阈值**
-      # （98.8 / 12658，由 test/gate_entrypoint_consistency_test.dart GEC-06 机器锁定）。
+      # （98.8 / 12702，由 test/gate_entrypoint_consistency_test.dart GEC-06 机器锁定）。
       # 只降不升：跌破即 exit 1 让 PR 变红，避免"全绿但覆盖分数下降"。
       - name: Coverage ratchet
-        run: dart run tool/coverage_report.dart --gate=98.8 --min-covered=12658
+        run: dart run tool/coverage_report.dart --gate=98.8 --min-covered=12702
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

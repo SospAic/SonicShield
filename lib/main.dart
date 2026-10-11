@@ -161,7 +161,16 @@ Future<void> _speakSystemTts(
         // 音色匹配是**增强**：拿不到语音列表/设置失败都不该让播报失败。
       }
     }
-    await tts.speak(text).timeout(const Duration(seconds: 15));
+    // ★ 离线播报「没声音」的根因修复：`speak` 在 Android/iOS 上**默认立即返回**
+    //   （原生仅在 `awaitSpeakCompletion && QUEUE_FLUSH` 时才挂起 result），于是
+    //   下面 finally 里的 `stop()` 会把刚排队的朗读**当场取消** —— 离线语音因此
+    //   几乎听不到。开启「等朗读完成」后 speak 真正等到 `onDone`，stop() 变成
+    //   无害清理（插件默认 queueMode 即 QUEUE_FLUSH，满足前提）。
+    await tts.awaitSpeakCompletion(true).timeout(const Duration(seconds: 3));
+    // 朗读预算按字数估（中文约 4 字/秒）+ 8s 余量，夹在 15..120s：
+    // 既不让长文本被 15s 截断，也不让「无引擎」时无限等。
+    final secs = (8 + text.length ~/ 4).clamp(15, 120).toInt();
+    await tts.speak(text).timeout(Duration(seconds: secs));
   } finally {
     try {
       await tts.stop().timeout(const Duration(seconds: 3));

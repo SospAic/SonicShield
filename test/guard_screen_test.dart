@@ -572,4 +572,101 @@ void main() {
           reason: '守卫已在运行，不该误报"需要守卫"');
     }, timeout: perTest);
   });
+
+  // ─────────── GRM 全局执行总开关（第八十二轮：从设置页移植到本页） ───────────
+  //
+  // 第八十二轮把「全局执行总开关（节假日自动暂停）」从设置页移到守护首页，
+  // 用例随之从 `settings_screen_test.dart` 的 SET-08 迁到这里 —— 覆盖：
+  // 卡片渲染 / 例外清单默认折叠 5 条 + 「展开全部」/ 切档落库。
+
+  group('GRM 全局执行总开关（移植到守护首页）', () {
+    Task mkForced(String id) {
+      final base = DateTime(2024, 1, 1);
+      return Task(
+        id: id,
+        name: '任务$id',
+        enabled: true,
+        triggerType: TriggerType.dailyAt,
+        trigger: const DailyTrigger(time: TimeSpec(hour: 10, minute: 0)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'T', body: 'B'),
+        assetIds: const [],
+        cooldownSec: 60,
+        quietPolicy: QuietPolicy.skip,
+        priority: 0,
+        createdAt: base,
+        updatedAt: base,
+        forceRun: true,
+      );
+    }
+
+    Future<void> pumpWithForced(
+      WidgetTester tester, {
+      required List<Task> forced,
+      String? mode,
+    }) async {
+      SharedPreferences.setMockInitialValues(
+          {if (mode != null) PrefsKeys.runMasterMode: mode});
+      final ctrl = StreamController<EngineState>.broadcast();
+      addTearDown(() async => ctrl.close());
+      BackgroundServiceManager.lastForTest = idle;
+      BackgroundServiceManager.stateForTest = ctrl.stream;
+
+      tester.view.physicalSize = const Size(1200, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [
+          databaseProvider.overrideWith((ref) async => db),
+          forceRunTasksProvider.overrideWith((ref) async => forced),
+        ],
+        child: const MaterialApp(home: GuardScreen()),
+      ));
+      ctrl.add(idle);
+      await tester.pump();
+      await drainAsync(tester);
+    }
+
+    testWidgets('GRM-01 总开关卡片在守护页；例外清单默认最多 5 条 + 可展开/收起',
+        (tester) async {
+      final forced = [for (var i = 0; i < 8; i++) mkForced('t$i')];
+      await pumpWithForced(tester, forced: forced, mode: 'off');
+
+      await waitForText(tester, '全局执行总开关');
+      await waitForText(tester, '8 条暂停期间仍执行');
+      await waitForText(tester, '强制关闭：始终暂停');
+
+      expect(find.textContaining('· 任务t0（强制执行）'), findsOneWidget);
+      expect(find.textContaining('· 任务t4（强制执行）'), findsOneWidget,
+          reason: '折叠态必须展示前 5 条');
+      expect(find.textContaining('· 任务t5（强制执行）'), findsNothing,
+          reason: '折叠态不该展示第 6 条（用户要求默认 5 条）');
+
+      await tester.tap(find.text('展开全部（8）'));
+      await tester.pump();
+      expect(find.textContaining('· 任务t7（强制执行）'), findsOneWidget,
+          reason: '点「展开全部」后必须能看到第 6..8 条');
+
+      await tester.tap(find.text('收起'));
+      await tester.pump();
+      expect(find.textContaining('· 任务t5（强制执行）'), findsNothing,
+          reason: '点「收起」后回到只展示前 5 条');
+    }, timeout: perTest);
+
+    testWidgets('GRM-02 切「强制开启」→ 状态行改写 + 落库', (tester) async {
+      await pumpWithForced(tester, forced: const [], mode: 'off');
+      await waitForText(tester, '强制关闭：始终暂停');
+      await waitForText(tester, '无：暂停期间不执行任何任务');
+
+      await tester.tap(find.text('强制开启'));
+      await waitForText(tester, '强制开启：忽略自动窗口');
+      expect(
+          (await SharedPreferences.getInstance())
+              .getString(PrefsKeys.runMasterMode),
+          'on',
+          reason: '远程/本机都用同一个 prefs 键，点选必须真的落库');
+      await retireSnackBars(tester);
+    }, timeout: perTest);
+  });
 }

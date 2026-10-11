@@ -22,7 +22,6 @@ import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../domain/models/tts_voice.dart';
 import '../../domain/scheduling/counter_plan_random.dart';
-import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/holiday_update_service.dart';
 import '../../services/native_bridge.dart';
@@ -50,12 +49,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 存 `SharedPreferences`（与本页其它设置同一存储）。**不做 DB 读取** ——
   /// kv 表要走一次 sqflite 往返，会让整页 widget 测试留下未完成的锁超时 Timer。
   bool _quietExemptMaster = false;
-
-  /// 全局执行总开关（v79，docs/20 §9）。默认 [RunMasterMode.auto]。
-  ///
-  /// 与 [_quietExemptMaster] 是**两个独立开关**：本开关管"整体是否停摆"
-  /// （法定休息日自动暂停），夜间豁免管"免打扰时段能否出声"。
-  RunMasterMode _runMasterMode = RunMasterMode.auto;
 
   // ---------------- 语音与接口 / 反击计划（v2.0） ----------------
   //
@@ -297,8 +290,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // 框架直接断言拦下（实测：整页用例全红）。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) ref.invalidate(quietExemptCountProvider);
-      // 全局执行总开关的例外清单同样每次进入重算（provider 亦非 autoDispose）。
-      if (mounted) ref.invalidate(forceRunTasksProvider);
     });
   }
 
@@ -314,8 +305,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
           ComplianceGuardrails.defaultQuietEndHour;
       _quietExemptMaster = p.getBool(PrefsKeys.quietExemptMaster) ?? false;
-      _runMasterMode =
-          RunMasterMode.parse(p.getString(PrefsKeys.runMasterMode));
       _dsBaseUrl = cfg.baseUrl;
       _dsModel = cfg.model;
       _dsApiKey = cfg.apiKey;
@@ -332,13 +321,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  /// 「月-日 时:分」友好格式；null（如强制模式无自动切换点）→ 「—」。
-  static String _fmtMd(DateTime? t) {
-    if (t == null) return '—';
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${t.month}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
   }
 
   // ---------------- 语音与接口（v2.0） ----------------
@@ -714,22 +696,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  /// 切换「全局执行总开关」（v79，docs/20 §9）。
-  ///
-  /// 三态直接落 pref 并请求引擎重排 —— 引擎每轮重读，无需重启服务。
-  /// 强制关闭有"整体停摆"的后果，与夜间豁免同为**削弱执行**的操作，
-  /// 但不削弱合规护栏（只是不执行），故不做二次确认弹窗，仅留状态行说明。
-  Future<void> _saveRunMaster(RunMasterMode mode) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(PrefsKeys.runMasterMode, mode.name);
-    if (mounted) setState(() => _runMasterMode = mode);
-    await BackgroundServiceManager.instance.replan();
-    if (mounted) {
-      ref.invalidate(forceRunTasksProvider);
-      _snack('全局执行总开关：${mode.label}');
-    }
-  }
-
   Future<void> _savePower(String mode) async {
     final p = await SharedPreferences.getInstance();
     await p.setString('power_mode', mode);
@@ -748,9 +714,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
-      body: ListView(
+      body: DefaultTabController(
+        length: 4,
+        child: Column(
+          children: [
+            const TabBar(
+              isScrollable: true,
+              tabs: [
+                Tab(text: '执行与护栏'),
+                Tab(text: '保活与备份'),
+                // ⚠️ 刻意不叫「语音与接口」—— 那会与下方同名分区标题撞成两处
+                // 同文案，`find.text('语音与接口')` 的 findsOneWidget 会判红。
+                Tab(text: '语音与音色'),
+                Tab(text: '数据与合规'),
+              ],
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _tabBody(_secExecution(context)),
+                  _tabBody(_secKeepAlive(context)),
+                  _tabBody(_secVoice(context)),
+                  _tabBody(_secData(context)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 单个 TAB 的滚动容器（各 TAB 各自滚动、互不干扰）。
+  ///
+  /// ⚠️ 第八十二轮：设置页原先是一个**超长单页 ListView**（用户反馈太长），
+  /// 现按功能分成 4 个 TAB。注意 `TabBarView` 是**惰性**的 —— 非活动 TAB 的
+  /// 子树不在 widget 树里，`find.text(...)` 默认找不到它们（测试需先切 TAB）。
+  Widget _tabBody(List<Widget> children) => ListView(
         padding: const EdgeInsets.all(AppSpacing.lg),
-        children: [
+        children: children,
+      );
+
+  /// TAB 1「执行与护栏」：电源策略 / 强制免打扰时段 / 夜间独立豁免。
+  List<Widget> _secExecution(BuildContext context) => [
           Text('电源策略', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           SegmentedButton<String>(
@@ -881,74 +887,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
             );
           }),
-          const Divider(height: 32),
-          // ---- 全局执行总开关（v79，docs/20 §9）：法定休息日自动暂停 ----
-          Text('全局执行总开关（节假日自动暂停）',
-              style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
-          Builder(builder: (context) {
-            final mode = _runMasterMode;
-            final forceRun = ref.watch(forceRunTasksProvider);
-            final list = forceRun.valueOrNull ?? const <Task>[];
-            // 状态行：如实说明当前是否处于暂停窗口 / 下次切换时刻（仅 auto 有意义）。
-            final now = DateTime.now();
-            final paused = RunPause.paused(mode, now);
-            final nextAt = RunPause.nextTransition(mode, now);
-            final status = switch (mode) {
-              RunMasterMode.auto => paused
-                  ? '自动暂停中：到 ${_fmtMd(nextAt)} 自动恢复执行'
-                  : '自动运行中：到 ${_fmtMd(nextAt)} 自动暂停',
-              RunMasterMode.on => '强制开启：忽略自动窗口，始终执行',
-              RunMasterMode.off => '强制关闭：始终暂停，仅执行下方例外任务',
-            };
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SegmentedButton<RunMasterMode>(
-                  segments: [
-                    for (final m in RunMasterMode.values)
-                      ButtonSegment(value: m, label: Text(m.label)),
-                  ],
-                  selected: {mode},
-                  onSelectionChanged: (s) => _saveRunMaster(s.first),
-                ),
-                const Padding(
-                  padding: EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.xs),
-                  child: Text(
-                    '自动模式：法定休息日前一天 20:00 → 休息日最后一天 21:00 暂停'
-                    '（含普通周末）；窗口内全部任务默认跳过，出窗自动恢复。',
-                    style: AppText.bodySmall,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-                  child: Text('当前状态：$status',
-                      style: AppText.bodySmall),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                  child: Text(
-                    '例外清单（${list.length} 条暂停期间仍执行）',
-                    style: AppText.bodyMedium.copyWith(fontWeight: FontWeight.w600),
-                  ),
-                ),
-                if (list.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: AppSpacing.sm),
-                    child: Text('无：暂停期间不执行任何任务',
-                        style: AppText.bodySmall),
-                  )
-                else
-                  for (final t in list)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 2),
-                      child: Text('· ${t.name}（强制执行）',
-                          style: AppText.bodySmall),
-                    ),
-              ],
-            );
-          }),
-          const Divider(height: 32),
+        ];
+
+  /// TAB 2「保活与备份」：后台保活 / 任务备份。
+  ///
+  /// ⚠️ 第八十二轮：「全局执行总开关（节假日自动暂停）」已**移植到守护首页**
+  /// （`features/guard/guard_screen.dart` 的 `_buildRunMasterCard`）—— 它是
+  /// "到底执不执行"的总闸，与守卫/动态反击同属执行控制，放守护页更该被看见。
+  List<Widget> _secKeepAlive(BuildContext context) => [
           Text('后台保活', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           ListTile(
@@ -979,7 +925,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('导入任务（JSON）'),
             onTap: _importTasks,
           ),
-          const Divider(height: 32),
+        ];
+
+  /// TAB 3「语音与接口」：TTS/DeepSeek 接口、音色与试听、反击计划。
+  List<Widget> _secVoice(BuildContext context) => [
           Text('语音与接口', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
           ListTile(
@@ -1013,7 +962,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const Divider(height: 32),
           ..._planWidgets(context),
-          const Divider(height: 32),
+        ];
+
+  /// TAB 4「数据与合规」：录音取证 / 合规须知 / 关于。
+  List<Widget> _secData(BuildContext context) => [
           Text('录音取证', style: Theme.of(context).textTheme.titleMedium),
           ListTile(
             leading: const Icon(Icons.folder_special),
@@ -1064,10 +1016,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // 也锁本文件不得再出现写死的版本号。
             subtitle: Text('v${AppMeta.displayVersion} · Flutter 跨平台 · 仅限合法用途'),
           ),
-        ],
-      ),
-    );
-  }
+        ];
 }
 
 /// 一个可编辑字段的规格（供 [_FieldsDialog] 声明式渲染）。
@@ -1156,7 +1105,7 @@ class _TtsPreviewDialog extends StatefulWidget {
 }
 
 class _TtsPreviewDialogState extends State<_TtsPreviewDialog> {
-  final _ctrl = TextEditingController(text: '请注意，已开启录音取证');
+  final _ctrl = TextEditingController(text: '你好');
   bool _busy = false;
 
   @override

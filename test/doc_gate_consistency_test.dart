@@ -286,20 +286,19 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 610 + `main.dart` 65）。
+/// 设备层豁免**分母**（`background_engine.dart` 612 + `main.dart` 67）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
 ///
-/// ⚠️ 第八十轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
-/// 可执行行 **598 → 610**（本轮新增 `BackgroundEngine.extendCounterPlan()` 接线 + `;`
-/// 即 `refreshIfNeeded` 续算接入 tick/启动序列）、`lib/main.dart` **65**（不变），
-/// 豁免面分母 **663 → 675**。
-/// ⚠️ 本轮**同时**核对了两段独立产物（失败门禁的 lcov 与全量复跑后的 lcov）：
-/// 两段逐位一致 —— 豁免面 `8 / 675`、可测面分母 `12808`、全局分母 `13483`。
-const int kDeviceExemptLines = 610 + 65;
+/// ⚠️ 第八十二轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
+/// 可执行行 **610 → 612**（本轮离线 TTS「没声音」根因修复：`speak` 先
+/// `awaitSpeakCompletion(true)` + 按字数估预算，播报路径新增可执行行）、
+/// `lib/main.dart` **65 → 67**（`_speakSystemTts` 同款修复），豁免面分母 **675 → 679**。
+/// ⚠️ 已覆盖行**不变**（仍 `background_engine.dart` 8/612 ⇒ 8；`main.dart` 0/67）。
+const int kDeviceExemptLines = 612 + 67;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/610 ⇒ 8；`main.dart` 0/65）。
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/612 ⇒ 8；`main.dart` 0/67）。
 const int kDeviceExemptCovered = 8;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════

@@ -170,9 +170,9 @@ abstract final class TtsVoices {
   /// `flutter_tts`：入参是 `Object?`，因此这个"怎么猜音色"的决策是**纯函数**，
   /// 宿主测试能穷举（对照 `remote_playback.PlaybackSelector` 的注入风格）。
   ///
-  /// 匹配规则：对每个关键词做**大小写不敏感**的 `name`/`locale` 包含匹配，
-  /// 关键词按 [match] 顺序优先。**返回 `null` = 交给系统默认音色**（不是错误，
-  /// 只是降级 —— 机型上装没装对应引擎不归我们管）。
+  /// 匹配规则：对每个关键词做**大小写不敏感**的 `name`/`locale` 匹配（见
+  /// [_hits] 的边界规则），关键词按 [match] 顺序优先。**返回 `null` = 交给系统
+  /// 默认音色**（不是错误，只是降级 —— 机型上装没装对应引擎不归我们管）。
   static Map<String, String>? pickSystemVoice(Object? voices, List<String> match) {
     if (voices is! List || match.isEmpty) return null;
     for (final key in match) {
@@ -183,13 +183,37 @@ abstract final class TtsVoices {
         final name = (raw['name'] ?? '').toString();
         final locale = (raw['locale'] ?? '').toString();
         if (name.isEmpty) continue;
-        if (name.toLowerCase().contains(k) ||
-            locale.toLowerCase().contains(k)) {
+        if (_hits(name.toLowerCase(), k) || _hits(locale.toLowerCase(), k)) {
           return <String, String>{'name': name, 'locale': locale};
         }
       }
     }
     return null;
+  }
+
+  /// 关键词命中判定：ASCII 关键词按**字母边界**匹配。
+  ///
+  /// 为什么不能直接 `contains`：Android 的系统音色名形如
+  /// `zh-cn-x-ccc#female_1-local` / `zh-cn-x-ccc#male_1-local`，而
+  /// `'male'` 是 `'female'` 的子串 —— 直接包含匹配会让「系统默认男声」
+  /// 挑到一个**女声**。加边界后 `#male_1` 命中、`#female_1` 不命中。
+  ///
+  /// CJK 关键词（「女」「男」）不含 ASCII 字母，天然退化为包含匹配。
+  static bool _hits(String text, String key) {
+    var i = text.indexOf(key);
+    while (i >= 0) {
+      final before = i == 0 ? '' : text[i - 1];
+      final after = i + key.length >= text.length ? '' : text[i + key.length];
+      if (!_isAsciiLetter(before) && !_isAsciiLetter(after)) return true;
+      i = text.indexOf(key, i + 1);
+    }
+    return false;
+  }
+
+  static bool _isAsciiLetter(String ch) {
+    if (ch.isEmpty) return false;
+    final c = ch.codeUnitAt(0);
+    return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
   }
 
   /// 离线（系统）音色。
