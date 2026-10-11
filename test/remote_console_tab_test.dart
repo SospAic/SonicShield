@@ -778,4 +778,52 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   }, timeout: const Timeout(Duration(seconds: 90)));
+
+  // ══════════════ RCT-RM 全局执行总开关·远程控制回显（第八十二轮） ══════════════
+  //
+  // 「总执行开关需要支持远程控制」：命令 `run.master.set` 自第 79 轮就绪，但
+  // 控制台**不回显当前档** —— 用户点了按钮只能靠记忆判断"到底改没改"。
+  // 本组锁：① 发命令；② 据 `rc.status` 回显当前档与暂停态；③ 当前档高亮。
+
+  testWidgets('RCT-RM1 发 run.master.set，并按 rc.status 回显当前档 + 高亮',
+      (tester) async {
+    final ch = await _pump(tester);
+
+    // 初始未取到状态 ⇒ 回显"未知"，三档均 OutlinedButton（不高亮）。
+    expect(find.textContaining('端点当前：未知'), findsOneWidget);
+
+    await _tapOutlined(tester, '强制关闭');
+    expect(ch.lastOfType(RcCmd.runMasterSet).payload['mode'], 'off',
+        reason: '「强制关闭」必须发 off —— 发成别的档是静默的反向操作');
+
+    // 端点回执 rc.status（真实载荷形状见 endpoint_service 的 statusGet 分支）。
+    ch.emit(RcEvt.status, {
+      'pendingCount': 0,
+      'version': '1.9.0',
+      'runMasterMode': 'off',
+      'paused': true,
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('端点当前：强制关闭'), findsOneWidget);
+    expect(find.textContaining('暂停中'), findsOneWidget);
+    // 当前档高亮为 FilledButton（其余仍 OutlinedButton）—— 回显必须可辨。
+    expect(find.widgetWithText(FilledButton, '● 强制关闭'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, '自动'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, '强制开启'), findsOneWidget);
+  });
+
+  testWidgets('RCT-RM2 三档各自发出正确的 mode；未取状态时不高亮任何档',
+      (tester) async {
+    final ch = await _pump(tester);
+    // 未取到状态 ⇒ 不高亮。
+    expect(find.widgetWithText(FilledButton, '● 强制关闭'), findsNothing);
+
+    await _tapOutlined(tester, '强制开启');
+    expect(ch.lastOfType(RcCmd.runMasterSet).payload['mode'], 'on');
+
+    await _tapOutlined(tester, '自动');
+    expect(ch.lastOfType(RcCmd.runMasterSet).payload['mode'], 'auto',
+        reason: '「自动」必须发 auto（回到跟随法定休息日窗口）');
+  });
 }

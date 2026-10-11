@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sonic_shield/features/remote/remote_screen.dart';
 import 'package:sonic_shield/remote/controller_service.dart';
+import 'package:sonic_shield/remote/node_catalog.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 import 'support/permission_stub.dart';
@@ -194,7 +195,7 @@ void main() {
     testWidgets('RRS-08 改 MQTT 代理 → 保存后落库并刷新界面', (tester) async {
       final store = await _pump(tester);
 
-      await tester.tap(find.text('MQTT 代理'));
+      await tester.tap(find.text('自定义…'));
       await tester.pumpAndSettle();
       expect(find.text('MQTT 代理地址'), findsOneWidget);
 
@@ -209,7 +210,7 @@ void main() {
     testWidgets('RRS-09 改 MQTT 代理 → 取消不落库', (tester) async {
       final store = await _pump(tester, broker: 'keep.me');
 
-      await tester.tap(find.text('MQTT 代理'));
+      await tester.tap(find.text('自定义…'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'discard.me');
       await tester.tap(find.widgetWithText(TextButton, '取消'));
@@ -584,4 +585,64 @@ void main() {
       expect(tester.takeException(), isNull);
     }, timeout: const Timeout(Duration(seconds: 90)));
   });
+
+  // ══════════════ 第八十二轮：连接方案 / 节点下拉 + 一键测速 ══════════════
+
+  testWidgets('RS-ND1 连接方案下拉：TLS → WSS 写回 rc_transport', (tester) async {
+    final store = await _pump(tester);
+    expect(store.transport, RcTransport.tls, reason: '出厂默认 TLS');
+
+    await tester.tap(find.text('TLS 8883'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('WSS 8084').last);
+    await tester.pumpAndSettle();
+
+    expect(store.transport, RcTransport.wss,
+        reason: '选 WSS 必须写回 rc_transport（否则连接方案选择是假的）');
+  });
+
+  testWidgets('RS-ND2 MQTT 节点下拉：切到国内节点写回 rc_mqtt_node', (tester) async {
+    final store = await _pump(tester);
+    expect(store.mqttNodeHost, isEmpty);
+
+    // 默认公共 broker（broker.emqx.io）命中预设 ⇒ 下拉显示「EMQX 全球」。
+    await tester.tap(find.textContaining('EMQX 全球').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('EMQX 国内节点').last);
+    await tester.pumpAndSettle();
+
+    expect(store.mqttNodeHost, 'broker-cn.emqx.io',
+        reason: '切到国内节点必须写回预设节点（否则只是界面变了）');
+  });
+
+  testWidgets('RS-ND3 STUN 节点下拉：固定一个节点写回 rc_stun_node', (tester) async {
+    final store = await _pump(tester);
+    expect(store.stunSelectedUrl, isEmpty);
+
+    await tester.tap(find.text('自动（全部并行，推荐）'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('腾讯').last);
+    await tester.pumpAndSettle();
+
+    expect(store.stunSelectedUrl, 'stun:stun.qq.com:3478',
+        reason: '固定 STUN 后必须写回 rc_stun_node');
+  });
+
+  testWidgets('RS-ND4 一键测速：探测节点并渲染结果列表', (tester) async {
+    await _pump(tester);
+
+    // 测速是**真实网络 IO**（并发探测 4 个 MQTT + 7 个 STUN），
+    // 必须放在 `runAsync` 里给真事件循环机会；超时由各探测自身兜底。
+    await tester.runAsync(() async {
+      await tester.tap(find.text('一键测速').first);
+      await tester.pump();
+      await Future<void>.delayed(const Duration(seconds: 9));
+    });
+    await tester.pumpAndSettle();
+
+    // 结果列表必须渲染出来（可达显示「N ms」、不可达显示「不可达/超时」）。
+    final rendered = find.textContaining(' ms').evaluate().isNotEmpty ||
+        find.textContaining('不可达').evaluate().isNotEmpty;
+    expect(rendered, isTrue, reason: '测速后必须展示结果（否则按钮是装饰）');
+  }, timeout: const Timeout(Duration(seconds: 120)));
 }

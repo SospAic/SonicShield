@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'node_catalog.dart';
 import 'protocol.dart';
 
 /// 已配对端点。
@@ -146,6 +147,12 @@ class RemoteStore {
   static const _kBrokerUser = 'rc_broker_user';
   static const _kBrokerPass = 'rc_broker_pass';
 
+  // ---- 第八十二轮：预设节点下拉（MQTT 代理节点 / 通话 STUN 节点 / 传输方案） ----
+  static const _kMqttNode = 'rc_mqtt_node';
+  static const _kMqttNodePort = 'rc_mqtt_node_port';
+  static const _kStunNode = 'rc_stun_node';
+  static const _kTransport = 'rc_transport';
+
   /// 默认公共演示 broker（生产建议自建 EMQX/Mosquitto，docs/14 §6）。
   static const defaultBroker = 'broker.emqx.io';
 
@@ -208,7 +215,9 @@ class RemoteStore {
   /// 配置了 [brokerHost] 时优先返回它（自建 broker 接管连接目标）。
   String get broker {
     final h = brokerHost.trim();
-    if (h.isNotEmpty) return h;
+    if (h.isNotEmpty) return h; // 自建/高级优先（显式接管）
+    final n = mqttNodeHost.trim();
+    if (n.isNotEmpty) return n; // 预设节点下拉（第八十二轮）
     return _prefs.getString(_kBroker) ?? defaultBroker;
   }
 
@@ -226,7 +235,7 @@ class RemoteStore {
   String get brokerHost => _prefs.getString(_kBrokerHost) ?? '';
 
   /// 自定义 broker 端口；null = 未配置（回落 [defaultBrokerPort]，TLS 8883）。
-  int? get brokerPort => _prefs.getInt(_kBrokerPort);
+  int? get brokerPort => _prefs.getInt(_kBrokerPort) ?? _prefs.getInt(_kMqttNodePort);
 
   /// broker 用户名（自建 broker 开启鉴权时填）；空串 = 未配置。
   String get brokerUsername => _prefs.getString(_kBrokerUser) ?? '';
@@ -262,6 +271,43 @@ class RemoteStore {
   }
 
   Future<void> setBroker(String v) => _prefs.setString(_kBroker, v);
+
+  // ---------------- 预设节点（第八十二轮） ----------------
+
+  /// 下拉选中的 MQTT 预设节点主机；空串 = 未选（回落 [defaultBroker]）。
+  String get mqttNodeHost => _prefs.getString(_kMqttNode) ?? '';
+
+  /// 下拉选中的 MQTT 预设节点端口；null = 未选（回落 [defaultBrokerPort]）。
+  int? get mqttNodePort => _prefs.getInt(_kMqttNodePort);
+
+  /// 选中一个 MQTT 预设节点（写 host + port）。传空 host 即清除、回落默认。
+  Future<void> setMqttNode(String host, {int port = 8883}) async {
+    final h = host.trim();
+    if (h.isEmpty) {
+      await _prefs.remove(_kMqttNode);
+      await _prefs.remove(_kMqttNodePort);
+      return;
+    }
+    await _prefs.setString(_kMqttNode, h);
+    await _prefs.setInt(_kMqttNodePort, port);
+  }
+
+  /// 选中的 STUN 节点 URL（如 `stun:stun.qq.com:3478`）；空串 = 自动（全部并行）。
+  String get stunSelectedUrl => _prefs.getString(_kStunNode) ?? '';
+
+  /// 设置选中的 STUN 节点（传空串 = 回到「自动：全部并行」，默认行为不变）。
+  Future<void> setStunSelectedUrl(String url) =>
+      _prefs.setString(_kStunNode, url.trim());
+
+  /// 选中的 MQTT **传输方案**（`tls` / `wss` / `quic`）；默认 `tls`。
+  ///
+  /// ⚠️ 这不是「关 TLS」开关：三种方案都要求加密（见 [RcTransport]）。
+  RcTransport get transport =>
+      RcTransport.parse(_prefs.getString(_kTransport));
+
+  /// 设置传输方案（写 `rc_transport`）。
+  Future<void> setTransport(RcTransport t) =>
+      _prefs.setString(_kTransport, t.id);
 
   /// 本机配对码（共享秘密）：对端扫码后即持有该值，用于派生消息密钥。
   ///

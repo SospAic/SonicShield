@@ -31,6 +31,7 @@ import '../services/counter_plan_service.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
 import '../services/ptt_stream_sink.dart';
+import '../services/run_master_service.dart';
 import 'call_lifecycle.dart';
 import 'call_service.dart';
 import 'assist.dart';
@@ -38,6 +39,7 @@ import 'assist_host.dart';
 import 'assist_join.dart';
 import 'guarded_dispatch.dart';
 import 'kdf_salt_store.dart';
+import 'node_catalog.dart';
 import 'protocol.dart';
 import 'rc_script.dart';
 import 'remote_playback.dart';
@@ -540,6 +542,20 @@ class RcEndpointService {
         message: '解除配对：已终止该设备的在途${plan.label}');
   }
 
+  /// 传输方案 → 实际端口。自定义端口（自建 broker）优先；否则按方案取默认：
+  /// TLS（共享常量）/ WSS（8084）/ QUIC（库不支持 → 回落 TLS 端口）。
+  ///
+  /// ⚠️ 端口**不是**「关 TLS」开关：`secure = true` 在三条路径上都不变
+  /// （`test/rc_transport_lock_test.dart` TL-12 锁着「不许就地写死端口字面量」）。
+  static int _effectivePort(RcTransport t, int? custom) {
+    if (custom != null && custom > 0) return custom;
+    return switch (t) {
+      RcTransport.tls => RemoteStore.defaultBrokerPort,
+      RcTransport.wss => RcTransport.wss.defaultPort,
+      RcTransport.quic => RemoteStore.defaultBrokerPort,
+    };
+  }
+
   Future<void> _connect() async {
     final store = _store!;
     final deviceId = store.deviceId;
@@ -575,8 +591,12 @@ class RcEndpointService {
                 store.brokerPort ?? RemoteStore.defaultBrokerPort) ??
             MqttServerClient.withPort(store.broker, deviceId,
                 store.brokerPort ?? RemoteStore.defaultBrokerPort))
-          ..port = store.brokerPort ?? RemoteStore.defaultBrokerPort
+          ..port = _effectivePort(store.transport, store.brokerPort)
           ..secure = true
+          // 第八十二轮：连接方案可配（TLS / WSS）。**两者都加密** —— 区别只是
+          // 承载：WSS 走 WebSocket over TLS，封 TCP 的企业网/酒店 Wi‑Fi 下更易穿透。
+          // QUIC 当前 Dart 客户端库不支持 ⇒ `_effectivePort` 回落 TLS 端口（UI 已明示）。
+          ..useWebSocket = store.transport == RcTransport.wss
           ..keepAlivePeriod = 30
           // ---- P1-12：关掉库自带的自动重连，重连由本服务**独占** ----
           //
@@ -2037,8 +2057,10 @@ class RcEndpointService {
       await _ack(msg, false, data: 'mode 必须为 auto/on/off');
       return;
     }
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(PrefsKeys.runMasterMode, mode.name);
+    // 走 [RunMasterService]（写 prefs **+** 广播）⇒ 端点**本机首页/设置页**即时
+    // 刷新（第八十二轮："总开关支持远程控制"的最后一公里；此前只写 prefs，
+    // 首页只在 initState 读一次 ⇒ 远程改了本机界面不刷新）。
+    await RunMasterService.instance.set(mode);
     try {
       await BackgroundServiceManager.instance.replan();
     } on Object catch (e) {

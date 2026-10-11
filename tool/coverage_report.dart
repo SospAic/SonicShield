@@ -126,7 +126,13 @@ Map<String, ({int lf, int lh})> parseLcov(String text) {
   for (final raw in const LineSplitter().convert(text)) {
     if (raw.startsWith('SF:')) {
       flush();
-      cur = raw.substring(3).trim().replaceAll(r'\', '/');
+      var p = raw.substring(3).trim().replaceAll(r'\', '/');
+      // ⚠️ 某些环境下 `flutter test --coverage` 写的是**绝对路径**
+      // （如 `D:/.../main-fb118d7d/lib/xxx.dart`）⇒ 统一裁到 `lib/` 开头。
+      // 否则下面的「分母完整性」锁会把 103 个文件全判成「没有 SF: 记录」（**假红**）。
+      final i = p.lastIndexOf('/lib/');
+      if (i >= 0) p = p.substring(i + 1);
+      cur = p;
     } else if (raw.startsWith('LF:')) {
       lf = int.tryParse(raw.substring(3).trim()) ?? 0;
     } else if (raw.startsWith('LH:')) {

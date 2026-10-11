@@ -240,6 +240,19 @@ void main() {
     }
   }
 
+  /// 切到设置页第 [index] 个 tab（0=通用 / 1=语音与反击）。
+  ///
+  /// ⚠️ 第八十二轮：设置页改 `TabBar`+`IndexedStack` 分组后，**非激活页是
+  /// offstage**，`find.text` 默认 `skipOffstage: true` 会跳过它们。语音/接口/
+  /// 反击计划等控件全在 tab 1，交互与渲染断言前必须先切过去；否则会报
+  /// "Could not find a widget" 或断言不到文本（假红）。`取证文件管理`等
+  /// 通用 tab 的控件不要切（见 SET-07o）。
+  Future<void> switchTab(WidgetTester tester, int index) async {
+    final label = index == 0 ? '通用' : '语音与反击';
+    await tester.tap(find.text(label));
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+
   Future<String?> prefString(String key) async =>
       (await SharedPreferences.getInstance()).getString(key);
   Future<int?> prefInt(String key) async =>
@@ -924,6 +937,7 @@ void main() {
     testWidgets('SET-07a 语音与接口：配置入口 + 音色分组 + 试听都在', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       expect(find.text('语音与接口'), findsOneWidget);
       expect(find.text('DeepSeek 接口配置'), findsOneWidget);
@@ -949,6 +963,7 @@ void main() {
         'api_key': 'sk-test',
       });
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       expect(find.textContaining('基址 https://api.deepseek.com'), findsOneWidget);
       expect(find.textContaining('Key 已配置'), findsOneWidget,
@@ -958,6 +973,7 @@ void main() {
     testWidgets('SET-07c 反击计划未配置：状态 + 五个操作都在', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       expect(find.text('反击计划'), findsOneWidget);
       expect(find.text('当前计划：未配置'), findsOneWidget);
@@ -980,6 +996,7 @@ void main() {
         'counter_plan_enabled': true,
       });
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       expect(find.text('当前计划：${plan.name}'), findsOneWidget);
       expect(find.textContaining('已启用'), findsOneWidget);
@@ -1104,6 +1121,7 @@ void main() {
     testWidgets('SET-07e DeepSeek 对话框「保存」→ 三项落库 + 回执', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('DeepSeek 接口配置'));
       await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
@@ -1124,6 +1142,7 @@ void main() {
     testWidgets('SET-07e2 DeepSeek 对话框「取消」→ 不落库', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('DeepSeek 接口配置'));
       await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
@@ -1142,6 +1161,7 @@ void main() {
     testWidgets('SET-07f 在线语音填 endpoint+key → 落库 + 回执', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('在线语音配置'));
       await waitFor(
@@ -1164,6 +1184,7 @@ void main() {
         'tts_api_key': 'old-key',
       });
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('在线语音配置'));
       await waitFor(tester, () => find.text('保存').evaluate().isNotEmpty,
@@ -1181,6 +1202,7 @@ void main() {
     testWidgets('SET-07g 试听对话框播放 → 回执「已试听」', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [ttsOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('试听所选音色'));
       await waitFor(tester, () => find.text('试听').evaluate().isNotEmpty,
@@ -1193,6 +1215,7 @@ void main() {
     testWidgets('SET-07g2 试听失败（系统 TTS 抛错）→ 回执「试听失败」', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [ttsOverride(fail: true)]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('试听所选音色'));
       await waitFor(tester, () => find.text('试听').evaluate().isNotEmpty,
@@ -1205,6 +1228,7 @@ void main() {
     testWidgets('SET-07h 本机随机生成并启用 → 落库 + 回执', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('本机随机生成并启用'));
       await waitForText(tester, '反击计划已生效');
@@ -1232,6 +1256,7 @@ void main() {
         'counter_plan_params_json': jsonEncode(params.toJson()),
       });
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('本机随机生成并启用'));
       await waitForText(tester, '反击计划已生效');
@@ -1248,6 +1273,7 @@ void main() {
     testWidgets('SET-07t 参数对话框：切换休息日开关 → 保存落库', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
       await tester.ensureVisible(edit);
@@ -1279,6 +1305,7 @@ void main() {
       // 「恢复默认」「取消」「保存」三个按钮。
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
       await tester.ensureVisible(edit);
@@ -1344,6 +1371,7 @@ void main() {
     testWidgets('SET-07v 参数对话框：取消不落库', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
       await tester.ensureVisible(edit);
@@ -1365,6 +1393,7 @@ void main() {
     testWidgets('SET-07w 参数对话框：排期六选一 + 条件字段驱动 → 落库', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
       await tester.ensureVisible(edit);
@@ -1425,6 +1454,7 @@ void main() {
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final edit = find.byKey(const ValueKey<String>('plan_params_edit'));
       await tester.ensureVisible(edit);
@@ -1495,6 +1525,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(
           tester, overrides: [holidayOverride(), counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final tile = find.byKey(const ValueKey<String>('holiday_update'));
       await tester.ensureVisible(tile);
@@ -1513,6 +1544,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(
           tester, overrides: [holidayOverride(ok: false), counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       final tile = find.byKey(const ValueKey<String>('holiday_update'));
       await tester.ensureVisible(tile);
@@ -1526,6 +1558,7 @@ void main() {
       SharedPreferences.setMockInitialValues({'api_key': 'sk-test'});
       await pumpSettings(
           tester, overrides: [deepSeekOverride(ok: true), counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('一键 AI 生成并导入'));
       await waitForText(tester, '反击计划已生效');
@@ -1539,6 +1572,7 @@ void main() {
       SharedPreferences.setMockInitialValues({'api_key': 'sk-test'});
       await pumpSettings(
           tester, overrides: [deepSeekOverride(ok: false)]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('一键 AI 生成并导入'));
       await waitForText(tester, 'AI 生成失败');
@@ -1557,6 +1591,7 @@ void main() {
       FilePicker.platform =
           _FakeFilePicker(FilePickerResult([_pf('plan.json', f)]));
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('导入 JSON'));
       await waitForText(tester, '反击计划已生效');
@@ -1575,6 +1610,7 @@ void main() {
       FilePicker.platform =
           _FakeFilePicker(FilePickerResult([_pf('bad.json', f)]));
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('导入 JSON'));
       await waitForText(tester, '不是合法 JSON');
@@ -1592,6 +1628,7 @@ void main() {
       FilePicker.platform =
           _FakeFilePicker(FilePickerResult([_pf('badschema.json', f)]));
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('导入 JSON'));
       await waitForText(tester, '计划校验未通过');
@@ -1603,6 +1640,7 @@ void main() {
     testWidgets('SET-07k 下载 JSON 模版 → 写盘并分享', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('下载 JSON 模版'));
       await waitFor(tester, () => shareCalls.any((c) => c.method == 'shareFiles'),
@@ -1621,6 +1659,7 @@ void main() {
         'counter_plan_enabled': true,
       });
       await pumpSettings(tester, overrides: [counterPlanOverride()]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('下线'));
       await waitForText(tester, '已下线反击计划');
@@ -1637,6 +1676,7 @@ void main() {
       // 而不是让异步错误裸露（否则用户点了"下载模版"却毫无反应）。
       messenger().setMockMethodCallHandler(kPathProvider, (c) async => null);
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('下载 JSON 模版'));
       await waitForText(tester, '导出模版失败：');
@@ -1648,6 +1688,7 @@ void main() {
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       const key = ValueKey<String>('voice_az_db_male_yunbiao');
       // 前置：默认选中不是该在线音色（默认是系统女声）。
@@ -1693,6 +1734,7 @@ void main() {
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('试听所选音色'));
       await waitFor(tester, () => find.text('关闭').evaluate().isNotEmpty,
@@ -1724,6 +1766,7 @@ void main() {
           );
         }),
       ]);
+      await switchTab(tester, 1);
 
       await tester.tap(find.text('导入 JSON'));
       await waitForText(tester, '导入失败：');

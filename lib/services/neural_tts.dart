@@ -44,14 +44,15 @@ class NeuralTtsEngine {
   /// 引擎是否已成功加载（可用于 UI 提示"神经音色可用"）。
   bool get ready => _tts != null;
 
-  Future<Directory> _supportDir() => getApplicationSupportDirectory();
-
   /// 拷贝模型资产 → 构造引擎。幂等；失败置 [_failed] 并返回 false。
   Future<bool> ensureLoaded() async {
     if (_tts != null) return true;
     if (_failed) return false;
     try {
-      final support = await _supportDir();
+      // ⚠️ 目录 API 的返回值必须**显式赋给局部变量**：`test/dir_path_interpolation_test.dart`
+      // 的 DIP 锁靠"赋值行"识别目录变量（否则它会判定本文件"调了目录 API 却没提取到
+      // 变量"→ 门禁红）。所以这里不抽 `_supportDir()` 那种"直接 return API"的写法。
+      final support = await getApplicationSupportDirectory();
       final dest = Directory(p.join(support.path, 'sonic_shield_tts', modelDir));
       if (!await dest.exists()) {
         await dest.create(recursive: true);
@@ -96,7 +97,8 @@ class NeuralTtsEngine {
     try {
       final audio = tts.generate(text: t, sid: 0, speed: 1.0);
       final wav = encodeWav(audio.samples, audio.sampleRate);
-      final support = await _supportDir();
+      // 同 ensureLoaded：目录 API 的返回值必须显式赋给局部变量（DIP 锁要求）。
+      final support = await getApplicationSupportDirectory();
       final tmp = File(
           p.join(support.path, 'sonic_shield_tts', 'tts_${_hash(t)}.wav'));
       await tmp.writeAsBytes(wav);

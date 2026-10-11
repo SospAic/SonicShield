@@ -16,22 +16,29 @@ void main() {
     test('CP-01 出厂默认计划通过校验且区间符合约定', () {
       final p = CounterPlan.defaults();
       expect(p.validate(), isEmpty);
-      // 工作日白天：尽量不喊话 ⇒ **大量大音量噪音**（70–100% / 3–8s）为主。
+      // 白天（06–21）：**大音量噪音**为主、**不喊话**、少量**高强度**震动。
       expect(p.workdayDay.volumeMin, 0.7);
       expect(p.workdayDay.volumeMax, 1.0);
       expect(p.workdayDay.durationSecMin, 3);
       expect(p.workdayDay.durationSecMax, 8);
-      // 工作日夜间：以 TTS 说烦人的话为主 + 轻幅噪音（10–30% / 3–5s）。
+      expect(p.workdayDay.ttsWeight, 0.0, reason: '白天整体导向是"尽量不包含 TTS"');
+      expect(p.workdayDay.vibrateWeight, 0.2);
+      expect(p.workdayDay.vibrateAmplitudeMin, 0.8, reason: '白天震动是"高强度"');
+      expect(p.workdayDay.vibrateAmplitudeMax, 1.0);
+      // 夜间：**以 TTS 说烦人的话为主** + 震动配合 + **轻幅度噪音**。
       expect(p.workdayNight.volumeMin, 0.1);
       expect(p.workdayNight.volumeMax, 0.3);
       expect(p.workdayNight.durationSecMax, 5);
+      expect(p.workdayNight.ttsWeight, 0.6);
+      expect(p.workdayNight.vibrateWeight, 0.3);
+      expect(p.workdayNight.vibrateAmplitudeMin, 0.4, reason: '夜间震动幅度要更轻');
       // 休息日两段默认关闭（可选）
       expect(p.restdayDay.enabled, isFalse);
       expect(p.restdayNight.enabled, isFalse);
       // 休息日夜间 10–30% / 3–5s
       expect(p.restdayNight.volumeMin, 0.1);
       expect(p.restdayNight.volumeMax, 0.3);
-      // 昼夜导向：白天窗口 06:00–21:00（第八十二轮起为 6/21）。
+      // 白天窗口 06:00–21:00
       expect(p.dayStartHour, 6);
       expect(p.dayEndHour, 21);
     });
@@ -174,16 +181,16 @@ void main() {
           isFalse);
     });
 
-    test('CP-08 describeWindow 输出音量/时长/次数/三路权重（不区分 enabled）', () {
+    test('CP-08 describeWindow 输出音量/时长/次数/动作配比（不区分 enabled）', () {
       const w = CounterWindow(
           volumeMin: 0.5,
           volumeMax: 0.8,
           durationSecMin: 3,
           durationSecMax: 8,
           actionsPerHour: 2);
-      // 三路权重由 `audioWeight = 1 - ttsWeight - vibrateWeight` 导出：
-      // 默认 ttsWeight=0.5 / vibrateWeight=0.0 ⇒ 音效 50%/TTS 50%/震动 0%。
-      expect(describeWindow(w), '50%–80% · 3–8 秒 · 每小时 2 次 · 音效50%/TTS50%/震动0%');
+      // 默认配比 tts=0.5 / vib=0 ⇒ 音效 50%。
+      expect(describeWindow(w),
+          '50%–80% · 3–8 秒 · 每小时 2 次 · 音效50%/TTS50%/震动0%');
       // 该函数本身不区分 enabled —— "未启用（该时段不反击）"的文案由设置页承担
       // （见 settings_screen.dart 的 `w.enabled ? describeWindow(w) : ...`）。
       const off = CounterWindow(enabled: false);
@@ -368,7 +375,7 @@ void main() {
           isEmpty);
     });
 
-    test('MT-06 无音源池但有 TTS → 只可能是 TTS/震动（绝不产 playAudio）', () {
+    test('MT-06 无音源池但有 TTS → 绝不排音效；白天只震动、夜间以喊话为主', () {
       final list = CounterPlanMaterializer.materialize(plan,
           planId: 'p1',
           from: DateTime(2026, 3, 10),
@@ -376,16 +383,27 @@ void main() {
           assetIdPool: const {},
           now: null);
       expect(list, isNotEmpty);
-      // 无音源池 ⇒ 不可能生成 playAudio；但夜间窗口 `vibrateWeight=0.3` ⇒
-      // 允许出现 randomVibrate（不再假设"全部 TTS"）。
+      // 没有音源池 ⇒ 排音效动作等于"到点必失败"，必须一条都没有。
+      expect(list.every((t) => t.actionType != ActionType.playAudio), isTrue,
+          reason: '无音源池时绝不能排音效动作');
+      // 只剩 TTS / 震动两类。
       expect(
           list.every((t) =>
               t.actionType == ActionType.tts ||
               t.actionType == ActionType.randomVibrate),
           isTrue,
-          reason: '无音源池时只应有 TTS / 震动两类动作');
-      expect(list.any((t) => t.actionType == ActionType.tts), isTrue,
-          reason: '有 TTS 文本时至少要能生成 TTS 动作');
+          reason: '无音源池时只可能是喊话或震动');
+      // 白天窗口 ttsWeight=0 ⇒ **白天绝不喊话**（只能震动）—— 这是昼夜导向的核心。
+      final dayTasks = list.where((t) => t.name.contains('白天')).toList();
+      expect(dayTasks, isNotEmpty);
+      expect(
+          dayTasks.every((t) => t.actionType == ActionType.randomVibrate), isTrue,
+          reason: '白天 ttsWeight=0 ⇒ 永不喊话');
+      // 夜间 ttsWeight 占主导 ⇒ 至少排出一条喊话。
+      final nightTasks = list.where((t) => t.name.contains('夜间')).toList();
+      expect(nightTasks, isNotEmpty);
+      expect(nightTasks.any((t) => t.actionType == ActionType.tts), isTrue,
+          reason: '夜间应以喊话为主');
     });
   });
 

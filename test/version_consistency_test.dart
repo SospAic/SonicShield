@@ -130,4 +130,25 @@ void main() {
     expect(hardcoded.hasMatch(src), isFalse,
         reason: '设置页不得再出现写死的版本号字面量（应统一走 AppMeta.displayVersion）');
   });
+
+  // ── 本轮新增基线：「每次迭代版本信息后须带年月日」 ──
+  //
+  // 第七十七轮只锁了「构建号随版本同步」；本轮补上「版本信息后必须带迭代日期」，
+  // 让用户/回执能直接看到构建日期，不必靠 +N 反推（文档真源：HANDOVER.md
+  // 「★ 新增长期规则」）。
+
+  test('AppMeta.buildDate 为 YYYY-MM-DD 格式（基线：版本信息后须带年月日）', () {
+    expect(AppMeta.buildDate, matches(RegExp(r'^\d{4}-\d{2}-\d{2}$')),
+        reason: '项目基线要求每次迭代在版本信息后追加年月日，'
+            'AppMeta.buildDate 必须为 YYYY-MM-DD');
+  });
+
+  test('AppMeta.displayVersion 在版本信息后携带年月日（基线）', () {
+    final dv = AppMeta.displayVersion;
+    expect(dv, contains(AppMeta.buildDate),
+        reason: 'displayVersion 必须在版本信息（version+build）之后附上年月日，'
+            '且须与 AppMeta.buildDate 一致（项目基线：版本信息后须带年月日）');
+    expect(RegExp(r'\d{4}-\d{2}-\d{2}').hasMatch(dv), isTrue,
+        reason: 'displayVersion 必须包含 YYYY-MM-DD 日期（项目基线）');
+  });
 }

@@ -7,9 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:sonic_shield/domain/scheduling/run_pause.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';
 import 'package:sonic_shield/services/background_engine.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';
+import 'package:sonic_shield/services/run_master_service.dart';
 
 import 'support/permission_stub.dart';
 
@@ -368,5 +370,67 @@ void main() {
     expect(find.textContaining('通知权限未授予'), findsNothing,
         reason: '通知已授予时不得弹出降级提示 —— 否则该提示会常驻，'
             '与 DBS-13 形成区分度，证明判据非恒真');
+  });
+
+  testWidgets('DBS-15 首页常驻「全局执行总开关」（FR-71）渲染', (tester) async {
+    await pump(
+      tester,
+      last: const EngineState(running: true, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: true, pendingCount: 0)),
+    );
+    await tester.pump(); // 等 _RunMasterCard.initState 的 SharedPreferences.then
+    // 标题（与设置页同源，docs/20 §9）
+    expect(find.text('全局执行总开关'), findsOneWidget,
+        reason: '首页必须常驻总开关标题（line 约 919，FR-71）');
+    // 三态分段控件标签
+    expect(find.text('自动'), findsWidgets);
+    expect(find.text('强制开启'), findsWidgets);
+    expect(find.text('强制关闭'), findsWidgets);
+    // 自动模式说明文案（唯一、与设置页一致）
+    expect(find.textContaining('自动模式：法定休息日前一天 20:00'), findsOneWidget);
+    // 当前状态行前缀
+    expect(find.textContaining('当前状态：'), findsOneWidget);
+  });
+
+  testWidgets('DBS-16 切到「强制关闭」→ 写回 run_master_mode=off（FR-71）',
+      (tester) async {
+    await pump(
+      tester,
+      last: const EngineState(running: true, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: true, pendingCount: 0)),
+    );
+    await tester.pump();
+    // 出厂默认（mock 未设键）→ auto
+    expect((await SharedPreferences.getInstance()).getString('run_master_mode'),
+        isNull);
+    // 点击「强制关闭」分段
+    await tester.tap(find.text('强制关闭'));
+    await tester.pump();
+    // 写回同一存储（与设置页同源）
+    expect((await SharedPreferences.getInstance()).getString('run_master_mode'),
+        'off',
+        reason: '首页切换总开关必须即时写回 PrefsKeys.runMasterMode');
+    // 状态行随 mode 更新
+    expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget);
+  });
+
+  testWidgets('DBS-17 远程改动即时刷新首页总开关卡片（第八十二轮：补实时同步）',
+      (tester) async {
+    await pump(
+      tester,
+      last: const EngineState(running: true, pendingCount: 0),
+      stateStream: Stream.value(const EngineState(running: true, pendingCount: 0)),
+    );
+    await tester.pump();
+    // 初始 auto（出厂默认）⇒ 不显示"强制关闭"状态行。
+    expect(find.textContaining('强制关闭：始终暂停'), findsNothing);
+
+    // 模拟**远程** `run.master.set`：外部（端点处理器）经服务写 prefs 并广播。
+    // 首页此前只在 initState 读一次 ⇒ 不会刷新；本轮改为监听服务 ⇒ 必须刷新。
+    await RunMasterService.instance.set(RunMasterMode.off);
+    await tester.pump();
+
+    expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget,
+        reason: '远程改了总开关，首页卡片必须即时反映（本轮的"最后一公里"）');
   });
 }

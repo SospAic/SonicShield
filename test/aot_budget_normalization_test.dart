@@ -56,7 +56,13 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 剥掉行注释与块注释 —— 否则"注释里写着修前的写法"会骗过 `isNot(contains(...))`。
+///
+/// ⚠️ **必须先归一化换行**：Windows 工作区（`core.autocrlf=true`）是 CRLF，而
+/// `//.*$` 的 `$` 只匹配真正的串尾（`.` 不吃 `\r`）⇒ 行注释**剥不掉**，
+/// 于是 `AN-04` 会把注释里那句"修前写法"当成第二处定义 → Windows 上假红。
+/// 归一化后行为与 Linux/CI 一致。
 String code(String src) => src
+    .replaceAll('\r\n', '\n')
     .replaceAll(RegExp(r'/\*[\s\S]*?\*/'), '')
     .split('\n')
     .map((l) => l.replaceAll(RegExp(r'//.*$'), ''))

@@ -169,7 +169,9 @@ void main() {
     expect(find.text('端点在线'), findsOneWidget);
     expect(svc.isRunning, isFalse, reason: '前提：本页只显示状态，尚未真正连');
 
-    await tester.tap(find.text('MQTT 代理'));
+    // 第八十二轮：MQTT 代理改为「节点下拉 + 自定义…」结构，自定义对话框
+    // 由「自定义…」按钮打开（原「MQTT 代理」整块可点）。
+    await tester.tap(find.text('自定义…'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'new.broker.bs');
     await tester.tap(find.widgetWithText(FilledButton, '保存'));

@@ -4,7 +4,7 @@
 ///
 /// ## 为什么需要它
 ///
-/// 需求规格里 58 个功能点，此前**没有任何机器可判的追溯**：
+/// 需求规格里 61 个功能点，此前**没有任何机器可判的追溯**：
 /// 用例散在 160+ 个测试文件里，"某功能点到底有没有用例"只能靠人肉记忆。
 /// 一旦有人删掉/改名一个用例文件，或新增需求却忘了补用例，
 /// **没有任何东西会报错** —— 这正是"测试覆盖率 100%"最容易变成口号的地方。
@@ -184,6 +184,14 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
       evidenceFile: 'test/condition_test.dart', token: 'skipInCall'),
   FeaturePoint('FR-69', '条件无法判定按满足处理',
       evidenceFile: 'test/condition_env_test.dart', token: 'firstUnmetIn'),
+  FeaturePoint('FR-70', '设置页 tab 分组（通用/语音与反击）',
+      evidenceFile: 'test/settings_screen_test.dart', token: 'switchTab'),
+  FeaturePoint('FR-71', '首页常驻全局执行总开关',
+      evidenceFile: 'test/dashboard_screen_test.dart', token: 'DBS-15'),
+  FeaturePoint('FR-72', '全局执行总开关支持远程控制（命令 + 回显 + 本机实时同步）',
+      evidenceFile: 'test/remote_console_tab_test.dart', token: 'RCT-RM1'),
+  FeaturePoint('FR-73', '远程连接方案可选 + 节点下拉 + 一键测速（TLS/WSS/QUIC）',
+      evidenceFile: 'test/node_catalog_test.dart', token: 'NC-01'),
 
   // ── 2. 非功能需求 ─────────────────────────────────────────────────────
   FeaturePoint('NFR-01', '24h 执行成功率 ≥ 99%',

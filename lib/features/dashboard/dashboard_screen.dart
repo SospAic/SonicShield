@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
+import '../../core/theme.dart';
+import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
+import '../../services/run_master_service.dart';
 import 'quick_scripts_card.dart';
-import '../../core/theme.dart';
 
 /// 守护仪表盘：引擎开关 / 下一触发倒计时 / 今日执行统计 / 权限体检。
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -57,6 +59,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             running: state?.running ?? false,
             guardActive: state?.guardActive ?? false,
           ),
+          // ⚠️ 第八十二轮：FR-71「全局执行总开关放置到首页」。
+          // 与设置页同源绑定 `PrefsKeys.runMasterMode`（v79，docs/20 §9），
+          // 首页常驻，便于用户一键切换节假日自动暂停。
+          const SizedBox(height: 12),
+          const _RunMasterCard(),
           // P1-04：精确闹钟降级必须在**用户可操作的位置**解释并给恢复入口。
           // 否则界面继续显示运行中 + 计划数，用户无从知道"进程被杀后不再准点"。
           if (state?.alarmDiag != null) ...[
@@ -197,6 +204,96 @@ class _EngineCard extends ConsumerWidget {
           if (context.mounted) ref.invalidate(engineStateProvider);
         },
       ),
+    );
+  }
+}
+
+/// 首页常驻「全局执行总开关（节假日自动暂停）」（FR-71，第八十二轮）。
+///
+/// 与设置页 / 远程 `run.master.set` 同源（[RunMasterService] → `PrefsKeys.runMasterMode`，
+/// v79 docs/20 §9）：三态 `auto/on/off`，暂停窗口判定走纯函数 [RunPause]。
+/// 首页只给**开关 + 当前状态**，例外清单仍在设置页展示，避免首页过长。
+///
+/// 🔴 监听 [RunMasterService.mode] ⇒ **远程改动即时刷新本卡片**（第八十二轮
+/// 补的"最后一公里"：此前只在 `initState` 读一次，远程改了首页不刷新）。
+class _RunMasterCard extends ConsumerStatefulWidget {
+  const _RunMasterCard();
+
+  @override
+  ConsumerState<_RunMasterCard> createState() => _RunMasterCardState();
+}
+
+class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
+  @override
+  void initState() {
+    super.initState();
+    // 从 prefs 播种（与设置页 / 远程 `run.master.set` 同一真源）。
+    RunMasterService.instance.seed();
+  }
+
+  /// 写总开关：走 [RunMasterService]，于是**本机与远程改动互相可见**。
+  Future<void> _set(RunMasterMode m) => RunMasterService.instance.set(m);
+
+  static String _fmtMd(DateTime? t) {
+    if (t == null) return '—';
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${p2(t.month)}-${p2(t.day)} ${p2(t.hour)}:${p2(t.minute)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 监听 [RunMasterService]：远程 `run.master.set` 与本机改动都会即时刷新本卡片。
+    return ValueListenableBuilder<RunMasterMode>(
+      valueListenable: RunMasterService.instance.mode,
+      builder: (context, mode, _) {
+        final now = DateTime.now();
+        final paused = RunPause.paused(mode, now);
+        final nextAt = RunPause.nextTransition(mode, now);
+        final status = switch (mode) {
+          RunMasterMode.auto => paused
+              ? '自动暂停中：到 ${_fmtMd(nextAt)} 自动恢复'
+              : '自动运行中：到 ${_fmtMd(nextAt)} 自动暂停',
+          RunMasterMode.on => '强制开启：忽略自动窗口，始终执行',
+          RunMasterMode.off => '强制关闭：始终暂停，仅执行例外任务',
+        };
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.pause_circle_outline),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('全局执行总开关',
+                          style: Theme.of(context).textTheme.titleMedium),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SegmentedButton<RunMasterMode>(
+                  segments: [
+                    for (final m in RunMasterMode.values)
+                      ButtonSegment(value: m, label: Text(m.label)),
+                  ],
+                  selected: {mode},
+                  onSelectionChanged: (s) => _set(s.first),
+                ),
+                const SizedBox(height: 8),
+                Text('当前状态：$status', style: AppText.bodySmall),
+                const SizedBox(height: 4),
+                const Text(
+                  '自动模式：法定休息日前一天 20:00 → 休息日最后一天 21:00 暂停'
+                  '（含普通周末）；窗口内任务默认跳过，出窗自动恢复。',
+                  style: AppText.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
