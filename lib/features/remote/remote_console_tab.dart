@@ -14,6 +14,7 @@ import '../../remote/protocol.dart';
 import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
 import '../../core/theme.dart';
+import '../../domain/scheduling/run_pause.dart';
 
 /// 远程控制台（v1.6）：对已配对端点的完全控制——
 /// ping/状态快照/任务查看与开关/音效播放/守卫开关/音量调节/拍照/定位。
@@ -576,30 +577,46 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         _volumePanel(),
         const SizedBox(height: 12),
         _section('全局执行总开关（v1.9 · 节假日自动暂停）'),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            // v79：远程控制端点的整体刹车。三态与端点设置页一致
-            // （`auto` 法定休息日自动暂停 / `on` 强制开启 / `off` 强制关闭）。
-            // 门控位为 `script`（见 RcPermGate），协助会话未放行即灰化。
-            OutlinedButton(
-                onPressed: _allowed(RcCmd.runMasterSet)
-                    ? () => _send(RcCmd.runMasterSet, {'mode': 'auto'}, '总开关=自动')
-                    : null,
-                child: const Text('自动')),
-            OutlinedButton(
-                onPressed: _allowed(RcCmd.runMasterSet)
-                    ? () => _send(RcCmd.runMasterSet, {'mode': 'on'}, '总开关=强制开启')
-                    : null,
-                child: const Text('强制开启')),
-            OutlinedButton(
-                onPressed: _allowed(RcCmd.runMasterSet)
-                    ? () => _send(RcCmd.runMasterSet, {'mode': 'off'}, '总开关=强制关闭')
-                    : null,
-                child: const Text('强制关闭')),
-          ],
-        ),
+        // v82 回显 + 高亮：把端点最近一次 `rc.status` 的 `runMasterMode/paused`
+        // 如实展示，并高亮当前档 —— 否则"远程到底改没改"只能靠记忆
+        // （按钮此前不回显状态）。数据源与端点 `RcEvt.status` 同源。
+        Builder(builder: (context) {
+          final raw = _lastStatus?['runMasterMode'] as String?;
+          final paused = _lastStatus?['paused'] as bool?;
+          final label = raw == null ? null : RunMasterMode.parse(raw).label;
+          final text = label == null
+              ? '端点当前：未知（尚未取到状态）'
+              : '端点当前：$label${paused == true ? ' · 暂停中' : (paused == false ? ' · 运行中' : '')}';
+          // v79：远程控制端点的整体刹车。三态与端点设置页一致
+          // （`auto` 法定休息日自动暂停 / `on` 强制开启 / `off` 强制关闭）。
+          // 门控位为 `script`（见 RcPermGate），协助会话未放行即灰化。
+          // v82：当前档用 [FilledButton] 高亮，其余用 [OutlinedButton]。
+          Widget btn(RunMasterMode m) {
+            final active = raw == m.name;
+            final onPressed = _allowed(RcCmd.runMasterSet)
+                ? () => _send(RcCmd.runMasterSet, {'mode': m.name}, '总开关=${m.label}')
+                : null;
+            final child = Text(active ? '● ${m.label}' : m.label);
+            return active
+                ? FilledButton(onPressed: onPressed, child: child)
+                : OutlinedButton(onPressed: onPressed, child: child);
+          }
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                child: Text(text, style: AppText.bodySmall),
+              ),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                btn(RunMasterMode.auto),
+                btn(RunMasterMode.on),
+                btn(RunMasterMode.off),
+              ]),
+            ],
+          );
+        }),
         const SizedBox(height: 12),
         _section('指令组（宏）'),
         Wrap(

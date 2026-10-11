@@ -28,6 +28,7 @@ import '../../services/holiday_update_service.dart';
 import '../../services/native_bridge.dart';
 import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
+import '../../services/run_master_service.dart';
 
 import 'evidence_screen.dart';
 import '../../core/theme.dart';
@@ -289,6 +290,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void initState() {
     super.initState();
     _load();
+    // 远程 `run.master.set` / 首页卡片改动 → 本页总开关即时同步（第八十二轮）。
+    RunMasterService.instance.mode.addListener(_syncRunMasterFromService);
     // 进入页面时让豁免计数重新算一次（provider 刻意不是 `autoDispose` ——
     // 靠这一句保证"每次进来都是新的"，同时避开 autoDispose 的零延时 Timer）。
     //
@@ -300,6 +303,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // 全局执行总开关的例外清单同样每次进入重算（provider 亦非 autoDispose）。
       if (mounted) ref.invalidate(forceRunTasksProvider);
     });
+  }
+
+  /// 服务侧总开关变更 → 同步本页本地态（三方同源，见 [RunMasterService]）。
+  void _syncRunMasterFromService() {
+    final m = RunMasterService.instance.mode.value;
+    if (mounted && m != _runMasterMode) setState(() => _runMasterMode = m);
+  }
+
+  @override
+  void dispose() {
+    RunMasterService.instance.mode.removeListener(_syncRunMasterFromService);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -720,8 +735,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 强制关闭有"整体停摆"的后果，与夜间豁免同为**削弱执行**的操作，
   /// 但不削弱合规护栏（只是不执行），故不做二次确认弹窗，仅留状态行说明。
   Future<void> _saveRunMaster(RunMasterMode mode) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(PrefsKeys.runMasterMode, mode.name);
+    // 走 [RunMasterService]（写 prefs + 广播）⇒ 首页卡片 / 远程控制台与本页
+    // 三方同源，本页改动也即时反映到首页（第八十二轮）。
+    await RunMasterService.instance.set(mode);
     if (mounted) setState(() => _runMasterMode = mode);
     await BackgroundServiceManager.instance.replan();
     if (mounted) {
@@ -746,11 +762,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
-      body: ListView(
-        padding: const EdgeInsets.all(AppSpacing.lg),
-        children: [
+    // ⚠️ 第八十二轮：设置页 tab 分组（用户明确要求「设置页 tab 页分组」）。
+    // 用 `TabBar` + `IndexedStack`：两页「通用 / 语音与反击」。
+    // `IndexedStack` 会**同时挂载**所有子页（仅非激活页 offstage），
+    // 因此既有 `find.text(...)` 渲染锁无需改动；仅语音/反击页的*交互*用例
+    // 在点击前需 `switchTab` 到对应页（见 `settings_screen_test.dart`）。
+    return DefaultTabController(
+      length: 2,
+      child: Builder(
+        builder: (ctx) => Scaffold(
+          appBar: AppBar(
+            title: const Text('设置'),
+            bottom: const TabBar(
+              tabs: [
+                Tab(text: '通用'),
+                Tab(text: '语音与反击'),
+              ],
+            ),
+          ),
+          body: IndexedStack(
+            index: DefaultTabController.of(ctx).index,
+            children: [
+              // ===== 通用 =====
+              SingleChildScrollView(
+                padding: const EdgeInsets.all(AppSpacing.lg),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
           Text('电源策略', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           SegmentedButton<String>(
@@ -980,39 +1018,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: _importTasks,
           ),
           const Divider(height: 32),
-          Text('语音与接口', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
-          ListTile(
-            leading: const Icon(Icons.smart_toy_outlined),
-            title: const Text('DeepSeek 接口配置'),
-            subtitle: Text('基址 $_dsBaseUrl · 模型 $_dsModel · '
-                'Key ${_dsApiKey.isEmpty ? '未配置' : '已配置'}'),
-            onTap: _editDeepSeek,
-          ),
-          ListTile(
-            leading: const Icon(Icons.translate),
-            title: const Text('在线语音配置'),
-            subtitle: Text(_onlineTtsConfigured
-                ? (_ttsEndpoint == ApiConfigStore.defaultTtsEndpoint
-                    ? '内置免费在线语音（开箱可用）：Microsoft Edge 大声朗读'
-                    : '已配置：$_ttsEndpoint')
-                : '在线语音已关闭：仅系统音色可用（东北话需在线语音）'),
-            onTap: _editOnlineTts,
-          ),
-          const Padding(
-            padding: EdgeInsets.only(left: AppSpacing.lg, top: AppSpacing.sm, bottom: 2),
-            child: Text('音色（离线优先，可选中后试听）',
-                style: AppText.bodySmall),
-          ),
-          ..._voiceWidgets(context),
-          ListTile(
-            leading: const Icon(Icons.play_circle_outline),
-            title: const Text('试听所选音色'),
-            subtitle: Text(TtsVoices.byId(_previewVoiceId).name),
-            onTap: _openPreview,
-          ),
-          const Divider(height: 32),
-          ..._planWidgets(context),
           const Divider(height: 32),
           Text('录音取证', style: Theme.of(context).textTheme.titleMedium),
           ListTile(
@@ -1064,10 +1069,58 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // 也锁本文件不得再出现写死的版本号。
             subtitle: Text('v${AppMeta.displayVersion} · Flutter 跨平台 · 仅限合法用途'),
           ),
-        ],
+                  ],
+                ),
+              ),
+              // ===== 语音与反击 =====
+              SingleChildScrollView(
+                padding: const EdgeInsets.all(AppSpacing.lg),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+          Text('语音与接口', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          ListTile(
+            leading: const Icon(Icons.smart_toy_outlined),
+            title: const Text('DeepSeek 接口配置'),
+            subtitle: Text('基址 $_dsBaseUrl · 模型 $_dsModel · '
+                'Key ${_dsApiKey.isEmpty ? '未配置' : '已配置'}'),
+            onTap: _editDeepSeek,
+          ),
+          ListTile(
+            leading: const Icon(Icons.translate),
+            title: const Text('在线语音配置'),
+            subtitle: Text(_onlineTtsConfigured
+                ? (_ttsEndpoint == ApiConfigStore.defaultTtsEndpoint
+                    ? '内置免费在线语音（开箱可用）：Microsoft Edge 大声朗读'
+                    : '已配置：$_ttsEndpoint')
+                : '在线语音已关闭：仅系统音色可用（东北话需在线语音）'),
+            onTap: _editOnlineTts,
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: AppSpacing.lg, top: AppSpacing.sm, bottom: 2),
+            child: Text('音色（离线优先，可选中后试听）',
+                style: AppText.bodySmall),
+          ),
+          ..._voiceWidgets(context),
+          ListTile(
+            leading: const Icon(Icons.play_circle_outline),
+            title: const Text('试听所选音色'),
+            subtitle: Text(TtsVoices.byId(_previewVoiceId).name),
+            onTap: _openPreview,
+          ),
+          const Divider(height: 32),
+          ..._planWidgets(context),
+                  ],
+                ),
+              ),
+          ],
+        ),
       ),
-    );
-  }
+    ),
+  );
+}
+
 }
 
 /// 一个可编辑字段的规格（供 [_FieldsDialog] 声明式渲染）。

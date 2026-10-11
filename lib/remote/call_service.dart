@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 import 'endpoint_service.dart';
 import 'call_lifecycle.dart';
 import 'call_media_profile.dart';
+import 'node_catalog.dart';
 import 'protocol.dart';
 import 'remote_store.dart';
 
@@ -40,12 +41,13 @@ class CallService {
   /// 这里换成国内主流公共 STUN（小米/哔哩哔哩/腾讯），并**保留** Google 一条
   /// 作为海外网络回落（双方都在海外时它反而更快）。多候选并存不冲突：
   /// ICE 会并行采集、择优使用。
-  static const _stunServers = <Map<String, dynamic>>[
-    {'urls': 'stun:stun.miwifi.com:3478'},
-    {'urls': 'stun:stun.chat.bilibili.com:3478'},
-    {'urls': 'stun:stun.qq.com:3478'},
-    {'urls': 'stun:stun.l.google.com:19302'},
-  ];
+  /// 自动模式（未指定首选）时的 STUN 候选：**全部并行**（ICE 会择优采集）。
+  ///
+  /// 真源是 `node_catalog.dart` 的 [kStunNodes]（国内可达优先 + Google 回落），
+  /// 与「远程 → 设置」的一键测速**共用同一份目录**，避免两处列表漂移。
+  static List<Map<String, dynamic>> get _stunServers => [
+        for (final n in kStunNodes) {'urls': n.url},
+      ];
 
   /// 预采集的 ICE 候选数。
   ///
@@ -79,7 +81,14 @@ class CallService {
       final tcp = turnTcpFallbackUrl(store.turnUrl);
       if (tcp != null) turn.add({'urls': tcp, ...creds});
     }
-    return [..._stunServers, ...turn];
+    // 指定了首选 STUN ⇒ 只用它（第八十二轮「下拉切换」）；否则全部并行（默认行为不变）。
+    final sel = store.stunSelectedUrl.trim();
+    final stun = sel.isEmpty
+        ? _stunServers
+        : <Map<String, dynamic>>[
+            {'urls': sel},
+          ];
+    return [...stun, ...turn];
   }
 
   /// `createPeerConnection` 的**统一配置**（单路 [CallService] 与多路

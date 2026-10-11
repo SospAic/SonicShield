@@ -104,6 +104,19 @@ void main() {
           reason: 'Google STUN 在中国大陆基本不可达，不能是唯一来源；'
               '否则拿不到 srflx 候选 → 跨网直连必然失败（BUG-081）');
     });
+
+    test('CS-06 指定首选 STUN 后只用它（第八十二轮：下拉切换）', () async {
+      final store = RemoteStore(await SharedPreferences.getInstance());
+      await store.setStunSelectedUrl('stun:stun.qq.com:3478');
+
+      final stun = (await CallService.iceServers())
+          .where((s) => (s['urls'] as String).startsWith('stun:'))
+          .map((s) => s['urls'] as String)
+          .toList();
+
+      expect(stun, ['stun:stun.qq.com:3478'],
+          reason: '固定一个节点后就只用它；传空串才回到「自动：全部并行」');
+    });
   });
 
   group('CS PeerConnection 统一配置（建连提速）', () {

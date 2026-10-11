@@ -9,6 +9,7 @@ import '../../core/providers.dart';
 import '../../core/theme.dart';
 import '../../remote/controller_service.dart';
 import '../../remote/endpoint_service.dart';
+import '../../remote/node_catalog.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
 import 'pair_qr_screen.dart' show notifyPeerOfPairing;
@@ -37,6 +38,14 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
   String _turnUrl = '';
   List<PairedEndpoint> _endpoints = const [];
 
+  // ---- 第八十二轮：节点下拉 + 一键测速 ----
+  int _mqttNodePort = RemoteStore.defaultBrokerPort;
+  RcTransport _transport = RcTransport.tls;
+  String _stunUrl = '';
+  List<NodeProbe>? _mqttProbes;
+  List<NodeProbe>? _stunProbes;
+  bool _probing = false;
+
   @override
   void initState() {
     super.initState();
@@ -57,7 +66,118 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
       _brokerUser = store.brokerUsername;
       _turnUrl = store.turnUrl;
       _endpoints = store.paired();
+      _mqttNodePort = store.mqttNodePort ?? RemoteStore.defaultBrokerPort;
+      _transport = store.transport;
+      _stunUrl = store.stunSelectedUrl;
     });
+  }
+
+  /// 当前 MQTT 节点对应的下拉选中 id（不落在预设里 → null，下拉留空）。
+  String? get _mqttDropdownValue {
+    for (final n in kMqttNodes) {
+      if (n.host == _broker) return n.id;
+    }
+    return null;
+  }
+
+  /// 当前 STUN 选中值（不在目录里 → 回到「自动」）。
+  String get _stunDropdownValue {
+    for (final n in kStunNodes) {
+      if (n.url == _stunUrl) return n.url;
+    }
+    return '__auto__';
+  }
+
+  static String _fmtMs(int? ms) => ms == null ? '不可达/超时' : '$ms ms';
+
+  /// 选中一个 MQTT 预设节点：落盘 host+port 并**重启远程模块**（与手填 broker 同一路径）。
+  Future<void> _selectMqttNode(MqttNode n) async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    await store.setMqttNode(n.host, port: n.port);
+    if (_enabled) {
+      await RcEndpointService.instance.stop();
+      final db = await ref.read(databaseProvider.future);
+      await RcEndpointService.instance.start(store, db);
+    }
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已切换到 ${n.label}（${n.host}:${n.port}）')));
+  }
+
+  /// 选中 MQTT **传输方案**（TLS / WSS / QUIC）：落盘并重启远程模块。
+  Future<void> _selectTransport(RcTransport t) async {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    await store.setTransport(t);
+    if (_enabled) {
+      await RcEndpointService.instance.stop();
+      final db = await ref.read(databaseProvider.future);
+      await RcEndpointService.instance.start(store, db);
+    }
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(t.usable
+            ? '连接方案：${t.label}'
+            : '${t.label} 暂不支持（当前客户端库无 QUIC），已回落 TLS')));
+  }
+
+  /// 选中首选 STUN 节点（空串 = 自动：全部并行，默认行为）。
+  Future<void> _selectStun(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await RemoteStore(prefs).setStunSelectedUrl(url);
+    await _load();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content:
+            Text(url.isEmpty ? 'STUN：自动（全部并行）' : 'STUN 已固定为 $url')));
+  }
+
+  /// 一键测速：并发探测全部 MQTT / STUN 候选节点，按「可达优先、时延升序」展示。
+  Future<void> _speedTest() async {
+    setState(() => _probing = true);
+    try {
+      final mqtt = await NodeSpeedTest.probeMqtt(kMqttNodes);
+      final stun = await NodeSpeedTest.probeStun(kStunNodes);
+      if (!mounted) return;
+      setState(() {
+        _mqttProbes = mqtt;
+        _stunProbes = stun;
+        _probing = false;
+      });
+    } on Object {
+      if (mounted) setState(() => _probing = false);
+    }
+  }
+
+  /// 测速结果列表（可达在前；最快的一条打 ★）。
+  Widget _probeList(List<NodeProbe>? probes, String Function(String id) label) {
+    if (probes == null) return const SizedBox.shrink();
+    String? fastest;
+    for (final p in probes) {
+      if (p.ok) {
+        fastest = p.id;
+        break;
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final p in probes)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text(
+                '${p.id == fastest ? '★ ' : '· '}${label(p.id)}：${_fmtMs(p.ms)}',
+                style: AppText.bodySmall,
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   /// 编辑 TURN 中继配置（S5）。
@@ -128,6 +248,69 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已保存：重启远程模块后生效')));
+  }
+
+  /// 一键测速按钮（MQTT + STUN 同时探测）。
+  Widget _speedTestButton() => FilledButton.tonalIcon(
+        icon: _probing
+            ? const SizedBox(
+                width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+            : const Icon(Icons.speed, size: 18),
+        label: const Text('一键测速'),
+        onPressed: _probing ? null : _speedTest,
+      );
+
+  /// 节点 id → 展示名（找不到回落到 id，不抛）。
+  static String _mqttLabel(String id) {
+    for (final n in kMqttNodes) {
+      if (n.id == id) return n.label;
+    }
+    return id;
+  }
+
+  static String _stunLabel(String id) {
+    for (final n in kStunNodes) {
+      if (n.url == id) return n.label;
+    }
+    return id;
+  }
+
+  /// 手填自定义 MQTT 代理地址（原「MQTT 代理」对话框，保留为兜底入口）。
+  Future<void> _editBrokerCustom() async {
+    // ⚠️ **不用 `TextEditingController`**：`showDialog` 的 future 在 `pop` 那刻就
+    // 完成，而路由**退场动画仍在跑**、`TextField` 仍挂在树上 —— 此时 dispose 控制器
+    // 会抛 "A TextEditingController was used after being disposed"（BUG-064 同款）。
+    // 改用 `TextFormField(initialValue:) + onChanged`：没有控制器就没有释放时机问题。
+    var text = _broker;
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('MQTT 代理地址'),
+        content: TextFormField(
+          initialValue: _broker,
+          onChanged: (s) => text = s,
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, text.trim()),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (v == null || v.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    // 手填 = 清掉预设下拉，避免"选了预设又手填"时两个来源打架。
+    await RemoteStore(prefs).setMqttNode('');
+    await RemoteStore(prefs).setBroker(v);
+    if (mounted && _enabled) {
+      await RcEndpointService.instance.stop();
+      final store = RemoteStore(prefs);
+      final db = await ref.read(databaseProvider.future);
+      await RcEndpointService.instance.start(store, db);
+    }
+    await _load();
   }
 
   Future<void> _toggleEnabled(bool v) async {
@@ -307,39 +490,74 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
             ),
           ),
           Card(
-            child: ListTile(
-              leading: const Icon(Icons.dns),
-              title: const Text('MQTT 代理'),
-              subtitle: Text('$_broker（公共演示节点，建议自建 EMQX）'),
-              onTap: () async {
-                final ctrl = TextEditingController(text: _broker);
-                final v = await showDialog<String>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('MQTT 代理地址'),
-                    content: TextField(controller: ctrl),
-                    actions: [
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const ListTile(
+                  leading: Icon(Icons.dns),
+                  title: Text('MQTT 代理节点'),
+                  subtitle: Text('连接方案 / 节点下拉切换 · 一键测速选最快'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _transport.id,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                        labelText: '连接方案（传输）', border: OutlineInputBorder()),
+                    items: [
+                      for (final t in RcTransport.values)
+                        DropdownMenuItem(
+                            value: t.id,
+                            child: Text(
+                                '${t.label}${t.usable ? '' : '（暂不支持）'}',
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: (id) {
+                      if (id != null) _selectTransport(RcTransport.parse(id));
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _mqttDropdownValue,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                        labelText: '节点', border: OutlineInputBorder()),
+                    hint: Text('当前：$_broker:$_mqttNodePort'),
+                    items: [
+                      for (final n in kMqttNodes)
+                        DropdownMenuItem(
+                            value: n.id,
+                            child: Text('${n.label}（${n.host}）',
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: (id) {
+                      if (id == null) return;
+                      for (final n in kMqttNodes) {
+                        if (n.id == id) {
+                          _selectMqttNode(n);
+                          break;
+                        }
+                      }
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Row(
+                    children: [
+                      _speedTestButton(),
+                      const SizedBox(width: 8),
                       TextButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          child: const Text('取消')),
-                      FilledButton(
-                          onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-                          child: const Text('保存')),
+                          onPressed: _editBrokerCustom,
+                          child: const Text('自定义…')),
                     ],
                   ),
-                );
-                if (v != null && v.isNotEmpty) {
-                  final prefs = await SharedPreferences.getInstance();
-                  await RemoteStore(prefs).setBroker(v);
-                  if (mounted && _enabled) {
-                    await RcEndpointService.instance.stop();
-                    final store = RemoteStore(prefs);
-                    final db = await ref.read(databaseProvider.future);
-                    await RcEndpointService.instance.start(store, db);
-                  }
-                  await _load();
-                }
-              },
+                ),
+                _probeList(_mqttProbes, _mqttLabel),
+              ],
             ),
           ),
           const SizedBox(height: 10),
@@ -375,6 +593,44 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
               isThreeLine: _turnUrl.isEmpty,
               trailing: const Icon(Icons.edit, size: 18),
               onTap: _editTurn,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Card(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const ListTile(
+                  leading: Icon(Icons.hub),
+                  title: Text('STUN 节点（通话打洞）'),
+                  subtitle: Text('默认「自动：全部并行」；也可固定一个节点'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _stunDropdownValue,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                        labelText: '首选节点', border: OutlineInputBorder()),
+                    items: [
+                      const DropdownMenuItem(
+                          value: '__auto__', child: Text('自动（全部并行，推荐）')),
+                      for (final n in kStunNodes)
+                        DropdownMenuItem(
+                            value: n.url,
+                            child: Text('${n.label}（${n.host}）',
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: (v) =>
+                        _selectStun(v == null || v == '__auto__' ? '' : v),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: _speedTestButton(),
+                ),
+                _probeList(_stunProbes, _stunLabel),
+              ],
             ),
           ),
           const SizedBox(height: 10),

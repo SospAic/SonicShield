@@ -60,3 +60,6 @@ _artifacts/
 
 # WorkBuddy 工作区记忆（与 .workbuddy-ai/ 同源，不入库）
 .workbuddy/
+
+# 一键安装固定发布目录（含已签名 APK / IPA 大文件；**不入库**）
+releases/

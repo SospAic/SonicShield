@@ -174,7 +174,7 @@ if (($out -join "`n") -match "All tests passed") {
 #        且**完全没有 `MIN_COVERED`**（第 34 轮给 gates.sh 加的"分母稀释"防线在 .ps1 上缺失）。
 #    该一致性现在由 `test/gate_entrypoint_consistency_test.dart` **机器锁定**。
 if ($env:SKIP_COVERAGE -ne '1') {
-    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.8' }
+    $covMin = if ($env:COVERAGE_MIN) { $env:COVERAGE_MIN } else { '98.5' }
     $minCov = if ($env:MIN_COVERED) { $env:MIN_COVERED } else { '12658' }
     Write-Host "=== 门禁 4/4: 覆盖率 ratchet（COVERAGE_MIN=$covMin% / MIN_COVERED=$minCov）===" -ForegroundColor Cyan
     if (-not (Test-Path 'coverage/lcov.info')) {

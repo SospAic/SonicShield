@@ -33,8 +33,19 @@ class AppMeta {
   /// 并锁死界面不得再出现写死的版本号。
   static const String buildNumber = '22';
 
-  /// 面向用户的完整版本串（含构建号），设置页「关于」区块显示的就是它。
-  static String get displayVersion => '$version+$buildNumber';
+  /// 迭代日期（年月日，格式 `YYYY-MM-DD`），每次迭代随版本信息一起更新。
+  ///
+  /// 项目基线（本轮新增）：**每次迭代除了抬版本信息，还必须在版本信息后
+  /// 追加年月日**——让用户/远程回执能直接看到本轮构建日期，而不必靠 `+N`
+  /// 反推。`test/version_consistency_test.dart` 强制其格式为 `YYYY-MM-DD`、
+  /// 且 [displayVersion] 必须携带该日期。
+  static const String buildDate = '2026-10-10';
+
+  /// 面向用户的完整版本串（含构建号 + 迭代日期），设置页「关于」区块显示的就是它。
+  ///
+  /// 形如 `1.9.0-alpha+22 (2026-10-10)`：版本信息（version+build）之后紧跟
+  /// 迭代年月日（项目基线：版本信息后须带 `YYYY-MM-DD`）。
+  static String get displayVersion => '$version+$buildNumber ($buildDate)';
 
   static const String complianceUrl =
       'https://example.invalid/sonicshield/compliance'; // 占位：发布时替换

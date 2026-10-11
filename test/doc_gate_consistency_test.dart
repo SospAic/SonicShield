@@ -286,21 +286,20 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 610 + `main.dart` 65）。
+/// 设备层豁免**分母**（`background_engine.dart` 613 + `main.dart` 68 + `neural_tts.dart` 70）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
 ///
 /// ⚠️ 第八十轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
-/// 可执行行 **598 → 610**（本轮新增 `BackgroundEngine.extendCounterPlan()` 接线 + `;`
-/// 即 `refreshIfNeeded` 续算接入 tick/启动序列）、`lib/main.dart` **65**（不变），
-/// 豁免面分母 **663 → 675**。
-/// ⚠️ 本轮**同时**核对了两段独立产物（失败门禁的 lcov 与全量复跑后的 lcov）：
-/// 两段逐位一致 —— 豁免面 `8 / 675`、可测面分母 `12808`、全局分母 `13483`。
-const int kDeviceExemptLines = 610 + 65;
+/// 可执行行 **598 → 610**、`lib/main.dart` **65**（不变），豁免面分母 **663 → 675**。
+/// ⚠️ 第八十二轮：白名单**第三文件** `lib/services/neural_tts.dart`（sherpa-onnx 原生 FFI，
+/// 宿主不可加载；此前常量**漏算**它）按权威 lcov 一并校正 —— `background_engine` 613 +
+/// `main` 68 + `neural_tts` 70 = **751**；可测面分母 **13309**、全局分母 **14060**。
+const int kDeviceExemptLines = 613 + 68 + 70;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/610 ⇒ 8；`main.dart` 0/65）。
-const int kDeviceExemptCovered = 8;
+/// 设备层豁免面**已覆盖**行（`background_engine` 8/613 + `main` 0/68 + `neural_tts` 1/70 ⇒ 9）。
+const int kDeviceExemptCovered = 9;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
