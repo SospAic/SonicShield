@@ -1,0 +1,23 @@
+# 换行归一：避免 `core.autocrlf=true` 在 checkout 时把 shell 脚本翻成 CRLF。
+# 背景：`test/scripts_encoding_lock_test.dart` 的 SCR-03 按**工作树字节**判 `.sh` 必须 LF；
+# 而本机 `core.autocrlf=true` 会在每次 checkout 后把仓库里的 LF 还原成 CRLF ⇒ 假红。
+*.sh text eol=lf
+
+# Windows 批处理保持 CRLF（cmd.exe 对 LF-only 的 .bat 在个别场景会出问题）。
+*.bat text eol=crlf
+
+# 二进制/大文件不走文本归一。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.otf binary
+*.ttf binary
+*.so binary
+*.jar binary
+*.keystore binary
+*.apk binary
+*.aab binary
+*.ipa binary
