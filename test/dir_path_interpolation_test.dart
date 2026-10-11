@@ -47,6 +47,11 @@ void main() {
       RegExp(r'\b(?:final|var|Directory)\s+(\w+)\s*=\s*(?:await\s+)?(get\w*Directory)\s*\(');
   final assignFromCtorRe =
       RegExp(r'\b(?:final|var)\s+(\w+)\s*=\s*Directory\s*\(');
+  /// 箭头体赋值：`Future<Directory> f() => getXxxDirectory();`
+  /// （无 `=`，只有 `=>` —— 上面的 `\s*=\s*` 匹配不到，需单独识别，
+  ///  否则 DIP-03 会把「有调用点却零识别」的文件误判为锁空转）。
+  final arrowFromApiRe =
+      RegExp(r'=>\s*(?:await\s+)?(get\w*Directory)\s*\(\)');
 
   /// 变量被插值**但没有接 `.path`** —— 就是 BUG-065 的形态。
   RegExp bareInterp(String name) =>
@@ -66,7 +71,10 @@ void main() {
           assignFromCtorRe.firstMatch(line);
       if (m != null) {
         dirVars.add(m.group(1)!);
-        apiFilesFound.add(m.group(2) ?? 'Directory');
+        // ⚠️ `assignFromCtorRe` 只有 1 个捕获组 ⇒ `group(2)` 会抛 RangeError。
+        // 用 `groupCount` 判定，而不是无脑取 group(2)。
+        apiFilesFound
+            .add(m.groupCount >= 2 ? (m.group(2) ?? 'Directory') : 'Directory');
       }
     }
     final bad = <(int, String)>[];
@@ -144,7 +152,10 @@ void main() {
           final code = line.trimLeft();
           if (code.startsWith('//') || code.startsWith('*')) continue;
           if (apiCallRe.hasMatch(line)) calls++;
-          if (assignFromApiRe.hasMatch(line)) recognised++;
+          if (assignFromApiRe.hasMatch(line) ||
+              arrowFromApiRe.hasMatch(line)) {
+            recognised++;
+          }
         }
         if (calls > 0) apiCallFiles.add(f.path);
         if (recognised > 0) recognisedFiles.add(f.path);

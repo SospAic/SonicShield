@@ -106,20 +106,30 @@ void main() {
   bool ciIsIpaOnly(String src) =>
       src.contains('ios-build') &&
       src.contains('sonic_shield-unsigned.ipa') &&
+      // 第八十三轮（远程合并轮）：恢复 `android-build`（签名 APK）—— 本仓交付
+      // 目标是「所有系统的 release」，Android 侧必须出 APK；远程 2026-10-10 的
+      // `1d8db2e` 把 android-build 一并裁掉了，与交付目标冲突。analyze/emulator/
+      // 覆盖率 ratchet 仍裁撤（改由本地 gates.sh 承担，不恢复）。
+      src.contains('android-build') &&
+      src.contains('name: sonicshield-apk') &&
       !src.contains('analyze-test') &&
-      !src.contains('android-build') &&
       !src.contains('emulator-test') &&
       !src.contains('--min-covered=');
 
-  test('GEC-06 ★ CI 收敛为「只构建 iOS IPA」（其余 job 已裁撤）', () {
+  test('GEC-06 ★ CI 只构建产物：Android 签名 APK + iOS 未签名 IPA（analyze/emulator/ratchet 已裁撤）', () {
     expect(ciIsIpaOnly(ci), isTrue,
-        reason: 'CI 必须只剩 ios-build 并产出未签名 IPA；analyze/test/coverage/'
-            'android/emulator 均应裁撤（改由本地 gates.sh 承担）');
+        reason: 'CI 必须同时产出 android-build（name: sonicshield-apk）与 '
+            'ios-build（name: sonicshield-ios-ipa）；analyze/test/coverage/'
+            'emulator 均应裁撤（改由本地 gates.sh 承担）');
   });
 
-  test('GEC-06r 反例：旧形状（android/emulator/覆盖率 ratchet/无 iOS）都判红', () {
-    expect(ciIsIpaOnly('$ci\n  android-build:\n    runs-on: ubuntu-latest\n'),
-        isFalse, reason: '塞回 android-build 必须判红');
+  test('GEC-06r 反例：塞回 analyze/emulator/覆盖率 ratchet、或删掉任一产物 job 都判红', () {
+    expect(ciIsIpaOnly(ci.replaceAll('android-build', 'X')), isFalse,
+        reason: '删掉 android-build 必须判红（交付目标是所有系统）');
+    expect(ciIsIpaOnly(ci.replaceAll('ios-build', 'X')), isFalse,
+        reason: '没有 iOS job 必须判红');
+    expect(ciIsIpaOnly('$ci\n  analyze-test:\n    runs-on: ubuntu-latest\n'),
+        isFalse, reason: '塞回 analyze-test 必须判红（改由本地 gates.sh 承担）');
     expect(ciIsIpaOnly('$ci\n  emulator-test:\n'), isFalse,
         reason: '塞回 emulator-test 必须判红');
     expect(
@@ -127,8 +137,6 @@ void main() {
             '--gate=98.8 --min-covered=12653\n'),
         isFalse,
         reason: '塞回覆盖率 ratchet 必须判红');
-    expect(ciIsIpaOnly(ci.replaceAll('ios-build', 'X')), isFalse,
-        reason: '没有 iOS job 必须判红');
   });
 
   /// 设备套件"无 adb / 无设备"分支必须落在 BLOCKED，且由 ALLOW_DEVICE_SKIP 显式放行 ——

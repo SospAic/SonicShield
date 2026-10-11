@@ -286,20 +286,22 @@ const String kTestableLabel = r'可测面|门禁口径';
 /// 全局口径的标签词（对外诚实数字）。
 const String kGlobalLabel = r'全局|对外诚实数字';
 
-/// 设备层豁免**分母**（`background_engine.dart` 612 + `main.dart` 67）。
+/// 设备层豁免**分母**（`background_engine.dart` 615 + `main.dart` 70 + `neural_tts.dart` 71）。
 ///
 /// 与 `test/device_exemption_lock_test.dart`（DEX 系列）绑定同一组事实；
 /// 一旦豁免面几何变化，本锁与 DEX 会**同时**判红。
 ///
-/// ⚠️ 第八十二轮：按权威 `coverage/lcov.info` 实测校正 —— `lib/services/background_engine.dart`
-/// 可执行行 **610 → 612**（本轮离线 TTS「没声音」根因修复：`speak` 先
-/// `awaitSpeakCompletion(true)` + 按字数估预算，播报路径新增可执行行）、
-/// `lib/main.dart` **65 → 67**（`_speakSystemTts` 同款修复），豁免面分母 **675 → 679**。
-/// ⚠️ 已覆盖行**不变**（仍 `background_engine.dart` 8/612 ⇒ 8；`main.dart` 0/67）。
-const int kDeviceExemptLines = 612 + 67;
+/// ⚠️ 第八十三轮（远程合并轮）：按权威 `coverage/lcov.info` 实测校正 ——
+/// 合并远程「离线神经 TTS（sherpa-onnx）」后，豁免面**新增第三个文件**
+/// `lib/services/neural_tts.dart`（71 行，onnxruntime 原生 FFI 宿主不可达），
+/// 且 `background_engine.dart` **612 → 615**、`main.dart` **67 → 70**
+/// （两文件均并入神经 TTS 装配接线）。豁免面分母 **679 → 756**，
+/// 已覆盖行 **8 → 9**（`neural_tts.dart` 覆盖 1 行）。
+const int kDeviceExemptLines = 615 + 70 + 71;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8/612 ⇒ 8；`main.dart` 0/67）。
-const int kDeviceExemptCovered = 8;
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8 + `main.dart` 0 +
+/// `neural_tts.dart` 1 ⇒ 9）。
+const int kDeviceExemptCovered = 9;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
@@ -478,7 +480,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 610 + 65，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 615 + 70 + 71，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1101,13 +1103,13 @@ void main() {
           reason: '全局**绝对分数**在两个根节里不一致 ⇒ 至少有一节没回刷');
     });
 
-    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 675 行；已覆盖 +8 行）', () {
+    test('BAS-03 ★ 豁免面几何必须自洽（全局−可测面 = 756 行；已覆盖 +9 行）', () {
       final r12 = rootOf(d12);
       expect(r12, isNotNull);
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 610 + 65，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 615 + 70 + 71，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
           reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/610）');
     });
@@ -1205,7 +1207,7 @@ void main() {
             baselineConsistencyViolation(
                 doc12: bad, doc17: d17, landingPoints: landing),
             isNotNull,
-            reason: '全局分母 − 可测面分母 ≠ 675 ⇒ 豁免面几何漂移');
+            reason: '全局分母 − 可测面分母 ≠ 756 ⇒ 豁免面几何漂移');
       });
 
       test('BAS-90e 根节塞进第二条不同的可测面基线 → 判红（防"只取第一条"的假绿）', () {

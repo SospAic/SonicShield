@@ -16,14 +16,14 @@ void main() {
     test('CP-01 出厂默认计划通过校验且区间符合约定', () {
       final p = CounterPlan.defaults();
       expect(p.validate(), isEmpty);
-      // 工作日白天 50–80% / 3–8s
-      expect(p.workdayDay.volumeMin, 0.5);
-      expect(p.workdayDay.volumeMax, 0.8);
+      // 工作日白天：尽量不喊话 ⇒ **大量大音量噪音**（70–100% / 3–8s）为主。
+      expect(p.workdayDay.volumeMin, 0.7);
+      expect(p.workdayDay.volumeMax, 1.0);
       expect(p.workdayDay.durationSecMin, 3);
       expect(p.workdayDay.durationSecMax, 8);
-      // 工作日夜间 30–50% / 3–5s
-      expect(p.workdayNight.volumeMin, 0.3);
-      expect(p.workdayNight.volumeMax, 0.5);
+      // 工作日夜间：以 TTS 说烦人的话为主 + 轻幅噪音（10–30% / 3–5s）。
+      expect(p.workdayNight.volumeMin, 0.1);
+      expect(p.workdayNight.volumeMax, 0.3);
       expect(p.workdayNight.durationSecMax, 5);
       // 休息日两段默认关闭（可选）
       expect(p.restdayDay.enabled, isFalse);
@@ -31,8 +31,9 @@ void main() {
       // 休息日夜间 10–30% / 3–5s
       expect(p.restdayNight.volumeMin, 0.1);
       expect(p.restdayNight.volumeMax, 0.3);
-      expect(p.dayStartHour, 8);
-      expect(p.dayEndHour, 20);
+      // 昼夜导向：白天窗口 06:00–21:00（第八十二轮起为 6/21）。
+      expect(p.dayStartHour, 6);
+      expect(p.dayEndHour, 21);
     });
 
     test('CP-02 toJson/fromJson 往返一致', () {
@@ -173,14 +174,16 @@ void main() {
           isFalse);
     });
 
-    test('CP-08 describeWindow 输出音量/时长/次数（不区分 enabled）', () {
+    test('CP-08 describeWindow 输出音量/时长/次数/三路权重（不区分 enabled）', () {
       const w = CounterWindow(
           volumeMin: 0.5,
           volumeMax: 0.8,
           durationSecMin: 3,
           durationSecMax: 8,
           actionsPerHour: 2);
-      expect(describeWindow(w), '50%–80% · 3–8 秒 · 每小时 2 次');
+      // 三路权重由 `audioWeight = 1 - ttsWeight - vibrateWeight` 导出：
+      // 默认 ttsWeight=0.5 / vibrateWeight=0.0 ⇒ 音效 50%/TTS 50%/震动 0%。
+      expect(describeWindow(w), '50%–80% · 3–8 秒 · 每小时 2 次 · 音效50%/TTS50%/震动0%');
       // 该函数本身不区分 enabled —— "未启用（该时段不反击）"的文案由设置页承担
       // （见 settings_screen.dart 的 `w.enabled ? describeWindow(w) : ...`）。
       const off = CounterWindow(enabled: false);
@@ -365,7 +368,7 @@ void main() {
           isEmpty);
     });
 
-    test('MT-06 无音源池但有 TTS → 全部走 TTS', () {
+    test('MT-06 无音源池但有 TTS → 只可能是 TTS/震动（绝不产 playAudio）', () {
       final list = CounterPlanMaterializer.materialize(plan,
           planId: 'p1',
           from: DateTime(2026, 3, 10),
@@ -373,7 +376,16 @@ void main() {
           assetIdPool: const {},
           now: null);
       expect(list, isNotEmpty);
-      expect(list.every((t) => t.actionType == ActionType.tts), isTrue);
+      // 无音源池 ⇒ 不可能生成 playAudio；但夜间窗口 `vibrateWeight=0.3` ⇒
+      // 允许出现 randomVibrate（不再假设"全部 TTS"）。
+      expect(
+          list.every((t) =>
+              t.actionType == ActionType.tts ||
+              t.actionType == ActionType.randomVibrate),
+          isTrue,
+          reason: '无音源池时只应有 TTS / 震动两类动作');
+      expect(list.any((t) => t.actionType == ActionType.tts), isTrue,
+          reason: '有 TTS 文本时至少要能生成 TTS 动作');
     });
   });
 
