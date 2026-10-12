@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 声盾远程桌面级控制（docs/25）P0：无障碍服务配置。
+<!-- 声盾远程桌面级控制（docs/61）P0：无障碍服务配置。
 
      能力边界（如实声明，不夸大）：
        · canPerformGestures=true  → dispatchGesture（tap / swipe / 多指）

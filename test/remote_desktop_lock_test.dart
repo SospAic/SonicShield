@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sonic_shield/remote/assist.dart';
 import 'package:sonic_shield/remote/protocol.dart';
 
-/// 远程桌面级控制（docs/25）**契约锁**。
+/// 远程桌面级控制（docs/61）**契约锁**。
 ///
 /// ## 它防的是什么（两类静默失败）
 /// 1. **权限位漏登记**：`RcPermGate.requiredPerm` 对**未登记**命令返回 `denyAll`
@@ -13,7 +13,7 @@ import 'package:sonic_shield/remote/protocol.dart';
 ///    改错一个字母 = "命令发不出去且无任何报错"（与 `PairQrProtocol` 大小写
 ///    归一化同一族：**写在一处、用在另一处**的字符串必须有锁）。
 void main() {
-  group('RDP · 远程桌面级控制契约（docs/25）', () {
+  group('RDP · 远程桌面级控制契约（docs/61）', () {
     test('RDP-01 命令 / 事件字面量固定（跨端约定，改错即静默失联）', () {
       expect(RcCmd.screenCastRequest, 'screen.cast.request');
       expect(RcCmd.screenCastStop, 'screen.cast.stop');

@@ -26,10 +26,10 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 远程桌面级控制（docs/25）P0：投屏前台服务（`mediaProjection` 类型）。
+ * 远程桌面级控制（docs/61）P0：投屏前台服务（`mediaProjection` 类型）。
  *
  * ⚠️ **本类只做壳**：起停 + 常驻可见通知 + 持有 [MediaProjection]。**画面采集与
- * 传输**（`VirtualDisplay`/`ImageReader` 单帧，或 WebRTC 实时流）属 docs/25 P1/P2，
+ * 传输**（`VirtualDisplay`/`ImageReader` 单帧，或 WebRTC 实时流）属 docs/61 P1/P2，
  * 未实现前**不得冒充完成**（本类不含任何采集/编码/发送代码）。
  *
  * ## Android 14+ 纪律（docs/24 阶段0）
@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * `resultCode` + `data`（授权弹窗是唯一的授权入口），**再**以
  * `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` 调 `startForeground`；顺序反了直接
  * `SecurityException`。因此本服务**拒绝**在缺少授权 token 时启动 —— 这是
- * "不可绕过授权"红线的机器锁（docs/25 §1、G2）。
+ * "不可绕过授权"红线的机器锁（docs/61 §1、G2）。
  *
  * ## 可见性红线
  * 会话期间常驻通知（`setOngoing(true)`）在**任何像素出屏之前**就必须存在；
@@ -130,7 +130,7 @@ class ScreenCastService : Service() {
     }
 
     /**
-     * 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段 1 / docs/25 P1）。
+     * 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段 1 / docs/61 P1）。
      *
      * 复用 P0 已持有的 [projection]（MediaProjection 授权已在 P0 取得，**不重复弹窗**）。
      * 链路：`VirtualDisplay` → `ImageReader(RGBA_8888)` → `Bitmap`（按 rowStride 去 padding）

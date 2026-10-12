@@ -1329,7 +1329,7 @@ class RcEndpointService {
         await _deviceAlert(msg, peer, logs);
       case RcCmd.deviceRename:
         await _handleDeviceRename(msg, peer, logs);
-      // ---- v2.1：远程桌面级控制（docs/25）----
+      // ---- v2.1：远程桌面级控制（docs/61）----
       case RcCmd.screenCastRequest:
         await _screenCastRequest(msg, peer, logs);
       case RcCmd.screenCastStop:
@@ -1356,9 +1356,9 @@ class RcEndpointService {
     }
   }
 
-  // ==================== v2.1：远程桌面级控制（docs/25，看 + 控） ====================
+  // ==================== v2.1：远程桌面级控制（docs/61，看 + 控） ====================
 
-  /// 端点侧「控制会话进行中」的**可见性信号**（docs/25 §1 可见性红线）。
+  /// 端点侧「控制会话进行中」的**可见性信号**（docs/61 §1 可见性红线）。
   ///
   /// UI 监听它渲染「正在投屏 / 接受远程操作」醒目指示 + 一键停止 ——
   /// **任何像素出屏 / 任何注入生效之前，端点必须已有可见指示**。
@@ -1366,11 +1366,11 @@ class RcEndpointService {
 
   /// 当前进行中的控制会话 id（`null` = 无）。
   ///
-  /// **会话失效锁**（docs/25 G4）：输入注入必须落在**当前活跃**会话上 ——
+  /// **会话失效锁**（docs/61 G4）：输入注入必须落在**当前活跃**会话上 ——
   /// 会话停止后携旧 `castId` 的 `input.*` 一律拒，杜绝"停了还能操作"。
   String? _castSessionId;
 
-  /// 请求开启控制会话（画面 + 输入）。授权前置见 docs/25 §1。
+  /// 请求开启控制会话（画面 + 输入）。授权前置见 docs/61 §1。
   Future<void> _screenCastRequest(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
     final castId = (msg.payload['castId'] as String?) ?? '';
@@ -1386,7 +1386,7 @@ class RcEndpointService {
     }
     final wantControl = kind == 'control';
     // 输入授权前置：无障碍须由**端点用户在系统设置**开启。未开 ⇒ 如实拒绝，
-    // **不静默降级为仅看**（docs/25 §1、G8）。
+    // **不静默降级为仅看**（docs/61 §1、G8）。
     if (wantControl && !await NativeBridge.accessibilityEnabled()) {
       await logs.append(
           source: 'remote',
@@ -1402,7 +1402,7 @@ class RcEndpointService {
       return;
     }
     // 画面授权：由前台 Activity 弹 **MediaProjection 系统授权窗**；用户拒绝 ⇒
-    // 服务不启动、返回 false。**授权是唯一入口，不可绕过**（docs/25 §1、G2）。
+    // 服务不启动、返回 false。**授权是唯一入口，不可绕过**（docs/61 §1、G2）。
     final started = await NativeBridge.screenCastStart();
     if (!started) {
       await logs.append(
@@ -1475,7 +1475,7 @@ class RcEndpointService {
     await _ack(msg, true);
   }
 
-  /// 端点用户**本机一键停止**控制会话（docs/25 §1 可见性红线：端点任何时刻都能停）。
+  /// 端点用户**本机一键停止**控制会话（docs/61 §1 可见性红线：端点任何时刻都能停）。
   ///
   /// 与远程 `screen.cast.stop` 走**同一**副作用路径（失效会话锁 → 停服务），
   /// 只是发起方是端点自己、无需回执。
@@ -1496,8 +1496,8 @@ class RcEndpointService {
   /// 输入注入的统一入口（tap / swipe / key / text）。
   ///
   /// 两道前置校验（缺一即拒，且**如实回执** —— 不静默）：
-  /// 1. **会话失效锁**：必须落在当前活跃 `castId` 上（docs/25 G4）；
-  /// 2. **无障碍**：端点须已开启无障碍（docs/25 G8）。
+  /// 1. **会话失效锁**：必须落在当前活跃 `castId` 上（docs/61 G4）；
+  /// 2. **无障碍**：端点须已开启无障碍（docs/61 G8）。
   Future<void> _inputInject(RcMessage msg, PairedEndpoint peer,
       LogRepository logs, String kind) async {
     final castId = (msg.payload['castId'] as String?) ?? '';

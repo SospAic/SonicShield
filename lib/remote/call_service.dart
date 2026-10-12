@@ -151,6 +151,13 @@ class CallService {
   PairedEndpoint? _peer;
   bool _isCaller = false;
   bool _video = true;
+
+  /// 本会话是否为**屏幕共享**（docs/61 §5 P2）。
+  ///
+  /// `false`（默认）= 普通音视频通话（`getUserMedia`，摄像头 + 麦克风）；
+  /// `true` = 屏幕共享（`getDisplayMedia`，媒体是**屏幕画面**，默认不采麦克风）。
+  /// 与通话**互斥**：`startCall` 的 `inCall` 守卫同时覆盖两者（单会话）。
+  bool _screen = false;
   CallPhase _phase = CallPhase.idle;
 
   /// 本端是否已成功 `setRemoteDescription`。
@@ -428,7 +435,7 @@ class CallService {
   /// 依赖它给出可执行的失败原因。返回 null 却不说明原因，就是
   /// BUG-D 里"点了按钮什么都没发生"的一半。
   Future<String?> startCall(PairedEndpoint endpoint, RemoteStore store,
-      {bool video = true}) async {
+      {bool video = true, bool screen = false}) async {
     _lastStartBlock = null;
     if (inCall) {
       _lastStartBlock = CallStartBlock.alreadyInCall;
@@ -439,11 +446,12 @@ class CallService {
     _remoteDescSet = false;
     _isCaller = true; // 主叫标记（onAnswer 守卫用）
     _video = video;
+    _screen = screen;
     _peer = endpoint;
     _callId = const Uuid().v4();
     _setPhase(CallPhase.connecting);
 
-    final ok = await _ensureMedia(video: video);
+    final ok = await _ensureMedia(video: video, screen: screen);
     if (!ok) {
       _lastStartBlock = CallStartBlock.mediaFailed;
       await _teardown();
@@ -476,6 +484,10 @@ class CallService {
       RcMessage.now(RcCmd.callInvite, {
         'callId': _callId,
         'video': video,
+        // docs/61 §5 P2：会话类型。`'screen'` ⇒ 被叫用 `getDisplayMedia`
+        // （共享**屏幕**）而非 `getUserMedia`（摄像头）。缺省 `'call'`
+        // 保持向后兼容 —— 旧端不认此字段时按普通通话处理，不会解析失败。
+        'kind': screen ? 'screen' : 'call',
         'sdp': sdp,
         'type': desc?.type ?? 'offer',
         'fromName': store.deviceName,
@@ -531,6 +543,8 @@ class CallService {
     _peer = peer;
     _callId = payload['callId'] as String;
     _video = payload['video'] as bool? ?? true;
+    // docs/61 §5 P2：会话类型（缺省 `'call'` ⇒ 向后兼容旧端）。
+    _screen = payload['kind'] == 'screen';
     // 新会话起点：候选缓存必须是空的（`_createPc` 要等到用户点「接听」
     // 才会跑，而候选在振铃期间就会进缓存 —— 两者不能互相清）。
     _pendingCandidates.clear();
@@ -572,7 +586,7 @@ class CallService {
     _answered = true;
     _cancelWaitTimer();
 
-    final ok = await _ensureMedia(video: _video);
+    final ok = await _ensureMedia(video: _video, screen: _screen);
     if (!ok) {
       await _sendCallMsg(
           RcCmd.callEnd, {'callId': _callId, 'reason': 'media'}, peer, store);
@@ -767,8 +781,24 @@ class CallService {
 
   // ---------------- 内部 ----------------
 
-  Future<bool> _ensureMedia({required bool video}) async {
+  Future<bool> _ensureMedia({required bool video, bool screen = false}) async {
     try {
+      if (screen) {
+        // docs/61 §5 P2：**屏幕共享** —— 用 `getDisplayMedia` 取屏幕画面，
+        // **不采麦克风**（投屏默认只传屏幕视频；设备音频是独立开关、默认关，
+        // 见 docs/24 §阶段2「不复用部分」）。
+        //
+        // ⚠️ 本分支是 P2 的**最大不确定点**（docs/24 R12）：flutter_webrtc 在
+        // Android 上如何与我们在 P0 拿到的 MediaProjection token 交接，
+        // **尚未真机验证**（本机 Dart 管道耗尽 ⇒ 无法构建/实测）。若该 API
+        // 不可用、或会二次弹授权窗，降级方案是原生 libwebrtc AAR 直写
+        // （信令仍复用 MQTT）。**在 spike 通过前，不得声称 P2 可用。**
+        _localStream = await navigator.mediaDevices.getDisplayMedia({
+          'video': true,
+          'audio': false,
+        });
+        return true;
+      }
       // ⚠️ 采集约束必须走 [videoConstraintsFor]（docs/16 §10）：旧写法只写死
       // 640x480、**完全不设帧率上限**，部分机型会以 30/60fps 采集，
       // 低端机编码线程直接吃满 CPU ⇒ 双方"爆卡"。`ideal` 而非精确值是为了

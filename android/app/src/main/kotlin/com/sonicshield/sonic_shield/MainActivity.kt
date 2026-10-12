@@ -62,7 +62,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ==================== 远程桌面级控制（docs/25 P0）====================
+    // ==================== 远程桌面级控制（docs/61 P0）====================
 
     /** 投屏授权在途的 Dart 回调（同一时刻只允许一次授权弹窗）。 */
     private var pendingCastResult: MethodChannel.Result? = null
@@ -83,7 +83,7 @@ class MainActivity : FlutterActivity() {
      *
      * ⚠️ **必须由 Activity 承载**：`createScreenCaptureIntent` 的系统授权弹窗，
      * 及其返回的 `resultCode`/`data`，只能在 `onActivityResult` 里拿到 —— 这是
-     * Android 的硬约束（docs/25 §1「授权不可绕过」）。因此本流程**不放插件**
+     * Android 的硬约束（docs/61 §1「授权不可绕过」）。因此本流程**不放插件**
      * （插件没有 Activity）。用户拒绝 ⇒ 服务不启动、回调 false，调用方据此回
      * `rc.ack{ok:false}`（不重试轰炸）。
      */

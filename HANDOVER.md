@@ -257,6 +257,28 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 
 ---
 
+## 0.5 断点续作（可自动恢复）★ 中断后先看这里
+
+**任何一次中断（进程被杀 / 会话结束 / 上下文丢失）后，恢复只需三步：**
+
+1. `bash scripts/resume_queue.sh` —— 打印队列全貌 + **下一个待办项**（含 id 与 note）。
+2. 取 `status == 'pending'` 的**最小 seq** 项执行；开始前置 `in_progress`，完成后置 `done`
+   并在 `note` 写**证据**（提交号 / 文件 / 命令输出）—— 与本文档其余部分同一条纪律：
+   **不写证据等于没做完**。
+3. 全部 `done` ⇒ 用 `automation_update(mode=update, status=PAUSED)` 停掉续作自动化。
+
+**队列真源**：`.workbuddy-ai/queue.json`（**本地、不入库**，与 `.workbuddy-ai/memory/` 同源）。
+**恢复协议**同时写在队列文件的 `resumeProtocol` 字段里 —— 脚本与文档都指向它，避免两处漂移。
+
+**自动化**：已建一条**每小时**的续作自动化；它读队列、继续执行、并回写状态。
+中断后**不需要人工重新开场**。
+
+⚠️ **环境事实（会阻塞部分队列项）**：本机 **Dart 命名管道耗尽**
+（`CreateFile failed 231` @ `process_win.cc:744`；疑 WorkBuddy 沙箱 `sandbox-cli.exe`，
+`schtasks`/`reg`/`cmd` 已被其 Program Blacklist 拦）⇒ `flutter analyze` / `flutter test` /
+`flutter build` **全部不可用**。因此**所有 Kotlin / Dart 代码一律标记「未编译验证」**，
+**不得声称通过** —— 解除步骤见 `.workbuddy-ai/memory/2026-10-12.md`「续八 C」节。
+
 ## 1. 项目状态快照
 
 | 项 | 状态 |

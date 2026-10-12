@@ -136,7 +136,7 @@ class NativeBridgePlugin : FlutterPlugin {
                             val on = call.argument<Boolean>("enabled") == true
                             result.success(setPersistentWakeLock(ctx, on))
                         }
-                        // ---- 远程桌面级控制（docs/25）P0 ----
+                        // ---- 远程桌面级控制（docs/61）P0 ----
                         // ⚠️ 输入注入是**高危能力**：本桥只做"转发 + 如实回执"；
                         // 授权（MediaProjection 弹窗 / 系统无障碍开关）与权限位
                         // （RcPermGate）在 Dart 端点层把关 —— 桥**不重复判定、也不绕过**。
@@ -490,7 +490,7 @@ class NativeBridgePlugin : FlutterPlugin {
     }
 
     /**
-     * 无障碍服务是否已启用（docs/25 P0）。
+     * 无障碍服务是否已启用（docs/61 P0）。
      *
      * 读 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`（形如
      * `pkg/cls:pkg/cls:…`），比对 app 的 `RemoteInputService` 全名。

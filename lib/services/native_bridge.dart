@@ -203,7 +203,7 @@ class NativeBridge {
     return r ?? false;
   }
 
-  // ---------------- 远程桌面级控制（docs/25 P0，看 + 控） ----------------
+  // ---------------- 远程桌面级控制（docs/61 P0，看 + 控） ----------------
   //
   // ⚠️ 输入注入是**高危能力**：本桥只"转发 + 如实回执"；授权（MediaProjection
   // 弹窗 / 系统无障碍开关）与权限位（`RcPermGate`）在端点层把关，桥不重复判定。
@@ -211,13 +211,13 @@ class NativeBridge {
   /// 无障碍服务是否已开启（决定远程输入是否可用）。
   ///
   /// 未开启时**所有** `input*` 注入都会如实失败 —— 调用方必须据此引导用户到
-  /// 系统设置开启，**不得静默降级**（docs/25 §1、G8）。
+  /// 系统设置开启，**不得静默降级**（docs/61 §1、G8）。
   static Future<bool> accessibilityEnabled() async {
     final r = await _invoke<bool>('accessibilityEnabled');
     return r ?? false;
   }
 
-  /// 停止投屏前台服务（幂等）。**不触碰授权**（授权由系统弹窗持有，docs/25 §1）。
+  /// 停止投屏前台服务（幂等）。**不触碰授权**（授权由系统弹窗持有，docs/61 §1）。
   static Future<void> screenCastStop() => _invoke<Object?>('screenCastStop');
 
   /// 归一化坐标点击（`x`/`y` ∈ 0..1）。返回是否受理（未开无障碍 / 桥不可用 → false）。
@@ -248,7 +248,7 @@ class NativeBridge {
     return r ?? false;
   }
 
-  /// 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段1 / docs/25 P1）。
+  /// 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段1 / docs/61 P1）。
   ///
   /// 复用已授权的 MediaProjection（**不重复弹窗**）。未在投屏 / 未授权 / 超时
   /// ⇒ `null`（**如实失败**，调用方必须回 `rc.ack{ok:false}`，不得静默）。
@@ -261,7 +261,7 @@ class NativeBridge {
   /// 走**独立通道** `sonic_shield/screencast`（由 `MainActivity` 处理）：
   /// `createScreenCaptureIntent` 需要 Activity 承载系统授权弹窗，且返回的
   /// `resultCode` + `data` 只能在 `onActivityResult` 里拿到 —— 这是 Android 的
-  /// 硬约束（docs/25 §1「授权不可绕过」）。返回 true = 用户同意且服务已启动；
+  /// 硬约束（docs/61 §1「授权不可绕过」）。返回 true = 用户同意且服务已启动；
   /// false = 拒绝 / 取消 / 桥不可用。
   static Future<bool> screenCastStart() async {
     try {

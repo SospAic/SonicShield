@@ -1,7 +1,7 @@
 package com.sonicshield.native_bridge
 
 /**
- * 远程桌面级控制（docs/25）P0：**输入注入的跨模块注册点**。
+ * 远程桌面级控制（docs/61）P0：**输入注入的跨模块注册点**。
  *
  * ## 为什么需要它（一个真实的架构约束）
  * 输入注入由 **app 级** `RemoteInputService`（`AccessibilityService`，见 app 模块）
@@ -13,7 +13,7 @@ package com.sonicshield.native_bridge
  * ## 语义（fail-closed，不静默降级）
  * 未登记（**无障碍未开启 / 服务未连接**）时对应回调为 `null` ⇒ 插件**如实返回
  * false**，调用方必须回 `rc.inputAck{ok:false}` 并引导用户"去开启无障碍"，
- * 不得假装受理（docs/25 §1、G8）。
+ * 不得假装受理（docs/61 §1、G8）。
  *
  * 线程：`onServiceConnected` 在主线程，方法通道回调也在主线程；`@Volatile` 保证
  * 可见性（与 `NativeBridgePlugin` 的常驻唤醒锁同一纪律）。

@@ -15,6 +15,7 @@ import '../../remote/rc_script.dart';
 import '../../remote/remote_store.dart';
 import '../../core/theme.dart';
 import '../../domain/scheduling/run_pause.dart';
+import 'screen_viewer.dart';
 
 /// 远程控制台（v1.6）：对已配对端点的完全控制——
 /// ping/状态快照/任务查看与开关/音效播放/守卫开关/音量调节/拍照/定位。
@@ -525,21 +526,31 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                     ? () => _send(RcCmd.logsRecent, {'limit': 20}, '端点日志',
                         trackAck: false, expectEvt: RcEvt.logs)
                     : null),
-            // ---- docs/25：远程桌面级控制（看 + 控）----
+            // ---- docs/61：远程桌面级控制（看 + 控）----
             // 请求后**端点**会弹 MediaProjection 系统授权窗；且 `kind:'control'`
             // 还需端点已开启无障碍。任一不满足 ⇒ 端点如实回 `ok:false`（不静默）。
             FilledButton.tonalIcon(
                 icon: const Icon(Icons.desktop_windows_outlined),
                 label: const Text('请求远程控制'),
                 onPressed: _allowed(RcCmd.screenCastRequest)
-                    ? () => _send(
-                        RcCmd.screenCastRequest,
-                        {
-                          'castId':
-                              'cast_${DateTime.now().millisecondsSinceEpoch}',
-                          'kind': 'control',
-                        },
-                        '请求远程控制（需对方授权 + 已开无障碍）')
+                    ? () async {
+                        final castId =
+                            'cast_${DateTime.now().millisecondsSinceEpoch}';
+                        await _send(
+                            RcCmd.screenCastRequest,
+                            {'castId': castId, 'kind': 'control'},
+                            '请求远程控制（需对方授权 + 已开无障碍）');
+                        // 授权是**异步**的（端点弹系统窗）⇒ 先进观看页等画面；
+                        // 端点拒绝时 `rc.screen{state:denied}` + `rc.ack{ok:false}`
+                        // 会落在回执框里，页面显示"等待画面…"不会假装成功。
+                        final ep = _endpoint;
+                        if (ep != null && mounted) {
+                          await Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => ScreenViewerScreen(
+                                endpoint: ep, castId: castId),
+                          ));
+                        }
+                      }
                     : null),
             FilledButton.tonalIcon(
                 icon: const Icon(Icons.stop_screen_share_outlined),

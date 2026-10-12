@@ -1,7 +1,7 @@
 package com.sonicshield.native_bridge
 
 /**
- * 远程桌面级控制（docs/25）P1：**单帧抓取的跨模块注册点**。
+ * 远程桌面级控制（docs/61）P1：**单帧抓取的跨模块注册点**。
  *
  * 与 [RemoteInputRegistry] **同一手法**（依赖方向 `app → native_bridge`，插件无法
  * 引用 app 的 `ScreenCastService`）：app 的服务在**启动投屏时**把抓帧实现登记进来，
@@ -9,7 +9,7 @@ package com.sonicshield.native_bridge
  *
  * ## 语义（fail-closed）
  * 未登记（**未在投屏 / 未授权 / 服务已停**）时 [captureOnce] 为 `null` ⇒ 插件
- * 如实回 `null`，调用方据此回 `rc.ack{ok:false}`（**不静默**，docs/25 G2）。
+ * 如实回 `null`，调用方据此回 `rc.ack{ok:false}`（**不静默**，docs/61 G2）。
  */
 object RemoteCaptureRegistry {
 

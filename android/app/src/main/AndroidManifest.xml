@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <!-- 远程桌面级控制（docs/25）P0：投屏前台服务（mediaProjection 类型）。
+    <!-- 远程桌面级控制（docs/61）P0：投屏前台服务（mediaProjection 类型）。
          Android 14+ 要求逐类型声明；且必须先 createScreenCaptureIntent 拿到用户
          同意的 result token 再 startForeground，否则 SecurityException。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -157,7 +157,7 @@
             android:foregroundServiceType="mediaPlayback"
             tools:replace="android:foregroundServiceType" />
 
-        <!-- ===== 远程桌面级控制（docs/25）P0 被控端骨架 =====
+        <!-- ===== 远程桌面级控制（docs/61）P0 被控端骨架 =====
              ⚠️ 只做「壳」：ScreenCastService 起停 + 常驻通知；RemoteInputService
              无障碍注入。画面**传输**（WebRTC/单帧）属 P1/P2，未实现前不得冒充完成。
              · 授权：画面 = MediaProjection 系统弹窗（每次）；输入 = 系统无障碍开关。

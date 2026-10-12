@@ -288,7 +288,7 @@ abstract final class RcCmd {
   /// 副作用的全局操作，同 [scriptRun] 一档。
   static const runMasterSet = 'run.master.set';
 
-  // ---- v2.1：远程桌面级控制（docs/25，看+控）----
+  // ---- v2.1：远程桌面级控制（docs/61，看+控）----
   //
   // ⚠️ 纪律同 docs/24 阶段0：**此处只加常量与文档注释，不加发射方**。
   // 发射/处理随 P0→P3 分阶段实现；未实现的命令在端点侧**如实 `ok:false`**，
@@ -366,7 +366,7 @@ abstract final class RcEvt {
   static const presets = 'rc.presets'; // 预置分类 {for, categories:[...]}
   static const plan = 'rc.plan'; // 反击计划快照 {for, plan, enabled, planId, taskCount}
 
-  // ---- v2.1：远程桌面级控制回执（docs/25）----
+  // ---- v2.1：远程桌面级控制回执（docs/61）----
 
   /// 控制会话状态机镜像（与 [callState] 同形）。
   /// payload：`{for, castId, state: requesting|streaming|stopped|denied, kind}`。

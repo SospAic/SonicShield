@@ -17,7 +17,7 @@ import androidx.annotation.RequiresApi
 import com.sonicshield.native_bridge.RemoteInputRegistry
 
 /**
- * 远程桌面级控制（docs/25）P0：**输入注入**（无障碍路径，docs/25 §2 选型 A）。
+ * 远程桌面级控制（docs/61）P0：**输入注入**（无障碍路径，docs/61 §2 选型 A）。
  *
  * ## 为什么是无障碍
  * 它是 Android 上唯一"纯 App 内、无需 root / 无需电脑"的合规注入路径：
@@ -25,18 +25,18 @@ import com.sonicshield.native_bridge.RemoteInputRegistry
  * - `performGlobalAction` 表达**导航类**按键（返回 / Home / 最近任务）；
  * - 文本经活动窗口聚焦节点的 `ACTION_SET_TEXT`。
  *
- * ## 能力边界（如实，不夸大 —— docs/25 §2）
+ * ## 能力边界（如实，不夸大 —— docs/61 §2）
  * - **不能**注入系统级按键（电源 / 音量）—— 那需 Shizuku（P1 可选）；
  * - 部分定制 ROM 的安全输入（密码框 / 支付页）会**屏蔽**无障碍注入（系统行为，
  *   无法也不应绕过）；
  * - 未开启无障碍时本服务的 [instance] 为 null ⇒ 注入**如实返回 false**
  *   （调用方必须回 `rc.inputAck{ok:false}` 并提示"请让对方开启无障碍"，不静默降级）。
  *
- * ## 坐标口径（docs/25 §4.1）
+ * ## 坐标口径（docs/61 §4.1）
  * 对外接口收 **归一化 0..1** 坐标；本类按当前**真实屏幕像素**（含系统栏）换算，
  * 使控制端无需知道端点分辨率，旋转 / 分辨率变化也不失效。
  *
- * ## 隐私（docs/25 §1）
+ * ## 隐私（docs/61 §1）
  * 只用窗口内容**定位聚焦输入框**做文本注入，**不读取 / 不落盘 / 不上传**屏幕文本；
  * 不监听按键内容（配置未开 `flagRequestFilterKeyEvents`）。
  */

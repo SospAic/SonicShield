@@ -66,7 +66,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           // 首页常驻，便于用户一键切换节假日自动暂停。
           const SizedBox(height: 12),
           const _RunMasterCard(),
-          // docs/25 §1 可见性红线：控制会话进行中时，端点必须有**醒目**指示。
+          // docs/61 §1 可见性红线：控制会话进行中时，端点必须有**醒目**指示。
           const SizedBox(height: 12),
           const _CastActiveBanner(),
           // P1-04：精确闹钟降级必须在**用户可操作的位置**解释并给恢复入口。
@@ -395,7 +395,7 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
   }
 }
 
-/// 端点侧「控制会话进行中」的**醒目指示**（docs/25 §1 可见性红线）。
+/// 端点侧「控制会话进行中」的**醒目指示**（docs/61 §1 可见性红线）。
 ///
 /// 只在投屏 / 远程控制会话进行时出现；端点用户可**一键停止**（停止即同时断开
 /// 画面与输入）。这是"不可隐蔽"红线的端点侧落地：**任何像素出屏 / 任何注入
