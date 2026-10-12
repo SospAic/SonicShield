@@ -4,6 +4,8 @@ REM  SonicShield  one-click installer  (all connected devices)
 REM  - Wired USB devices + wireless ADB devices
 REM  - Installs releases\SonicShield-Android.apk to every device
 REM  - Auto-uninstalls an old build if the signature mismatches
+REM  - Wireless via releases\wireless.txt: adb connect / adb pair
+REM    (Android 11+ first-time pairing) / mdns auto-discovery
 REM ============================================================
 chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
@@ -37,15 +39,30 @@ if not exist "%APK%" (
   goto :ios
 )
 
-REM ---- optional wireless reconnect list (releases\wireless.txt) ----
-REM   one "host:port" per line; lines starting with # are ignored
+REM ---- optional wireless provisioning (releases\wireless.txt) ----
+REM   one entry per line; lines starting with # are ignored.
+REM   Supported line formats:
+REM     <host:port>              -> adb connect <host:port>
+REM     pair <host:port> <code>  -> adb pair <host:port> <code>   (Android 11+ first-time pairing)
+REM     mdns                     -> auto-discover + connect every _adb-tls-connect._tcp device
 if exist "%REL%\wireless.txt" (
   echo [wireless] reading %REL%\wireless.txt ...
   for /f "usebackq eol=# tokens=*" %%w in ("%REL%\wireless.txt") do (
     set "line=%%w"
     if not "!line!"=="" (
-      echo   connect !line!
-      "%ADB%" connect !line! >nul 2>&1
+      for /f "tokens=1*" %%a in ("!line!") do (
+        if /i "%%~a"=="pair" (
+          echo   pair %%b
+          "%ADB%" pair %%b >nul 2>&1
+        ) else (
+          if /i "%%~a"=="mdns" (
+            call :mdns_connect
+          ) else (
+            echo   connect !line!
+            "%ADB%" connect !line! >nul 2>&1
+          )
+        )
+      )
     )
   )
 )
@@ -130,3 +147,17 @@ REM  when launched by a runner/CI it does not, so we skip the pause and exit)
 echo %cmdcmdline% | find /i "%~f0" >nul
 if not errorlevel 1 pause
 exit /b %FINAL%
+
+REM ---- subroutine: mDNS wireless auto-discovery + connect ----
+REM   Invoked via "call :mdns_connect" from a "mdns" directive line in wireless.txt.
+REM   TAB is the delimiter: device names may contain spaces (e.g. "adb-XXXX (2)"),
+REM   and "adb mdns services" prints TAB-separated fields (parsing verified CRLF-safe).
+:mdns_connect
+echo   [mdns] discovering wireless devices (adb mdns services) ...
+for /f "tokens=1,2,3 delims=	" %%a in ('"%ADB%" mdns services 2^>nul') do (
+  if "%%b"=="_adb-tls-connect._tcp" (
+    echo     found %%a -^> connect %%c
+    "%ADB%" connect "%%c" >nul 2>&1
+  )
+)
+goto :eof
