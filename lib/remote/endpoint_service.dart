@@ -1329,6 +1329,19 @@ class RcEndpointService {
         await _deviceAlert(msg, peer, logs);
       case RcCmd.deviceRename:
         await _handleDeviceRename(msg, peer, logs);
+      // ---- v2.1：远程桌面级控制（docs/25）----
+      case RcCmd.screenCastRequest:
+        await _screenCastRequest(msg, peer, logs);
+      case RcCmd.screenCastStop:
+        await _screenCastStop(msg, peer, logs);
+      case RcCmd.inputTap:
+        await _inputInject(msg, peer, logs, 'tap');
+      case RcCmd.inputSwipe:
+        await _inputInject(msg, peer, logs, 'swipe');
+      case RcCmd.inputKey:
+        await _inputInject(msg, peer, logs, 'key');
+      case RcCmd.inputText:
+        await _inputInject(msg, peer, logs, 'text');
       default:
         // ⚠️ 旧约定是"未知命令静默忽略"（docs/14）。但静默的代价是：控制器
         // 发了一条拼错的命令，端点**什么都不做也不回执**，控制器只能等到超时，
@@ -1341,6 +1354,155 @@ class RcEndpointService {
             message: 'by ${peer.name} · 未知命令，未执行');
         await _ack(msg, false, data: '未知命令');
     }
+  }
+
+  // ==================== v2.1：远程桌面级控制（docs/25，看 + 控） ====================
+
+  /// 当前进行中的控制会话 id（`null` = 无）。
+  ///
+  /// **会话失效锁**（docs/25 G4）：输入注入必须落在**当前活跃**会话上 ——
+  /// 会话停止后携旧 `castId` 的 `input.*` 一律拒，杜绝"停了还能操作"。
+  String? _castSessionId;
+
+  /// 请求开启控制会话（画面 + 输入）。授权前置见 docs/25 §1。
+  Future<void> _screenCastRequest(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final castId = (msg.payload['castId'] as String?) ?? '';
+    final kind = (msg.payload['kind'] as String?) ?? 'view';
+    if (castId.isEmpty) {
+      await _ack(msg, false, data: 'castId 缺失');
+      return;
+    }
+    // 单会话：新请求替换旧会话（与 `call.*` 互斥的同一纪律）。
+    if (_castSessionId != null && _castSessionId != castId) {
+      await NativeBridge.screenCastStop();
+      _castSessionId = null;
+    }
+    final wantControl = kind == 'control';
+    // 输入授权前置：无障碍须由**端点用户在系统设置**开启。未开 ⇒ 如实拒绝，
+    // **不静默降级为仅看**（docs/25 §1、G8）。
+    if (wantControl && !await NativeBridge.accessibilityEnabled()) {
+      await logs.append(
+          source: 'remote',
+          action: 'screen.cast',
+          status: 'skipped',
+          message: 'by ${peer.name} · 请求远程控制但端点未开启无障碍');
+      await _send(
+        RcMessage.now(RcEvt.screen,
+            {'for': msg.id, 'castId': castId, 'state': 'denied', 'kind': kind}),
+        targetPeerId: msg.from,
+      );
+      await _ack(msg, false, data: '端点未开启无障碍：无法远程控制（可改用"仅看"）');
+      return;
+    }
+    // 画面授权：由前台 Activity 弹 **MediaProjection 系统授权窗**；用户拒绝 ⇒
+    // 服务不启动、返回 false。**授权是唯一入口，不可绕过**（docs/25 §1、G2）。
+    final started = await NativeBridge.screenCastStart();
+    if (!started) {
+      await logs.append(
+          source: 'remote',
+          action: 'screen.cast',
+          status: 'skipped',
+          message: 'by ${peer.name} · 用户拒绝投屏授权');
+      await _send(
+        RcMessage.now(RcEvt.screen,
+            {'for': msg.id, 'castId': castId, 'state': 'denied', 'kind': kind}),
+        targetPeerId: msg.from,
+      );
+      await _ack(msg, false, data: '用户拒绝投屏授权');
+      return;
+    }
+    _castSessionId = castId;
+    await logs.append(
+        source: 'remote',
+        action: 'screen.cast',
+        status: 'success',
+        message: 'by ${peer.name} · 开始控制会话（kind=$kind）');
+    await _send(
+      RcMessage.now(RcEvt.screen,
+          {'for': msg.id, 'castId': castId, 'state': 'streaming', 'kind': kind}),
+      targetPeerId: msg.from,
+    );
+    await _ack(msg, true, data: 'kind=$kind');
+  }
+
+  /// 停止控制会话（画面与输入**同时**停）。
+  Future<void> _screenCastStop(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final castId = (msg.payload['castId'] as String?) ?? '';
+    _castSessionId = null; // 先失效会话锁，再停服务（顺序即护栏）
+    await NativeBridge.screenCastStop();
+    await logs.append(
+        source: 'remote',
+        action: 'screen.cast',
+        status: 'success',
+        message:
+            'by ${peer.name} · 停止控制会话${castId.isEmpty ? '' : '（$castId）'}');
+    await _send(
+      RcMessage.now(
+          RcEvt.screen, {'for': msg.id, 'castId': castId, 'state': 'stopped'}),
+      targetPeerId: msg.from,
+    );
+    await _ack(msg, true);
+  }
+
+  /// 输入注入的统一入口（tap / swipe / key / text）。
+  ///
+  /// 两道前置校验（缺一即拒，且**如实回执** —— 不静默）：
+  /// 1. **会话失效锁**：必须落在当前活跃 `castId` 上（docs/25 G4）；
+  /// 2. **无障碍**：端点须已开启无障碍（docs/25 G8）。
+  Future<void> _inputInject(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, String kind) async {
+    final castId = (msg.payload['castId'] as String?) ?? '';
+    Future<void> deny(String why) async {
+      await _send(
+        RcMessage.now(RcEvt.inputAck,
+            {'for': msg.id, 'castId': castId, 'ok': false, 'message': why}),
+        targetPeerId: msg.from,
+      );
+    }
+
+    if (_castSessionId == null || castId.isEmpty || castId != _castSessionId) {
+      await deny('无匹配的活动会话（会话可能已停止）');
+      return;
+    }
+    if (!await NativeBridge.accessibilityEnabled()) {
+      await deny('端点未开启无障碍');
+      return;
+    }
+    final p = msg.payload;
+    final ok = switch (kind) {
+      'tap' => await NativeBridge.inputTap(
+          (p['x'] as num?)?.toDouble() ?? -1,
+          (p['y'] as num?)?.toDouble() ?? -1,
+          durationMs: (p['durationMs'] as num?)?.toInt() ?? 0,
+        ),
+      'swipe' => await NativeBridge.inputSwipe(
+          (p['x1'] as num?)?.toDouble() ?? -1,
+          (p['y1'] as num?)?.toDouble() ?? -1,
+          (p['x2'] as num?)?.toDouble() ?? -1,
+          (p['y2'] as num?)?.toDouble() ?? -1,
+          durationMs: (p['durationMs'] as num?)?.toInt() ?? 200,
+        ),
+      'key' => await NativeBridge.inputKey((p['keyCode'] as num?)?.toInt() ?? -1),
+      'text' => await NativeBridge.inputText((p['text'] as String?) ?? ''),
+      _ => false,
+    };
+    await _send(
+      RcMessage.now(RcEvt.inputAck, {
+        'for': msg.id,
+        'castId': castId,
+        'ok': ok,
+        if (!ok) 'message': '注入未被受理（无障碍 / 参数 / 系统限制）',
+      }),
+      targetPeerId: msg.from,
+    );
+    // 审计：注入是高风险操作，逐条留痕。
+    await logs.append(
+        source: 'remote',
+        action: 'input.$kind',
+        status: ok ? 'success' : 'failed',
+        message: 'by ${peer.name}');
   }
 
   // ==================== v2.0：随机反击计划（远程） ====================

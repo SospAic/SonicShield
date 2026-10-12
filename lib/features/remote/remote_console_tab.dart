@@ -525,6 +525,28 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                     ? () => _send(RcCmd.logsRecent, {'limit': 20}, '端点日志',
                         trackAck: false, expectEvt: RcEvt.logs)
                     : null),
+            // ---- docs/25：远程桌面级控制（看 + 控）----
+            // 请求后**端点**会弹 MediaProjection 系统授权窗；且 `kind:'control'`
+            // 还需端点已开启无障碍。任一不满足 ⇒ 端点如实回 `ok:false`（不静默）。
+            FilledButton.tonalIcon(
+                icon: const Icon(Icons.desktop_windows_outlined),
+                label: const Text('请求远程控制'),
+                onPressed: _allowed(RcCmd.screenCastRequest)
+                    ? () => _send(
+                        RcCmd.screenCastRequest,
+                        {
+                          'castId':
+                              'cast_${DateTime.now().millisecondsSinceEpoch}',
+                          'kind': 'control',
+                        },
+                        '请求远程控制（需对方授权 + 已开无障碍）')
+                    : null),
+            FilledButton.tonalIcon(
+                icon: const Icon(Icons.stop_screen_share_outlined),
+                label: const Text('停止远程控制'),
+                onPressed: _allowed(RcCmd.screenCastStop)
+                    ? () => _send(RcCmd.screenCastStop, {}, '停止远程控制')
+                    : null),
           ],
         ),
         // FR-79（第八十四轮用户明文）：在「设备快照与动作」与「动作」两模块

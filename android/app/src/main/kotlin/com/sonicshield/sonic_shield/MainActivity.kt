@@ -1,8 +1,15 @@
 package com.sonicshield.sonic_shield
 
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 /**
  * 主 Activity。
@@ -53,5 +60,72 @@ class MainActivity : FlutterActivity() {
             // 迁移失败不阻塞启动；configure() 稍后会写权威值。
             Log.w("SonicShield", "BUG-078 migration failed (non-fatal)", e)
         }
+    }
+
+    // ==================== 远程桌面级控制（docs/25 P0）====================
+
+    /** 投屏授权在途的 Dart 回调（同一时刻只允许一次授权弹窗）。 */
+    private var pendingCastResult: MethodChannel.Result? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CAST_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "screenCastStart" -> startCastFlow(result)
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /**
+     * 发起投屏授权 → 用户同意后启动投屏前台服务。
+     *
+     * ⚠️ **必须由 Activity 承载**：`createScreenCaptureIntent` 的系统授权弹窗，
+     * 及其返回的 `resultCode`/`data`，只能在 `onActivityResult` 里拿到 —— 这是
+     * Android 的硬约束（docs/25 §1「授权不可绕过」）。因此本流程**不放插件**
+     * （插件没有 Activity）。用户拒绝 ⇒ 服务不启动、回调 false，调用方据此回
+     * `rc.ack{ok:false}`（不重试轰炸）。
+     */
+    private fun startCastFlow(result: MethodChannel.Result) {
+        if (pendingCastResult != null) {
+            result.success(false) // 已有一次在途，避免叠加授权弹窗
+            return
+        }
+        val mpm =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        pendingCastResult = result
+        @Suppress("DEPRECATION")
+        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQ_SCREEN_CAPTURE) {
+            val r = pendingCastResult
+            pendingCastResult = null
+            val ok = resultCode == Activity.RESULT_OK && data != null
+            if (ok) {
+                val svc = Intent()
+                    .setClassName(this, "com.sonicshield.sonic_shield.ScreenCastService")
+                    .setAction("com.sonicshield.screen.START")
+                    .putExtra("resultCode", resultCode)
+                    .putExtra("resultData", data)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(svc)
+                } else {
+                    startService(svc)
+                }
+            }
+            r?.success(ok)
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    companion object {
+        private const val CAST_CHANNEL = "sonic_shield/screencast"
+        private const val REQ_SCREEN_CAPTURE = 0x5C01
     }
 }

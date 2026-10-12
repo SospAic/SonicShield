@@ -194,6 +194,13 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 引擎每次重排 / 执行后会广播新状态（`replan()` 末尾必 `broadcast()`）。
+    // 本页在 `StatefulShellRoute.indexedStack` 下**常驻**，`taskListProvider`
+    // （autoDispose）被本页持续 watch ⇒ 缓存不会因切页而失效 ⇒ 引擎侧重排后
+    // 列表仍显示旧「下次触发」（用户实测：改免打扰窗口 / 豁免开关后列表不变）。
+    // 这里在引擎状态变化时重读 DB，兜住所有"引擎重排但 UI 未失效"的场景；
+    // 广播本身是**低频**事件（tick 仅在 pending 少于阈值时才 replan），不放大查询。
+    ref.listen(engineStateProvider, (_, __) => ref.invalidate(taskListProvider));
     final tasks = ref.watch(taskListProvider);
     return Scaffold(
       appBar: widget.embedded

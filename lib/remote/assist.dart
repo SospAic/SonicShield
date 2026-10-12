@@ -401,6 +401,16 @@ abstract final class RcPermGate {
         // 与自动化改写同级 → 归 `script` 位；协助会话下无此位则拒绝。
         RcCmd.deviceRename =>
           'script',
+        // docs/25：远程桌面级控制（看 + 控）。**输入注入是最高危能力**（可代用户
+        // 操作任意 App）⇒ 与"宏执行 / 持久自动化改写"同级，一律要求 `script` 位。
+        // 画面投屏同样归 `script`：它暴露端点屏幕内容（含可能的敏感信息）。
+        RcCmd.screenCastRequest ||
+        RcCmd.screenCastStop ||
+        RcCmd.inputTap ||
+        RcCmd.inputSwipe ||
+        RcCmd.inputKey ||
+        RcCmd.inputText =>
+          'script',
         _ => denyAll,
       };
 

@@ -202,6 +202,73 @@ class NativeBridge {
     final r = await _invoke<bool>('alert', {'message': message});
     return r ?? false;
   }
+
+  // ---------------- 远程桌面级控制（docs/25 P0，看 + 控） ----------------
+  //
+  // ⚠️ 输入注入是**高危能力**：本桥只"转发 + 如实回执"；授权（MediaProjection
+  // 弹窗 / 系统无障碍开关）与权限位（`RcPermGate`）在端点层把关，桥不重复判定。
+
+  /// 无障碍服务是否已开启（决定远程输入是否可用）。
+  ///
+  /// 未开启时**所有** `input*` 注入都会如实失败 —— 调用方必须据此引导用户到
+  /// 系统设置开启，**不得静默降级**（docs/25 §1、G8）。
+  static Future<bool> accessibilityEnabled() async {
+    final r = await _invoke<bool>('accessibilityEnabled');
+    return r ?? false;
+  }
+
+  /// 停止投屏前台服务（幂等）。**不触碰授权**（授权由系统弹窗持有，docs/25 §1）。
+  static Future<void> screenCastStop() => _invoke<Object?>('screenCastStop');
+
+  /// 归一化坐标点击（`x`/`y` ∈ 0..1）。返回是否受理（未开无障碍 / 桥不可用 → false）。
+  static Future<bool> inputTap(double x, double y, {int durationMs = 0}) async {
+    final r = await _invoke<bool>(
+        'inputTap', {'x': x, 'y': y, 'durationMs': durationMs});
+    return r ?? false;
+  }
+
+  /// 归一化坐标滑动 / 拖拽（各坐标 ∈ 0..1）。返回是否受理。
+  static Future<bool> inputSwipe(double x1, double y1, double x2, double y2,
+      {int durationMs = 200}) async {
+    final r = await _invoke<bool>('inputSwipe',
+        {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'durationMs': durationMs});
+    return r ?? false;
+  }
+
+  /// 导航类按键（Android `KeyEvent` 常量：返回 / Home / 最近任务）。
+  /// ⚠️ 系统级按键（电源 / 音量）无障碍**做不到**，原生侧如实返回 false。
+  static Future<bool> inputKey(int keyCode) async {
+    final r = await _invoke<bool>('inputKey', {'keyCode': keyCode});
+    return r ?? false;
+  }
+
+  /// 文本注入（对活动窗口**已聚焦**输入框）。返回是否受理。
+  static Future<bool> inputText(String text) async {
+    final r = await _invoke<bool>('inputText', {'text': text});
+    return r ?? false;
+  }
+
+  /// 发起投屏授权并启动投屏前台服务（**必须由前台 UI 触发**）。
+  ///
+  /// 走**独立通道** `sonic_shield/screencast`（由 `MainActivity` 处理）：
+  /// `createScreenCaptureIntent` 需要 Activity 承载系统授权弹窗，且返回的
+  /// `resultCode` + `data` 只能在 `onActivityResult` 里拿到 —— 这是 Android 的
+  /// 硬约束（docs/25 §1「授权不可绕过」）。返回 true = 用户同意且服务已启动；
+  /// false = 拒绝 / 取消 / 桥不可用。
+  static Future<bool> screenCastStart() async {
+    try {
+      final r = await _screenCastCh.invokeMethod<bool>('screenCastStart');
+      return r ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// 投屏授权通道（Activity 承载，区别于插件的主方法通道）。
+  static const MethodChannel _screenCastCh =
+      MethodChannel('sonic_shield/screencast');
 }
 
 /// 避免与 services 包内其它 Channels 常量冲突的私有命名空间。

@@ -136,6 +136,58 @@ class NativeBridgePlugin : FlutterPlugin {
                             val on = call.argument<Boolean>("enabled") == true
                             result.success(setPersistentWakeLock(ctx, on))
                         }
+                        // ---- 远程桌面级控制（docs/25）P0 ----
+                        // ⚠️ 输入注入是**高危能力**：本桥只做"转发 + 如实回执"；
+                        // 授权（MediaProjection 弹窗 / 系统无障碍开关）与权限位
+                        // （RcPermGate）在 Dart 端点层把关 —— 桥**不重复判定、也不绕过**。
+                        "screenCastStop" -> {
+                            // 用**显式组件名**停止 app 级投屏服务，避免插件引用 app 类
+                            // （与 AlarmWatchdogReceiver 同一约束/手法）。
+                            ctx.stopService(
+                                Intent().setClassName(
+                                    ctx.packageName,
+                                    "com.sonicshield.sonic_shield.ScreenCastService",
+                                ),
+                            )
+                            result.success(true)
+                        }
+                        "accessibilityEnabled" -> result.success(isAccessibilityEnabled(ctx))
+                        "inputTap" -> {
+                            val x = call.argument<Number>("x")?.toFloat()
+                            val y = call.argument<Number>("y")?.toFloat()
+                            val d = call.argument<Number>("durationMs")?.toLong() ?: 0L
+                            val f = RemoteInputRegistry.tap
+                            result.success(
+                                if (f == null || x == null || y == null) false else f(x, y, d)
+                            )
+                        }
+                        "inputSwipe" -> {
+                            val x1 = call.argument<Number>("x1")?.toFloat()
+                            val y1 = call.argument<Number>("y1")?.toFloat()
+                            val x2 = call.argument<Number>("x2")?.toFloat()
+                            val y2 = call.argument<Number>("y2")?.toFloat()
+                            val d = call.argument<Number>("durationMs")?.toLong() ?: 0L
+                            val f = RemoteInputRegistry.swipe
+                            result.success(
+                                if (f == null || x1 == null || y1 == null ||
+                                    x2 == null || y2 == null
+                                ) {
+                                    false
+                                } else {
+                                    f(x1, y1, x2, y2, d)
+                                }
+                            )
+                        }
+                        "inputKey" -> {
+                            val k = call.argument<Number>("keyCode")?.toInt()
+                            val f = RemoteInputRegistry.key
+                            result.success(if (f == null || k == null) false else f(k))
+                        }
+                        "inputText" -> {
+                            val t = call.argument<String>("text")
+                            val f = RemoteInputRegistry.text
+                            result.success(if (f == null || t == null) false else f(t))
+                        }
                         "openOemAutostart" -> {
                             openVendorAutostart(
                                 ctx,
@@ -423,6 +475,24 @@ class NativeBridgePlugin : FlutterPlugin {
             Log.w(TAG, "setPersistentWakeLock failed", e)
             false
         }
+    }
+
+    /**
+     * 无障碍服务是否已启用（docs/25 P0）。
+     *
+     * 读 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`（形如
+     * `pkg/cls:pkg/cls:…`），比对 app 的 `RemoteInputService` 全名。
+     * **只比字符串、不引用 app 类** ⇒ 无跨模块耦合（同 [openVendorAutostart] 的
+     * 显式组件名手法）。返回 false = 未开启 ⇒ 调用方须引导用户去系统设置开启。
+     */
+    private fun isAccessibilityEnabled(ctx: Context): Boolean {
+        val expected =
+            "${ctx.packageName}/com.sonicshield.sonic_shield.RemoteInputService"
+        val enabled = Settings.Secure.getString(
+            ctx.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }
 
     private fun openVendorAutostart(ctx: Context, vendor: String) {

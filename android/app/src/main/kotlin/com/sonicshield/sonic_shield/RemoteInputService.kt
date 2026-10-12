@@ -14,6 +14,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.annotation.RequiresApi
+import com.sonicshield.native_bridge.RemoteInputRegistry
 
 /**
  * 远程桌面级控制（docs/25）P0：**输入注入**（无障碍路径，docs/25 §2 选型 A）。
@@ -50,15 +51,23 @@ class RemoteInputService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // 把注入实现登记进**插件侧**注册表。依赖方向是 `app → native_bridge`
+        // （插件无法引用 app 类），故由 app 侧反向登记 —— 见 RemoteInputRegistry 文档。
+        RemoteInputRegistry.tap = { nx, ny, d -> tap(nx, ny, d) }
+        RemoteInputRegistry.swipe = { x1, y1, x2, y2, d -> swipe(x1, y1, x2, y2, d) }
+        RemoteInputRegistry.key = { k -> globalAction(k) }
+        RemoteInputRegistry.text = { t -> setText(t) }
         Log.i(TAG, "无障碍服务已连接：可注入 tap/swipe/key/text")
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        RemoteInputRegistry.clear()
         if (instance === this) instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        RemoteInputRegistry.clear()
         if (instance === this) instance = null
         super.onDestroy()
     }

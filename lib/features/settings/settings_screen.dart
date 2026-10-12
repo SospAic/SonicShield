@@ -690,6 +690,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (mounted) {
       ref.invalidate(quietExemptCountProvider);
       ref.invalidate(quietExemptOverrideTasksProvider);
+      // ⚠️ 必须一并失效**任务列表**：本页在 `StatefulShellRoute.indexedStack` 下
+      // 与任务列表**同时常驻**，`taskListProvider`（autoDispose）被列表页持续
+      // watch ⇒ 缓存不会因切页而失效。豁免开关改变了「下一触发」的物化结果，
+      // 不失效这里，列表会一直显示旧时间（用户实测："豁免后下一任务时间没变"）。
+      ref.invalidate(taskListProvider);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(next
               ? '已开启夜间豁免主开关：所有任务默认豁免（个别可强制不豁免）'
@@ -709,6 +714,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await p.setInt(PrefsKeys.quietStartHour, _quietStart);
     await p.setInt(PrefsKeys.quietEndHour, _quietEnd);
     await BackgroundServiceManager.instance.replan();
+    // 同上：免打扰窗口变更也会改变物化结果（平移点变了）⇒ 一并失效任务列表。
+    ref.invalidate(taskListProvider);
   }
 
   @override
