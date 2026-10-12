@@ -87,10 +87,20 @@ class PermissionRequestOutcome {
   const PermissionRequestOutcome({
     required this.notification,
     required this.microphone,
+    this.exactAlarmDenied = false,
   });
 
   final PermissionStatus notification;
   final PermissionStatus microphone;
+
+  /// 精确闹钟特殊权限（`SCHEDULE_EXACT_ALARM`）**未授予**（Android 12+）。
+  ///
+  /// 为什么单列一项：Android 14+ 对 `targetSdk ≥ 34` 的应用**默认拒绝**该权限，
+  /// 而它是锁屏 / Doze 下唯一可靠通道（原生精确闹钟）的前提；被拒时锁屏后
+  /// **功能会整体失效**。它不在普通运行时权限弹窗里（属「特殊权限 / 其他权限」），
+  /// 用户"以为给了所有权限"往往就是漏了它 ⇒ 必须由调用方在可操作位置显式引导。
+  /// 非 Android / 平台不支持时为 false（不误报）。
+  final bool exactAlarmDenied;
 
   /// 通知未授予（含"拒绝"与"永久拒绝"）—— 后台提醒会静默缺失。
   bool get notificationDenied =>
@@ -109,11 +119,14 @@ Future<PermissionRequestOutcome> requestAllPermissions(WidgetRef ref) async {
   final notification = await Permission.notification.request();
   // 麦克风（守卫/取证）
   final microphone = await Permission.microphone.request();
-  // 精确闹钟（Android 12+ 特殊权限）
-  final exact = await NativeBridge.exactAlarmSupported();
-  if (exact) {
-    // 原生层已检查；未授权时跳转系统设置由引导页完成。
-  }
+  // 精确闹钟（Android 12+ 特殊权限）。**无法在这里弹系统框**（该特殊权限只能
+  // 由用户到系统设置页手动开启），故这里只**判定**，把结果回传给调用方由其
+  // 在可操作位置引导（首页保活清单常驻提示行 + 设置页保活自检面板）。
+  //
+  // ⚠️ 此前这里是**空分支**（检查了 exact 却什么都不做）—— 用户"以为给了所有
+  // 权限"却漏掉这一项时，锁屏后引擎只靠被 Doze 冻结的通道 A，功能整体失效
+  // 且界面零提示。
+  final exactAlarmOk = await NativeBridge.exactAlarmSupported();
   // 电池优化白名单（可跳过，引导页处理）。
   //
   // ⚠️ 只在**尚未加白**时才弹系统框：无条件弹会让「每次开引擎 / 开守卫」
@@ -124,6 +137,7 @@ Future<PermissionRequestOutcome> requestAllPermissions(WidgetRef ref) async {
   return PermissionRequestOutcome(
     notification: notification,
     microphone: microphone,
+    exactAlarmDenied: !exactAlarmOk,
   );
 }
 

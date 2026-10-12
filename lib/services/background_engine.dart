@@ -220,6 +220,32 @@ Future<void> _engineBody(ServiceInstance service) async {
   final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
 
+  /// 应用电源模式副作用（v1.9.1 新增）：**仅** `performance` 档持有常驻唤醒锁。
+  ///
+  /// 背景：此前 `power_mode` 是**死设置** —— 设置页写入、`setPowerMode` 发
+  /// `powerMode` invoke，但引擎里**没有接收方**、全仓也无人读取 ⇒ 电源模式对运行时
+  /// **零影响**（BUG-070「写在一处、用在另一处」同族）。本函数补上唯一副作用：
+  /// 性能优先 = 持 `PARTIAL_WAKE_LOCK`（锁屏 / Doze 不冻结 CPU，通道 A 持续跑）；
+  /// 平衡 / 省电 = 释放，退回"仅通道 B 精确闹钟"的默认保活。
+  Future<void> applyPowerMode(String mode) async {
+    final wantLock = mode == 'performance';
+    try {
+      await native.invokeMethod<bool>(
+          'setPersistentWakeLock', {'enabled': wantLock});
+    } on Object catch (e) {
+      // 持锁失败不致命（最坏退回"仅通道 B"），但必须留痕，不得静默。
+      await logs.append(
+        source: 'engine',
+        action: 'powerMode',
+        status: 'failed',
+        message: '切换电源模式 $mode 时唤醒锁设置失败：$e',
+      );
+    }
+  }
+
+  // 启动即应用（与设置页持久化的 power_mode 一致；看门狗唤醒重启后同样生效）。
+  await applyPowerMode(prefs.getString(PrefsKeys.powerMode) ?? 'balanced');
+
   /// 实时随机动态反击（v2.0 阶段 D）。
   ///
   /// **不采音**：本服务没有录音器，它消费 [SoundGuardService] 的 [SoundEvent]
@@ -1464,6 +1490,13 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   service.on('replan').listen((_) => unawaited(replan()));
   service.on('tick').listen((_) => unawaited(executeDue()));
+  // 电源模式热切换（v1.9.1）：设置页改档 → 引擎即时应用副作用（常驻唤醒锁）。
+  // 与 `reactive` 同为"UI 改设置 → 引擎即时响应"，无需重启引擎。
+  service.on('powerMode').listen((m) async {
+    final mode = (m?['mode'] as String?) ?? 'balanced';
+    await applyPowerMode(mode);
+    await broadcast();
+  });
   service.on('guard').listen((m) async {
     guardEnabled = (m?['enabled'] as bool?) ?? false;
     await prefs.setBool('guard_enabled', guardEnabled);
@@ -1574,6 +1607,9 @@ Future<void> _engineBody(ServiceInstance service) async {
     // 用户以为"已关闭"，系统却再次运行。这里与 start/replan 的排布路径对称清理，
     // 并由看门狗接收器在拉起前再校验启用态/代次（双保险）。
     await clearAllAlarms();
+    // v1.9.1：释放性能优先档的常驻唤醒锁 —— **对称**撤下，不把"持续耗电"这个
+    // 副作用留给"已停止"状态（否则用户关了引擎，CPU 仍被本应用钉住不放）。
+    await applyPowerMode('balanced');
     // ⚠️ **必须在 `stopSelf()` 之前回投 `running:false`**。
     // 旧实现从不回投停止状态，且 `broadcast()` 把 `running` 写死成 `true` ⇒
     // UI 的 `isRunning` 永远停在 true（引擎已经死了，再没人能广播），

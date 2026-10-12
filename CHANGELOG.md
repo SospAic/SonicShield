@@ -20,6 +20,8 @@
   - **FR-83「应用图标改为用户拟定样式」**：新建 **`tool/gen_icon.py`**（可复现图标生成器：深蓝黑底 + 青绿盾牌 + 白色声波，**20 个文件** = Android 5 档 mipmap + iOS 15 档 AppIcon 一次产出），`--check` 模式可校验；新建 **`test/app_icon_lock_test.dart`**（`AIC-01…04`：存在性 / PNG 头尺寸 / `git ls-files` 入库 / 生成脚本可复现）。全套图标已重生成。
 - ✅ **G 门禁**：本轮改完后跑权威四步门禁（`bash scripts/gates.sh`）复核；**机器锁全库 77/77 → 81/81 回刷**（`version` 组 8 → **12**：FR-81 新增「日期格式 `x.y.z(YYYYMMDD)`」「pubspec 禁预发布后缀」「每轮至少 +0.0.1 且不得同号复用」三把 + FR-82 新增「文件版本引用一致性」「全落点禁 alpha 残留」两把，原「buildNumber 一致」锁保留）。
 
+- 🔴 **H（补）FR-84 锁屏保活增强**（用户反馈「手机锁屏后 APP 功能全部失效」，2026-10-12 追加）：① **性能优先档常驻唤醒锁** —— 新增 `NativeBridgePlugin.setPersistentWakeLock`（`PARTIAL_WAKE_LOCK`，进程级单例，`acquire`/`release` 幂等）+ Dart 桥 `NativeBridge.setPersistentWakeLock`；**并接线引擎电源模式**（此前 `power_mode` 是**死设置**：设置页只写、`setPowerMode` 发 `powerMode` invoke 但引擎**无接收方**、全仓无人读取 ⇒ 对运行时零影响）：引擎启动读 `PrefsKeys.powerMode`（新增唯一真源键）、`service.on('powerMode')` 热切换、`service.on('stop')` **对称释放**；② **保活自检面板**（设置页「保活与备份」TAB）：精确闹钟 / 电池优化白名单 / 通知 / 前台服务 **四项状态 + 一键跳转**（`_KeepAliveSelfCheck`）；③ **首页**保活清单在精确闹钟未授权时**常驻提示行**（`_PermissionChecklist`，比瞬时 SnackBar 更可靠、不留定时器）；④ **`permission_flow.requestAllPermissions`** 把**空分支**改为回传 `PermissionRequestOutcome.exactAlarmDenied`。`docs/02` 登记 **FR-84**（`feature_point_inventory` 矩阵 + `FP-00` 计数 **72 → 73** 同步）。⚠️ 本环境 Dart **命名管道耗尽**，`flutter test` / `flutter build` / `dart analyze` 均无法执行 —— 静态校验与真机验证**待环境恢复**。
+
 ## [1.9.0] - 2026-09-24（全功能点测试与缺陷修复）
 
 #### 第八十四轮（2026-10-11 深夜续）· **并入 `workbuddy/main-fb118d7d` 的 FR-70~73 远程工作（设置页 tab / 首页总开关 / 总开关远程控制 / 连接方案+节点测速）+ 落地用户三条新基线（需求登记 / releases 固定产物 / `install_all.bat` 一键装）+ 抓修合并遗留的「两 tab 标签 vs 四 tab 布局」假红 + 修复 `gates.sh` 环境自愈静默空跑；可测面 98.64%（13156/13338） / 全局 93.42%（13165/14093），机器锁 77/77**

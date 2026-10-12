@@ -212,6 +212,8 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
       evidenceFile: 'test/version_consistency_test.dart', token: 'FR-82 文件版本引用一致性'),
   FeaturePoint('FR-83', '应用图标改为「用户拟定图标」样式（20 档 + 入库 + 可复现）',
       evidenceFile: 'test/app_icon_lock_test.dart', token: 'AIC-01'),
+  FeaturePoint('FR-84', '性能优先档常驻唤醒锁 + 保活自检 + 精确闹钟强引导',
+      evidenceFile: 'test/native_bridge_test.dart', token: 'setPersistentWakeLock'),
 
   // ── 2. 非功能需求 ─────────────────────────────────────────────────────
   FeaturePoint('NFR-01', '24h 执行成功率 ≥ 99%',

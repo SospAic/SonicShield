@@ -72,6 +72,21 @@ class NativeBridgePlugin : FlutterPlugin {
         /** 闹钟 Intent 携带的代次 extra（与 [KEY_GENERATION] 对照）。 */
         const val EXTRA_GENERATION = "generation"
         private const val TAG = "NativeBridge"
+
+        /**
+         * 「性能优先」极致保活档持有的**常驻 PARTIAL_WAKE_LOCK**（进程级单例）。
+         *
+         * 为什么放 companion object（而非插件实例字段）：插件会被注册到**每一个**
+         * Flutter 引擎（UI 引擎 + flutter_background_service 的后台服务引擎），
+         * 但二者同属**同一 app 进程** ⇒ 唤醒锁必须进程级唯一，否则会出现
+         * "UI 引擎持一把、后台引擎又持一把"，release 时互相看不见、锁泄漏。
+         *
+         * 语义：**只在电源模式 = performance 时持有**（用户显式选择的取舍）；
+         * 目的 = 锁屏 / Doze 下**不让 CPU 休眠**，使通道 A（应用内 Dart Timer）
+         * 也能持续运行，而不只依赖通道 B（精确闹钟）。代价 = 持续耗电。
+         */
+        @Volatile
+        private var persistentWakeLock: PowerManager.WakeLock? = null
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -115,6 +130,11 @@ class NativeBridgePlugin : FlutterPlugin {
                                 )
                             }
                             result.success(true)
+                        }
+                        // ---- 「性能优先」极致保活：常驻唤醒锁 ----
+                        "setPersistentWakeLock" -> {
+                            val on = call.argument<Boolean>("enabled") == true
+                            result.success(setPersistentWakeLock(ctx, on))
                         }
                         "openOemAutostart" -> {
                             openVendorAutostart(
@@ -360,6 +380,49 @@ class NativeBridgePlugin : FlutterPlugin {
     private fun isIgnoringBattery(ctx: Context): Boolean {
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+
+    /**
+     * 「性能优先」极致保活档：持有 / 释放**常驻** `PARTIAL_WAKE_LOCK`。
+     *
+     * 为什么需要它（真机 `shengnong` / Android 16 实测反馈）：锁屏进入 Doze 后，
+     * 系统会冻结应用进程的 CPU —— 应用内 Dart Timer（通道 A）随之停摆，只能靠
+     * 原生精确闹钟（通道 B）唤醒。若用户希望"锁屏也像前台一样准点"，唯一的
+     * 手段是**显式持有唤醒锁**不让 CPU 休眠。这是一个**耗电换可靠**的取舍，
+     * 因此只在电源模式 = performance 时由引擎持有（默认 balanced 不持）。
+     *
+     * `PARTIAL_WAKE_LOCK` 自 API 1 可用（**未废弃** —— 废弃的是
+     * `SCREEN_BRIGHT_WAKE_LOCK` / `FULL_WAKE_LOCK`），需要 `WAKE_LOCK` 权限
+     * （Manifest 已声明）。**无超时** `acquire()`：由引擎在切档 / 停止时对称
+     * `release()`；`setReferenceCounted(false)` + `isHeld` 判重避免重复持锁。
+     *
+     * 幂等：重复 enable 不会叠加持锁；重复 disable 不抛异常。
+     * 返回 true = 调用后处于持锁状态。
+     */
+    private fun setPersistentWakeLock(ctx: Context, enabled: Boolean): Boolean {
+        return try {
+            val cur = persistentWakeLock
+            if (enabled) {
+                if (cur?.isHeld != true) {
+                    val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    val wl = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "sonic_shield:engine_keepalive",
+                    )
+                    wl.setReferenceCounted(false)
+                    wl.acquire()
+                    persistentWakeLock = wl
+                }
+            } else {
+                if (cur?.isHeld == true) cur.release()
+                persistentWakeLock = null
+            }
+            persistentWakeLock?.isHeld == true
+        } catch (e: Exception) {
+            // 持锁失败不致命（最坏退回"仅通道 B"的默认行为），但要留痕。
+            Log.w(TAG, "setPersistentWakeLock failed", e)
+            false
+        }
     }
 
     private fun openVendorAutostart(ctx: Context, vendor: String) {

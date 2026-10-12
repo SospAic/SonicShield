@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -299,7 +300,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final cfg = ApiConfigStore(p);
     final planStore = CounterPlanStore(p);
     setState(() {
-      _powerMode = p.getString('power_mode') ?? 'balanced';
+      _powerMode = p.getString(PrefsKeys.powerMode) ?? 'balanced';
       _quietStart = p.getInt(PrefsKeys.quietStartHour) ??
           ComplianceGuardrails.defaultQuietStartHour;
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
@@ -698,7 +699,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _savePower(String mode) async {
     final p = await SharedPreferences.getInstance();
-    await p.setString('power_mode', mode);
+    await p.setString(PrefsKeys.powerMode, mode);
     await BackgroundServiceManager.instance.setPowerMode(mode);
     if (mounted) setState(() => _powerMode = mode);
   }
@@ -775,7 +776,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
-            child: Text('省电模式下，电量 < 15% 且未充电时自动暂停随机类任务与守卫，仅保留固定定时。',
+            child: Text(
+                '性能优先：额外持有唤醒锁，锁屏后 CPU 不休眠、定时最准（更耗电）；'
+                '省电模式：电量 < 15% 且未充电时自动暂停随机类任务与守卫，仅保留固定定时。',
                 style: AppText.bodySmall),
           ),
           const Divider(height: 32),
@@ -901,6 +904,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// "到底执不执行"的总闸，与守卫/动态反击同属执行控制，放守护页更该被看见。
   List<Widget> _secKeepAlive(BuildContext context) => [
           Text('后台保活', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          const _KeepAliveSelfCheck(),
           const SizedBox(height: 8),
           ListTile(
             leading: const Icon(Icons.battery_saver),
@@ -1491,6 +1496,153 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
           onChanged: onChanged,
         ),
       ],
+    );
+  }
+}
+
+/// 保活自检面板（v1.9.1）：一眼看清"锁屏后能否继续工作"所依赖的四项是否就绪。
+///
+/// 为什么需要它：用户反馈"锁屏后功能全部失效"，而根因往往是**不在普通权限
+/// 列表里**的两项（精确闹钟特殊权限 / 厂商省电策略）没设置 —— 用户"以为给了
+/// 所有权限"。本面板把四项状态显式列出并给出**一键修复入口**，消灭这一盲区。
+///
+/// 四项（任一 ✗ 都可能导致锁屏后失效）：
+///   ① 精确闹钟特殊权限（通道 B 前提；Android 14+ 对 targetSdk≥34 默认拒绝）
+///   ② 电池优化白名单（Doze 豁免）
+///   ③ 通知权限（前台服务常驻通知的前提）
+///   ④ 调度引擎运行中（前台服务在跑）
+///
+/// 全部状态读取都 **try/catch 容错**：桥不可用（桌面/测试）时按"未就绪"显示，
+/// 绝不抛异常；且**不创建任何 Timer**，避免污染 widget 测试（同「kv 表会留
+/// 未完成 Timer」的既有教训）。
+class _KeepAliveSelfCheck extends StatefulWidget {
+  const _KeepAliveSelfCheck();
+
+  @override
+  State<_KeepAliveSelfCheck> createState() => _KeepAliveSelfCheckState();
+}
+
+class _KeepAliveSelfCheckState extends State<_KeepAliveSelfCheck> {
+  // null = 正在检测（显示沙漏）。
+  bool? _exactAlarm;
+  bool? _batteryWhitelist;
+  bool? _notification;
+  bool _engineRunning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    var exact = false;
+    var battery = false;
+    var notif = false;
+    try {
+      exact = await NativeBridge.exactAlarmSupported();
+    } on Object {
+      exact = false;
+    }
+    try {
+      battery = await NativeBridge.isIgnoringBatteryOptimizations();
+    } on Object {
+      battery = false;
+    }
+    try {
+      notif = (await Permission.notification.status).isGranted;
+    } on Object {
+      notif = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _exactAlarm = exact;
+      _batteryWhitelist = battery;
+      _notification = notif;
+      _engineRunning = BackgroundServiceManager.instance.isRunning;
+    });
+  }
+
+  Widget _statusIcon(bool? ok) {
+    if (ok == null) {
+      return const Icon(Icons.hourglass_empty, color: AppColors.warning);
+    }
+    return Icon(
+      ok ? Icons.check_circle : Icons.cancel,
+      color: ok ? AppColors.success : AppColors.danger,
+    );
+  }
+
+  void _recheck() {
+    setState(() {
+      _exactAlarm = null;
+      _batteryWhitelist = null;
+      _notification = null;
+    });
+    _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.fact_check_outlined),
+            title: const Text('保活自检'),
+            subtitle: const Text('锁屏后能否继续工作的四项前提'),
+            trailing: IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: '重新检测',
+              onPressed: _recheck,
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: _statusIcon(_exactAlarm),
+            title: const Text('精确闹钟权限'),
+            subtitle: const Text('锁屏/Doze 下唯一可靠通道；「闹钟和提醒」特殊权限'),
+            trailing: TextButton(
+              onPressed: () async {
+                await NativeBridge.openExactAlarmSettings();
+                await _load();
+              },
+              child: const Text('去开启'),
+            ),
+          ),
+          ListTile(
+            leading: _statusIcon(_batteryWhitelist),
+            title: const Text('电池优化白名单'),
+            subtitle: const Text('未加入则 Doze 更激进，后台更易被冻结'),
+            trailing: TextButton(
+              onPressed: () async {
+                await NativeBridge.requestIgnoreBatteryOptimizations();
+                await _load();
+              },
+              child: const Text('去加入'),
+            ),
+          ),
+          ListTile(
+            leading: _statusIcon(_notification),
+            title: const Text('通知权限'),
+            subtitle: const Text('前台服务常驻通知的前提'),
+            trailing: TextButton(
+              onPressed: openAppSettings,
+              child: const Text('去开启'),
+            ),
+          ),
+          ListTile(
+            leading: _statusIcon(_engineRunning),
+            title: const Text('调度引擎运行中'),
+            subtitle: const Text('前台服务在跑 = 后台执行的基础'),
+            trailing: TextButton(
+              onPressed: () => setState(() =>
+                  _engineRunning = BackgroundServiceManager.instance.isRunning),
+              child: const Text('刷新'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

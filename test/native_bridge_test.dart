@@ -539,4 +539,27 @@ void main() {
       expect(log.single.method, 'vibrateWaveform');
     });
   });
+
+  // ==================== 常驻唤醒锁（FR-84） ====================
+
+  group('NB-P · 常驻唤醒锁（性能优先档极致保活，FR-84）', () {
+    test('NB-P01 setPersistentWakeLock(true) 透传 enabled 并回传原生结果', () async {
+      installNative((c) => c.method == 'setPersistentWakeLock' ? true : null);
+      expect(await NativeBridge.setPersistentWakeLock(true), isTrue);
+      expect(log.last.method, 'setPersistentWakeLock');
+      expect(log.last.arguments, {'enabled': true});
+    });
+
+    test('NB-P02 setPersistentWakeLock(false) 透传并回传', () async {
+      installNative((c) => c.method == 'setPersistentWakeLock' ? false : null);
+      expect(await NativeBridge.setPersistentWakeLock(false), isFalse);
+      expect(log.last.arguments, {'enabled': false});
+    });
+
+    test('NB-P03 桥不可用 setPersistentWakeLock → false（不抛，走降级契约）', () async {
+      installNotImplemented();
+      expect(await NativeBridge.setPersistentWakeLock(true), isFalse);
+      expect(log.single.method, 'setPersistentWakeLock');
+    });
+  });
 }

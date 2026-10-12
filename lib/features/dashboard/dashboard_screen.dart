@@ -400,8 +400,35 @@ class _PermissionChecklist extends ConsumerStatefulWidget {
 }
 
 class _PermissionChecklistState extends ConsumerState<_PermissionChecklist> {
+  /// 精确闹钟特殊权限状态：`null` = 检测中，`true` = 已授权，`false` = 未授权。
+  ///
+  /// v1.9.1：这是**锁屏后能否继续工作**的关键一环（通道 B 的前提；Android 14+
+  /// 对 targetSdk≥34 的应用**默认拒绝**），且属「闹钟和提醒」特殊权限、
+  /// **不在普通权限弹窗里** —— 用户"以为给了所有权限"往往就漏了它。故在此
+  /// 常驻一张提示行，把盲区显性化并给一键直达（比瞬时 SnackBar 更可靠，
+  /// 也**不留定时器**，避免污染 widget 测试）。
+  bool? _exactAlarm;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkExactAlarm();
+  }
+
+  Future<void> _checkExactAlarm() async {
+    var ok = true; // 读不到（桌面 / 测试 / 桥不可用）按"已就绪"处理，不误报
+    try {
+      ok = await NativeBridge.exactAlarmSupported();
+    } on Object {
+      ok = true;
+    }
+    if (!mounted) return;
+    setState(() => _exactAlarm = ok);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final showExactAlarmWarning = _exactAlarm == false;
     return Card(
       child: Column(
         children: [
@@ -412,6 +439,23 @@ class _PermissionChecklistState extends ConsumerState<_PermissionChecklist> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showKeepAliveGuide(context),
           ),
+          // 精确闹钟未授权 → 常驻提示行（不是 SnackBar）：它是锁屏 / Doze 下
+          // 唯一可靠通道的前提，漏了它锁屏后功能会整体失效。
+          if (showExactAlarmWarning) ...[
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.alarm_off),
+              title: const Text('精确闹钟权限未开启（锁屏可能失效）'),
+              subtitle: const Text('属「闹钟和提醒」特殊权限，不在普通权限列表'),
+              trailing: TextButton(
+                onPressed: () async {
+                  await NativeBridge.openExactAlarmSettings();
+                  await _checkExactAlarm();
+                },
+                child: const Text('去开启'),
+              ),
+            ),
+          ],
         ],
       ),
     );

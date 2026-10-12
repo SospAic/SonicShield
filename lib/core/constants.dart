@@ -169,4 +169,19 @@ abstract final class PrefsKeys {
   /// 与「远程不得写 [quietExemptMaster]」的合规红线不同：那是单机护栏授权，
   /// 这是用户自己的整体刹车，允许持权对端代为切换。
   static const String runMasterMode = 'run_master_mode';
+
+  /// 电源模式（`performance` / `balanced` / `saver`）。默认 `balanced`。
+  ///
+  /// 写入方：设置页「执行与护栏」TAB 的电源策略分段控件。
+  /// 读取方：`background_engine`（启动时 + `powerMode` 热切换）。
+  ///
+  /// 🔴 语义（v1.9.1 补）：**仅 `performance`** 档由引擎持有**常驻
+  /// `PARTIAL_WAKE_LOCK`** —— 锁屏 / Doze 下不让 CPU 休眠，使通道 A（应用内
+  /// Dart Timer）也能持续运行，而不只依赖通道 B（精确闹钟）。代价 = 持续耗电。
+  ///
+  /// ⚠️ BUG-070「写在一处、用在另一处」同族：本键此前**只写不读** ——
+  /// 设置页写入、`setPowerMode` 发 `powerMode` invoke，但引擎里**没有接收方**、
+  /// 全仓也无人读取 ⇒ 电源模式对运行时**零影响**。现补上引擎侧读取 + 唯一副作用，
+  /// 并集中到本类作为唯一真源。
+  static const String powerMode = 'power_mode';
 }

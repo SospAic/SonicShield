@@ -13,6 +13,7 @@ import '../domain/scheduling/vibrate_resolve.dart';
 /// - isIgnoringBatteryOptimizations / requestIgnoreBatteryOptimizations。
 /// - openOemAutostart：跳转主流厂商的自启动/电池白名单页。
 /// - setServiceShouldRun：开机自启标志（BootReceiver 读取）。
+/// - setPersistentWakeLock：性能优先档的常驻唤醒锁（锁屏/Doze 不冻结 CPU）。
 class NativeBridge {
   NativeBridge._();
 
@@ -57,6 +58,19 @@ class NativeBridge {
   /// vendor: xiaomi|huawei|oppo|vivo|samsung|meizu|oneplus|generic
   static Future<void> openOemAutostart(String vendor) =>
       _invoke<Object?>('openOemAutostart', {'vendor': vendor});
+
+  /// 「性能优先」极致保活档：持有 / 释放**常驻** `PARTIAL_WAKE_LOCK`。
+  ///
+  /// 由引擎按电源模式调用（performance ⇒ 持锁，其余 ⇒ 释放）。持锁期间锁屏 /
+  /// Doze 也不会冻结 CPU，通道 A（应用内 Dart Timer）可像前台一样准点触发 ——
+  /// 这是"锁屏后功能全部失效"（仅通道 B 生效）的**可选**兜底方案。
+  /// **代价是持续耗电**，故仅当用户显式选「性能优先」时才持有。
+  ///
+  /// 返回 true = 当前处于持锁状态（桥不可用 / 非 Android 返回 false）。
+  static Future<bool> setPersistentWakeLock(bool enabled) async {
+    final r = await _invoke<bool>('setPersistentWakeLock', {'enabled': enabled});
+    return r ?? false;
+  }
 
   static Future<void> setServiceShouldRun(bool v) =>
       _invoke<Object?>('setServiceShouldRun', {'value': v});
