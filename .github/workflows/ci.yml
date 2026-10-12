@@ -83,10 +83,26 @@ jobs:
   # 免费 Apple ID 重新签名后侧载到 iPhone（免费号签名 7 天有效，需每周重签）。
   # 之所以 `--no-codesign`：签名需要你的证书/描述文件，不应放进仓库 Secrets；
   # 侧载工具会用自己的 Apple ID 重签，故这里只负责"能编译出可用的 app 包"。
+  #
+  # 🔴 用户基线（2026-10-12 新增）：iOS 构建**前**仓库设为公开（所有人可见）、
+  # 构建**后**恢复私有。见本 job 内「Set repository public / Restore repository private」两步，
+  # 以及 HANDOVER.md §8 同名长期规则。
   ios-build:
     runs-on: macos-latest
+    # 改仓库可见性需要 administration 写权限；checkout 只需 contents:read，
+    # upload-artifact 需要 actions 写权限（与默认 token 行为保持一致）。
+    permissions:
+      contents: read
+      actions: write
+      administration: write
     steps:
       - uses: actions/checkout@v4
+
+      # 🔴 用户基线：构建开始前先把仓库设为「所有人可见」（public）。
+      - name: Set repository public (before iOS build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh repo edit "$GITHUB_REPOSITORY" --visibility public
 
       - uses: subosito/flutter-action@v2
         with:
@@ -120,3 +136,11 @@ jobs:
         with:
           name: sonicshield-ios-ipa
           path: sonic_shield-unsigned.ipa
+
+      # 🔴 用户基线：构建完成后（无论成功失败）恢复仓库为私有（private）。
+      # if: always() 保证任一步失败也不会让仓库卡在公开状态。
+      - name: Restore repository private (after iOS build)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh repo edit "$GITHUB_REPOSITORY" --visibility private

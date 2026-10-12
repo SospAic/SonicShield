@@ -2752,6 +2752,12 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
   release 构建（Android `releases/SonicShield-Android.apk` + iOS `releases/SonicShield-iOS.ipa`，固定文件名、见上文
   `releases/` 基线）；debug 构建不算完成。⇒ 收口清单含「regression 最少测试绿 **且** release 构建成功」两项，缺一则不算本轮回合结束。
 
+- 🔴 **iOS 经 GitHub CI 构建时，构建前仓库设为公开、构建后恢复私有**（第八十四轮续二新增基线，用户明文指令）：iOS 由 GitHub CI 的 `ios-build` job（`.github/workflows/ci.yml`，macOS runner）构建并产出**未签名 IPA**；
+  **每次 `ios-build` 触发时**：① 构建**开始前**先把仓库可见性设为「所有人可见」（`gh repo edit --visibility public`）；
+  ② 构建**完成后**（无论成功或失败，`if: always()`）把仓库可见性**恢复为私有**（`gh repo edit --visibility private`）。
+  ⇒ 该切换在 `ios-build` job 内由 `GITHUB_TOKEN`（`permissions: administration: write`）自动完成，**不得**依赖人工手动改可见性；
+  Android 的 `android-build` job **不受影响**（仍按私有仓库正常构建签名 APK）。本规则与 `ios-build` 顶部注释同步。
+
 - 🔴 **每次迭代 APP 显示版本必须同步更新**（第七十七轮新增基线）：`AppMeta.version` 只锁 `x.y.z[-pre]`，
   而每次迭代抬的是**构建号** `+N` —— 若界面只显示 `version`，用户看不出本轮已更新（设置页「关于」历史上还长期写死 `v1.0.0`）。
   ⇒ 界面必须显示 `AppMeta.displayVersion`（= `version+build`），且 `AppMeta.buildNumber` 必须与 `pubspec.yaml` 的 `+N` 逐字一致；
