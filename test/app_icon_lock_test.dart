@@ -88,7 +88,7 @@ void main() {
         final (w, h) = pngSize(f);
         expect((w, h), (e.value, e.value),
             reason: 'mipmap-${e.key} 图标尺寸应为 $e.value×$e.value，'
-                '实际 ${w}×${h}（贴错密度会让启动器拉伸/模糊）');
+                '实际 $w×$h（贴错密度会让启动器拉伸/模糊）');
       }
     });
 
@@ -99,7 +99,7 @@ void main() {
         expect(f.existsSync(), isTrue, reason: '缺 iOS 图标：$dir/${e.key}（FR-83）');
         final (w, h) = pngSize(f);
         expect((w, h), (e.value, e.value),
-            reason: '$dir/${e.key} 尺寸应为 $e.value×$e.value，实际 ${w}×${h}');
+            reason: '$dir/${e.key} 尺寸应为 $e.value×$e.value，实际 $w×$h');
       }
     });
 

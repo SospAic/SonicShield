@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/theme.dart';
 import '../../remote/call_service.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
@@ -138,7 +139,7 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
           Container(
             width: double.infinity,
             color: theme.colorScheme.errorContainer,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Text(
               '对方设备可见本次操作指示，且可随时停止',
               style: theme.textTheme.bodySmall,
@@ -186,8 +187,8 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
                         bottom: 8,
                         child: Text(
                           _last,
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 12),
+                          style: AppText.bodySmall.copyWith(
+                              color: Colors.white70),
                         ),
                       ),
                     ],

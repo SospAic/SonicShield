@@ -180,6 +180,20 @@ Future<void> settle(WidgetTester tester, [int n = 4]) async {
   }
 }
 
+/// 统计界面上**所有** `Text` 里 [needle] 出现的次数。
+///
+/// ⚠️ FR-79 起，远程动作回执全部 `join('\n')` 进**一个** `Text`（`_ReceiptConsole`）
+/// ⇒ `find.textContaining(...)` 无论里面有几条都只算 **1 个 widget**。
+/// 要判"同一条提示是否复弹"，必须数**出现次数**而不是 widget 数。
+int countText(WidgetTester tester, String needle) {
+  final re = RegExp(RegExp.escape(needle));
+  var n = 0;
+  for (final w in tester.widgetList<Text>(find.byType(Text))) {
+    n += re.allMatches(w.data ?? '').length;
+  }
+  return n;
+}
+
 void main() {
   // ══════════════════════════════════════════════════════════════════
   // R-3 · 「请求-事件」类命令的失败必须可见
@@ -239,11 +253,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.textContaining('端点未响应'), findsOneWidget);
 
-    // 冲掉第一条（4s 后自动退场），再推进到"若条目没删就该弹第二条"的时刻。
+    // FR-79：超时不再弹「一闪即走」的 SnackBar，改写进**常驻可回看**的两行高回执行。
+    // 故本条不再断言"文字消失"（回执本就常驻），改为断言**不复弹**：
+    // 再推进 5s，若条目没被删除，1s 扫描会再报一条 ⇒ 出现 2 次。
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    expect(find.textContaining('端点未响应'), findsNothing,
-        reason: '条目必须在超时那一刻被删除 —— 否则每 8s 复弹一次且随点击次数无界增长');
+    expect(countText(tester, '端点未响应'), 1,
+        reason: '条目必须在超时那一刻被删除 —— 否则每 8s 复弹一条且随点击次数无界增长');
   });
 
   testWidgets('CN-05 定位失败（error:true）也要渲染原因，不能被整个隐藏', (tester) async {
@@ -314,14 +330,14 @@ void main() {
 
     expect(find.textContaining('本机远程模块未开启，命令不会补发'), findsOneWidget,
         reason: '本机模块没开时命令不会补发，说成"上线后自动执行"是误导');
-    expect(find.textContaining('端点离线：'), findsNothing);
+    expect(find.textContaining('端点离线'), findsNothing);
 
     // 入口必须真的能到达 —— 否则用户知道原因却无处可去。
-    // ⚠️ 页面顶部的「远程模块未开启」卡片里也有一个「去开启」，
-    // 故必须限定在 SnackBar 之内，否则 finder 会歧义（实测踩到）。
-    final action = find.descendant(
-        of: find.byType(SnackBar), matching: find.text('去开启'));
+    // FR-79 后反馈改走回执行、不再有 SnackBarAction ⇒ 入口只剩页面顶部
+    // 「远程模块未开启」卡片里的「去开启」，故 finder 不再需要限定在 SnackBar 内。
+    final action = find.widgetWithText(TextButton, '去开启');
     expect(action, findsOneWidget);
+    await tester.ensureVisible(action);
     await tester.tap(action);
     await tester.pumpAndSettle();
     expect(find.text('REMOTE-SETTINGS-PAGE'), findsOneWidget);
@@ -334,7 +350,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(
-        find.textContaining('端点离线：「开启端点守卫」已入队，端点上线后自动执行'),
+        find.textContaining('端点离线，已入队（端点上线后自动执行）'),
         findsOneWidget,
         reason: '模块开着时命令**会**被补发，这里的提示不能跟着改错');
     expect(find.textContaining('本机远程模块未开启'), findsNothing);

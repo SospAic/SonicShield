@@ -127,6 +127,13 @@ void main() {
         '解除条件：控制台做「按 id 拉取单条任务」时一并接线。',
     'deviceAlert': '找回告警（Q9-B）：端点分发与原生桥已接线，'
         '控制端 UI 入口下一轮加入。解除条件：控制台加「找回」按钮。',
+    'inputKey': 'docs/61 P3：端点已有 `input.key` 分发（`_inputInject(…, \'key\')`）'
+        '与 `RcPermGate` 登记，但控制端观看页只接了**手势**（tap/swipe）。'
+        '键/文本注入属预留能力（需控制端先有导航键/文本输入入口）。'
+        '解除条件：`screen_viewer` 加「返回/Home/最近任务」导航键时一并接线。',
+    'inputText': 'docs/61 P3：同上 —— 端点 `input.text`（无障碍 `ACTION_SET_TEXT`）'
+        '已就绪，控制端无文本输入入口。'
+        '解除条件：观看页加文本输入框时接线。',
   };
 
   /// **必须在协助会话被拒绝、但登记在别处**的命令。
@@ -153,15 +160,29 @@ void main() {
   ///
   /// ⚠️ `callMissed` 已于第十七轮**闭环**（BUG-050）：端点侧 `_wireCall()` 会在
   /// 被叫振铃超时后发出它。按本表的规矩，修好就要删条目（见下方"不得冗余"用例）。
+  ///
+  /// ⚠️ `photo` 已于第八十四轮**闭环**（FR-85 P1 单帧截屏）：端点
+  /// `screen.cast.request{once:true}` 经 `NativeBridge.screenCaptureOnce()` 发
+  /// `rc.photo`，控制台 `_onEvent` 消费它。同样按规矩删条目。
   const evtWithoutEmitter = <String, String>{
-    'photo': '`camera.snap` 因 camera 插件无 AGP9 兼容版而按设计降级',
+    'deviceRenamed': 'FR-77 的**中继广播**尚未接线：控制端改名已由'
+        '`RcCmd.deviceRename` **直发**各已绑定端点（`device_name_service.renameLocal`），'
+        '端点 `_handleDeviceRename` 会更新本机列表中该控制端的名字并回 `rc.ack`；'
+        '但端点**尚未**向其它已配对控制端中继广播本事件。'
+        '解除条件：端点改名后向 `_store.paired()` 中除发送方外的控制端广播本事件。',
   };
 
   /// 无人消费的事件。
   ///
   /// 第十七轮已**清空**：`callMissed` 现在由 `CallService._onRemoteEvent`
   /// 与通话 UI 消费（BUG-050）。
-  const evtWithoutConsumer = <String, String>{};
+  ///
+  /// ⚠️ `deviceRenamed`（FR-77 中继广播）连发射方都还没有 ⇒ 自然也无消费者，
+  /// 与上面的 `evtWithoutEmitter` 同源。解除条件见上。
+  const evtWithoutConsumer = <String, String>{
+    'deviceRenamed': '与 `evtWithoutEmitter/deviceRenamed` 同源：中继广播未接线，'
+        '故无任何端消费它。解除条件同上。',
+  };
 
   /// 有消费方，但**只在 `tool/` 桌面 E2E 工具里**，App 内无消费者。
   ///

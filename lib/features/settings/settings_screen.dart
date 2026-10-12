@@ -1633,9 +1633,9 @@ class _KeepAliveSelfCheckState extends State<_KeepAliveSelfCheck> {
             leading: _statusIcon(_notification),
             title: const Text('通知权限'),
             subtitle: const Text('前台服务常驻通知的前提'),
-            trailing: TextButton(
+            trailing: const TextButton(
               onPressed: openAppSettings,
-              child: const Text('去开启'),
+              child: Text('去开启'),
             ),
           ),
           ListTile(

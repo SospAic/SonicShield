@@ -268,10 +268,9 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
         setState(() => _lastDevice = payload);
       case RcEvt.location:
         setState(() => _lastLocation = payload);
-      // ⚠️ R-7 死分支（显式标注，保留而非删除）：`rc.photo` 当前**没有发出方**
-      // —— 端点 `camera.snap` 恒降级回 `rc.ack(false)`（camera 插件与 AGP9
-      // 不兼容，见 docs/16 §9 注记）。保留消费端与卡片是为了将来端点恢复
-      // 拍照回传时不必重写这一侧（协议、事件、卡片都在，只差端点）。
+      // `rc.photo` 的**单帧截屏**路径（FR-85 P1）：端点 `screen.cast.request
+      // {once:true}` 抓一帧后回本事件。camera.snap 仍按设计降级（见 docs/16 §9），
+      // 故这里的消费端同时服务单帧截屏与将来可能的拍照回传。
       case RcEvt.photo:
         setState(() => _photoB64 = payload['photoB64'] as String?);
       case RcEvt.logs:
@@ -285,6 +284,19 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
       case RcEvt.presets:
         setState(
             () => _lastPresets = (payload['categories'] as List?) ?? const []);
+      // ---- docs/61：远程桌面级控制（看 + 控）的回执 ----
+      // 会话状态机镜像：端点授权/拒绝/开流/停止都会推一条，落进回执行
+      // （控制端据此知道"等画面 / 被拒 / 已中断"，而不是静默无反应）。
+      case RcEvt.screen:
+        final st = payload['state'] as String? ?? '';
+        _pushReceipt('屏幕会话：$st');
+      // 逐条输入注入回执（刻意不并入 rc.ack，见 protocol.dart 的说明）：
+      // 失败必须带原因，否则用户只看到"✗"却不知道端点为何拒。
+      case RcEvt.inputAck:
+        final ok = payload['ok'] == true;
+        final why = payload['message']?.toString() ?? '';
+        _pushReceipt(
+            '${ok ? '✓' : '✗'} 输入注入${ok || why.isEmpty ? '' : '（$why）'}');
       case RcEvt.ack:
         final cmdId = payload['for'] as String? ?? '';
         final p = cmdId.isEmpty ? null : _pendingAcks[cmdId];
@@ -536,6 +548,8 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                     ? () async {
                         final castId =
                             'cast_${DateTime.now().millisecondsSinceEpoch}';
+                        // 跨 await 前先取 Navigator（避免用 BuildContext 跨异步间隙）。
+                        final navigator = Navigator.of(context);
                         await _send(
                             RcCmd.screenCastRequest,
                             {'castId': castId, 'kind': 'control'},
@@ -545,7 +559,7 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                         // 会落在回执框里，页面显示"等待画面…"不会假装成功。
                         final ep = _endpoint;
                         if (ep != null && mounted) {
-                          await Navigator.of(context).push(MaterialPageRoute(
+                          await navigator.push<void>(MaterialPageRoute<void>(
                             builder: (_) => ScreenViewerScreen(
                                 endpoint: ep, castId: castId),
                           ));
@@ -1134,7 +1148,7 @@ class _ReceiptConsole extends StatelessWidget {
     return Container(
       height: _height,
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         // 深色"终端"底：与周围 Card 区分，一眼知道是回执区。
         color: scheme.surfaceContainerHighest,

@@ -133,9 +133,10 @@ void main() {
       ep('ep-2', name: '书房平板'),
     ]);
 
-    expect(find.text('客厅手机'), findsOneWidget, reason: '备注名应覆盖对端自报名');
-    expect(find.text('MI_MAX_2'), findsNothing,
-        reason: '起了备注名还显示自报名，用户就分不清哪台是哪台');
+    // FR-77（用户明文）：有别名时显示格式**固定**为 `别名（真名）` ——
+    // 别名是本机私有视角（能按"客厅手机"辨认），真名保留在后（不丢对端上报名）。
+    expect(find.text('客厅手机（MI_MAX_2）'), findsOneWidget,
+        reason: 'FR-77：别名非空 ⇒ 显示 `别名（真名）`');
     expect(find.text('书房平板'), findsOneWidget, reason: '没备注名则回落自报名');
 
     expect(find.textContaining('ep-1'), findsOneWidget, reason: '设备 ID 要能看到');
@@ -204,7 +205,8 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, '保存'));
     await tester.pumpAndSettle();
 
-    expect(find.text('客厅手机'), findsOneWidget);
+    expect(find.text('客厅手机（MI_MAX_2）'), findsOneWidget,
+        reason: 'FR-77：改名后列表显示 `别名（真名）`');
     expect((await store()).paired().first.alias, '客厅手机');
   });
 
@@ -254,9 +256,9 @@ void main() {
 
     expect((await store()).paired().length, 1);
     expect((await store()).paired().first.deviceId, 'ep-2');
-    expect(find.text('已删除「客厅手机」'), findsOneWidget,
-        reason: '删了却不告知，用户会以为没生效而重复操作');
-    expect(find.text('客厅手机'), findsNothing);
+    expect(find.text('已删除「客厅手机（A）」'), findsOneWidget,
+        reason: '删了却不告知，用户会以为没生效而重复操作（FR-77 显示名）');
+    expect(find.text('客厅手机（A）'), findsNothing);
   });
 
   testWidgets('DLSW-11 删除：点「取消」必须保留设备', (tester) async {

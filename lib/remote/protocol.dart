@@ -348,7 +348,7 @@ abstract final class RcEvt {
       'rc.call'; // 通话状态镜像 {callId, state: ringing|connected|ended}
   static const device = 'rc.device'; // 设备状态快照（载荷见 deviceStatus）
   static const photo =
-      'rc.photo'; // 拍照回传 {photoB64} —— **当前无发射方**（camera.snap 恒降级，C-5）
+      'rc.photo'; // 单帧截屏回传 {for, photoB64}（FR-85 P1：screen.cast.request{once:true}）
   static const location =
       'rc.location'; // 定位回传 {for, lat, lng, acc}｜失败 {for, error:true}
   static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
