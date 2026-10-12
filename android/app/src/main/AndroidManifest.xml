@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- 远程桌面级控制（docs/25）P0：投屏前台服务（mediaProjection 类型）。
+         Android 14+ 要求逐类型声明；且必须先 createScreenCaptureIntent 拿到用户
+         同意的 result token 再 startForeground，否则 SecurityException。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- 麦克风：守卫模式声音检测 / 录音取证 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -152,6 +156,34 @@
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:foregroundServiceType="mediaPlayback"
             tools:replace="android:foregroundServiceType" />
+
+        <!-- ===== 远程桌面级控制（docs/25）P0 被控端骨架 =====
+             ⚠️ 只做「壳」：ScreenCastService 起停 + 常驻通知；RemoteInputService
+             无障碍注入。画面**传输**（WebRTC/单帧）属 P1/P2，未实现前不得冒充完成。
+             · 授权：画面 = MediaProjection 系统弹窗（每次）；输入 = 系统无障碍开关。
+               App 内不得提供任何绕过路径。
+             · 可见：会话期间前台通知 + App 内醒目指示，端点一键可停。 -->
+
+        <!-- 投屏前台服务：mediaProjection 类型。Android 14+ 必须先拿到用户同意的
+             result token 再 startForeground，顺序反了直接 SecurityException。 -->
+        <service
+            android:name=".ScreenCastService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- 无障碍服务：输入注入（dispatchGesture / performGlobalAction / 文本）。
+             需用户在系统设置显式开启；未开启时注入如实失败（不静默降级）。 -->
+        <service
+            android:name=".RemoteInputService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/remote_input_service" />
+        </service>
 
         <!-- 通道B：精确闹钟看门狗接收器已迁移至本地插件
              com.sonicshield.native_bridge.AlarmWatchdogReceiver -->

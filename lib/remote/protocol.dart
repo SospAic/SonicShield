@@ -287,6 +287,46 @@ abstract final class RcCmd {
   /// 需 `script` 权限位（`RcPermGate.requiredPerm` 登记）：切换整体刹车是有
   /// 副作用的全局操作，同 [scriptRun] 一档。
   static const runMasterSet = 'run.master.set';
+
+  // ---- v2.1：远程桌面级控制（docs/25，看+控）----
+  //
+  // ⚠️ 纪律同 docs/24 阶段0：**此处只加常量与文档注释，不加发射方**。
+  // 发射/处理随 P0→P3 分阶段实现；未实现的命令在端点侧**如实 `ok:false`**，
+  // 不得静默成功（与本协议一以贯之的"不假成功"纪律一致）。
+  //
+  // 安全：输入注入是**高危能力**（可代用户操作任意 App）。全部命令：
+  // ① 仅**已配对**控制端可用；② 需 `script` 权限位（`RcPermGate`）；
+  // ③ 端点必须**显式授权**（画面 = MediaProjection 系统弹窗；输入 = 系统无障碍开关）；
+  // ④ 会话停止后携旧 `castId` 的 `input.*` 一律拒（会话失效锁）。
+
+  /// 请求开启控制会话（画面 + 输入）。
+  /// payload：`{castId, kind:'view'|'control', maxW?, maxH?, fps?}` →
+  /// `rc.ack` + 会话状态经 [RcEvt.screen] 镜像。
+  ///
+  /// `kind:'view'` = 仅看（等价 docs/24 投屏）；`kind:'control'` = 看 + 输入注入。
+  /// 授权前置：画面须过 MediaProjection 弹窗；`kind:'control'` 还须端点已开启无障碍，
+  /// 否则**如实 `ok:false`**（不静默降级为仅看）。
+  static const screenCastRequest = 'screen.cast.request';
+
+  /// 停止控制会话（画面与输入同时停）。
+  /// payload：`{castId, reason?}` → `rc.ack`。
+  static const screenCastStop = 'screen.cast.stop';
+
+  /// 远程点击。payload：`{castId, x, y, durationMs?}`（**x/y 为归一化 0..1**）。
+  /// 端点按当前屏幕实际像素换算 —— 控制端无需知道端点分辨率，旋转/分辨率变化不失效。
+  static const inputTap = 'input.tap';
+
+  /// 远程滑动/拖拽。payload：`{castId, x1, y1, x2, y2, durationMs}`（归一化 0..1）。
+  static const inputSwipe = 'input.swipe';
+
+  /// 远程按键。payload：`{castId, keyCode}`。
+  /// ⚠️ 仅无障碍（`performGlobalAction`）可表达的**导航类**（返回/Home/最近任务）；
+  /// 电源/音量等系统级按键无障碍**做不到**，需 Shizuku（P1 可选），此处如实不承诺。
+  static const inputKey = 'input.key';
+
+  /// 远程文本输入。payload：`{castId, text}`。
+  /// 端点侧优先对**已聚焦**输入框走无障碍 `ACTION_SET_TEXT`；不可用时如实失败。
+  static const inputText = 'input.text';
 }
 
 // ---------------- 事件类型（端点 → 控制器） ----------------
@@ -325,6 +365,18 @@ abstract final class RcEvt {
       'rc.assets'; // 音源库 {for, assets:[{id,name,durationMs,tags}]}
   static const presets = 'rc.presets'; // 预置分类 {for, categories:[...]}
   static const plan = 'rc.plan'; // 反击计划快照 {for, plan, enabled, planId, taskCount}
+
+  // ---- v2.1：远程桌面级控制回执（docs/25）----
+
+  /// 控制会话状态机镜像（与 [callState] 同形）。
+  /// payload：`{for, castId, state: requesting|streaming|stopped|denied, kind}`。
+  static const screen = 'rc.screen';
+
+  /// 单条输入注入回执。payload：`{for, castId, ok, message?}`。
+  ///
+  /// **刻意不并入通用 [ack]**：注入是高频、逐条回执的，混进命令级 ack 会让
+  /// 送达账本（[RcDeliveryLedger]）把"每一条 tap"当成一条命令，语义与容量都不对。
+  static const inputAck = 'rc.inputAck';
 }
 
 // ---------------- 加密编解码 ----------------

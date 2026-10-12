@@ -3,4 +3,9 @@
     <string name="app_name">声盾</string>
     <string name="service_notification_title">声盾 SonicShield</string>
     <string name="service_notification_text">调度引擎运行中 · 合法使用，禁止骚扰他人</string>
+    <!-- 远程桌面级控制（docs/25）P0：无障碍服务说明（显示在系统无障碍设置里，
+         必须让用户明白本服务能做什么、以及随时可关）与投屏常驻通知文案。 -->
+    <string name="remote_input_service_desc">声盾远程协助：仅响应你已配对设备的远程操作（触摸 / 滑动 / 按键）。你可随时在系统设置中关闭本服务。</string>
+    <string name="screen_cast_notification_title">正在共享屏幕</string>
+    <string name="screen_cast_notification_text">声盾正在向已配对设备共享屏幕，你可随时停止</string>
 </resources>

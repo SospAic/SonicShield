@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 声盾远程桌面级控制（docs/25）P0：无障碍服务配置。
+
+     能力边界（如实声明，不夸大）：
+       · canPerformGestures=true  → dispatchGesture（tap / swipe / 多指）
+       · 导航类按键经 performGlobalAction（返回 / Home / 最近任务）
+       · 文本注入经「活动窗口聚焦节点」的 ACTION_SET_TEXT
+     ⚠️ 电源 / 音量等系统级按键无障碍**做不到**（需 Shizuku，P1）——此处不承诺。
+
+     隐私（最小必要）：
+       · canRetrieveWindowContent=true 是**文本注入所必需**（要拿到聚焦的输入框节点）。
+         本服务**只**用它定位聚焦节点做注入，**不读取、不落盘、不上传**任何屏幕文本。
+       · **不**声明 flagRequestFilterKeyEvents（不监听按键内容），
+         **不**声明 flagRetrieveInteractiveWindows（不遍历全部窗口）。
+       · 只响应**已配对**控制端的注入命令（端点侧另有权限位与授权门）。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/remote_input_service_desc"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100" />
