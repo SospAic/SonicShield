@@ -46,10 +46,30 @@ APP_ID="${APP_ID:-com.sonicshield.sonic_shield}"
 #    极易被误读成"测试坏了"。
 #
 # 两者都不是回归。门禁在此主动消除，避免把环境问题记成代码问题。
-# =====================================================================
-if ! env | grep -q '^PROGRAMFILES(X86)='; then
-  export SONICSHIELD_ENV_HEALED=1
-  exec env 'PROGRAMFILES(X86)=C:\Program Files (x86)' bash "${BASH_SOURCE[0]}" "$@"
+#
+# ⚠️ 2026-10-11（第八十四轮）实测加固：此前的判据 `env | grep '^PROGRAMFILES(X86)='`
+#   **不可靠** —— Git Bash / 中继 bash 的**内建 `env`** 会把带括号的变量名从列表里
+#   丢掉（而 `/usr/bin/env` 与 `cmd.exe` 都看得到）。于是判据恒假 ⇒ **每次**都走
+#   `exec env ...` 重执行，而该重执行在本机中继上下文里**静默死亡**（RC=0、零输出）
+#   ⇒ 门禁"看起来跑了"其实一行未执行。修法两条：
+#     ① 判据改为**优先问 cmd.exe**（`flutter.bat` 读的就是 Windows 环境，这才是权威），
+#        内建 `env` 仅作兜底；
+#     ② 加**一次性守卫** `SONICSHIELD_ENV_HEALED`，重执行至多发生一次（防死循环）。
+if [ "${SONICSHIELD_ENV_HEALED:-0}" != "1" ]; then
+  _pf86_ok=0
+  if command -v cmd.exe >/dev/null 2>&1; then
+    # cmd.exe 能看到真正的 Windows 环境变量；bash 内建 env 可能丢带括号名。
+    if cmd.exe //c "if defined PROGRAMFILES(X86) (exit 0) else (exit 1)" 2>/dev/null; then
+      _pf86_ok=1
+    fi
+  fi
+  if [ "$_pf86_ok" != "1" ] && env | grep -q '^PROGRAMFILES(X86)='; then
+    _pf86_ok=1
+  fi
+  if [ "$_pf86_ok" != "1" ]; then
+    export SONICSHIELD_ENV_HEALED=1
+    exec env 'PROGRAMFILES(X86)=C:\Program Files (x86)' bash "${BASH_SOURCE[0]}" "$@"
+  fi
 fi
 if [ -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${all_proxy:-}" ]; then
   echo "[env] 检测到代理变量，已为本次门禁清除（flutter_tester 走本机 WebSocket，不能经代理）"

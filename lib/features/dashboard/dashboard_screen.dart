@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/providers.dart';
 import '../../core/theme.dart';
+import '../../domain/models/task.dart';
 import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
@@ -208,11 +209,15 @@ class _EngineCard extends ConsumerWidget {
   }
 }
 
-/// 首页常驻「全局执行总开关（节假日自动暂停）」（FR-71，第八十二轮）。
+/// 守护页常驻「全局执行总开关（节假日自动暂停）」（FR-71 → FR-78）。
 ///
 /// 与设置页 / 远程 `run.master.set` 同源（[RunMasterService] → `PrefsKeys.runMasterMode`，
 /// v79 docs/20 §9）：三态 `auto/on/off`，暂停窗口判定走纯函数 [RunPause]。
-/// 首页只给**开关 + 当前状态**，例外清单仍在设置页展示，避免首页过长。
+///
+/// 🔴 **第八十四轮用户明文（FR-78）**：本控件**从守卫页移至守护页**并**美化样式**
+/// —— 守卫页（`GuardScreen`）**不再残留**总开关；本卡片为唯一入口。
+/// 原有「例外清单（暂停期间仍执行）」能力一并**从守卫页迁入**（重构入口，不丢功能），
+/// 默认折叠前 [_kForceRunPreview] 条，超出给「展开全部」。
 ///
 /// 🔴 监听 [RunMasterService.mode] ⇒ **远程改动即时刷新本卡片**（第八十二轮
 /// 补的"最后一公里"：此前只在 `initState` 读一次，远程改了首页不刷新）。
@@ -224,6 +229,12 @@ class _RunMasterCard extends ConsumerStatefulWidget {
 }
 
 class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
+  /// 例外清单折叠时展示的条数（用户要求：默认 5 条）。
+  static const int _kForceRunPreview = 5;
+
+  /// 例外清单是否已展开（超出 [_kForceRunPreview] 条时才可展开）。
+  bool _forceRunExpanded = false;
+
   @override
   void initState() {
     super.initState();
@@ -242,6 +253,7 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     // 监听 [RunMasterService]：远程 `run.master.set` 与本机改动都会即时刷新本卡片。
     return ValueListenableBuilder<RunMasterMode>(
       valueListenable: RunMasterService.instance.mode,
@@ -256,7 +268,25 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
           RunMasterMode.on => '强制开启：忽略自动窗口，始终执行',
           RunMasterMode.off => '强制关闭：始终暂停，仅执行例外任务',
         };
+        // 档位视觉（FR-78 美化）：图标 / 状态色 / 徽标文案随档位切换。
+        final (icon, tinted) = switch (mode) {
+          RunMasterMode.auto => (Icons.event_available, !paused),
+          RunMasterMode.on => (Icons.play_circle, false),
+          RunMasterMode.off => (Icons.pause_circle, false),
+        };
+        final tone = paused
+            ? theme.colorScheme.error
+            : (mode == RunMasterMode.on
+                ? theme.colorScheme.primary
+                : theme.colorScheme.tertiary);
+        final all = ref.watch(forceRunTasksProvider).valueOrNull ?? const <Task>[];
+        final overflow = all.length > _kForceRunPreview;
+        final shown =
+            _forceRunExpanded ? all : all.take(_kForceRunPreview).toList();
+
         return Card(
+          // 美化：暂停时整卡用 errorContainer 提示"现在不执行"，一眼可辨。
+          color: paused ? theme.colorScheme.errorContainer : null,
           child: Padding(
             padding: const EdgeInsets.all(AppSpacing.lg),
             child: Column(
@@ -264,15 +294,50 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.pause_circle_outline),
-                    const SizedBox(width: 8),
+                    // 档位图标放进圆角色块，比裸图标更有"卡头"感。
+                    Container(
+                      padding: const EdgeInsets.all(AppSpacing.sm),
+                      decoration: BoxDecoration(
+                        color: tone.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(icon, size: 26, color: tone),
+                    ),
+                    const SizedBox(width: AppSpacing.md),
                     Expanded(
-                      child: Text('全局执行总开关',
-                          style: Theme.of(context).textTheme.titleMedium),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('全局执行总开关',
+                              style: theme.textTheme.titleMedium),
+                          const SizedBox(height: 2),
+                          Text(
+                            mode.label,
+                            style: AppText.labelSmall.copyWith(
+                              color: tone,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // 状态徽标：暂停/运行一眼可辨。
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.sm, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: tone,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        paused ? '暂停中' : '执行中',
+                        style: AppText.labelSmall
+                            .copyWith(color: theme.colorScheme.onPrimary),
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.md),
                 SegmentedButton<RunMasterMode>(
                   segments: [
                     for (final m in RunMasterMode.values)
@@ -281,7 +346,7 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
                   selected: {mode},
                   onSelectionChanged: (s) => _set(s.first),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Text('当前状态：$status', style: AppText.bodySmall),
                 const SizedBox(height: 4),
                 const Text(
@@ -289,6 +354,34 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
                   '（含普通周末）；窗口内任务默认跳过，出窗自动恢复。',
                   style: AppText.bodySmall,
                 ),
+                const Divider(height: AppSpacing.lg),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '例外清单（${all.length} 条暂停期间仍执行）',
+                        style: AppText.bodyMedium
+                            .copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (overflow)
+                      TextButton(
+                        onPressed: () => setState(
+                            () => _forceRunExpanded = !_forceRunExpanded),
+                        child: Text(
+                            _forceRunExpanded ? '收起' : '展开全部（${all.length}）'),
+                      ),
+                  ],
+                ),
+                if (all.isEmpty)
+                  const Text('无：暂停期间不执行任何任务', style: AppText.bodySmall)
+                else
+                  for (final t in shown)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text('· ${t.name}（强制执行）',
+                          style: AppText.bodySmall),
+                    ),
               ],
             ),
           ),

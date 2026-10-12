@@ -103,18 +103,30 @@ void main() {
   final ci = File('.github/workflows/ci.yml').readAsStringSync();
 
   /// 新 CI 判据：只保留 iOS IPA 构建，其余 job 一律不得存在。
-  bool ciIsIpaOnly(String src) =>
-      src.contains('ios-build') &&
-      src.contains('sonic_shield-unsigned.ipa') &&
-      // 第八十三轮（远程合并轮）：恢复 `android-build`（签名 APK）—— 本仓交付
-      // 目标是「所有系统的 release」，Android 侧必须出 APK；远程 2026-10-10 的
-      // `1d8db2e` 把 android-build 一并裁掉了，与交付目标冲突。analyze/emulator/
-      // 覆盖率 ratchet 仍裁撤（改由本地 gates.sh 承担，不恢复）。
-      src.contains('android-build') &&
-      src.contains('name: sonicshield-apk') &&
-      !src.contains('analyze-test') &&
-      !src.contains('emulator-test') &&
-      !src.contains('--min-covered=');
+  ///
+  /// ⚠️ 第八十四轮修正：`analyze-test` / `emulator-test` / `--min-covered=` 的
+  /// **「不得存在」判据此前会误伤注释** —— `ci.yml` 里恰有一行说明「analyze-test /
+  /// emulator-test 仍保持在本地 gates.sh（不恢复）」，于是判据把**注释**当成了 job
+  /// definition 而判红（实测 `GEC-06` 假红）。注释描述的是「**为什么**不恢复」，
+  /// 与「是否真的存在该 job」是两回事 ⇒ 检查前先剥掉 YAML 注释行。
+  /// 反例保证判据非恒真（见 `GEC-06r`：真塞回 `analyze-test:` job 仍判红）。
+  bool ciIsIpaOnly(String src) {
+    final code = src
+        .split('\n')
+        .where((l) => !l.trimLeft().startsWith('#'))
+        .join('\n');
+    return code.contains('ios-build') &&
+        code.contains('sonic_shield-unsigned.ipa') &&
+        // 第八十三轮（远程合并轮）：恢复 `android-build`（签名 APK）—— 本仓交付
+        // 目标是「所有系统的 release」，Android 侧必须出 APK；远程 2026-10-10 的
+        // `1d8db2e` 把 android-build 一并裁掉了，与交付目标冲突。analyze/emulator/
+        // 覆盖率 ratchet 仍裁撤（改由本地 gates.sh 承担，不恢复）。
+        code.contains('android-build') &&
+        code.contains('name: sonicshield-apk') &&
+        !code.contains('analyze-test') &&
+        !code.contains('emulator-test') &&
+        !code.contains('--min-covered=');
+  }
 
   test('GEC-06 ★ CI 只构建产物：Android 签名 APK + iOS 未签名 IPA（analyze/emulator/ratchet 已裁撤）', () {
     expect(ciIsIpaOnly(ci), isTrue,

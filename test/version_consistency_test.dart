@@ -143,12 +143,87 @@ void main() {
             'AppMeta.buildDate 必须为 YYYY-MM-DD');
   });
 
-  test('AppMeta.displayVersion 在版本信息后携带年月日（基线）', () {
+  test('AppMeta.displayVersion 携带紧凑日期 `(YYYYMMDD)`（第八十四轮基线）', () {
     final dv = AppMeta.displayVersion;
-    expect(dv, contains(AppMeta.buildDate),
-        reason: 'displayVersion 必须在版本信息（version+build）之后附上年月日，'
-            '且须与 AppMeta.buildDate 一致（项目基线：版本信息后须带年月日）');
-    expect(RegExp(r'\d{4}-\d{2}-\d{2}').hasMatch(dv), isTrue,
-        reason: 'displayVersion 必须包含 YYYY-MM-DD 日期（项目基线）');
+    // 🔴 第八十四轮用户基线：格式固定 `版本号(当前日期)`，例 `1.9.1(20261011)`。
+    final compact = AppMeta.buildDate.replaceAll('-', '');
+    expect(dv, contains('($compact)'),
+        reason: 'displayVersion 必须形如 `x.y.z(YYYYMMDD)`（用户明文指定），'
+            '当前为 `$dv`，期望包含 `($compact)`');
+    expect(RegExp(r'^[0-9]+\.[0-9]+\.[0-9]+\(\d{8}\)$').hasMatch(dv), isTrue,
+        reason: 'displayVersion 必须严格匹配 `x.y.z(YYYYMMDD)`（不带连字符、不带 alpha）');
+  });
+
+  // ── 第八十四轮新增基线：禁止 alpha+N，每轮至少 +0.0.1 ──
+  //
+  // 用户明文：版本号格式为「版本号(当前日期)」，**禁止** `alpha+23` 这种表述；
+  // 且以后所有版本至少更新 0.0.1 个迭代。前两条把「格式」与「单调递增」都锁死。
+
+  test('pubspec 版本号不得含预发布后缀（禁 alpha / beta / rc 等）', () {
+    final raw = pubspecVersion();
+    expect(RegExp(r'alpha|beta|rc|dev|pre', caseSensitive: false).hasMatch(raw),
+        isFalse,
+        reason: '第八十四轮用户基线：**禁止** alpha/beta 等预发布后缀（曾为 '
+            '`1.9.0-alpha+23`）。版本号必须为纯 `x.y.z`，当前为 `$raw`');
+    expect(RegExp(r'^[0-9]+\.[0-9]+\.[0-9]+$').hasMatch(raw), isTrue,
+        reason: '版本号必须是纯 `x.y.z`（无后缀），当前为 `$raw`');
+  });
+
+  test('本轮版本号 > 上一轮（每轮至少 +0.0.1，不得同号复用）', () {
+    // 上一轮已发布版本：`1.9.0`（第八十三轮）。第八十四轮必须严格更大。
+    const previous = '1.9.0';
+    expect(compare(pubspecVersion(), previous), greaterThan(0),
+        reason: '「每轮迭代至少更新 0.0.1」：当前 ${pubspecVersion()} 必须 > $previous');
+  });
+
+  // ── 第八十四轮新增基线（FR-82）：文件版本号必须与代码版本号强关联 ──
+  //
+  // 用户明文：「文件版本号应当与代码版本号强关联；需要上锁，不做这个锁易漂移」。
+  // 人工核对会漏（本文件开头记的 BUG-049 漂移史就是明证），故把「文件里出现的
+  // 版本号 == 代码版本号」变成**机械门禁判据**：枚举**权威版本落点**，逐一断言
+  // 其版本串与 [AppMeta.version] 逐位一致。任一落点漂移 ⇒ 功能层判红。
+
+  test('FR-82 文件版本引用一致性：权威落点的版本号必须 == AppMeta.version', () {
+    // 权威版本落点（含版本号、且应当是**当前版本**而非历史）：
+    //  - `HANDOVER.md` 标题行（第一行）
+    //  - `HANDOVER.md` 「当前状态」快照行
+    //  - `HANDOVER.md` 「版本」表格行
+    // 历史小节（docs/12 各轮、docs/00 索引里的历史描述）刻意不入列 ——
+    // 它们记录的是**当时**的版本，改写会破坏历史记录（属反漂移审计的豁免面）。
+    final handover = File('HANDOVER.md').readAsStringSync();
+    const ver = AppMeta.version;
+
+    final titleLine = handover.split('\n').first;
+    expect(titleLine.contains('v$ver'), isTrue,
+        reason: 'HANDOVER.md 标题行（第 1 行）的版本必须为当前版本 `v$ver`，'
+            '实际标题：`$titleLine`（FR-82：文件版本号须与代码版本号强关联）');
+
+    final statusLine = RegExp(r'^\*\*当前状态（[^\n]*$', multiLine: true)
+        .firstMatch(handover)
+        ?.group(0) ?? '';
+    expect(statusLine.isNotEmpty, isTrue,
+        reason: 'HANDOVER.md 找不到「**当前状态（…」快照行');
+    expect(statusLine.contains('v$ver'), isTrue,
+        reason: 'HANDOVER.md「当前状态」行的版本必须为当前版本 `v$ver`，'
+            '实际：`$statusLine`（FR-82）');
+
+    final tableLine = RegExp(r'^\| 版本 \|[^\n]*$', multiLine: true)
+        .firstMatch(handover)
+        ?.group(0) ?? '';
+    expect(tableLine.isNotEmpty, isTrue,
+        reason: 'HANDOVER.md 找不到「| 版本 |」表格行');
+    expect(tableLine.contains(ver), isTrue,
+        reason: 'HANDOVER.md「版本」表格行必须为当前版本 `$ver`，'
+            '实际：`$tableLine`（FR-82）');
+  });
+
+  test('FR-82 文件版本引用不得残留预发布后缀（全落点禁 alpha）', () {
+    // 与上一条互补：上一条盯「等值」，这一条盯「不得留旧格式」——
+    // 防止把 `v1.9.0-alpha` 只是「顺手改成别的 alpha」而绕开等值判据。
+    final handover = File('HANDOVER.md').readAsStringSync();
+    final titleLine = handover.split('\n').first;
+    expect(titleLine.contains('-alpha'), isFalse,
+        reason: 'HANDOVER.md 标题行不得残留 `-alpha` 预发布后缀（FR-81/82），'
+            '实际：`$titleLine`');
   });
 }

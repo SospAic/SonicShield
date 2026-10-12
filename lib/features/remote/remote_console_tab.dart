@@ -101,6 +101,33 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   StreamSubscription<Map<String, dynamic>>? _evtSub;
   StreamSubscription<void>? _updSub;
 
+  /// 远程动作回执行（FR-79，第八十四轮用户明文）。
+  ///
+  /// 用户要求：「在『目标端点和设备快照』与『动作』两个模块中间新增两行高的
+  /// 命令行组件，显示为一个**两行高的文本框**，里面显示**所有远程动作的回执**，
+  /// 超过两行时自动换行，**同时去除原来的各动作的反馈信息显示点**」。
+  ///
+  /// 故原「逐动作 SnackBar（✓/✗ desc）」全部改为**追加进本列表**，
+  /// 由 [_ReceiptConsole] 统一渲染（固定两行高、自动换行、可滚动看全部）。
+  /// 保留上限 [_kReceiptMax] 防无界增长（旧的 SnackBar 一闪即走，无此问题）。
+  final List<String> _receipts = <String>[];
+
+  /// 回执行保留条数上限（超出丢最旧的；避免长时间使用后无界增长）。
+  static const int _kReceiptMax = 200;
+
+  /// 追加一条回执（FR-79）。
+  ///
+  /// 不弹 SnackBar —— 用户要的是「积在一处、可回看」，而不是「一闪而过」。
+  void _pushReceipt(String line) {
+    if (!mounted) return;
+    setState(() {
+      _receipts.add(line);
+      if (_receipts.length > _kReceiptMax) {
+        _receipts.removeRange(0, _receipts.length - _kReceiptMax);
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -274,9 +301,9 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
           // 失败原因（`data`）必须一并显示：只说"✗"等于让用户自己去猜
           // 端点为什么拒绝（R-4 同族判据）。
           final data = payload['data']?.toString() ?? '';
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('${payload['ok'] == true ? '✓' : '✗'} ${p.desc}'
-                  '${data.isEmpty ? '' : '（$data）'}')));
+          // FR-79：不再弹 SnackBar（原「逐动作反馈点」），改写进两行高回执行。
+          _pushReceipt('${payload['ok'] == true ? '✓' : '✗'} ${p.desc}'
+              '${data.isEmpty ? '' : '（$data）'}');
         }
     }
     // R-3：收到期望的响应即清除条目 —— 否则 8s 后会误报"端点未响应"。
@@ -320,9 +347,9 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     if (expired.isEmpty) return;
     final head = expired.first;
     final more = expired.length - 1;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('「$head」端点未响应：可能离线、配对码不一致或引擎未运行'
-            '${more > 0 ? '（另有 $more 条同类）' : ''}')));
+    // FR-79：超时同样写入回执行（不再弹 SnackBar）。
+    _pushReceipt('⚠ 「$head」端点未响应：可能离线、配对码不一致或引擎未运行'
+        '${more > 0 ? '（另有 $more 条同类）' : ''}');
   }
 
   /// 发送命令。
@@ -345,25 +372,23 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
     final channel = widget.channel;
     if (channel != null) {
       if (!channel.canSend) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('协助会话未激活')));
+        _pushReceipt('⚠ $desc：协助会话未激活');
         return null;
       }
       final ok = await channel.send(msg);
       if (!mounted) return null;
       if (ok) {
         _armExpectation(msg.id, desc, expect);
+        _pushReceipt('→ $desc  已发出（等待回执…）');
         return msg.id;
       }
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('发送失败：「$desc」')));
+      _pushReceipt('✗ $desc：发送失败');
       return null;
     }
 
     final ep = _endpoint;
     if (ep == null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('请先选择端点')));
+      _pushReceipt('⚠ $desc：请先选择端点');
       return null;
     }
     final store = await _store();
@@ -373,23 +398,16 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
       // 只有**真的发出去了**才记账：没发出去的情况下面会立刻给出原因，
       // 再叠一条"8 秒后未响应"只会互相矛盾。
       _armExpectation(msg.id, desc, expect);
+      _pushReceipt('→ $desc  已发出（等待回执…）');
       return msg.id;
     }
     // R-9：`sendTo` 返回 false 的原因**不止一种**，提示必须跟着原因走。
     // 一律说"已入队，端点上线后自动执行"会让"本机远程模块根本没开"的用户
     // 一直等一个永远等不到的补发（那是**误导**，不是提示）。
     if (!_enabled) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text('本机远程模块未开启，命令不会补发'),
-        action: SnackBarAction(
-            label: '去开启',
-            onPressed: () {
-              if (mounted) context.push('/remote/settings');
-            }),
-      ));
+      _pushReceipt('⚠ $desc：本机远程模块未开启，命令不会补发');
     } else {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('端点离线：「$desc」已入队，端点上线后自动执行')));
+      _pushReceipt('⚠ $desc：端点离线，已入队（端点上线后自动执行）');
     }
     return null;
   }
@@ -509,6 +527,10 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
                     : null),
           ],
         ),
+        // FR-79（第八十四轮用户明文）：在「设备快照与动作」与「动作」两模块
+        // **中间**插入一个**两行高**的命令行回执组件，显示**所有远程动作的回执**。
+        const SizedBox(height: 12),
+        _ReceiptConsole(lines: _receipts),
         const SizedBox(height: 12),
         _section('音效播放'),
         Wrap(
@@ -1046,6 +1068,72 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
   }
 }
 
+/// 两行高的远程动作回执命令行组件（FR-79，第八十四轮用户明文）。
+///
+/// 用户原话：「远程控制台页面『目标端点和设备快照』与『动作』两个模块中间
+/// 新增两行高的命令行组件，显示为一个**两行高的文本框**，里面显示**所有远程
+/// 动作的回执**，超过两行时**自动换行**，同时**去除原来的各动作的反馈信息显示点**。」
+///
+/// 呈现选择：
+/// - **固定两行高**（按等宽字体行高 × 2 定高），不因内容多少而跳动；
+/// - 内容**自动换行**，超出两行时内部**可滚动**（不然第 3 行起会被裁掉，
+///   而"所有回执"是硬需求 ⇒ 必须能回看全部）；
+/// - 等宽字体 + 深色底 + 亮字，视觉上就是"命令行/终端回执"；
+/// - 空态给一行灰字占位，避免用户以为"组件没渲染"。
+class _ReceiptConsole extends StatelessWidget {
+  const _ReceiptConsole({required this.lines});
+
+  /// 全部回执行（按时间先后追加；渲染时最新的在最下面）。
+  final List<String> lines;
+
+  /// 命令行字号（等宽）。
+  static const double _fontSize = 12;
+
+  /// 行高倍数（两行高的定高基准）。
+  static const double _lineHeight = 1.4;
+
+  /// 组件的**固定高度 = 两行**（用户明文"两行高"）。
+  static double get _height => _fontSize * _lineHeight * 2 + 16; // + 内边距
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      height: _height,
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        // 深色"终端"底：与周围 Card 区分，一眼知道是回执区。
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: lines.isEmpty
+          ? const Text(
+              '> 远程动作回执将显示在这里',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: _fontSize,
+                height: _lineHeight,
+                color: Colors.grey,
+              ),
+            )
+          : SingleChildScrollView(
+              // 超出两行 ⇒ 可滚动回看全部回执（"显示所有回执"的硬需求）。
+              child: Text(
+                lines.join('\n'),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: _fontSize,
+                  height: _lineHeight,
+                  color: scheme.onSurface,
+                ),
+              ),
+            ),
+    );
+  }
+}
+
 /// 一条「已发出、等待响应」的命令（R-3）。
 ///
 /// 与旧实现（`Map<String, String>` 只存描述）的区别：多存了**期望的响应类型**
@@ -1071,8 +1159,7 @@ class _PendingAck {
 ///
 /// ⚠️ R-7：当前**不可达**（端点不产 `rc.photo`），保留是为了端点恢复拍照
 /// 回传时不必重写消费端；见 [RcEvt.photo] 处的说明。
-class _PhotoView extends StatelessWidget {
-  const _PhotoView({required this.b64});
+class _PhotoView extends StatelessWidget {  const _PhotoView({required this.b64});
 
   final String b64;
 

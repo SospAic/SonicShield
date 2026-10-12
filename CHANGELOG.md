@@ -3,7 +3,46 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
-## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
+## [1.9.1] - 2026-10-11（用户六条新需求：设备自定义名/别名 · 总开关迁守护页 · 两行高回执行 · 反击计划独立 TAB · 版本号格式改制）
+
+#### 第八十四轮（2026-10-11 夜·续二）· **落地用户明文六条需求 —— 设备名自定义+别名广播（FR-77）/ 总执行开关从守卫页移至守护页并美化（FR-78）/ 远程控制台新增两行高回执命令行组件+去除逐动作反馈点（FR-79）/ 反击计划独立成 TAB（FR-80）/ 版本号改 `x.y.z(YYYYMMDD)` 并禁 `alpha+N`（FR-81）；用户三条基线全部登记进 `docs/02`**
+
+**🔴 本轮是「需求登记 + 商品代码实现」轮：用户一次性给出六条明文需求（三条是长期基线），先按硬规则①全部登记进 `docs/02`（FR-74~81），再逐条落到代码。**
+
+- 🔴 **A 需求登记（硬规则①）**：`docs/02-需求规格说明书.md` 新增 **FR-77 ~ FR-81** 五行（设备自定义名+别名广播 / 总开关迁守护页+美化 / 两行高回执行+去反馈点 / 反击计划独立 TAB / 版本号格式改制），并补齐 FR-74~76 的登记（首页开关真实生效 / 保活与反击分离可配置 / 远程界面列表化）。
+- 🔴 **B FR-81 版本号格式改制**：`pubspec.yaml` `1.9.0-alpha+23` → **`1.9.1+24`**（**纯 `x.y.z`，无任何预发布后缀**）；`lib/core/constants.dart` 的 `AppMeta.version` → `1.9.1`、`buildNumber` → `24`、`buildDate` → `2026-10-11`，`displayVersion` 改为用户指定格式 **`1.9.1(20261011)`**（紧凑 8 位日期，圆括号）；`version_consistency_test.dart` 新增两把锁 —— **「pubspec 版本号不得含 alpha/beta/rc/dev/pre 后缀」** + **「本轮版本号必须 > 上一轮（每轮至少 +0.0.1）」**，原「displayVersion 携带 `YYYY-MM-DD`」锁改写为「严格匹配 `x.y.z(YYYYMMDD)`」。
+- 🔴 **C FR-78 总执行开关迁移 + 美化**：从 `guard_screen.dart` **移除** `_buildRunMasterCard` / `_saveRunMaster` / `_runMasterMode` / `_syncRunMasterFromService` 及其监听注册；功能并入 `dashboard_screen.dart` 的 `_RunMasterCard` —— 保留三态 `SegmentedButton`，**新增状态色圆角徽标**（暂停=error 色 / 运行=primary 色）、图标随档位切换、状态行文案、以及**例外清单前 5 条折叠 + 展开/收起**（原在守卫页的能力一并迁入，不丢功能）。
+- 🔴 **D FR-79 远程控制台两行高回执命令行**：`remote_console_tab.dart` 在「设备快照与动作」与「音效播放」两模块**中间**插入固定**两行高**的只读回执文本框（等宽字体 + 深色底 + 自动换行 + 可滚动看全部），累积展示每条动作回执（发送/成功/失败/端点未响应四类都入框）；**去除原逐动作的 SnackBar 反馈弹点**（`✓/✗ desc` 与「端点未响应」不再弹 SnackBar，改写进回执框），失败原因（`data`）一并入框不丢信息。
+- 🔴 **E FR-80 反击计划独立 TAB**：`settings_screen.dart` 的 `DefaultTabController.length` **4 → 5**，新增第 5 个 TAB「反击计划」；反击计划区块从「语音与音色」TAB **移出**，独占一页。
+- 🔴 **F FR-77 设备自定义名 + 别名广播**：`PairedEndpoint.displayName` 由「别名优先、回落真名」改为用户指定格式 **`别名（真名）`**（别名为空时退化为只显示真名）；`RemoteStore.renamePaired` 保持本机本地化（别名**只在本机显示**，不参与同步）。
+- 🔴 **H 新增两条基线（硬规则①登记）**：
+  - **FR-82「文件版本号与代码版本号强关联」**：`test/version_consistency_test.dart` 新增**文件版本引用一致性锁**（扫 `HANDOVER.md` 标题行 / 当前状态行 / 版本表格行，逐一断言版本串 == `AppMeta.version`）+ **全落点禁 `-alpha` 残留锁**；`HANDOVER.md` 三处版本落点回刷 `1.9.1`。**不做锁易漂移**（用户明文）。
+  - **FR-83「应用图标改为用户拟定样式」**：新建 **`tool/gen_icon.py`**（可复现图标生成器：深蓝黑底 + 青绿盾牌 + 白色声波，**20 个文件** = Android 5 档 mipmap + iOS 15 档 AppIcon 一次产出），`--check` 模式可校验；新建 **`test/app_icon_lock_test.dart`**（`AIC-01…04`：存在性 / PNG 头尺寸 / `git ls-files` 入库 / 生成脚本可复现）。全套图标已重生成。
+- ✅ **G 门禁**：本轮改完后跑权威四步门禁（`bash scripts/gates.sh`）复核；**机器锁全库 77/77 → 81/81 回刷**（`version` 组 8 → **12**：FR-81 新增「日期格式 `x.y.z(YYYYMMDD)`」「pubspec 禁预发布后缀」「每轮至少 +0.0.1 且不得同号复用」三把 + FR-82 新增「文件版本引用一致性」「全落点禁 alpha 残留」两把，原「buildNumber 一致」锁保留）。
+
+## [1.9.0] - 2026-09-24（全功能点测试与缺陷修复）
+
+#### 第八十四轮（2026-10-11 深夜续）· **并入 `workbuddy/main-fb118d7d` 的 FR-70~73 远程工作（设置页 tab / 首页总开关 / 总开关远程控制 / 连接方案+节点测速）+ 落地用户三条新基线（需求登记 / releases 固定产物 / `install_all.bat` 一键装）+ 抓修合并遗留的「两 tab 标签 vs 四 tab 布局」假红 + 修复 `gates.sh` 环境自愈静默空跑；可测面 98.64%（13156/13338） / 全局 93.42%（13165/14093），机器锁 77/77**
+
+**🔴 本轮把「这两天散落在未合并分支上的远程改造」并回 main，并把用户明文提出的三条长期规则写进基线文档 —— 目标不是加功能，而是「让改造不丢 + 让约定可执行」。**
+
+- 🔴 **A 并入未合并分支 `workbuddy/main-fb118d7d`**（用户裁定「并入 main」）：该分支含 `f0f3ad6 feat(remote+settings): FR-70/71/72/73` + `92628e1` / `0cccf08` / `7a109fc` 四提交，实现 ——
+  - **FR-70 设置页 tab 分组**、**FR-71 首页常驻全局执行总开关**、**FR-72 总开关远程控制（命令 `run.master.set` + 回执回显 + 本机实时同步）**、**FR-73 远程连接方案可选 + 节点下拉 + 一键测速（TLS/WSS/QUIC）**。
+  - 新增生产文件：`lib/services/run_master_service.dart`（`ValueNotifier<RunMasterMode>` 单例，`seed()` 每次真读 prefs 避开内存污染）、`lib/remote/node_catalog.dart`（`MqttNode` / `RcTransport{tls,wss,quic}` / `kStunNodes` / `NodeSpeedTest`）、`.gitattributes`（`*.sh` 强制 LF）。
+  - 27 处冲突**逐处语义合并**：`endpoint_service.dart` / `node_catalog.dart` / `run_master_service.dart` / `counter_plan_test.dart` / `coverage_sentinel_test.dart` **取分支**；`settings_screen.dart` / `ci.yml` / `gates.sh|ps1` / `dir_path_interpolation_test.dart` / `doc_gate_consistency_test.dart` **取本地**；UI 类（`dashboard_screen` / `remote_console_tab` / `remote_screen` / `remote_store` / `call_service`）**自动合并即正确**。
+- 🔴 **B 用户三条新基线落地**（明文指令，登记在 `HANDOVER.md` ★ 新增长期规则 + `docs/02` + README）
+  - **① 每一轮用户需求必须登记进项目基线文档** —— 需求**先进 `docs/02`（FR 行 + 追踪矩阵）再进代码**，收口反查「本轮需求是否都能在 docs/02 grep 到 FR」。
+  - **② release 产物固定生成到根目录 `releases/`**（Android `SonicShield-Android.apk` / iOS `SonicShield-iOS.ipa`，固定名覆盖）—— 新建 `releases/`（含 `README.md` + `wireless.txt` 模板），`.gitignore` 改 `releases/*` + `!releases/README.md` + `!releases/wireless.txt`。
+  - **③ 根目录 `install_all.bat` 一键装到所有真实设备** —— 读 `releases/wireless.txt` 自动 `adb connect`、枚举全部在线设备逐个 `install -r`、签名不符自动 `uninstall + install`、MIUI `INSTALL_FAILED_USER_RESTRICTED` 给「通过 USB 安装」提示、iOS 走 `ideviceinstaller`。
+- 🔴 **C 抓修合并遗留缺陷**
+  - `test/settings_screen_test.dart` 的 `switchTab` 助手仍是**两 tab 时代标签**（`通用` / `语音与反击`），而设置页在第八十三轮已是**四 tab** ⇒ 30 处 `switchTab(tester, 1)` 会 `find.text('语音与反击')` 落空、整组假红。修 = 按四 tab 真名映射 + 调用点 `1` → `2`（语音与音色）。**该助手在 main 的 `3240e71` 版本里根本不存在，是分支带入的** ⇒ 典型「取分支的助手 + 取本地的布局」错配。
+  - `make install_all.bat` 的四项缺陷（实测中抓）：① UTF-8 **BOM** 使首行 `@echo off` 变成「不是内部或外部命令」；② `for /f ... ('"%ADB%" devices')` **嵌套引号**被 cmd 拒（`The filename, directory name, or volume label syntax is incorrect.`）⇒ 设备数恒 0；③ 中文 `wireless.txt` 的 `#` 行仍在回显；④ 结尾 `pause` 使**非交互运行（CI / 中继）永久挂起**。修 = **去 BOM** + 改**临时文件 `type`**枚举 + `for /f "usebackq eol=#"` 跳注释 + `pause` 仅在 `%cmdcmdline%` 含脚本路径（双击）时触发、`exit /b %AFAIL%` 回传失败数。
+- 🔴 **D 文档同步**：`docs/02` FR-70 由「两 tab」更正为**四 tab 真名**；`test/support/feature_point_inventory.dart` FR-70 描述同步；README 增补 releases 约定 + `install_all.bat` + 目录结构；`HANDOVER.md` ★ 新增长期规则新增三条。
+- 🔴 **F 修复 `gates.sh` 环境自愈静默空跑（本轮最贵坑）**：顶部 `if ! env | grep -q '^PROGRAMFILES(X86)='` 在计划任务中继上下文里**恒真** —— bash **内建 `env` 会丢弃带括号的变量名**（`/usr/bin/env` 与 `cmd.exe` 都能看到，内建看不到）⇒ 触发 `exec env ... bash "$0"` 自愈重入，而内建 `env` 同样丢弃 ⇒ 子进程**静默死亡**（RC=0、零输出）⇒ 门禁「看似跑了」实则**什么都没执行**。修 = 自愈判断**优先问 `cmd.exe`**（`cmd.exe //c "if defined PROGRAMFILES(X86) (exit 0) else (exit 1)"`）+ 一次性守卫 `SONICSHIELD_ENV_HEALED`。证据 = 四条独立探针（`cmd.exe` 侧有值 / bash 侧 `env|grep -c PROGRAMFILES`=0 / `flutter analyze` 经中继直跑成功 / `/usr/bin/env 'PROGRAMFILES(X86)=...' bash -c 'echo T1_OK'` 打印而裸 `env …` 无输出）。修后门禁**真实执行**（`[PASS] analyze` …）。
+- 🔴 **G 门禁与机器锁同步**：门禁四步经中继真实复跑（`_pt/gate84b.log`）= analyze ✅ / 功能层 **2668 通过 + 8 失败**（8 处全为文档锁，逐条修复：`BRL-02` / `MCL-02` / `CCL-01/02` / `RCL-01` / `SSL-01/02` / `GEC-06`）/ 压测 **24/24** ✅ / ratchet ✅ **98.64% ≥ `COVERAGE_MIN=98.6`**；**机器锁全库 75/75 → 77/77 回刷**（`version` 组 6 → 8：分支 `f0f3ad6` 新增「`buildDate` 格式」「`displayVersion` 携带日期」两把锁）；写 `docs/12 §117` + `docs/17 §114`（R84 权威节）+ 全库落点回刷。
+- ✅ **E 实测取证**：`install_all.bat` 经**计划任务中继真实复跑**（`_pt/ibat2.txt`）—— `devices online: 1`、`--> device adb-960f853-Kmi5Mk._adb-tls-connect._tcp`、`[OK] installed`、`RC=0`（无线设备 `23116PN5BC` 经 mDNS 自动发现并装包成功，`releases/.install_*.log` = `Success`）。
+- ⚠️ **BLOCKED（如实登记）**：真机 versionCode 实测（**四台已全部装 v23**：MI MAX `5540bc21` API24 / MIX 2 `8ebc6293` API28 / 无线 `23116PN5BC` Android16 / Redmi 8A `16920aab0906` API29）、动态反击真机端到端、iOS 侧载、**release 签名（现包仍是 debug 签名，待 keystore 或 CI Secrets）**。
+- ⚠️ **本轮无 `lib/**` 实质新增**（FR-70~73 的商品代码来自分支机构，本轮只做合并 + 文档 + 脚本 + 测试修复）。
 
 #### 第八十三轮（2026-10-11 深夜）· **合并 `origin/main`（离线神经 TTS / 昼夜反击 / 远程回执）到第八十二轮收口 —— 语义解冲突（6 文件真人合并）+ 恢复 Android 签名 APK 交付 job；新增设备层豁免文件 `neural_tts.dart` 与 `sherpa_onnx` 依赖，可测面分母扩张至 13052 ⇒ 双指标重标定为 98.68%（12880/13052） / 全局 93.34%（12889/13808），`MIN_COVERED` 12702 → 12872；机器锁 75/75**
 
@@ -1945,17 +1984,20 @@ P2-11 取证文件管理 / P2-12 列表批量查询 / P2-16 通知与全屏降�
 - 删除死常量 `RcAssistCmd.state`（`'rc.assist'` 从未被生产侧发出/消费）。
 
 ### 已知限制
-- **机器锁（自述计数）75/75**（`DGC` 55 + `GEC` 10 + version 6 + SCR 4；第七十七轮 `version` 组 4 → 6
-  （新增「APP 显示版本每轮同步」两把锁）；第六十轮新增
+- **机器锁（自述计数）81/81**（`DGC` 55 + `GEC` 10 + version 12 + SCR 4；第七十七轮 `version` 组 4 → 6
+  （新增「APP 显示版本每轮同步」两把锁）；第八十四轮并入 `workbuddy/main-fb118d7d` 的 `f0f3ad6` 再 +2
+  （`buildDate` 格式 / `displayVersion` 携带日期 ⇒ `version` 组 6 → **8**）；第八十四轮续二 FR-81/82 再 +4
+  （`version` 组 **8 → 12**：日期格式 `x.y.z(YYYYMMDD)` / pubspec 禁预发布后缀 / 每轮至少 +0.0.1 且不得同号复用 /
+  文件版本引用一致性 + 全落点禁 alpha 残留）；第六十轮新增
   `CCL`「★ 当前口径块标题自述轮次」锁 **5 例** ⇒ 补上 `DGC`/`BAS`/`BRL`/`MCL` **四者都抓不到**的第四类漂移
   「权威块标题过期」；第六十四轮新增 🔴 `RCL`「★ 当前口径**活块续作指针**」锁 **5 例** ⇒ 补上「权威块**尾部**
   接力棒指针过期」（`DGC`/`BAS`/`BRL`/`MCL`/`CCL` 与全库审计的结构性盲区）；第六十七轮新增 🔴 `SSL`「HANDOVER 顶部
   『当前状态（第N轮）』快照轮次」锁 **6 例** ⇒ 补上**第六类**漂移「TL;DR 状态快照过期」（六把锁 + 全库审计用语表
   全都不认「当前状态」）；前序第五十九轮已新增 `MCL` 一致锁 **5 例** 盯「自述计数过期」——
   这些锁都由「4 把锁文件内 `test(` 的静态统计」校验，见 `docs/12 §92 / §93 / §97 / §98 / §99 / §100`）。
-- **覆盖率 98.68%（12880/13052）**（门禁口径＝**可测面**）／**全局（对外诚实数字）93.34%（12889/13808）**（2026-10-11 **第八十三轮**（合并 `origin/main` 离线神经 TTS / 昼夜反击 / 远程回执 到第八十二轮收口 + 恢复 Android 签名 APK job）干净门禁复验（analyze `No issues found!` ⇒ RC=0），本轮**含 `lib/**` 改动**（合并引入 `neural_tts.dart` + `sherpa_onnx`）⇒ 可测面分母 13052、分子 **12880**，比率阈值 `COVERAGE_MIN` **有意识下调 98.8 → 98.6**（分母扩张致比率下探，非回归）、绝对下限 `MIN_COVERED` 12702 → **12872**（实测分子 12880 − 8 行抖动余量）；设备层见 `docs/12 §116` / `docs/17 §113`）
-  - —— 已越过 97% 目标（⚠️ 本行 2026-10-11 **第八十三轮**实测更新；
-  此前「98.86%（12710/12857）」是第八十二轮值、「98.87%（12666/12811）」是第八十一轮值、「98.85%（12661/12808）」是第八十轮值、「98.85%（12666/12813）」是第七十九轮值、「98.94%（12484/12618）」是第七十八轮值、「98.89%（11773/11905）」是第七十七轮值、「98.85%（11413/11546）」是第七十六轮值、「98.83%（10277/10399）」是第七十五轮值、「98.82%（10217/10339）」是第七十四轮值、「98.81%（10035/10156）」是第七十三轮值、「98.82%（10033/10153）」是第七十二轮值、「99.21%（9521/9597）」是第六十九轮值、「99.10%（9511/9597）」是第六十八轮值、「99.08%（9509/9597）」是第六十七轮值、「98.92%（9493/9597）」是第六十六轮值、「98.81%（9483/9597）」是第六十五轮值、「98.67%（9469/9597）」是第六十四轮值、「98.52%（9455/9597）」是第六十三轮值、「98.36%（9440/9597）」是第六十二轮值、「98.11%（9416/9597）」是第六十一轮值、「97.88%（9394/9597）」是第六十轮值、「97.71%（9377/9597）」是第五十九轮值、
+- **覆盖率 98.64%（13156/13338）**（门禁口径＝**可测面**）／**全局（对外诚实数字）93.42%（13165/14093）**（2026-10-11 **第八十四轮**（并入 `workbuddy/main-fb118d7d` 的 FR-70~73 + 落地用户三条新基线 + 抓修合并遗留假红）干净门禁复验（analyze `No issues found!`），本轮**含 `lib/**`（`run_master_service.dart`）+ `test/**` 改动** ⇒ 可测面分母 13338、分子 **13156**，比率阈值 `COVERAGE_MIN=98.6` **保持**（实测 98.64%，正裕量 0.04pt，按「阈值取整纪律」不抬）、绝对下限 `MIN_COVERED=12872` **保持**；设备层见 `docs/12 §117` / `docs/17 §114`）
+  - —— 已越过 97% 目标（⚠️ 本行 2026-10-11 **第八十四轮**实测更新；
+  此前「98.68%（12880/13052）」是第八十三轮值、「98.86%（12710/12857）」是第八十二轮值、「98.87%（12666/12811）」是第八十一轮值、「98.85%（12661/12808）」是第八十轮值、「98.85%（12666/12813）」是第七十九轮值、「98.94%（12484/12618）」是第七十八轮值、「98.89%（11773/11905）」是第七十七轮值、「98.85%（11413/11546）」是第七十六轮值、「98.83%（10277/10399）」是第七十五轮值、「98.82%（10217/10339）」是第七十四轮值、「98.81%（10035/10156）」是第七十三轮值、「98.82%（10033/10153）」是第七十二轮值、「99.21%（9521/9597）」是第六十九轮值、「99.10%（9511/9597）」是第六十八轮值、「99.08%（9509/9597）」是第六十七轮值、「98.92%（9493/9597）」是第六十六轮值、「98.81%（9483/9597）」是第六十五轮值、「98.67%（9469/9597）」是第六十四轮值、「98.52%（9455/9597）」是第六十三轮值、「98.36%（9440/9597）」是第六十二轮值、「98.11%（9416/9597）」是第六十一轮值、「97.88%（9394/9597）」是第六十轮值、「97.71%（9377/9597）」是第五十九轮值、
   「86.83%（8315/9576）」是第四十轮值、
   「85.69%（8206/9576）」是第三十九轮值、
   「84.49%（8091/9576）」是第三十八轮值、

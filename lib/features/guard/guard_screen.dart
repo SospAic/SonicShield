@@ -11,7 +11,6 @@ import '../../core/providers.dart';
 import '../../data/repositories/task_repository.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
-import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import 'guard_orchestration.dart';
 import 'guard_toggle.dart';
@@ -45,17 +44,8 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
   /// 「实时随机动态反击」开关（v2.0 阶段 D），持久化在 [PrefsKeys.reactiveCounterEnabled]。
   bool _reactiveCounter = false;
 
-  /// 全局执行总开关（v79，docs/20 §9）。默认 [RunMasterMode.auto]。
-  ///
-  /// 第八十二轮从设置页**移植到守护首页**：它是"到底执不执行"的总闸，
-  /// 与守卫/动态反击同属执行控制，放在这里比埋在设置页更该被看见。
-  RunMasterMode _runMasterMode = RunMasterMode.auto;
-
-  /// 例外清单默认只展示 [_kForceRunPreview] 条，超出时用「展开全部」按钮展开。
-  bool _forceRunExpanded = false;
-
-  /// 例外清单折叠时展示的条数（用户要求：默认 5 条）。
-  static const int _kForceRunPreview = 5;
+  /// 🔴 第八十四轮 FR-78：全局执行总开关**已从本页移至守护页**（`DashboardScreen`
+  /// 的 `_RunMasterCard`）；守卫页不再持有该控件，也不注册其监听。
 
   /// 可作为候选的「声音触发」任务（用于多选）。
   List<Task> _soundTasks = const [];
@@ -77,9 +67,6 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
     final prefs = await SharedPreferences.getInstance();
     final reactive =
         prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false;
-    // 全局执行总开关（v79）：三态，读不懂回落 auto（与出厂一致，不抛）。
-    final master =
-        RunMasterMode.parse(prefs.getString(PrefsKeys.runMasterMode));
     if (!mounted) return;
     setState(() {
       if (rows.isNotEmpty) {
@@ -89,7 +76,6 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
       }
       _orch = orch;
       _reactiveCounter = reactive;
-      _runMasterMode = master;
       _soundTasks = [
         for (final t in tasks)
           if (t.triggerType == TriggerType.soundTriggered) t,
@@ -117,128 +103,8 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
 
   /// 切换「全局执行总开关」并落 pref（v79，docs/20 §9）。
   ///
-  /// 三态直接落 pref 并请求引擎重排 —— 引擎每轮重读，无需重启服务。
-  /// 强制关闭有"整体停摆"的后果，与夜间豁免同为**削弱执行**的操作，
-  /// 但不削弱合规护栏（只是不执行），故不做二次确认弹窗，仅留状态行说明。
-  Future<void> _saveRunMaster(RunMasterMode mode) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(PrefsKeys.runMasterMode, mode.name);
-    if (mounted) setState(() => _runMasterMode = mode);
-    await BackgroundServiceManager.instance.replan();
-    if (!mounted) return;
-    ref.invalidate(forceRunTasksProvider);
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('全局执行总开关：${mode.label}')));
-  }
-
-  static String _fmtMd(DateTime? t) {
-    if (t == null) return '—';
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${t.month}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
-  }
-
-  /// 全局执行总开关卡片（第八十二轮**从设置页移植**到守护首页）。
-  ///
-  /// 例外清单默认只展示 [_kForceRunPreview] 条，超出时给「展开全部」按钮 ——
-  /// 任务多时不再把整页撑爆（用户诉求）。
-  Widget _buildRunMasterCard(BuildContext context) {
-    final theme = Theme.of(context);
-    final mode = _runMasterMode;
-    final all = ref.watch(forceRunTasksProvider).valueOrNull ?? const <Task>[];
-    final now = DateTime.now();
-    final paused = RunPause.paused(mode, now);
-    final nextAt = RunPause.nextTransition(mode, now);
-    final status = switch (mode) {
-      RunMasterMode.auto => paused
-          ? '自动暂停中：到 ${_fmtMd(nextAt)} 自动恢复执行'
-          : '自动运行中：到 ${_fmtMd(nextAt)} 自动暂停',
-      RunMasterMode.on => '强制开启：忽略自动窗口，始终执行',
-      RunMasterMode.off => '强制关闭：始终暂停，仅执行例外任务',
-    };
-    final overflow = all.length > _kForceRunPreview;
-    final shown =
-        _forceRunExpanded ? all : all.take(_kForceRunPreview).toList();
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-            AppSpacing.md, AppSpacing.md, AppSpacing.md, AppSpacing.md),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  switch (mode) {
-                    RunMasterMode.auto => Icons.event_available,
-                    RunMasterMode.on => Icons.play_circle,
-                    RunMasterMode.off => Icons.pause_circle,
-                  },
-                  size: 30,
-                  color: paused
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.primary,
-                ),
-                const SizedBox(width: AppSpacing.sm),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('全局执行总开关',
-                          style: theme.textTheme.titleMedium),
-                      Text('法定休息日自动暂停（含普通周末）',
-                          style: theme.textTheme.bodySmall),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            SegmentedButton<RunMasterMode>(
-              segments: [
-                for (final m in RunMasterMode.values)
-                  ButtonSegment(value: m, label: Text(m.label)),
-              ],
-              selected: {mode},
-              onSelectionChanged: (s) => _saveRunMaster(s.first),
-            ),
-            Padding(
-              padding: const EdgeInsets.only(top: AppSpacing.sm),
-              child: Text('当前状态：$status', style: AppText.bodySmall),
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '例外清单（${all.length} 条暂停期间仍执行）',
-                    style: AppText.bodyMedium
-                        .copyWith(fontWeight: FontWeight.w600),
-                  ),
-                ),
-                if (overflow)
-                  TextButton(
-                    onPressed: () => setState(
-                        () => _forceRunExpanded = !_forceRunExpanded),
-                    child: Text(
-                        _forceRunExpanded ? '收起' : '展开全部（${all.length}）'),
-                  ),
-              ],
-            ),
-            if (all.isEmpty)
-              const Text('无：暂停期间不执行任何任务', style: AppText.bodySmall)
-            else
-              for (final t in shown)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Text('· ${t.name}（强制执行）',
-                      style: AppText.bodySmall),
-                ),
-          ],
-        ),
-      ),
-    );
-  }
+  /// 🔴 第八十四轮 FR-78：本方法已**随总开关一起移出**守卫页（现由守护页
+  /// `DashboardScreen._RunMasterCard` 负责），此处不再保留。
 
   Future<void> _persist() async {
     final db = (await ref.read(databaseProvider.future)).db;
@@ -349,9 +215,6 @@ class _GuardScreenState extends ConsumerState<GuardScreen> {
               ),
             ),
           ),
-          const SizedBox(height: 16),
-          // 「全局执行总开关」（第八十二轮从设置页移植到此）。
-          _buildRunMasterCard(context),
           const SizedBox(height: 16),
           Text('触发灵敏度', style: Theme.of(context).textTheme.titleMedium),
           Text('阈值 ${_threshold.round()} dBFS（越大越不敏感）',

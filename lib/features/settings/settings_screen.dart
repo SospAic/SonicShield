@@ -715,7 +715,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: DefaultTabController(
-        length: 4,
+        // FR-80（第八十四轮用户明文）：反击计划独立成一个 TAB ⇒ 4 → 5。
+        length: 5,
         child: Column(
           children: [
             const TabBar(
@@ -726,6 +727,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 // ⚠️ 刻意不叫「语音与接口」—— 那会与下方同名分区标题撞成两处
                 // 同文案，`find.text('语音与接口')` 的 findsOneWidget 会判红。
                 Tab(text: '语音与音色'),
+                // FR-80：反击计划独占一个 TAB（此前内嵌在「语音与音色」里）。
+                Tab(text: '反击计划'),
                 Tab(text: '数据与合规'),
               ],
             ),
@@ -735,6 +738,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   _tabBody(_secExecution(context)),
                   _tabBody(_secKeepAlive(context)),
                   _tabBody(_secVoice(context)),
+                  _tabBody(_secCounterPlan(context)),
                   _tabBody(_secData(context)),
                 ],
               ),
@@ -748,7 +752,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 单个 TAB 的滚动容器（各 TAB 各自滚动、互不干扰）。
   ///
   /// ⚠️ 第八十二轮：设置页原先是一个**超长单页 ListView**（用户反馈太长），
-  /// 现按功能分成 4 个 TAB。注意 `TabBarView` 是**惰性**的 —— 非活动 TAB 的
+  /// 现按功能分成 TAB。⚠️ 第八十四轮 FR-80：4 → **5** 个 TAB（反击计划独立）。
+  /// 注意 `TabBarView` 是**惰性**的 —— 非活动 TAB 的
   /// 子树不在 widget 树里，`find.text(...)` 默认找不到它们（测试需先切 TAB）。
   Widget _tabBody(List<Widget> children) => ListView(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -927,7 +932,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ];
 
-  /// TAB 3「语音与接口」：TTS/DeepSeek 接口、音色与试听、反击计划。
+  /// TAB 3「语音与接口」：TTS/DeepSeek 接口、音色与试听。
+  ///
+  /// ⚠️ 第八十四轮 FR-80：原属本 TAB 的「反击计划」已**独立成第 4 个 TAB**。
   List<Widget> _secVoice(BuildContext context) => [
           Text('语音与接口', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
@@ -960,9 +967,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             subtitle: Text(TtsVoices.byId(_previewVoiceId).name),
             onTap: _openPreview,
           ),
-          const Divider(height: 32),
-          ..._planWidgets(context),
         ];
+
+  /// TAB 4「反击计划」（FR-80，第八十四轮用户明文：反击计划**独立成一个 TAB**）。
+  ///
+  /// 此前它内嵌在「语音与音色」TAB 末尾；现独占一页 ——
+  /// 反击计划是**执行策略**，与语音/音色不是一类东西（用户诉求即"别混在一起"）。
+  ///
+  /// ⚠️ 分区标题 `Text('反击计划')` 由 [\_planWidgets] 提供（单一真源）——
+  /// 此处**不再重复**加标题，否则 TAB 标签 + 两处标题 = 3 个同文案 widget，
+  /// `find.text('反击计划')` 的断言会判红（实测 `SET-07c`）。
+  List<Widget> _secCounterPlan(BuildContext context) => [
+        const Padding(
+          padding: EdgeInsets.only(bottom: AppSpacing.sm),
+          child: Text(
+            '随机反击计划：按当前参数区间离线随机生成，或由 AI 生成后导入；'
+            '启用后任务落在 counter: 命名空间，与手动任务隔离。',
+            style: AppText.bodySmall,
+          ),
+        ),
+        ..._planWidgets(context),
+      ];
 
   /// TAB 4「数据与合规」：录音取证 / 合规须知 / 关于。
   List<Widget> _secData(BuildContext context) => [

@@ -67,10 +67,14 @@ void main() {
   });
 
   group('DLS 备注名', () {
-    test('DLS-07 displayName：备注优先，空备注回落自报名', () {
-      expect(ep('a', name: 'Xiaomi').displayName, 'Xiaomi');
+    test('DLS-07 displayName：备注显示为「别名（真名）」，空备注回落真名', () {
+      // FR-77（第八十四轮用户明文）：格式固定 `别名（远程机器真实名称）`。
+      expect(ep('a', name: 'Xiaomi').displayName, 'Xiaomi',
+          reason: '无备注时只显示真名（不加空括号）');
       final e = ep('a', name: 'Xiaomi').copyWith(alias: '爸妈的手机');
-      expect(e.displayName, '爸妈的手机');
+      expect(e.displayName, '爸妈的手机（Xiaomi）',
+          reason: '有备注时必须显示为「别名（真名）」——别名只在本机显示，'
+              '真名是对端上报的原名，两者都要可见（FR-77）');
       // 空串/纯空格备注视为没写，不能显示成空白。
       expect(e.copyWith(alias: '   ').displayName, 'Xiaomi');
     });

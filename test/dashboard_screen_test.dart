@@ -7,6 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:sonic_shield/core/constants.dart';
+import 'package:sonic_shield/core/providers.dart';
+import 'package:sonic_shield/domain/models/action.dart';
+import 'package:sonic_shield/domain/models/task.dart';
+import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/run_pause.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';
 import 'package:sonic_shield/services/background_engine.dart';
@@ -432,5 +437,140 @@ void main() {
 
     expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget,
         reason: '远程改了总开关，首页卡片必须即时反映（本轮的"最后一公里"）');
+  });
+
+  // ─────────── DBS-RM 总开关例外清单（第八十四轮 FR-78：从守卫页迁入） ───────────
+  //
+  // 第八十四轮用户明文：总开关**从守卫页移至守护页**并美化。原守卫页的
+  // 「例外清单默认折叠 5 条 + 展开/收起」能力**一并迁入首页**（重构入口，
+  // 不丢功能）—— 用例随之从 `guard_screen_test.dart` 的 GRM-01/02 迁到这里。
+
+  group('DBS-RM 总开关例外清单（第八十四轮从守卫页迁入）', () {
+    Task mkForced(String id) {
+      final base = DateTime(2024, 1, 1);
+      return Task(
+        id: id,
+        name: '任务$id',
+        enabled: true,
+        triggerType: TriggerType.dailyAt,
+        trigger: const DailyTrigger(time: TimeSpec(hour: 10, minute: 0)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'T', body: 'B'),
+        assetIds: const [],
+        cooldownSec: 60,
+        quietPolicy: QuietPolicy.skip,
+        priority: 0,
+        createdAt: base,
+        updatedAt: base,
+        forceRun: true,
+      );
+    }
+
+    Future<void> pumpWithForced(
+      WidgetTester tester, {
+      required List<Task> forced,
+      String? mode,
+    }) async {
+      SharedPreferences.setMockInitialValues({
+        'compliance_accepted_v1': true,
+        if (mode != null) PrefsKeys.runMasterMode: mode,
+      });
+      await SharedPreferences.getInstance();
+      // 对齐 `pump`：桩权限 + 原生通道，避免权限未授予时仪表盘弹出覆盖层
+      // 拦截命中测试（find 能找到底层 widget 但 tap 打空 → 段/按钮点击不生效）。
+      stubPermissions({
+        Permission.notification: PermissionStatus.granted,
+        Permission.microphone: PermissionStatus.granted,
+      });
+      const nativeChannel = MethodChannel('sonic_shield/native');
+      _messenger.setMockMethodCallHandler(nativeChannel, (call) async => null);
+      addTearDown(() {
+        clearPermissionStub();
+        _messenger.setMockMethodCallHandler(nativeChannel, null);
+      });
+      final ctrl = StreamController<EngineState>.broadcast();
+      addTearDown(() async => ctrl.close());
+      BackgroundServiceManager.lastForTest =
+          const EngineState(running: true, pendingCount: 0);
+      BackgroundServiceManager.stateForTest = ctrl.stream;
+
+      tester.view.physicalSize = const Size(1200, 2600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [
+          forceRunTasksProvider.overrideWith((ref) async => forced),
+        ],
+        // 对齐 DBS-16 等稳定用例：显式 platform=linux，避免默认平台下
+        // SegmentedButton / TextButton 的命中行为差异导致 `tap` 静默不生效。
+        child: MaterialApp(
+          theme: ThemeData(platform: TargetPlatform.linux),
+          home: const DashboardScreen(),
+        ),
+      ));
+      ctrl.add(const EngineState(running: true, pendingCount: 0));
+      await tester.pump();
+    }
+
+    testWidgets('DBS-RM-01 例外清单默认最多 5 条 + 可展开/收起（迁自 GRM-01）',
+        (tester) async {
+      final forced = [for (var i = 0; i < 8; i++) mkForced('t$i')];
+      await pumpWithForced(tester, forced: forced, mode: 'off');
+
+      expect(find.text('全局执行总开关'), findsOneWidget);
+      expect(find.textContaining('8 条暂停期间仍执行'), findsOneWidget);
+      expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget);
+
+      expect(find.textContaining('· 任务t0（强制执行）'), findsOneWidget);
+      expect(find.textContaining('· 任务t4（强制执行）'), findsOneWidget,
+          reason: '折叠态必须展示前 5 条');
+      // 折叠态不该展示第 6 条（用户要求默认 5 条）。注意：展开态把 8 条**全部**
+      // 渲染进同一个 Column，折叠时第 6..8 条**根本不存在于 widget 树**，
+      // 因此这里必须断言 `findsNothing`（而不是"滚出可视区"）。
+      expect(find.textContaining('· 任务t5（强制执行）'), findsNothing,
+          reason: '折叠态不该展示第 6 条（用户要求默认 5 条）');
+
+      // ⚠️ 首页 ListView + 卡片高：展开/收起按钮可能落在视口外，先 `ensureVisible`
+      // 滚入再点。真实根因（本轮实跑暴露）：`pumpWithForced` 未设
+      // `compliance_accepted_v1: true` 时，仪表盘会弹合规模态层拦截命中测试，
+      // 导致 `tap` 静默打空（find 仍能定位底层 widget，故初始断言全过）。已修。
+      // 展开是同步 setState，`pumpAndSettle` 落定后第 6..8 条必入树。
+      await tester.ensureVisible(find.text('展开全部（8）'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('展开全部（8）'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('· 任务t7（强制执行）'), findsExactly(1),
+          reason: '点「展开全部」后必须能看到第 6..8 条');
+
+      await tester.ensureVisible(find.text('收起'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('收起'), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('· 任务t5（强制执行）'), findsNothing,
+          reason: '点「收起」后回到只展示前 5 条');
+    });
+
+    testWidgets('DBS-RM-02 切「强制开启」→ 状态行改写 + 落库（迁自 GRM-02）',
+        (tester) async {
+      await pumpWithForced(tester, forced: const [], mode: 'off');
+      expect(find.textContaining('强制关闭：始终暂停'), findsOneWidget);
+      expect(find.textContaining('无：暂停期间不执行任何任务'), findsOneWidget);
+
+      // ⚠️ `SegmentedButton` 的段是叶子 Text，`tap` 打在它身上即可触发段选择。
+      // `RunMasterService.set` 是 async（`await SharedPreferences` 之后才
+      // `mode.value = m`），需 `pumpAndSettle` 等异步落定再断言状态行与 prefs。
+      // 真实根因（本轮实跑暴露）：`pumpWithForced` 未设 `compliance_accepted_v1`
+      // 时仪表盘弹合规模态层拦截命中，`tap` 静默打空——已在 harness 修。
+      final onSeg = find.text('强制开启');
+      await tester.tap(onSeg, warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('强制开启：忽略自动窗口'), findsOneWidget);
+      expect(
+          (await SharedPreferences.getInstance())
+              .getString(PrefsKeys.runMasterMode),
+          'on',
+          reason: '远程/本机都用同一个 prefs 键，点选必须真的落库');
+    });
   });
 }

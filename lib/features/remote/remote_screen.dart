@@ -12,6 +12,7 @@ import '../../remote/endpoint_service.dart';
 import '../../remote/node_catalog.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../services/device_name_service.dart';
 import 'pair_qr_screen.dart' show notifyPeerOfPairing;
 
 /// 远程遥控总览：模块开关 / 设备身份 / broker / 配对端点管理 /
@@ -313,6 +314,51 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
     await _load();
   }
 
+  /// 本机改名（FR-77，第八十四轮用户明文）：改名 + **广播给所有已绑定端点**。
+  ///
+  /// 广播结果**如实回报**：`sent < total` 说明有端点离线没收到（下次它上线时
+  /// 仍会从别的通路得知，但此刻不能谎报"全部同步成功"）。
+  Future<void> _renameLocal() async {
+    final ctrl = TextEditingController(text: _deviceName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('本机名称'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: DeviceNameService.maxLen,
+          decoration: const InputDecoration(
+            labelText: '给本机起个名字',
+            hintText: '如：我的手机 / 客厅主机',
+            helperText: '改名后会通知所有已绑定设备，并在它们的列表中同步更新',
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('保存并同步')),
+        ],
+      ),
+    );
+    if (name == null || !mounted) return;
+    final r = await DeviceNameService.instance.renameLocal(name);
+    await _load();
+    if (!mounted) return;
+    final text = !r.ok
+        ? '改名失败：${r.error}'
+        : (r.total == 0
+            ? '本机名称已更新（暂无已绑定设备）'
+            : r.sent == r.total
+                ? '本机名称已更新，并已同步到全部 ${r.total} 台设备'
+                : '本机名称已更新：${r.sent}/${r.total} 台已同步'
+                    '（其余离线，下次上线后同步）');
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(text)));
+  }
+
   Future<void> _toggleEnabled(bool v) async {
     setState(() => _connecting = true);
     try {
@@ -477,6 +523,9 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> {
               subtitle: Text(
                   _deviceId.isEmpty ? '开启后自动生成' : '$_deviceName\n$_deviceId'),
               isThreeLine: _deviceId.isNotEmpty,
+              // FR-77（第八十四轮用户明文）：本机名称支持自定义，改名后**通知所有
+              // 已绑定远程设备**并在它们的列表同步更新。点标题即改名。
+              onTap: _deviceId.isEmpty ? null : _renameLocal,
               trailing: _deviceId.isEmpty
                   ? null
                   : IconButton(

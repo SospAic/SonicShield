@@ -1327,6 +1327,8 @@ class RcEndpointService {
         await _setVolumes(msg, peer, logs);
       case RcCmd.deviceAlert:
         await _deviceAlert(msg, peer, logs);
+      case RcCmd.deviceRename:
+        await _handleDeviceRename(msg, peer, logs);
       default:
         // ⚠️ 旧约定是"未知命令静默忽略"（docs/14）。但静默的代价是：控制器
         // 发了一条拼错的命令，端点**什么都不做也不回执**，控制器只能等到超时，
@@ -1515,11 +1517,54 @@ class RcEndpointService {
     );
   }
 
+  // ==================== FR-77：对端改名（第八十四轮） ====================
+
+  /// 处理控制端的 `device.rename`：把它在本机配对表里的 `name` 更新为新名。
+  ///
+  /// ## 边界（FR-77 用户明文）
+  ///
+  /// - **只改名，不动别名**：别名是控制端的私有视角，端点侧根本没有该字段；
+  ///   这里 `copyWith` **不传 alias** ⇒ 保留端点本机给该控制端起的备注（若有）。
+  /// - **身份以 `msg.from` 为准**：改名对象是"这条命令的发送方"。`msg.from`
+  ///   是由 `decideRcAdmission` 判过"是否已配对"的发送方 ID；未配对发送方
+  ///   在进入本 dispatch **之前**就被拒了，故此处不必再判配对。
+  /// - 未找到记录（恶意/过期）⇒ 如实 `ok=false`，不静默。
+  Future<void> _handleDeviceRename(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    final newName = (msg.payload['name'] as String?)?.trim() ?? '';
+    if (newName.isEmpty || newName.length > 32) {
+      await logs.append(
+          source: 'remote',
+          action: 'device.rename',
+          status: 'failed',
+          message: 'by ${peer.name} · 名称非法（空或超 32 字符）');
+      await _ack(msg, false, data: '名称非法：须为 1..32 字符');
+      return;
+    }
+    final id = msg.from.trim();
+    final existing = endpointById(_store!.paired(), id);
+    if (id.isEmpty || existing == null) {
+      await logs.append(
+          source: 'remote',
+          action: 'device.rename',
+          status: 'failed',
+          message: 'by ${peer.name} · 送方 $id 不在配对表内，拒绝改名');
+      await _ack(msg, false, data: '发送方不在配对表内');
+      return;
+    }
+    await _store!.addPaired(existing.copyWith(name: newName));
+    await logs.append(
+        source: 'remote',
+        action: 'device.rename',
+        status: 'success',
+        message: 'by $newName · 控制器名称已更新（原 ${existing.name}）');
+    await _ack(msg, true, data: '名称已更新');
+  }
+
   // ==================== v1.7：远程任务 CRUD（docs/14 §2.1） ====================
 
   /// 单次任务列表回传上限（防止对端拉爆 MQTT 报文）。
   static const maxRemoteTaskList = 200;
-
   /// 单次音源列表回传上限。
   static const maxRemoteAssetList = 300;
 

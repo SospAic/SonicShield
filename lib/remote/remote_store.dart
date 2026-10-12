@@ -31,10 +31,17 @@ class PairedEndpoint {
   /// 最近一次把该端点设为目标（"连接"）的时间。
   final DateTime? lastConnectedAt;
 
-  /// 展示名：备注优先，回落对端自报名。
+  /// 展示名（FR-77，第八十四轮用户明文）。
+  ///
+  /// 格式固定为 **`别名（远程机器真实名称）`** —— 用户明文：「本机更新远程机器
+  /// 名称相当于为当机器取别名，显示为 `别名（远程机器真实名称）`，别名只在本机显示」。
+  ///
+  /// - 有别名：`别名（真名）`，便于本机辨认的同时**不丢失真名**（真名是对端上报的，
+  ///   跨机一致，别才是本机的私有视角）；
+  /// - 无别名：只显示 [name]（不加空括号，避免 `（设备）` 这种噪声）。
   String get displayName {
     final a = alias?.trim() ?? '';
-    return a.isEmpty ? name : a;
+    return a.isEmpty ? name : '$a（$name）';
   }
 
   Map<String, dynamic> toJson() => {

@@ -262,9 +262,10 @@ void main() {
   /// 回 `rc.ack`。但 `_send` 默认 `trackAck: true` → `_pendingAcks` 里的条目
   /// 永不清理，随会话次数无界增长。
   ///
-  /// 判定方式：若某命令被记账，则回灌一条 `for` 指向它的 `rc.ack` 会弹出
-  /// SnackBar；修正为 `trackAck: false` 后**不应**弹出。
-  testWidgets('专用事件类命令不记账：回灌 rc.ack 不弹提示（无 pendingAcks 泄漏）', (tester) async {
+  /// 判定方式：若某命令被记账，则回灌一条 `for` 指向它的 `rc.ack` 会在
+  /// **回执行**（FR-79 起取代 SnackBar）里追加一条 `✓`；`trackAck: false`
+  /// 则**不应**新增。
+  testWidgets('专用事件类命令不记账：回灌 rc.ack 不产生 ✓ 回执（无 pendingAcks 泄漏）', (tester) async {
     final ch = await _pump(tester);
     await _tap(tester, '状态快照');
     await _tap(tester, '定位回传');
@@ -284,8 +285,10 @@ void main() {
       final id = ch.lastOfType(cmd).id;
       ch.emit(RcEvt.ack, {'ok': true, 'for': id});
       await tester.pumpAndSettle();
-      expect(find.byType(SnackBar), findsNothing,
-          reason: '$cmd 的响应是专用事件，不应被当作 ack 记账');
+      // FR-79：回执不再走 SnackBar，而是进两行高回执行 —— 判据随之改为
+      // 「回执行里不得出现成功 ✓」（专用事件命令不该把 ack 当回执记账）。
+      expect(find.textContaining('✓'), findsNothing,
+          reason: '$cmd 的响应是专用事件，不应被当作 ack 记进回执行');
     }
   });
 
@@ -486,9 +489,9 @@ void main() {
         enabled: true, eps: [_ep('ep-1', '客厅手机')], selected: 'ep-1');
     await _tapOutlined(tester, '守卫 开');
 
-    expect(find.textContaining('端点离线：'), findsOneWidget,
+    expect(find.textContaining('端点离线'), findsOneWidget,
         reason: '端点未连接时必须说清"没立刻执行"');
-    expect(find.textContaining('已入队，端点上线后自动执行'), findsOneWidget,
+    expect(find.textContaining('已入队'), findsOneWidget,
         reason: '同时要说清"命令没丢" —— 否则使用者会以为坏了');
 
     // 命令**真的**进了 outbox（不是只弹了个提示）。
@@ -500,7 +503,7 @@ void main() {
     await _pumpNoChannel(tester, enabled: true); // 已启用但没有任何端点
     await _tapOutlined(tester, '守卫 开');
     await tester.pumpAndSettle();
-    expect(find.text('请先选择端点'), findsOneWidget);
+    expect(find.textContaining('请先选择端点'), findsOneWidget);
   });
 
   // ---------------- B · 协助会话通道的两条失败分支 ----------------
@@ -509,7 +512,7 @@ void main() {
     final ch = await _pump(tester);
     ch.canSendValue = false;
     await _tap(tester, 'Ping');
-    expect(find.text('协助会话未激活'), findsOneWidget);
+    expect(find.textContaining('协助会话未激活'), findsOneWidget);
     expect(ch.sent, isEmpty, reason: '未激活就不该真的发出去');
   });
 
@@ -518,7 +521,7 @@ void main() {
     ch.sendOk = false;
     await _tap(tester, 'Ping');
     await tester.pumpAndSettle();
-    expect(find.textContaining('发送失败：「Ping 测试」'), findsOneWidget);
+    expect(find.textContaining('发送失败'), findsOneWidget);
   });
 
   testWidgets('RCT-08 权限/可用性变更（updates）触发重建，按钮不被误灰化（BUG-030）',
@@ -658,7 +661,7 @@ void main() {
         reason: '解不开就必须如实说"解码失败"，而不是留一块空白');
   });
 
-  testWidgets('RCT-11 记账命令收到 rc.ack 时弹出回执提示（ok 与 fail 两种）', (tester) async {
+  testWidgets('RCT-11 记账命令收到 rc.ack 时写入回执行（ok 与 fail 两种）', (tester) async {
     final ch = await _pump(tester);
 
     await _tapOutlined(tester, '守卫 开');
@@ -666,14 +669,13 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.textContaining('✓ 开启端点守卫'), findsOneWidget);
 
-    // 冲掉上一条（SnackBar 是串行的，不排空就看不到第二条）。
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pumpAndSettle();
-
     await _tapOutlined(tester, '停止指令组');
     ch.emit(RcEvt.ack, {'ok': false, 'for': ch.lastOfType(RcCmd.scriptStop).id});
     await tester.pumpAndSettle();
+    // FR-79：两条回执**同时留存**在回执行里（不再像 SnackBar 那样串行覆盖）。
     expect(find.textContaining('✗ 停止端点指令组'), findsOneWidget);
+    expect(find.textContaining('✓ 开启端点守卫'), findsOneWidget,
+        reason: '回执行显示"所有远程动作的回执"，前一条不得被覆盖');
   });
 
   // ---------------- E · 音量滑杆与「最后成功值」（第四十四轮） ----------------
@@ -825,5 +827,55 @@ void main() {
     await _tapOutlined(tester, '自动');
     expect(ch.lastOfType(RcCmd.runMasterSet).payload['mode'], 'auto',
         reason: '「自动」必须发 auto（回到跟随法定休息日窗口）');
+  });
+
+  // ══════════════ RCT-RC 两行高回执行（FR-79，第八十四轮） ══════════════
+  //
+  // 用户明文：「远程控制台页面『目标端点和设备快照』与『动作』两个模块中间
+  // 新增两行高的命令行组件，显示为一个**两行高的文本框**，里面显示所有远程
+  // 动作的回执，超过两行时**自动换行**，同时**去除原来的各动作的反馈信息显示点**」。
+  //
+  // 本组锁三条：① 组件固定两行高；② 回执累积展示（可换行/滚动看全部）；
+  // ③ 原先的逐动作 SnackBar 反馈点**已移除**（回执不再以 SnackBar 形式出现）。
+
+  testWidgets('RCT-RC1 回执行组件渲染，且高度恰为两行（FR-79）', (tester) async {
+    await _pumpNoChannel(tester, enabled: true, eps: [_ep('ep-1', '端点一')], selected: 'ep-1');
+    // 空态占位可见（避免"组件没渲染"的误判）。
+    expect(find.textContaining('远程动作回执将显示在这里'), findsOneWidget);
+
+    // 回执行是**定高**容器：高度 = 字号 12 × 行高 1.4 × 2 行 + 内边距 16。
+    const expected = 12 * 1.4 * 2 + 16;
+    final sizes = tester.widgetList<Container>(find.byType(Container)).where(
+          (c) => c.constraints?.maxHeight == expected,
+        );
+    expect(sizes, isNotEmpty,
+        reason: '回执行必须是"两行高"（用户明文），期望存在 maxHeight=$expected 的容器');
+  });
+
+  testWidgets('RCT-RC2 多条回执累积展示（不覆盖）；发出计入回执行', (tester) async {
+    final ch = await _pump(tester);
+    await _tap(tester, 'Ping');
+    await tester.pump();
+    expect(find.textContaining('已发出'), findsWidgets,
+        reason: '命令发出即写入回执行（FR-79：显示所有远程动作的回执）');
+
+    await _tapOutlined(tester, '守卫 开');
+    ch.emit(RcEvt.ack, {'ok': true, 'for': ch.lastOfType(RcCmd.guardSet).id});
+    await tester.pumpAndSettle();
+    expect(find.textContaining('✓ 开启端点守卫'), findsOneWidget);
+    // 之前那条"已发出"仍在 —— 累积而非覆盖。
+    expect(find.textContaining('已发出'), findsWidgets);
+  });
+
+  testWidgets('RCT-RC3 回执不再以 SnackBar 形式出现（去除逐动作反馈点，FR-79）',
+      (tester) async {
+    final ch = await _pump(tester);
+    await _tapOutlined(tester, '守卫 开');
+    ch.emit(RcEvt.ack, {'ok': true, 'for': ch.lastOfType(RcCmd.guardSet).id});
+    await tester.pumpAndSettle();
+    // 回执在框里 ⇒ 不该再弹 SnackBar（用户要求去除原来的各动作反馈显示点）。
+    expect(find.byType(SnackBar), findsNothing,
+        reason: 'FR-79：逐动作反馈点已移除，回执统一进两行高回执行');
+    expect(find.textContaining('✓ 开启端点守卫'), findsOneWidget);
   });
 }

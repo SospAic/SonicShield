@@ -191,6 +191,22 @@ abstract final class RcCmd {
   /// 原生未实现/被拒时如实 `ok=false`（不假成功）。
   static const deviceAlert = 'device.alert';
 
+  /// 本机改名广播（FR-77，第八十四轮用户明文）：控制端改了**自己的**名字后，
+  /// 主动把新名字推给**所有已绑定端点**，让它们在「我的设备」列表里同步更新。
+  ///
+  /// payload：`{name}`（控制端新显示名，非空，≤ 32 字符）。
+  ///
+  /// 语义与边界：
+  /// - **只广播本机名，不广播别名**：别名是控制端的**私有视角**（只在本机显示），
+  ///   绝不外泄（用户明文「别名只在本机显示」）；
+  /// - 端点收到后**更新该控制端在自己的配对表里的 `name`**（真名来源），
+  ///   下次 `rc.pong` / `rc.status` 回执里带的 `device`/`fromName` 即为新名；
+  /// - 端点侧**不得**修改控制端的别名（端点侧根本没有别名概念）——
+  ///   别名只存在于发起改名的控制端本地。
+  ///
+  /// 回执：`rc.ack {ok, for}`。
+  static const deviceRename = 'device.rename';
+
   // ---- v1.7：远程任务 CRUD（与本机「自动化 → 任务」完整对齐，docs/14 §2.1）----
 
   /// 取单条任务完整定义：{taskId} → rc.task {task}
@@ -296,6 +312,12 @@ abstract final class RcEvt {
   static const location =
       'rc.location'; // 定位回传 {for, lat, lng, acc}｜失败 {for, error:true}
   static const callMissed = 'rc.call.missed'; // 未接（被叫进程不在线时由控制器判定）
+
+  /// 对端设备改名通知（FR-77，第八十四轮）：`{for, peerId, name}`。
+  ///
+  /// 端点收到控制端的 `device.rename` 后，除回 `rc.ack` 外，还向**其它**已配对
+  /// 控制端（或该控制端自己的镜像）广播本事件，使各端列表即时刷新。
+  static const deviceRenamed = 'rc.deviceRenamed';
 
   // ---- v1.7：远程任务 CRUD 回执 ----
   static const task = 'rc.task'; // 单条任务完整定义 {for, task}

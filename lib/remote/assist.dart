@@ -396,7 +396,10 @@ abstract final class RcPermGate {
         RcCmd.guardSet ||
         RcCmd.planApply ||
         RcCmd.planStop ||
-        RcCmd.runMasterSet =>
+        RcCmd.runMasterSet ||
+        // FR-77：改名会**改写端点侧配对记录里的名字**（持久状态），
+        // 与自动化改写同级 → 归 `script` 位；协助会话下无此位则拒绝。
+        RcCmd.deviceRename =>
           'script',
         _ => denyAll,
       };
