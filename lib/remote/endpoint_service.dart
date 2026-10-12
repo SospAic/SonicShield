@@ -1358,6 +1358,12 @@ class RcEndpointService {
 
   // ==================== v2.1：远程桌面级控制（docs/25，看 + 控） ====================
 
+  /// 端点侧「控制会话进行中」的**可见性信号**（docs/25 §1 可见性红线）。
+  ///
+  /// UI 监听它渲染「正在投屏 / 接受远程操作」醒目指示 + 一键停止 ——
+  /// **任何像素出屏 / 任何注入生效之前，端点必须已有可见指示**。
+  final ValueNotifier<bool> castActive = ValueNotifier<bool>(false);
+
   /// 当前进行中的控制会话 id（`null` = 无）。
   ///
   /// **会话失效锁**（docs/25 G4）：输入注入必须落在**当前活跃**会话上 ——
@@ -1413,6 +1419,28 @@ class RcEndpointService {
       return;
     }
     _castSessionId = castId;
+    castActive.value = true; // 可见性红线：指示必须先于任何像素出屏 / 注入生效
+    // P1 单帧路径（docs/24 阶段1）：`once:true` ⇒ 抓一帧 → `rc.photo` → **立即停会话**
+    // （本次授权只覆盖这一帧，符合"授权最小化"）。
+    if (msg.payload['once'] == true) {
+      final b64 = await NativeBridge.screenCaptureOnce();
+      if (b64 != null) {
+        await _send(
+            RcMessage.now(RcEvt.photo, {'for': msg.id, 'photoB64': b64}),
+            targetPeerId: msg.from);
+      }
+      _castSessionId = null;
+      castActive.value = false;
+      await NativeBridge.screenCastStop();
+      await logs.append(
+          source: 'remote',
+          action: 'screen.cast',
+          status: b64 != null ? 'success' : 'failed',
+          message: 'by ${peer.name} · 单帧抓取'
+              '${b64 != null ? '成功' : '失败（未授权 / 超时）'}');
+      await _ack(msg, b64 != null, data: b64 != null ? 'photo' : '抓帧失败');
+      return;
+    }
     await logs.append(
         source: 'remote',
         action: 'screen.cast',
@@ -1431,6 +1459,7 @@ class RcEndpointService {
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
     final castId = (msg.payload['castId'] as String?) ?? '';
     _castSessionId = null; // 先失效会话锁，再停服务（顺序即护栏）
+    castActive.value = false;
     await NativeBridge.screenCastStop();
     await logs.append(
         source: 'remote',
@@ -1444,6 +1473,24 @@ class RcEndpointService {
       targetPeerId: msg.from,
     );
     await _ack(msg, true);
+  }
+
+  /// 端点用户**本机一键停止**控制会话（docs/25 §1 可见性红线：端点任何时刻都能停）。
+  ///
+  /// 与远程 `screen.cast.stop` 走**同一**副作用路径（失效会话锁 → 停服务），
+  /// 只是发起方是端点自己、无需回执。
+  Future<void> stopCastByUser() async {
+    _castSessionId = null;
+    castActive.value = false;
+    await NativeBridge.screenCastStop();
+    final db = _db;
+    if (db != null) {
+      await LogRepository(db).append(
+          source: 'remote',
+          action: 'screen.cast',
+          status: 'success',
+          message: '端点用户本机停止控制会话');
+    }
   }
 
   /// 输入注入的统一入口（tap / swipe / key / text）。

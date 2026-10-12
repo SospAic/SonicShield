@@ -10,6 +10,7 @@ import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
+import '../../remote/endpoint_service.dart';
 import '../../services/run_master_service.dart';
 import 'quick_scripts_card.dart';
 
@@ -65,6 +66,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           // 首页常驻，便于用户一键切换节假日自动暂停。
           const SizedBox(height: 12),
           const _RunMasterCard(),
+          // docs/25 §1 可见性红线：控制会话进行中时，端点必须有**醒目**指示。
+          const SizedBox(height: 12),
+          const _CastActiveBanner(),
           // P1-04：精确闹钟降级必须在**用户可操作的位置**解释并给恢复入口。
           // 否则界面继续显示运行中 + 计划数，用户无从知道"进程被杀后不再准点"。
           if (state?.alarmDiag != null) ...[
@@ -383,6 +387,39 @@ class _RunMasterCardState extends ConsumerState<_RunMasterCard> {
                           style: AppText.bodySmall),
                     ),
               ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 端点侧「控制会话进行中」的**醒目指示**（docs/25 §1 可见性红线）。
+///
+/// 只在投屏 / 远程控制会话进行时出现；端点用户可**一键停止**（停止即同时断开
+/// 画面与输入）。这是"不可隐蔽"红线的端点侧落地：**任何像素出屏 / 任何注入
+/// 生效之前，端点必须已有可见指示**（`RcEndpointService.castActive` 由端点
+/// handler 在会话开始时置真、停止时置假）。
+class _CastActiveBanner extends StatelessWidget {
+  const _CastActiveBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: RcEndpointService.instance.castActive,
+      builder: (context, active, _) {
+        if (!active) return const SizedBox.shrink();
+        final theme = Theme.of(context);
+        return Card(
+          color: theme.colorScheme.errorContainer,
+          child: ListTile(
+            leading: const Icon(Icons.screen_share),
+            title: const Text('正在接受远程操作'),
+            subtitle: const Text('屏幕可能正被已配对设备查看；你可随时停止'),
+            trailing: FilledButton.tonal(
+              onPressed: () => RcEndpointService.instance.stopCastByUser(),
+              child: const Text('停止'),
             ),
           ),
         );

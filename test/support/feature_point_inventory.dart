@@ -214,6 +214,8 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
       evidenceFile: 'test/app_icon_lock_test.dart', token: 'AIC-01'),
   FeaturePoint('FR-84', '性能优先档常驻唤醒锁 + 保活自检 + 精确闹钟强引导',
       evidenceFile: 'test/native_bridge_test.dart', token: 'setPersistentWakeLock'),
+  FeaturePoint('FR-85', '远程桌面级控制（看 + 控）',
+      evidenceFile: 'test/remote_desktop_lock_test.dart', token: 'RDP-01'),
 
   // ── 2. 非功能需求 ─────────────────────────────────────────────────────
   FeaturePoint('NFR-01', '24h 执行成功率 ≥ 99%',

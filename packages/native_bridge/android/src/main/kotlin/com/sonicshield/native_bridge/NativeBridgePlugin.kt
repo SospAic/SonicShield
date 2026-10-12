@@ -188,6 +188,18 @@ class NativeBridgePlugin : FlutterPlugin {
                             val f = RemoteInputRegistry.text
                             result.success(if (f == null || t == null) false else f(t))
                         }
+                        "screenCaptureOnce" -> {
+                            // 抓帧是**异步**的（ImageReader 回调）⇒ `result` 延迟回投；
+                            // 未登记（未投屏 / 未授权）⇒ 如实回 null（不静默）。
+                            val f = RemoteCaptureRegistry.captureOnce
+                            if (f == null) {
+                                result.success(null)
+                            } else {
+                                val timeout =
+                                    (call.argument<Number>("timeoutMs"))?.toLong() ?: 5000L
+                                f(timeout) { b64 -> result.success(b64) }
+                            }
+                        }
                         "openOemAutostart" -> {
                             openVendorAutostart(
                                 ctx,

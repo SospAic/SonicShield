@@ -7,12 +7,23 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.sonicshield.native_bridge.RemoteCaptureRegistry
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 远程桌面级控制（docs/25）P0：投屏前台服务（`mediaProjection` 类型）。
@@ -53,8 +64,11 @@ class ScreenCastService : Service() {
                 startForegroundWithNotification()
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 projection = mpm.getMediaProjection(resultCode, data)
-                // P1：此处挂 VirtualDisplay/ImageReader（单帧）或与 flutter_webrtc 交接投影 token。
-                Log.i(TAG, "投屏服务已启动（P0 壳：无画面传输）")
+                // P1：把「抓一帧」登记进**插件侧**注册表（依赖方向 app → native_bridge）。
+                RemoteCaptureRegistry.captureOnce = { timeoutMs, cb ->
+                    captureOnce(timeoutMs, cb)
+                }
+                Log.i(TAG, "投屏服务已启动（P0 壳 + P1 单帧抓取已登记）")
             }
             ACTION_STOP -> stopCast()
             else -> {
@@ -106,12 +120,102 @@ class ScreenCastService : Service() {
     }
 
     override fun onDestroy() {
+        RemoteCaptureRegistry.captureOnce = null
         try {
             projection?.stop()
         } catch (_: Exception) {
         }
         projection = null
         super.onDestroy()
+    }
+
+    /**
+     * 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段 1 / docs/25 P1）。
+     *
+     * 复用 P0 已持有的 [projection]（MediaProjection 授权已在 P0 取得，**不重复弹窗**）。
+     * 链路：`VirtualDisplay` → `ImageReader(RGBA_8888)` → `Bitmap`（按 rowStride 去 padding）
+     * → 裁剪到真实宽高 → JPEG(70) → base64。
+     *
+     * **如实失败**：未授权 / 超时 / 任何异常 ⇒ `callback(null)`（调用方据此回
+     * `rc.ack{ok:false}`，**不静默**）。`timeoutMs` 是硬兜底，绝不挂住调用方。
+     *
+     * 回调在**主线程**（`ImageReader` 用主 Looper 的 Handler）。
+     */
+    fun captureOnce(timeoutMs: Long, callback: (String?) -> Unit) {
+        val mp = projection
+        if (mp == null) {
+            callback(null)
+            return
+        }
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val density = metrics.densityDpi
+        val done = AtomicBoolean(false)
+        var reader: ImageReader? = null
+        var vd: VirtualDisplay? = null
+
+        fun finish(b64: String?) {
+            if (!done.compareAndSet(false, true)) return
+            try {
+                vd?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                reader?.close()
+            } catch (_: Exception) {
+            }
+            callback(b64)
+        }
+
+        try {
+            val r = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            reader = r
+            vd = mp.createVirtualDisplay(
+                "sonicshield-capture",
+                width,
+                height,
+                density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                r.surface,
+                null,
+                null,
+            )
+            r.setOnImageAvailableListener({ ir ->
+                try {
+                    val image = ir.acquireLatestImage()
+                    if (image == null) {
+                        finish(null)
+                        return@setOnImageAvailableListener
+                    }
+                    val plane = image.planes[0]
+                    val pixelStride = plane.pixelStride
+                    val rowStride = plane.rowStride
+                    val rowPadding = rowStride - pixelStride * width
+                    // ⚠️ ImageReader 的 buffer 含 rowStride padding：必须按 padding
+                    // 建图再裁剪，否则图像会**横向错位**（经典坑）。
+                    val padded = Bitmap.createBitmap(
+                        width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888,
+                    )
+                    padded.copyPixelsFromBuffer(plane.buffer)
+                    val cropped = Bitmap.createBitmap(padded, 0, 0, width, height)
+                    val baos = ByteArrayOutputStream()
+                    cropped.compress(Bitmap.CompressFormat.JPEG, 70, baos)
+                    image.close()
+                    padded.recycle()
+                    cropped.recycle()
+                    finish(Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP))
+                } catch (e: Exception) {
+                    Log.w(TAG, "captureOnce: decode failed", e)
+                    finish(null)
+                }
+            }, Handler(Looper.getMainLooper()))
+            // 硬超时兜底：宁可失败，也不让调用方永久等待。
+            Handler(Looper.getMainLooper()).postDelayed({ finish(null) }, timeoutMs)
+        } catch (e: Exception) {
+            Log.w(TAG, "captureOnce failed", e)
+            finish(null)
+        }
     }
 
     companion object {

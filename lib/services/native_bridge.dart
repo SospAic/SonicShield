@@ -248,6 +248,14 @@ class NativeBridge {
     return r ?? false;
   }
 
+  /// 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段1 / docs/25 P1）。
+  ///
+  /// 复用已授权的 MediaProjection（**不重复弹窗**）。未在投屏 / 未授权 / 超时
+  /// ⇒ `null`（**如实失败**，调用方必须回 `rc.ack{ok:false}`，不得静默）。
+  static Future<String?> screenCaptureOnce({int timeoutMs = 5000}) async {
+    return await _invoke<String>('screenCaptureOnce', {'timeoutMs': timeoutMs});
+  }
+
   /// 发起投屏授权并启动投屏前台服务（**必须由前台 UI 触发**）。
   ///
   /// 走**独立通道** `sonic_shield/screencast`（由 `MainActivity` 处理）：
