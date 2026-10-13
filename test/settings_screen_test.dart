@@ -603,6 +603,56 @@ void main() {
       expect(nativeCalls.where((c) => c.method == 'openExactAlarmSettings').length,
           1);
     }, timeout: perTest);
+
+    testWidgets(
+        'SET-04d 保活自检面板：重新检测 / 去开启 / 去加入 / 刷新 四项都真的生效',
+        (tester) async {
+      // 第八十四轮续二：该面板（`_KeepAliveSelfCheck`）此前整块 0% 覆盖 ——
+      // 用户反馈"锁屏后功能全失效"的根因常在这四项上，面板与一键修复入口
+      // 必须有行为用例守着（不是只锁文案）。
+      SharedPreferences.setMockInitialValues({});
+      settingsTab = 1; // 「保活与备份」TAB
+      await pumpSettings(tester);
+
+      expect(find.text('保活自检'), findsOneWidget);
+      expect(find.text('锁屏后能否继续工作的四项前提'), findsOneWidget);
+
+      // ① 重新检测 → 必须重跑四项探测（`exactAlarmSupported` 再打一次）。
+      final before =
+          nativeCalls.where((c) => c.method == 'exactAlarmSupported').length;
+      await tester.tap(find.byTooltip('重新检测'));
+      await waitFor(
+        tester,
+        () =>
+            nativeCalls.where((c) => c.method == 'exactAlarmSupported').length >
+            before,
+        reason: '「重新检测」必须真的重跑探测，而不是只清空状态图标',
+      );
+
+      // ② 去开启（精确闹钟特殊权限）
+      await tester.tap(find.widgetWithText(TextButton, '去开启').first);
+      await waitFor(
+        tester,
+        () => nativeCalls.any((c) => c.method == 'openExactAlarmSettings'),
+        reason: '「去开启」必须打到 native 的 openExactAlarmSettings',
+      );
+
+      // ③ 去加入（电池优化白名单）
+      await tester.tap(find.widgetWithText(TextButton, '去加入'));
+      await waitFor(
+        tester,
+        () => nativeCalls
+            .any((c) => c.method == 'requestIgnoreBatteryOptimizations'),
+        reason: '「去加入」必须打到 native 的 requestIgnoreBatteryOptimizations',
+      );
+
+      // ④ 刷新（调度引擎运行中）—— 只是重读单例状态，不得抛。
+      await tester.tap(find.widgetWithText(TextButton, '刷新'));
+      await tester.pump();
+      expect(find.text('调度引擎运行中'), findsOneWidget);
+
+      await settleSnackBars(tester);
+    }, timeout: perTest);
   });
 
   // ─────────────────── SET-05 导出 ───────────────────

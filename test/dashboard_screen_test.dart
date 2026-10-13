@@ -14,6 +14,7 @@ import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
 import 'package:sonic_shield/domain/scheduling/run_pause.dart';
 import 'package:sonic_shield/features/dashboard/dashboard_screen.dart';
+import 'package:sonic_shield/remote/endpoint_service.dart';
 import 'package:sonic_shield/services/background_engine.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';
 import 'package:sonic_shield/services/run_master_service.dart';
@@ -571,6 +572,43 @@ void main() {
               .getString(PrefsKeys.runMasterMode),
           'on',
           reason: '远程/本机都用同一个 prefs 键，点选必须真的落库');
+    });
+  });
+
+  // ─────────────── 远程投屏可见性红线（docs/61 §1）───────────────
+
+  /// 端点侧「不可隐蔽」红线的落地：**任何像素出屏 / 任何注入生效之前，
+  /// 端点必须已有可见指示**，且端点用户**任何时刻都能一键停**。
+  /// `RcEndpointService.castActive` 由端点 handler 在会话开始/停止时置位，
+  /// 本横幅是它在守护首页上的消费端 —— 此前 0% 覆盖。
+  group('DBS-CAST 远程投屏可见性横幅', () {
+    testWidgets('DBS-CAST-01 会话进行中 → 横幅出现；点「停止」→ 会话停止且横幅消失',
+        (tester) async {
+      final svc = RcEndpointService.instance;
+      svc.castActive.value = false;
+      addTearDown(() => svc.castActive.value = false);
+
+      await pump(
+        tester,
+        last: const EngineState(running: true, pendingCount: 0),
+        stateStream:
+            Stream.value(const EngineState(running: true, pendingCount: 0)),
+      );
+      expect(find.text('正在接受远程操作'), findsNothing,
+          reason: '没有会话时不得显示横幅（否则是恒真的假指示）');
+
+      svc.castActive.value = true;
+      await tester.pump();
+
+      expect(find.text('正在接受远程操作'), findsOneWidget,
+          reason: '会话进行中端点必须醒目可见');
+      expect(find.text('屏幕可能正被已配对设备查看；你可随时停止'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, '停止'));
+      await tester.pumpAndSettle();
+
+      expect(svc.castActive.value, isFalse, reason: '端点一键停止必须真的停掉会话');
+      expect(find.text('正在接受远程操作'), findsNothing);
     });
   });
 }
