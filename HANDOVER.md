@@ -12,7 +12,7 @@
 合法替代是扫码配对。这条不要重新设计。
 
 **当前状态（2026-10-13 第八十四轮续三）**：v1.9.1（`+24`），
-功能层 **2746/2746** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步真实复跑 RC=0**（经计划任务中继；见 `_pt/r84c_gate.txt`）（可测面 **98.67%（13543/13726）**；比率阈值 `COVERAGE_MIN=98.6` **保持**（实测 98.67%，正裕量 0.07pt，按「阈值取整纪律」不抬）、绝对下限 `MIN_COVERED=12872` **保持**）；
+功能层 **2746/2746** + 压测 **24/24** 全绿，`flutter analyze` 零问题（`No issues found!`），**门禁四步真实复跑 RC=0**（**2026-10-13 21:28 终态树直跑**，见 `_pt/r84c_gate.txt`）（可测面 **98.67%（13543/13726）**；比率阈值 `COVERAGE_MIN=98.6` **保持**（实测 98.67%，正裕量 0.07pt，按「阈值取整纪律」不抬）、绝对下限 `MIN_COVERED=12872` **保持**）；
 机器锁 **81/81**（含 🔴 **`SSL`「HANDOVER 顶部『当前状态（第N轮）』快照轮次」锁 6 例** + 🔴 **`RCL` 组 5 例** + 🔴 **`CCL` 组 5 例** + `MCL` 组 5 例 + `BAS` 组 11 例 + 🔴 **`BRL` 组 10 例** + 🔴 **`version` 组 **12** 例（第七十七轮 4 → 6；第八十四轮并分支 `f0f3ad6` 再 +2；第八十四轮续二 FR-81/82 再 +4：日期格式 / 禁预发布后缀 / 单调递增 / FR-82 文件版本引用 + 禁 alpha 残留）**；`GEC` 10 例含 CI ratchet / 设备层 BLOCKED 一致锁）。
 🔴 **本轮产出 = 并入 `workbuddy/main-fb118d7d` 的 FR-70~73 远程工作（设置页 tab 分组 / 首页常驻全局执行总开关 / 总开关远程控制 / 远程连接方案+节点测速）+ 落地用户三条新基线（每轮需求登记进基线文档 / release 固定产物落 `releases/` / 根目录 `install_all.bat` 一键装全部真实设备）+ 抓修合并遗留的「两 tab 标签 vs 四 tab 布局」假红（`settings_screen_test.dart` 的 `switchTab` 30 处）+ 修复 `gates.sh` 环境自愈静默空跑 + 全库机器锁 75 → 77 回刷**（含 `lib/**`（`run_master_service.dart`）+ `test/**` 改动；见 `docs/12 §117`）**；以下为第八十三轮（上一轮）产出 = 合并 `origin/main`（离线神经 TTS / 昼夜反击 / 远程回执）到第八十二轮收口（语义解冲突 6 文件 + 恢复 Android 签名 APK 交付 job + 抓修远程遗留缺陷；新增设备层豁免文件 `neural_tts.dart`（71 行）+ `sherpa_onnx` 依赖）；以下为第八十二轮产出 = UI 结构重构（全局执行总开关移植到守护首页 + 设置页拆 4 TAB + 离线 TTS `awaitSpeakCompletion` 根因修复 + 音色词边界加固）；以下为第八十一轮产出 = 技能驱动的全面评审（`docs/59`）落地「三批全做」（全站样式收敛到 `AppText` / `AppSpacing` / `AppColors` + `STY` 样式安全网）；以下为第八十轮产出 = 节假日更新与反击计划「完全解耦」（`refreshHolidays` 只写表，不再 `apply(replace: true)` 整族重建）+ 反击计划自动续算接线；以下为第七十九轮产出 = 夜间豁免三态化（`Task.quietExempt` `bool → bool?`）+ 节假日全局执行总开关（`lib/domain/scheduling/run_pause.dart`）；以下为第七十八轮产出 = 通话爆卡优化（`lib/remote/call_media_profile.dart` 单一真源 + 逐路 `RTCRtpSender.setParameters`）；以下为第七十七轮产出 = ① 新基线「每次迭代 APP 显示版本每轮同步」（`AppMeta.displayVersion` = `version+build`；设置页「关于」只从常量取、禁写死；`version` 组 +2 锁）；② 反击计划生成参数化（新增 `lib/domain/models/counter_plan_params.dart` + 设置页 `_PlanParamsDialog` 全参数可调，本机随机与 AI 同源）；以下为第七十六轮产出：① **A 招人烦音效库** —— `tool/gen_sfx.dart` 新增 `annoy` 分类，重生成 10 条招人烦音效（咳嗽 / 吐痰 / 嘲笑 / 「干啥呢」等，`annoy_*`）；② **B 仿真 TTS** —— `lib/domain/models/tts_voice.dart` 音色目录（普通话 + 东北话，男女兼备）+ `lib/services/tts_service.dart` + `lib/services/online_tts_client.dart`，`voiceId` 全链路接线（本地 / 远程）；③ **C 随机反击计划** —— `lib/domain/models/counter_plan.dart` schema/校验 + `lib/domain/scheduling/china_holidays.dart`（中国法定休息日 / 工作日）+ `counter_plan_materializer.dart` + `counter_plan_random.dart` + `lib/services/counter_plan_service.dart` + `lib/services/deepseek_service.dart`（一键 AI 生成 + 固定 JSON 模版，收敛 **100% 可导入**）+ 远程 `plan.*`；④ **D 实时随机动态反击** —— `lib/services/sound_guard_service.dart` 分级（轻 / 重量声）+ `lib/services/reactive_counter_service.dart`（重量声随机反击、15–25 分钟静默给动态反制）；⑤ **DeepSeek 内置默认 Key** —— `lib/data/repositories/api_config_store.dart` 增 `defaultApiKey`（`String.fromEnvironment('DEEPSEEK_API_KEY', defaultValue: …)`），**从未配置**回落默认、**显式保存空串**即停用、`clearAll` 回默认；⑥ 该轮含 `lib/**` 改动 ⇒ 可测面分母 10399 → **11546（+1147）**、分子 10277 → **11413（+1136）**。
 ⚠️ **BLOCKED**：iOS / macOS 宿主层、真机 arm64 分级门槛（设备 `23116PN5BC` **已上线**、v23 已装，剩另两台 versionCode 实测 + 动态反击端到端 + **离线神经 TTS 真机端到端**）、DST 时区专项（见 `docs/12 §117`）。
@@ -273,11 +273,14 @@ flutter test integration_test/app_smoke_test.dart -d emulator-5554   # 期望 +4
 **自动化**：已建一条**每小时**的续作自动化；它读队列、继续执行、并回写状态。
 中断后**不需要人工重新开场**。
 
-⚠️ **环境事实（会阻塞部分队列项）**：本机 **Dart 命名管道耗尽**
-（`CreateFile failed 231` @ `process_win.cc:744`；疑 WorkBuddy 沙箱 `sandbox-cli.exe`，
-`schtasks`/`reg`/`cmd` 已被其 Program Blacklist 拦）⇒ `flutter analyze` / `flutter test` /
-`flutter build` **全部不可用**。因此**所有 Kotlin / Dart 代码一律标记「未编译验证」**，
-**不得声称通过** —— 解除步骤见 `.workbuddy-ai/memory/2026-10-12.md`「续八 C」节。
+⚠️ **环境事实（曾阻塞部分队列项；2026-10-13 21:28 已恢复窗口）**：本机曾出现 **Dart 命名管道间歇耗尽**
+（`CreateFile failed 231` @ `process_win.cc:744`；**间歇性、机器级**，已排除沙箱 / 句柄膨胀 / 管道名 /
+进程残留等可自证假说；嫌疑指向内核过滤驱动，见 `.workbuddy-ai/memory/2026-10-12.md`「续八 C」节）
+⇒ 坏窗口下 `flutter analyze` / `flutter test` / `flutter build` **全部不可用**，
+此时**所有 Kotlin / Dart 代码一律标记「未编译验证」，不得声称通过**。
+✅ **恢复判据** = `dart _pt/probe_rc.dart` 返回 `RC=0`。**2026-10-13 21:28 窗口重开，已复跑四步门禁全绿 `RC=0`**
+（`_pt/r84c_gate.txt`）—— 此前标注「未编译验证」的 Kotlin / Dart 代码**已补验证**；
+真机项（队列 `seq#7 RD-SPIKE`，`getDisplayMedia` token 交接）仍**无设备**、如实保持 `blocked`。
 
 ## 1. 项目状态快照
 
