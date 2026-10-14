@@ -89,20 +89,28 @@ jobs:
   # 以及 HANDOVER.md §8 同名长期规则。
   ios-build:
     runs-on: macos-latest
-    # 改仓库可见性需要 administration 写权限；checkout 只需 contents:read，
-    # upload-artifact 需要 actions 写权限（与默认 token 行为保持一致）。
+    # 2026-10-14 根因修复：仓库 default_workflow_permissions=read，而本 job 曾请求
+    # `administration: write` —— 超出默认权限 ⇒ GitHub 在**创建 run 时整体拒绝**
+    # （症状：push 触发全失败、jobs total_count=0、"workflow file issue"）。
+    # 修复：permissions 收敛为最小集；可见性切换改用 PAT secret（见下方两步）。
     permissions:
       contents: read
       actions: write
-      administration: write
     steps:
       - uses: actions/checkout@v4
 
       # 🔴 用户基线：构建开始前先把仓库设为「所有人可见」（public）。
+      # 需要 REPO_ADMIN_PAT（classic PAT，repo scope）；未配置则跳过并告警
+      # （私有仓库跑 macOS runner 需付费 minutes，此时构建可能因配额失败）。
       - name: Set repository public (before iOS build)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh repo edit "$GITHUB_REPOSITORY" --visibility public
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_PAT }}
+        run: |
+          if [ -z "$REPO_ADMIN_PAT" ]; then
+            echo "::warning::未配置 REPO_ADMIN_PAT：跳过构建前公开（私有仓库 macOS minutes 需付费）"
+            exit 0
+          fi
+          gh repo edit "$GITHUB_REPOSITORY" --visibility public
 
       - uses: subosito/flutter-action@v2
         with:
@@ -117,7 +125,9 @@ jobs:
 
       - run: flutter pub get
 
-      # 首次构建时 Flutter 会按 ios/Runner.xcodeproj 的部署目标生成 ios/Podfile 并 pod install。
+      # 2026-10-14：仓库曾缺失 ios/Podfile（Flutter create 不会自动生成，历史 CI 从未
+      # 真正跑过 iOS job —— push 全被 workflow 级权限拒绝）。已补标准 Podfile
+      # （platform :ios, '15.5' 与 Runner.xcodeproj 的部署目标一致）。
       - name: Build iOS (release, unsigned)
         run: flutter build ios --release --no-codesign
 
@@ -139,8 +149,14 @@ jobs:
 
       # 🔴 用户基线：构建完成后（无论成功失败）恢复仓库为私有（private）。
       # if: always() 保证任一步失败也不会让仓库卡在公开状态。
+      # 与上面同理：未配置 REPO_ADMIN_PAT 时跳过（仓库本就私有则无需恢复）。
       - name: Restore repository private (after iOS build)
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh repo edit "$GITHUB_REPOSITORY" --visibility private
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_PAT }}
+        run: |
+          if [ -z "$REPO_ADMIN_PAT" ]; then
+            echo "::warning::未配置 REPO_ADMIN_PAT：跳过构建后恢复私有"
+            exit 0
+          fi
+          gh repo edit "$GITHUB_REPOSITORY" --visibility private
