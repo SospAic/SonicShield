@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- 本地插件所需权限由主工程声明（docs/03 §5 最小必要原则） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -11,6 +12,12 @@
     <!-- 条件层「仅 Wi-Fi 下执行」需要读取网络类型。normal 权限：安装即授予、
          无运行时弹窗；且仅用于判断传输类型，不读取任何网络内容。 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- App Standby 桶自检（docs/59 缺口2）：读本应用所在省电桶，稀有/受限时
+         如实提示用户（app 内无法自提权，只能引导）。未授权时原生侧抛
+         SecurityException 并归为 unknown —— 读不到≠确定状态，不猜。
+         权限本身是 appop 门控：用户在「设置-使用情况访问」里授予。 -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application>
         <service

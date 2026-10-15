@@ -177,13 +177,16 @@ void main() {
       expect(tasks.upserted, isEmpty);
     });
 
-    test('CPSV-04 无音效但有 TTS 文案 → 生成 TTS 任务（不空转）', () async {
+    test('CPSV-04 无可用音效 → 如实失败（2026-10 起不再有 TTS 兜底）', () async {
+      // 产品决策（docs/59 + v2.x）：守护反击只播随机噪音，不播 TTS 语音。
+      // 因此「无音效」不再是"退化 TTS 池"，而是如实失败 + 引导导入音源库。
+      // 旧契约（无音效→生成 TTS 任务）在此显式作废。
       final (svc, tasks, _) = await build(audio: const {});
       final r = await svc.apply(planFor(tts: const ['干啥呢？']),
           now: DateTime(2026, 3, 10), days: 3);
-      expect(r.ok, isTrue, reason: r.message);
-      expect(tasks.upserted, isNotEmpty);
-      expect(tasks.upserted.every((t) => t.action is TtsAction), isTrue);
+      expect(r.ok, isFalse);
+      expect(r.message, contains('音源库'));
+      expect(tasks.upserted, isEmpty);
     });
 
     test('CPSV-05 下线：清空该计划命名空间 + 置未启用（保留计划本体）', () async {

@@ -17,6 +17,12 @@
 /// - **零引擎改动**：复用既有 `FixedOnceTrigger` + `ScheduleEngine` 通路，
 ///   不与手动任务抢语义，也不需要新增"按日切换参数"的调度分支（崩溃面最小）。
 ///
+/// ## 动作形态：只出随机噪音，不出 TTS（2026-10 产品决策）
+/// 守护反击一律播放随机音效（"尤其是噪音"）：可识别语音会暴露意图、
+/// 录音取证价值低，与「不可预测」的目标相反。`CounterPlan.ttsTexts`
+/// 字段为兼容旧 JSON 而保留，但本物化器**不再生成 TTS 动作** ——
+/// 即便导入的 plan 带 ttsTexts，也全部物化为音效播放。
+///
 /// ## 命名空间隔离（不与手动内容冲突）
 /// 任务 id 形如 `counter:{planId}:{yyyyMMdd}{D|N}{序号}`，前缀 [taskPrefix]。
 /// 手动任务 id 是 UUID，两者不可能碰撞；下线计划时按前缀整族删除，
@@ -63,9 +69,9 @@ abstract final class CounterPlanMaterializer {
     // 展示标识）：manifest id → 库内资产 id 的映射由调用方完成（需要读 manifest
     // 与音源库，属于设备/数据层职责）。排序 ⇒ 抽取可复现。
     final pool = assetIdPool.toList()..sort();
-    final hasAudio = pool.isNotEmpty;
-    final hasTts = plan.ttsTexts.isNotEmpty;
-    if (!hasAudio && !hasTts) return const <Task>[];
+    // 只出噪音：没有可用音源 ⇒ 不生成任何任务（到点"无可用音源"属于
+    // 静默假成功，必须避免；空计划的提示由 CounterPlanService.apply 给出）。
+    if (pool.isEmpty) return const <Task>[];
 
     final created = now ?? DateTime.now();
     final sched = _resolveSchedule(plan, from, days);
@@ -88,8 +94,6 @@ abstract final class CounterPlanMaterializer {
           isNight: isNight,
           w: w,
           audioPool: pool,
-          hasAudio: hasAudio,
-          hasTts: hasTts,
           created: created,
           now: now,
         ));
@@ -160,8 +164,6 @@ abstract final class CounterPlanMaterializer {
     required bool isNight,
     required CounterWindow w,
     required List<String> audioPool,
-    required bool hasAudio,
-    required bool hasTts,
     required DateTime created,
     required DateTime? now,
   }) {
@@ -196,31 +198,17 @@ abstract final class CounterPlanMaterializer {
       final taskId = '$taskPrefix$planId:$key';
       // 每次反击独立抽动作（种子绑定到具体时刻 ⇒ 与排序无关，可复现）。
       final arng = Random(planSeed('$taskId#act', fireAt));
-      final ActionConfig action;
-      final ActionType type;
-      final List<String> assetIds;
-      if (hasAudio && (!hasTts || arng.nextBool())) {
-        assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
-        action = PlayAudioAction(
-          volumeMin: w.volumeMin,
-          volumeMax: w.volumeMax,
-          durationSecMin: w.durationSecMin,
-          durationSecMax: w.durationSecMax,
-          channel: AudioChannel.media,
-          respectDnd: true,
-        );
-        type = ActionType.playAudio;
-      } else {
-        assetIds = const <String>[];
-        final text = plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)];
-        action = TtsAction(
-          text: text,
-          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
-          channel: AudioChannel.media,
-          voiceId: plan.voiceId,
-        );
-        type = ActionType.tts;
-      }
+      // 只出随机噪音：从本机可用音效池里等概率抽一条（2026-10 产品决策，
+      // 见文件顶部「动作形态」）。音量的时段区间由 [w] 决定。
+      final assetId = audioPool[arng.nextInt(audioPool.length)];
+      final action = PlayAudioAction(
+        volumeMin: w.volumeMin,
+        volumeMax: w.volumeMax,
+        durationSecMin: w.durationSecMin,
+        durationSecMax: w.durationSecMax,
+        channel: AudioChannel.media,
+        respectDnd: true,
+      );
       tasks.add(Task(
         id: taskId,
         name: '反击·${kind.label}${isNight ? '夜间' : '白天'}'
@@ -228,9 +216,9 @@ abstract final class CounterPlanMaterializer {
         enabled: true,
         triggerType: TriggerType.fixedOnce,
         trigger: FixedOnceTrigger(at: fireAt),
-        actionType: type,
+        actionType: ActionType.playAudio,
         action: action,
-        assetIds: assetIds,
+        assetIds: <String>[assetId],
         cooldownSec: plan.cooldownSec,
         quietPolicy: QuietPolicy.skip,
         // v79 三态映射（与旧行为逐字等价，但改走"主开关默认值"语义）：

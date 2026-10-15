@@ -26,6 +26,7 @@ import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/holiday_update_service.dart';
 import '../../services/native_bridge.dart';
+import '../../services/power_service.dart';
 import '../../services/export_crypto.dart';
 import '../../services/permission_flow.dart';
 
@@ -961,6 +962,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('精确闹钟权限（Android 12+）'),
             onTap: () => NativeBridge.openExactAlarmSettings(),
           ),
+          // docs/59 缺口1：闹钟特权通道开关（默认开）。关掉它 = 锁屏后的
+          // 定时触发从「Doze 中准时」降级为「可能被推迟到维护窗口」。
+          const _AlarmChannelTile(),
+          // docs/59 缺口2：App Standby 桶自检警告。rare/restricted 时后台
+          // 任务会被大幅推迟，而 app 内无法自提权 —— 只能引导用户处理。
+          const _StandbyWarningTile(),
           // 说明（v1.7）：此处曾列出「远程遥控 / 视频通话 / 统计看板」三项，
           // 但它们只是 `context.go(...)` 导航快捷方式，**不含任何保活设置** ——
           // 放在「后台保活」分区语义不成立，且新 IA 已把「远程」「日志」提升为
@@ -1517,6 +1524,120 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
           onChanged: onChanged,
         ),
       ],
+    );
+  }
+}
+
+/// 闹钟特权通道开关（docs/59 缺口1，2026-10）。
+///
+/// 默认 **true**：通道B 走 `AlarmManager.setAlarmClock`，Doze 深度休眠中
+/// 准时触发（`setExactAndAllowWhileIdle` 有 9 分钟最小间隔、深度 Doze 可
+/// 被推迟到维护窗口）。关闭后状态栏不再常驻闹钟图标，但**准时性降级**——
+/// 副标题必须把这句话说清楚，不许让用户以为这只是观感问题。
+class _AlarmChannelTile extends StatefulWidget {
+  const _AlarmChannelTile();
+
+  @override
+  State<_AlarmChannelTile> createState() => _AlarmChannelTileState();
+}
+
+class _AlarmChannelTileState extends State<_AlarmChannelTile> {
+  late SharedPreferences _p;
+  bool _on = true;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    _p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _on = _p.getBool(PrefsKeys.alarmClockChannel) ?? true;
+      _loaded = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_loaded) {
+      return const ListTile(
+        leading: Icon(Icons.alarm_on_outlined),
+        title: Text('闹钟特权通道（Doze 准时唤醒）'),
+        subtitle: Text('读取中…'),
+      );
+    }
+    return SwitchListTile(
+      secondary: const Icon(Icons.alarm_on_outlined),
+      title: const Text('闹钟特权通道（Doze 准时唤醒）'),
+      subtitle: Text(_on
+          ? '已开启：锁屏/待机中定时任务准时触发（状态栏会显示闹钟图标）'
+          : '已关闭：锁屏后的触发可能被系统推迟到维护窗口（默认应开启）'),
+      value: _on,
+      onChanged: (v) async {
+        await _p.setBool(PrefsKeys.alarmClockChannel, v);
+        if (!mounted) return;
+        setState(() => _on = v);
+        // 让引擎下一轮 pushExactAlarms 即按新通道排布（重排幂等）。
+        await BackgroundServiceManager.instance.replan();
+      },
+    );
+  }
+}
+
+/// App Standby 桶降级警告（docs/59 缺口2，2026-10）。
+///
+/// 只在**确定**受限（rare/restricted）时显示；`unknown`（API<28 / 未授予
+/// 使用情况访问权 / 桥不可用）一律不显示 —— 读不到 ≠ 受限，不拿猜测骚扰
+/// 用户（BUG-041 同款纪律）。点按跳厂商自启动/电池设置页。
+class _StandbyWarningTile extends StatefulWidget {
+  const _StandbyWarningTile();
+
+  @override
+  State<_StandbyWarningTile> createState() => _StandbyWarningTileState();
+}
+
+class _StandbyWarningTileState extends State<_StandbyWarningTile> {
+  String _bucket = 'unknown';
+  bool _checked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  Future<void> _check() async {
+    final b = await NativeBridge.appStandbyBucket();
+    if (!mounted) return;
+    setState(() {
+      _bucket = b;
+      _checked = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_checked || (_bucket != 'rare' && _bucket != 'restricted')) {
+      return const SizedBox.shrink();
+    }
+    final label = PowerService.standbyBucketLabel(_bucket)!;
+    return Card(
+      color: Theme.of(context).colorScheme.errorContainer,
+      margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+      child: ListTile(
+        leading: const Icon(Icons.warning_amber_outlined),
+        title: const Text('系统省电策略正在限制本应用'),
+        subtitle: Text('$label。后台任务可能被大幅推迟，'
+            '锁屏后的定时执行会受影响。去「电池与自启动」把本应用放行后生效。'),
+        trailing: TextButton(
+          onPressed: () => NativeBridge.openOemAutostart('generic'),
+          child: const Text('去设置'),
+        ),
+      ),
     );
   }
 }

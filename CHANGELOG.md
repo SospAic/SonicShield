@@ -5,6 +5,25 @@
 
 ## [1.9.0-alpha] - 2026-09-24（全功能点测试与缺陷修复）
 
+#### 第八十三轮（2026-10-16）· **锁屏自动化三缺口落地 + 反击「关闭后依然有效」真因修复 + 反击弃 TTS 改随机噪音 + 任务清单按「单次创建单位」展示（任务包/单任务）+ 任务「立即执行」入口 —— 含 `lib/**` 改动，release APK 已产出并签名验证（方案与证据见 `docs/62-锁屏后自动化任务执行方案.md`）**
+
+**🔴 本轮起因（老板四需求 + 上一轮定位的三缺口）**：① 反击关闭后仍会响；② 反击不该用 TTS 语音、要随机噪音；③ 任务清单要以「单次创建的单任务/任务包」为单位展示；④ 任务要有「立即执行」。
+
+- 🔴 **A 修复「守护反击关闭后依然有效」（真因，非猜测）**：`CounterPlanMaterializer` 把反击计划物化成 `counter:{planId}:{key}` 的**独立 `fixedOnce` 任务**，与 `reactiveCounterEnabled` 开关**毫无关系** —— 关开关只停 realtime counter，物化任务照常按时刻触发。修复三处：
+  - `BackgroundEngine.stopReactiveCounter()` 改为 **async 联动清场**：`CounterPlanService.disable()` 按前缀整族删除计划任务（外键 CASCADE 带走未执行 occurrences）+ `store.enabled=false`（此后 `refreshIfNeeded` 首行即被挡死，不再续算）；清场失败**落审计**（`reactiveCounterOff/failed`），不许假装全关。
+  - 引擎**开机自愈**：启动序列新增 `if (!reactiveCounterEnabled) stopReactiveCounter()` —— 覆盖"引擎没运行时关开关 ⇒ 库里残留物化任务 ⇒ 下次启动照常触发"的洞。
+  - 远程入口准入：`RcEndpointService._applyRemotePlan` 增加本机开关门 —— 本机关闭时拒绝 `plan.apply`（"关了还在响"的远程变体），与 docs/08 §2「任何对端/计划都无法单方面绕过本机护栏」同口径。
+- 🔴 **B 反击弃用 TTS，改随机噪音**：`CounterPlan.defaultTtsTexts` 清空（字段保留仅为旧 JSON/远程模版兼容）；`CounterPlanMaterializer._expandSlot` **删除 TTS 分支**，只从本机音效池等概率抽噪音（`PlayAudioAction`），`assetIdPool` 为空 ⇒ **零任务**（不空转、不静默假成功）；`buildReactivePool` 同步去掉 TTS 入池，并在**素材库为空时自动导入内置预置库**（`preset_import.importBundledPresets`，与「音源库」页共用同一条通路，消除两套导入逻辑漂移），导入失败落审计。
+- 🔴 **C 任务清单按「单次创建单位」展示（新 IA）**：`TaskListScreen` 普通态改为**分组渲染** —— 手动 UUID 任务 = 单任务卡片（旧行为全保留）；`counter:{planId}:…` 任务按 planId 聚合成**任务包卡片**（组头：条数/启用数/下次触发 + 整组启停 + 「立即执行下一条」/「删除整包」，组内条目可折叠）。批量选择态**保持平铺**（批量语义与旧版逐字一致，既有 19 条 TLS 断言不受影响）。
+- 🔴 **D 任务「立即执行」入口**：单任务卡片新增 `play_circle_outline` 按钮 + 长按菜单「立即执行」，走既有 `BackgroundServiceManager.runNow`（转交引擎隔离执行并等回执）；引擎未运行时**如实回报**「未执行：调度引擎未运行」，绝不假成功。
+- 🔴 **E docs/62 缺口1：闹钟特权通道（`setAlarmClock`）**：`NativeBridgePlugin.scheduleExactAlarms` 新增 `useAlarmClock` 参数 —— true 走 `AlarmManager.setAlarmClock`（Doze 深度休眠中**准时**触发、不受 `setExactAndAllowWhileIdle` 的 9 分钟最小间隔限制）；排布失败**逐条回退**常规精确闹钟并在回执 error 写明降级（`alarmDiag` 可见）。Dart 侧 `NativeBridge.setExactAlarms` 改返回结构化 `AlarmScheduleResult`；引擎按 prefs `alarmClockChannel`（**默认开**）选择通道；设置页「后台保活」新增开关（副标题明说"关闭=准时性降级"）。
+- 🔴 **F docs/62 缺口2：App Standby 桶自检**：原生新增 `standbyBucket`（`UsageStatsManager.appStandbyBucket`，API<28/未授权 ⇒ `unknown`）；`PowerService.standbyBucket/standbyRestricted/standbyBucketLabel`；设置页在 **rare/restricted** 时显示警告卡（含「去设置」深链）。`unknown` **一律不显示** —— 读不到 ≠ 受限（BUG-041 同款纪律）。插件清单补 `PACKAGE_USAGE_STATS`。
+- 🔴 **G docs/62 缺口3：CI 设备预配置脚本**：`scripts/prepare_device.bat`（自包含，与仓库根 `prepare_device.bat` 同能力）：防锁屏（`svc power stayon` + `stay_on_while_plugged_in 3` + 永不超时 + 关锁屏 + 唤醒）+ Doze 白名单 + `standby-bucket active` + 精确闹钟 appop，四态（apply/restore/verify/-s 单机）。**mock adb 冒烟 26/26 通过**（`_pt/ci_prep_smoke.py`，未动真机）。
+- 🔴 **测试锁**：新增 `test/reactive_noise_gate_test.dart`（RCT-01…04：TTS 池恒空 / 带 ttsTexts 的旧 plan 物化后**零 TtsAction** / 空音效池零任务）；新增 `test/task_list_pack_test.dart`（TLS-PACK-01…05 + TLS-RUN-01/02：任务包聚合与折叠、批量态平铺、立即执行入口存在且引擎未运行时如实报错）；`test/counter_plan_service_test.dart` 的 **CPSV-04 契约反转**（原「无音效但有 TTS → 生成 TTS 任务」⇒ 现「无音效 → 如实失败」，显式作废旧行为）。
+- ⚠️ **门禁口径（如实记录，未粉饰）**：本轮按老板指示**未跑全量回归**（`flutter test` 未执行）。已跑的是：① **真分析器静态门禁** —— 沙箱内 Dart 父进程 spawn 被拦（CreateFile 231），改用 Python 直连 analysis server（旧版 newline 协议，`_pt/analyze_old.py`），**11 个改动源文件 + 3 个测试文件 `No issues found!`**；② **真 Dart 全项目编译** —— 手工复刻 assemble 链路（`_pt/gen_flutter_artifacts.py`）产出 `app.dill`（54.8 MB，含全部改动代码）与 3 个 ABI 的 `app.so`；③ **release 构建** —— `gradlew assembleRelease --offline` **BUILD SUCCESSFUL in 8m 4s（914 tasks）**，APK `apksigner verify` 通过（v2 签名，1 signer）。
+- 📦 **产物**：`E:\SonicShield\releases\SonicShield-Android.apk`（177.6 MB，sha256 `60939191fbd4afe429b1befa633aaeceaf5d80e708c823edbecad277b9892969`，同名 `.sha256` 旁挂），含 arm64-v8a / armeabi-v7a / x86_64 三 ABI 的新 `libapp.so` 与 87 项 `flutter_assets`。
+- ⚠️ **构建环境留痕（沙箱特有，非项目问题）**：本机沙箱拦 Dart 父进程 spawn ⇒ 用「Python 生成产物 + 临时 shim `flutter.bat`（构建后**立即还原并校验 SHA256 一致**）」完成构建；shim 脚本 `_pt/gradle_release_shim.py` 带产物校验（缺产物即 exit 1，不静默）。
+
 #### 第八十一轮（2026-10-08）· **技能驱动的全面评审（`docs/59`）落地「三批全做」：全站样式收敛到 `lib/core/theme.dart` 三个阶梯（`AppText` / `AppSpacing` / `AppColors`）+ 新建 `STY` 样式安全网 —— 含 `lib/**` 改动，可测面 98.87%（12666/12811），`MIN_COVERED` 12653 → 12658；机器锁 75/75**
 
 **🔴 本轮修的是一个「样式规范只存在于人脑里」的问题 —— 本仓没有 golden 测试（`matchesGoldenFile` 全库 0 处），样式改错了没有任何自动化手段会发现。**

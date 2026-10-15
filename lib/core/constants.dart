@@ -133,6 +133,15 @@ abstract final class PrefsKeys {
   /// 行为，必须由用户显式开启（与其它"会自动执行"的能力同一口径）。
   static const String reactiveCounterEnabled = 'reactive_counter_enabled';
 
+  /// 「闹钟特权通道」开关（2026-10，docs/59 缺口1）。默认 **true**。
+  ///
+  /// 读取方：引擎 `pushExactAlarms` 排布通道B 时决定用
+  /// `AlarmManager.setAlarmClock`（Doze 中唯一保证准时的公开通道）还是
+  /// `setExactAndAllowWhileIdle`（9 分钟最小间隔、深度 Doze 可被推迟）；
+  /// 写入方：设置页「后台保活」分区。关掉它的理由：状态栏常驻闹钟图标
+  /// （用户可见性契约）。**关掉 = 准时性降级**，UI 有同字说明。
+  static const String alarmClockChannel = 'alarm_clock_channel';
+
   /// **全局执行总开关**（v1.9，docs/20 §9）。取值：`auto` / `on` / `off`。
   ///
   /// - `auto`（默认）= 自动按法定休息日暂停：窗口为

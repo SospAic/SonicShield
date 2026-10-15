@@ -86,9 +86,9 @@ class CounterPlanService {
       autoOverrides: _store.autoOverrides(),
     );
     if (tasks.isEmpty) {
-      final why = pool.isEmpty && plan.ttsTexts.isEmpty
-          ? '计划点名的音效在本机音源库中没有找到（请先到「音源库」导入预置库），'
-              '且计划里没有可用的 TTS 文案'
+      final why = pool.isEmpty
+          ? '计划点名的音效在本机音源库中没有找到（请先到「音源库」导入预置库）；'
+              '守护反击只播放随机噪音，不播 TTS 语音'
           : '计划未生成任何任务：请检查各时段的开关与「每小时次数」';
       return CounterApplyResult.fail(why);
     }
