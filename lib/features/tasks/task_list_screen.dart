@@ -171,7 +171,10 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       final members = entry.value..sort(byNext);
       items.add(_PackItem(_TaskPack(planId: entry.key, items: members)));
     }
-    singles.sort(byNext);
+    // ⚠️ 单任务**保持 provider 给的顺序**（`listAll` 是 priority DESC），
+    // 绝不在这里重排：重排会把高优先级任务挤出首屏，而 ListView.builder 是
+    // 懒加载 —— 视口外的条目**根本不构建**，`find.text` 也就找不到它
+    // （2026-10-16 实测：TLS-08 因此假红/真红）。
     for (final m in singles) {
       items.add(_SingleItem(m));
     }

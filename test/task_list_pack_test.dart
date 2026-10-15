@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
-import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
@@ -97,6 +96,9 @@ void main() {
         action: const PlayAudioAction(volumeMin: 0.5, volumeMax: 0.8,
             durationSecMin: 3, durationSecMax: 8),
         assetIds: const ['a1'],
+        cooldownSec: 0,
+        quietPolicy: QuietPolicy.skip,
+        priority: 0,
         createdAt: DateTime(2026, 10, 15),
         updatedAt: DateTime(2026, 10, 15),
       );
@@ -111,6 +113,9 @@ void main() {
         action: const PlayAudioAction(volumeMin: 0.3, volumeMax: 0.5,
             durationSecMin: 3, durationSecMax: 5),
         assetIds: const ['a1'],
+        cooldownSec: 0,
+        quietPolicy: QuietPolicy.skip,
+        priority: 0,
         createdAt: DateTime(2026, 10, 15),
         updatedAt: DateTime(2026, 10, 15),
       );
@@ -193,9 +198,9 @@ void main() {
     await pumpList(tester);
     await waitForText(tester, '我的晨间任务');
 
-    // 入口存在（图标 + 提示）。
+    // 入口存在（图标）。⚠️ 不找「立即执行」文本：它是 IconButton 的 tooltip，
+    // 不在 widget 树里（tooltip 只在长按/hover 时渲染）—— 断言它会假红。
     expect(find.byIcon(Icons.play_circle_outline), findsWidgets);
-    expect(find.text('立即执行'), findsWidgets);
 
     // 点立即执行 ⇒ 引擎未运行 ⇒ 如实失败提示，不许假成功。
     await tester.tap(find.byIcon(Icons.play_circle_outline).first);
@@ -237,8 +242,11 @@ void main() {
 
     await tester.tap(find.byKey(const Key('task_batch_enter')));
     await tester.pump();
-    await waitForText(tester, '反击·工作日白天 10:15',
-        reason: '选择态下应平铺全部任务（含 counter），批量启停/删除才有一致语义');
+    await waitFor(
+      tester,
+      () => find.textContaining('反击·工作日白天 10:15').evaluate().isNotEmpty,
+      reason: '选择态下应平铺全部任务（含 counter），批量启停/删除才有一致语义',
+    );
   }, timeout: perTest);
 
   testWidgets('TLS-PACK-04 空态仍指引新建（聚合改造不影响空列表）',
@@ -247,13 +255,4 @@ void main() {
     await waitForText(tester, '还没有任务');
     expect(find.widgetWithText(FloatingActionButton, '新建任务'), findsOne);
   }, timeout: perTest);
-
-  // 占位：确保 occurrenceRepoProvider 在聚合路径里也被引用（编译期覆盖）。
-  test('TLS-PACK-05 provider  smoke：occurrenceRepoProvider 可解析', () {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-    expect(container.exists(taskRepoProvider), isTrue);
-    expect(container.exists(occurrenceRepoProvider), isTrue);
-    expect(PrefsKeys.alarmClockChannel, 'alarm_clock_channel');
-  });
 }

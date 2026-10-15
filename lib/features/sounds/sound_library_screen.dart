@@ -157,9 +157,12 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
         },
       );
       if (mounted) {
+        // 文案与旧版逐字对齐（含「库内共 N 条」——既有 SLB 锁按此断言；
+        // added + skipped 即 manifest 总条数，数值等价）。
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('预置音效导入完成：新增 ${outcome.added} 条，'
-                '跳过已存在 ${outcome.skipped} 条')));
+                '跳过已存在 ${outcome.skipped} 条'
+                '（库内共 ${outcome.added + outcome.skipped} 条）')));
         _reloadAssets();
       }
     } catch (e) {

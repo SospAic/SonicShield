@@ -277,19 +277,24 @@ void main() {
       expect(tasks.deletedPlanIds, isEmpty);
     });
 
-    test('CPSV-11 默认通路：不注入 resolve/replan 且省略 now 仍可用（TTS 兜底）',
+    test('CPSV-11 默认通路：省略 now 仍可用（有音源 ⇒ 只出播放动作）',
         () async {
       SharedPreferences.setMockInitialValues({});
       final tasks = _FakeTasks();
       final store = CounterPlanStore(await SharedPreferences.getInstance());
-      // 只用 TTS 文案：默认音源解析器返回空集，仍能生成 TTS 任务。
-      final plan = planFor(presets: const [], tts: const ['干啥呢？']);
-      final svc = CounterPlanService(tasks: tasks, store: store);
-      // 不传 now → 走 `now ?? DateTime.now()`；默认 resolve→_noAudio、replan→_noop。
+      // 2026-10 契约：反击只出随机噪音（TTS 池已废弃）。本用例保留的覆盖点是
+      // 「省略 now → 走 now ?? DateTime.now() 默认通路」与「默认 replan 为 noop」。
+      final plan = planFor(presets: const ['annoy_cough_fit'], tts: const []);
+      final svc = CounterPlanService(
+        tasks: tasks,
+        store: store,
+        resolveAudioIds: (ids) async => const {'a1'},
+      );
       final r = await svc.apply(plan);
       expect(r.ok, isTrue, reason: r.message);
       expect(tasks.upserted, isNotEmpty);
-      expect(tasks.upserted.every((t) => t.action is TtsAction), isTrue);
+      expect(tasks.upserted.every((t) => t.action is PlayAudioAction), isTrue,
+          reason: '新契约：只出噪音播放动作，绝无 TtsAction');
 
       // 续算同样省略 now（覆盖 refreshIfNeeded 内 `now ?? DateTime.now()`）。
       final r2 = await svc.refreshIfNeeded();

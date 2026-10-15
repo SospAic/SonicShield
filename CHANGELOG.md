@@ -20,7 +20,23 @@
 - 🔴 **F docs/62 缺口2：App Standby 桶自检**：原生新增 `standbyBucket`（`UsageStatsManager.appStandbyBucket`，API<28/未授权 ⇒ `unknown`）；`PowerService.standbyBucket/standbyRestricted/standbyBucketLabel`；设置页在 **rare/restricted** 时显示警告卡（含「去设置」深链）。`unknown` **一律不显示** —— 读不到 ≠ 受限（BUG-041 同款纪律）。插件清单补 `PACKAGE_USAGE_STATS`。
 - 🔴 **G docs/62 缺口3：CI 设备预配置脚本**：`scripts/prepare_device.bat`（自包含，与仓库根 `prepare_device.bat` 同能力）：防锁屏（`svc power stayon` + `stay_on_while_plugged_in 3` + 永不超时 + 关锁屏 + 唤醒）+ Doze 白名单 + `standby-bucket active` + 精确闹钟 appop，四态（apply/restore/verify/-s 单机）。**mock adb 冒烟 26/26 通过**（`_pt/ci_prep_smoke.py`，未动真机）。
 - 🔴 **测试锁**：新增 `test/reactive_noise_gate_test.dart`（RCT-01…04：TTS 池恒空 / 带 ttsTexts 的旧 plan 物化后**零 TtsAction** / 空音效池零任务）；新增 `test/task_list_pack_test.dart`（TLS-PACK-01…05 + TLS-RUN-01/02：任务包聚合与折叠、批量态平铺、立即执行入口存在且引擎未运行时如实报错）；`test/counter_plan_service_test.dart` 的 **CPSV-04 契约反转**（原「无音效但有 TTS → 生成 TTS 任务」⇒ 现「无音效 → 如实失败」，显式作废旧行为）。
-- ⚠️ **门禁口径（如实记录，未粉饰）**：本轮按老板指示**未跑全量回归**（`flutter test` 未执行）。已跑的是：① **真分析器静态门禁** —— 沙箱内 Dart 父进程 spawn 被拦（CreateFile 231），改用 Python 直连 analysis server（旧版 newline 协议，`_pt/analyze_old.py`），**11 个改动源文件 + 3 个测试文件 `No issues found!`**；② **真 Dart 全项目编译** —— 手工复刻 assemble 链路（`_pt/gen_flutter_artifacts.py`）产出 `app.dill`（54.8 MB，含全部改动代码）与 3 个 ABI 的 `app.so`；③ **release 构建** —— `gradlew assembleRelease --offline` **BUILD SUCCESSFUL in 8m 4s（914 tasks）**，APK `apksigner verify` 通过（v2 签名，1 signer）。
+- ⚠️ **门禁口径（如实记录，含一次自我推翻）**：
+  - 🔴 **撤回**：本轮早期版本写下的「真分析器静态门禁 —— 11 个改动源文件 + 3 个测试文件 `No issues found!`」**结论不可信，已撤回**。证伪方式：给 `_pt/analyze_old.py` 喂一个**故意写错类型**的文件（`int x = "string";`），它同样回 `No issues found!` ⇒ 该包装**从未真正收集到 errors**（假绿）。**用假绿当门禁比没有门禁更危险**，此处明确作废。
+  - ✅ **真门禁（本轮实际执行的）**：手工复刻 `flutter test` 的两段链路 —— ① `frontend_server`（debug + `--native-assets`）编译测试 kernel；② `flutter_tester.exe` 执行（`--enable-checked-mode --verify-entry-points --flutter-assets-dir=build/unit_test_assets`，`FLUTTER_TEST=true`）。沙箱内 Dart 父进程 spawn 被拦（CreateFile 231），故由 Python 编排（脚本在 `_pt/`，按约定不入库）。
+  - **测试结果与修复见下方 §H**（含 baseline 对照判定的环境性失败）。
+- 🔴 **H 测试发现的 4 个真问题（全部已修）**：
+  1. **`TaskListScreen._buildItems` 重排序 = 真回归**：我把单任务也按 `nextFireAt` 排序，**覆盖了 provider 的 `priority DESC` 语义**；高优先级任务因此被挤出首屏，而 `ListView.builder` 懒加载**根本不构建视口外条目** ⇒ `TLS-08 下拉刷新` 红（baseline 对照：改动前 33/33 绿，改动后 32/33 红）。修复：**单任务保持 provider 原序**（只对任务包内部排序），并留注释说明懒加载这个坑。
+  2. **三处旧契约断言**（TTS 兜底）随 #2 一起失效：`CPSV-11`（无音源仍生成 TTS 任务）、`MT-06`（同）、`RD-02`（`expect(p.ttsTexts, isNotEmpty)`）⇒ 全部按新契约更新（无音效 ⇒ 零任务 / 出厂 TTS 池为空）。
+  3. **`SoundLibraryScreen._importPresets` 重写时丢了「（库内共 N 条）」文案**（SLB 锁按此断言）⇒ 已恢复（`added + skipped` 即 manifest 总条数，数值等价）。
+  4. **远程 `plan.apply` 的两处测试适配**：新门（本机开关）会让既有用例被拒 ⇒ 测试 `setUp` 置 `reactive_counter_enabled: true` 并**落一条命中 `defaultPresetIds` 的音源**（新契约下音源库为空 = 计划无法物化）；同时**新增 `RP-03c`** 反向锁住「本机关闭 ⇒ 远程拒绝启用」。
+- ⚠️ **环境性失败（baseline 对照证明与本轮改动无关）**：`settings_screen_test`（`StateError: No element` @ 导出/文件写入路径）与 `sound_library_screen_test` 的 `SLB-24/SLB-21`（文件删除、试听播放器释放）在**改动前版本上同样红** ⇒ 判定为沙箱 `flutter_tester` 的文件系统/插件 mock 与真 `flutter test` 的差异，非代码回归。
+- 🔴 **I 全量测试结果（173 个文件，2026-10-16）**：**156 PASS / 17 not-pass**，且 **17 个全部判定为环境或测试基建问题、0 个代码回归**：
+  - **12 个 = 环境**（`baseline` 对照：把本轮全部改动文件还原到 `HEAD~1` 后**同样红**）：`android_compat_lock` / `silent_failure_locks` / `native_bridge` / `doc_gate_consistency` / `scripts_encoding_lock` / `aot_budget_normalization` / `permission_flow` / `providers_v2` / `log_stats_screen` / `multi_call_service_connect` / `settings_screen` / `sound_library_screen`。
+  - **4 个 = 并发干扰**（全量跑是 8 并发；**串行复跑全部 `All tests passed!`**）：`endpoint_inbound_raw` / `performance` / `performance_v2` / `playback_service_justaudio` —— 性能断言在 CPU 竞争下超限（8266ms > 1500ms 之类），单跑即绿。
+  - **1 个 = 非测试文件**：`perf_bench.dart`（基准脚本，`baseline` 下同样 COMPILE_FAIL）。
+  - ⇒ **有效通过 160/173**（156 + 4 串行复跑绿）；**代码回归数 = 0**。
+- ⚠️ **测试基建口径**：上述「串行 vs 并发」差异说明**本沙箱的手工链路不能当性能门禁**（`flutter test` 官方 runner 有节流与资源隔离，手工 8 并发没有）。性能类断言须以真 `flutter test` 或串行为准。
+- 🔴 **教训（写进 `_pt/` 与记忆）**：**baseline 对照探针的恢复逻辑必须从备份还原，不能用 `git checkout HEAD --`** —— 后者会把 HEAD 之后的所有未提交改动一并抹掉（本探针第一次就因此丢过两个文件的修复，靠备份救回）。
 - 📦 **产物**：`E:\SonicShield\releases\SonicShield-Android.apk`（177.6 MB，sha256 `60939191fbd4afe429b1befa633aaeceaf5d80e708c823edbecad277b9892969`，同名 `.sha256` 旁挂），含 arm64-v8a / armeabi-v7a / x86_64 三 ABI 的新 `libapp.so` 与 87 项 `flutter_assets`。
 - ⚠️ **构建环境留痕（沙箱特有，非项目问题）**：本机沙箱拦 Dart 父进程 spawn ⇒ 用「Python 生成产物 + 临时 shim `flutter.bat`（构建后**立即还原并校验 SHA256 一致**）」完成构建；shim 脚本 `_pt/gradle_release_shim.py` 带产物校验（缺产物即 exit 1，不静默）。
 

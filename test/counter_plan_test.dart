@@ -359,15 +359,15 @@ void main() {
           isEmpty);
     });
 
-    test('MT-06 无音源池但有 TTS → 全部走 TTS', () {
+    test('MT-06 无音源池 ⇒ 零任务（2026-10 起不再兜底 TTS）', () {
       final list = CounterPlanMaterializer.materialize(plan,
           planId: 'p1',
           from: DateTime(2026, 3, 10),
           days: 1,
           assetIdPool: const {},
           now: null);
-      expect(list, isNotEmpty);
-      expect(list.every((t) => t.actionType == ActionType.tts), isTrue);
+      expect(list, isEmpty,
+          reason: '反击只出随机噪音：无可用音效即零任务，由 CounterPlanService 如实报错');
     });
   });
 
@@ -392,7 +392,8 @@ void main() {
         expect(p.workdayNight.durationSecMax, lessThanOrEqualTo(5));
         expect(p.restdayNight.volumeMin, greaterThanOrEqualTo(0.1));
         expect(p.restdayNight.volumeMax, lessThanOrEqualTo(0.3));
-        expect(p.ttsTexts, isNotEmpty);
+        // 2026-10 契约：出厂 TTS 池已清空（反击只出随机噪音），生成器不再塞 TTS 文案。
+        expect(p.ttsTexts, isEmpty);
         expect(p.presetIds, isNotEmpty);
       }
     });
