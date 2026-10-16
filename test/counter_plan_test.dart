@@ -363,47 +363,29 @@ void main() {
       }
     });
 
-    test('MT-05 无音源池且无 TTS → 不生成（避免到点必失败）', () {
+    test('MT-05 无音源池 ⇒ 不排音效动作（可退化震动，避免到点必失败）', () {
       final bare = plan.copyWith(presetIds: const [], ttsTexts: const []);
-      expect(
-          CounterPlanMaterializer.materialize(bare,
-              planId: 'p1',
-              from: DateTime(2026, 3, 10),
-              days: 1,
-              assetIdPool: const {},
-              now: null),
-          isEmpty);
+      final list = CounterPlanMaterializer.materialize(bare,
+          planId: 'p1',
+          from: DateTime(2026, 3, 10),
+          days: 1,
+          assetIdPool: const {},
+          now: null);
+      expect(list.every((t) => t.actionType != ActionType.playAudio), isTrue,
+          reason: '无音源池时绝不能排音效动作（到点必失败）');
     });
 
-    test('MT-06 无音源池但有 TTS → 绝不排音效；白天只震动、夜间以喊话为主', () {
+    test('MT-06 无音源池 ⇒ 不排音效、不喊话（只可能震动）', () {
       final list = CounterPlanMaterializer.materialize(plan,
           planId: 'p1',
           from: DateTime(2026, 3, 10),
           days: 1,
           assetIdPool: const {},
           now: null);
-      expect(list, isNotEmpty);
-      // 没有音源池 ⇒ 排音效动作等于"到点必失败"，必须一条都没有。
       expect(list.every((t) => t.actionType != ActionType.playAudio), isTrue,
           reason: '无音源池时绝不能排音效动作');
-      // 只剩 TTS / 震动两类。
-      expect(
-          list.every((t) =>
-              t.actionType == ActionType.tts ||
-              t.actionType == ActionType.randomVibrate),
-          isTrue,
-          reason: '无音源池时只可能是喊话或震动');
-      // 白天窗口 ttsWeight=0 ⇒ **白天绝不喊话**（只能震动）—— 这是昼夜导向的核心。
-      final dayTasks = list.where((t) => t.name.contains('白天')).toList();
-      expect(dayTasks, isNotEmpty);
-      expect(
-          dayTasks.every((t) => t.actionType == ActionType.randomVibrate), isTrue,
-          reason: '白天 ttsWeight=0 ⇒ 永不喊话');
-      // 夜间 ttsWeight 占主导 ⇒ 至少排出一条喊话。
-      final nightTasks = list.where((t) => t.name.contains('夜间')).toList();
-      expect(nightTasks, isNotEmpty);
-      expect(nightTasks.any((t) => t.actionType == ActionType.tts), isTrue,
-          reason: '夜间应以喊话为主');
+      expect(list.every((t) => t.action is! TtsAction), isTrue,
+          reason: '弃 TTS 后不得退化到喊话（旧兜底路径已关闭）');
     });
   });
 
@@ -434,7 +416,8 @@ void main() {
         expect(p.workdayNight.vibrateWeight, greaterThan(0));
         expect(p.restdayNight.volumeMin, greaterThanOrEqualTo(0.1));
         expect(p.restdayNight.volumeMax, lessThanOrEqualTo(0.3));
-        expect(p.ttsTexts, isNotEmpty);
+        // 2026-10 契约：出厂 TTS 池已清空（反击只出随机噪音），生成器不再塞 TTS 文案。
+        expect(p.ttsTexts, isEmpty);
         expect(p.presetIds, isNotEmpty);
       }
     });

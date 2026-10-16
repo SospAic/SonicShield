@@ -339,9 +339,11 @@ void main() {
       expect(await NativeBridge.isIgnoringBatteryOptimizations(), isTrue);
     });
 
-    test('桥不可用时 setExactAlarms → 0（排布 0 个，而不是抛）', () async {
+    test('桥不可用时 setExactAlarms → 结构化结果 scheduled=0（不抛）', () async {
       installNotImplemented();
-      expect(await NativeBridge.setExactAlarms([1, 2, 3]), 0);
+      final r = await NativeBridge.setExactAlarms([1, 2, 3]);
+      expect(r.scheduled, 0);
+      expect(r.expected, 3);
     });
 
     test('桥不可用时 exactAlarmSupported → false', () async {

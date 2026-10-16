@@ -90,7 +90,7 @@ void main() {
         assetIdPool: const {'annoy_spit'},
         now: null);
 
-    test('DN-09 白天任务**永不**是 TTS；夜间任务可出现 TTS', () {
+    test('DN-09 白天/夜间任务**永不**是 TTS（2026-10 弃 TTS）', () {
       var dayTts = 0;
       var nightTts = 0;
       var nightTotal = 0;
@@ -106,7 +106,7 @@ void main() {
       }
       expect(dayTts, 0, reason: '白天 ttsWeight=0 ⇒ 不得出现喊话');
       expect(nightTotal, greaterThan(0));
-      expect(nightTts, greaterThan(0), reason: '夜间应出现喊话');
+      expect(nightTts, 0, reason: '弃 TTS ⇒ 夜间同样不得出现喊话');
     });
 
     test('DN-10 白天可出现高强度震动（RandomVibrateAction）', () {

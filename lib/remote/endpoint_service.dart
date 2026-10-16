@@ -1579,11 +1579,28 @@ class RcEndpointService {
   }
 
   /// `plan.apply`：校验 → 物化 → 落库。**不合格计划绝不落库**，如实回执。
+  ///
+  /// ## 本机「动态反击」开关是准入线（2026-10 红线，docs/08 §2 同款）
+  /// 用户在本机关闭动态反击 ⇒ `reactive_counter_enabled = false`。此时
+  /// 远程 `plan.apply` 必须被拒绝：否则"关了还在响"会从对端复活
+  /// （本轮 BUG 的远程变体）。计划可落库预览，但**不启用**——
+  /// 与 quietExempt 的"任何对端/计划都无法单方面绕过本机护栏"同口径。
   Future<void> _applyRemotePlan(RcMessage msg, PairedEndpoint peer,
       LogRepository logs, AppDatabase db, TaskRepository tasks) async {
     final raw = msg.payload['plan'];
     if (raw is! Map) {
       await _ack(msg, false, data: '缺少 plan');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (!(prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false)) {
+      final why = '本机已关闭「动态反击」，拒绝启用反击计划（请先在本机开启）';
+      await logs.append(
+          source: 'remote',
+          action: 'plan.apply',
+          status: 'skipped',
+          message: 'by ${peer.name} · $why');
+      await _ack(msg, false, data: why);
       return;
     }
     final plan = CounterPlan.fromJson(raw);

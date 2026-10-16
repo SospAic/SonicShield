@@ -1,8 +1,59 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../data/repositories/task_repository.dart';
+
+/// 导入 **assets 内置预置音效库**（`assets/audio/presets_manifest.json`）。
+///
+/// 幂等（按名字跳过已导入者）。原先只存在于「音源库」页（UI 私有方法），
+/// 抽到这里有两个调用方：
+/// - 「音源库」页的「导入预置库」按钮（行为不变）；
+/// - **后台引擎**（2026-10）：守护反击改为只播随机噪音后，素材库为空
+///   = 反击彻底空转。引擎在装配反击动作池前调用本函数自愈 —— 用户不必
+///   记得先去音源库点导入。
+///
+/// 失败**原样抛出**：调用方（UI 提示 / 引擎记 failed 日志）各自处置，
+/// 本函数不回 partial 成功（importer 已保证失败零残留）。
+Future<AssetImportOutcome> importBundledPresets({
+  required Future<Set<String>> Function() existingNames,
+  required Future<void> Function(Iterable<AudioAsset>) saveAll,
+  required Future<void> Function(String path) removeFile,
+}) async {
+  final raw = await rootBundle.loadString('assets/audio/presets_manifest.json');
+  final manifest = jsonDecode(raw) as Map<String, dynamic>;
+  final items = (manifest['items'] as List).cast<Map<String, dynamic>>();
+  final docs = await getApplicationDocumentsDirectory();
+  final entries = <AssetImportEntry>[
+    for (final it in items)
+      AssetImportEntry(
+        name: '[预置]${it['name']}',
+        // 第三个 tag 是 manifest 里的**稳定 id**（如 `annoy_spit`）：
+        // 反击计划（v2.0）按它回查"本机装了哪些计划点名的音效"。
+        // 资产行 id 是导入时生成的 UUID，无法反推 manifest id，故必须落 tag。
+        tags: ['预置', '${it['category']}', '${it['id']}'],
+        durationMs: (it['durationMs'] as num?)?.toInt() ?? 0,
+        materialize: (id) async {
+          final data = await rootBundle.load('assets/audio/${it['file']}');
+          // P2-23：预置库落盘走原子写入（失败不留半截文件）。
+          final dest = '${docs.path}/audio_$id.wav';
+          await atomicWrite(dest,
+              (tmp) => File(tmp).writeAsBytes(data.buffer.asUint8List(),
+                  flush: true));
+          return AssetBlob(path: dest, sizeBytes: data.lengthInBytes);
+        },
+      ),
+  ];
+  final importer = AssetLibraryImporter(
+    saveAll: saveAll,
+    removeFile: removeFile,
+    existingNames: existingNames,
+  );
+  return importer.importAll(entries);
+}
 
 /// 原子落盘（P2-23）：先写 `<finalPath>.part`，全部写完再 `rename` 到最终路径。
 ///

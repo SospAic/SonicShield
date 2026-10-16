@@ -32,9 +32,22 @@ class NativeBridge {
   }
 
   /// 提交精确闹钟（毫秒时间戳列表）。返回成功排布的数量。
-  static Future<int> setExactAlarms(List<int> epochMs) async {
-    final r = await _invoke<int>('setExactAlarms', {'times': epochMs});
-    return r ?? 0;
+  ///
+  /// [useAlarmClock]（docs/59 缺口1，2026-10）：true 时原生走
+  /// `AlarmManager.setAlarmClock` 特权通道 —— Doze 深度休眠中**准时**触发、
+  /// 不受 `setExactAndAllowWhileIdle` 的 9 分钟最小间隔限制（闹钟类应用的
+  /// 标准做法）。代价：状态栏常驻闹钟图标（用户可见性契约）。排布失败时
+  /// 原生逐条回退常规精确闹钟，并把降级原因写进 [AlarmScheduleResult.error]
+  /// —— 调用方（引擎 `alarmDiag`）必须如实呈现，不许静默。
+  static Future<AlarmScheduleResult> setExactAlarms(
+    List<int> epochMs, {
+    bool useAlarmClock = false,
+  }) async {
+    final r = await _invoke<Object>('setExactAlarms', {
+      'times': epochMs,
+      'useAlarmClock': useAlarmClock,
+    });
+    return AlarmScheduleResult.fromRaw(r, expected: epochMs.length);
   }
 
   static Future<void> clearAlarms() => _invoke<Object?>('clearAlarms');
@@ -70,6 +83,17 @@ class NativeBridge {
   static Future<bool> setPersistentWakeLock(bool enabled) async {
     final r = await _invoke<bool>('setPersistentWakeLock', {'enabled': enabled});
     return r ?? false;
+  }
+
+  /// 本应用当前 **App Standby Bucket**（docs/59 缺口2）。
+  ///
+  /// 取值：`active` / `working_set` / `frequent` / `rare` / `restricted` /
+  /// `unknown`。**`unknown` = 无法判定**（API<28 / 未授予使用情况访问权 /
+  /// 桥不可用），不是"某种确定状态"——与 [isOnWifi] 的 null 语义同先例
+  /// （BUG-041）：不能把读不到当成 rare 弹警告，也不能当成 active 装没事。
+  static Future<String> appStandbyBucket() async {
+    final r = await _invoke<String>('standbyBucket');
+    return r ?? 'unknown';
   }
 
   static Future<void> setServiceShouldRun(bool v) =>

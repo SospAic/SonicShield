@@ -37,6 +37,7 @@ import 'native_bridge.dart';
 import 'neural_tts.dart';
 import 'online_tts_client.dart';
 import 'playback_service.dart';
+import 'preset_import.dart';
 import 'reactive_counter_service.dart';
 import 'retention_maintenance.dart';
 import 'sound_guard_service.dart';
@@ -966,10 +967,22 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 计划照常列出、引擎照常显示运行中，只有真机长时间灭屏后才漏出洞。
   /// 现在区分两种不可排布：**原生明确抛错**（failed）与**平台未回执**
   /// （skipped，iOS/桌面没有这条通道），都写审计。
+  ///
+  /// ## useAlarmClock（docs/59 缺口1，2026-10）
+  /// 默认走 `setAlarmClock` 特权通道（prefs `alarmClockChannel`，默认 true）：
+  /// Doze 深度休眠中准时触发、无 9 分钟最小间隔；用户可在设置里关掉
+  /// （状态栏闹钟图标观感），关闭即回退 `setExactAndAllowWhileIdle`。
+  /// 原生排布失败时会**逐条回退**并在回执 error 中写明降级 ——
+  /// 本方法把降级原因如实汇进 `alarmDiag`，不静默。
   Future<void> pushExactAlarms(List<int> times) async {
+    final useAlarmClock =
+        prefs.getBool(PrefsKeys.alarmClockChannel) ?? true;
     try {
-      final n = await native.invokeMethod('setExactAlarms', {'times': times});
-      if (n == null) {
+      final res = await NativeBridge.setExactAlarms(times,
+          useAlarmClock: useAlarmClock);
+      if (res.unsupported && res.scheduled == 0 && res.expected > 0 &&
+          res.error == null && !res.denied) {
+        // 平台未回执（iOS/桌面/旧版原生无此通道）：与 null 回执同义。
         alarmDiag = '本平台未实现精确闹钟：进程被杀后不再补触发（仅通道A生效）';
         await logs.append(
             source: 'schedule',
@@ -981,7 +994,6 @@ Future<void> _engineBody(ServiceInstance service) async {
       }
       // P1-04：解析**结构化结果**。旧实现只看 null/异常，把"权限被拒返回 0"
       // 当成普通成功 —— 界面照常显示运行中与计划数，系统级唤醒却没排上。
-      final res = AlarmScheduleResult.fromRaw(n, expected: times.length);
       if (res.degraded) {
         alarmDiag = res.reason;
         await logs.append(
@@ -1421,15 +1433,43 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   }
 
-  /// 装配动态反击的动作池（v2.0 阶段 D）。
+  /// 装配动态反击的动作池（v2.0 阶段 D；2026-10 起**只含噪音音效**）。
   ///
-  /// 优先取**已导入的预置招人烦音效**（按 tag 命中库内资产），再补默认 TTS 文案。
-  /// 素材库为空 / 读取失败时自动退化为纯 TTS 池 —— 保证动态反击**总有**可执行
-  /// 动作，不会因为"用户还没导入音效"而静默空转。
+  /// ## 为什么不再有 TTS（产品决策）
+  /// 可识别语音会暴露反击意图、取证价值低，与「不可预测」目标相反；
+  /// 一律随机音效（"尤其是噪音"）。`CounterAction.tts` 构造保留（远端协议
+  /// 兼容），但本池不再放入任何 TTS 动作。
+  ///
+  /// ## 素材库为空怎么办（自愈，2026-10）
+  /// 以前库空 ⇒ 退化纯 TTS 池；没有 TTS 后库空 = 反击彻底空转。改为：
+  /// 库空时先**自动导入内置预置库**（`importBundledPresets`，幂等），
+  /// 再 resolve —— 用户不必记得先去「音源库」点导入。导入失败（如磁盘满）
+  /// 不抛：返回空池，由调用方给用户如实提示（守卫照常运行，只是没反击）。
   Future<List<CounterAction>> buildReactivePool() async {
+    final repo = AssetRepository(db);
+    var assets = await repo.listAll();
+    if (assets.isEmpty) {
+      try {
+        await importBundledPresets(
+          existingNames: repo.nameSet,
+          saveAll: repo.upsertMany,
+          removeFile: (p) async {
+            final f = File(p);
+            if (await f.exists()) await f.delete();
+          },
+        );
+        assets = await repo.listAll();
+      } on Object catch (e) {
+        await logs.append(
+          source: 'reactive',
+          action: 'pool',
+          status: 'failed',
+          message: '预置噪音库自动导入失败（反击将无动作可用）：$e',
+        );
+      }
+    }
     final pool = <CounterAction>[];
     try {
-      final assets = await AssetRepository(db).listAll();
       final ids = resolvePresetAudioIds(assets, CounterPlan.defaultPresetIds);
       final byId = {for (final a in assets) a.id: a};
       for (final id in ids) {
@@ -1439,10 +1479,15 @@ Future<void> _engineBody(ServiceInstance service) async {
         }
       }
     } on Object {
-      // 素材库读取失败不该让动态反击整条失效：退化为纯 TTS 池。
+      // 素材库读取失败不该让动态反击整条失效：留空池 + 下面的日志说明。
     }
-    for (final t in CounterPlan.defaultTtsTexts) {
-      pool.add(CounterAction.tts(t));
+    if (pool.isEmpty) {
+      await logs.append(
+        source: 'reactive',
+        action: 'pool',
+        status: 'failed',
+        message: '反击动作池为空：音源库没有可用噪音（请到「音源库」导入预置库）',
+      );
     }
     return pool;
   }
@@ -1483,9 +1528,46 @@ Future<void> _engineBody(ServiceInstance service) async {
     )..start();
   }
 
-  void stopReactiveCounter() {
+  /// 撤下动态反击：停 realtime counter **并整族清场物化的反击计划任务**。
+  ///
+  /// ## 为什么必须联动（2026-10-15 BUG：「关闭后依然有效」）
+  /// 反击计划（CounterPlan）物化出的 `counter:{planId}:{…}` 任务是**独立的
+  /// fixedOnce 任务**，与 `reactiveCounterEnabled` 开关无关 —— 只停 realtime
+  /// counter，计划任务照常按时刻触发，用户看到的就是"关了还在响"。
+  ///
+  /// 清场 = [CounterPlanService.disable]：按前缀整族删除计划任务（外键
+  /// CASCADE 带走未执行 occurrences）+ `store.enabled = false`。此后 tick 的
+  /// `extendCounterPlan → refreshIfNeeded` 首行 `if (!_store.enabled) return`
+  /// 即被挡死，不会再续算。计划本体保留在 prefs 里，用户重新开启时可恢复。
+  ///
+  /// ## 失败不可静默
+  /// 撤下 realtime 与清场计划任务是两件事：前者已停、后者失败 ⇒ "关了一半"，
+  /// 必须落审计（UI 的守卫页/日志页可见），不许假装全关。
+  Future<void> stopReactiveCounter() async {
     reactive?.stop();
     reactive = null;
+    try {
+      final store = CounterPlanStore(prefs);
+      final svc = CounterPlanService(
+        tasks: tasksRepo,
+        store: store,
+        replan: replan,
+      );
+      final r = await svc.disable();
+      await logs.append(
+        source: 'guard',
+        action: 'reactiveCounterOff',
+        status: 'success',
+        message: '动态反击已关闭：${r.message}',
+      );
+    } on Object catch (e) {
+      await logs.append(
+        source: 'guard',
+        action: 'reactiveCounterOff',
+        status: 'failed',
+        message: '动态反击已停，但反击计划任务清场失败（可能仍在触发）：$e',
+      );
+    }
   }
 
   service.on('replan').listen((_) => unawaited(replan()));
@@ -1552,8 +1634,9 @@ Future<void> _engineBody(ServiceInstance service) async {
       await guardErrSub?.cancel();
       guardErrSub = null;
       // 守卫停 ⇒ 声音来源停 ⇒ 动态反击必须一并停（否则静默反制定时器
-      // 会在无输入的情况下继续自主出声）。
-      stopReactiveCounter();
+      // 会在无输入的情况下继续自主出声）。连带清场物化的反击计划任务
+      // （BUG：只停 realtime 的话计划任务照常触发）。
+      await stopReactiveCounter();
       await guard.stop();
       // 关闭也要留痕（对称）：否则"关了但没关掉"在日志里完全无迹可寻。
       await logs.append(
@@ -1563,20 +1646,24 @@ Future<void> _engineBody(ServiceInstance service) async {
   });
   // 动态反击热切换（v2.0 阶段 D）：UI 开关 → 引擎即时装配/撤下，
   // 不必重启守卫。守卫没跑时只落 prefs（下次守卫启动自动装配）。
+  //
+  // ⚠️ 关闭 = [stopReactiveCounter]：除停 realtime counter 外，还整族删除
+  // 物化的 `counter:*` 计划任务并禁用计划续算 —— 否则"关了还在响"
+  // （2026-10-15 BUG，计划任务与 realtime 开关是两套东西）。
   service.on('reactive').listen((m) async {
     final on = (m?['enabled'] as bool?) ?? false;
     await prefs.setBool(PrefsKeys.reactiveCounterEnabled, on);
     if (on) {
       if (guard.isRunning) await startReactiveCounter();
     } else {
-      stopReactiveCounter();
+      await stopReactiveCounter();
     }
     await broadcast();
   });
   service.on('stop').listen((_) async {
     guardDelayTimer?.cancel();
     guardDelayTimer = null;
-    stopReactiveCounter();
+    await stopReactiveCounter();
     await guardSub?.cancel();
     guardSub = null;
     await guardErrSub?.cancel();
@@ -1828,6 +1915,13 @@ Future<void> _engineBody(ServiceInstance service) async {
   // **引擎永远不广播状态** ⇒ UI 的 `isRunning` 恒为 false ⇒
   // 「守护」页引擎开关与「守卫」页守卫开关**都打不开**，且页面零解释（BUG-A）。
   await stepGuarded('executeDue', executeDue);
+  // 「动态反击」开关是反击计划任务的**存在前提**：本机关着 ⇒ 开机即清场。
+  // 自愈场景（2026-10 BUG）：引擎未运行时用户关开关 → invoke 无人受理 →
+  // store 仍启用、库里残留物化任务 → 旧版本引擎重启后照常触发。
+  // 开着时为 no-op；这一步还顺带把自己曾经的漏关现场补清。
+  if (!(prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false)) {
+    await stepGuarded('stopReactiveCounter(boot)', stopReactiveCounter);
+  }
   // 反击计划续算必须**排在 replan 之前**（同 tick 内的理由）：续排只写任务，
   // 计划条目由紧随其后的 `replan` 生成。
   await stepGuarded('extendCounterPlan', extendCounterPlan);

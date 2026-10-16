@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.app.usage.UsageStatsManager
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
@@ -100,8 +101,14 @@ class NativeBridgePlugin : FlutterPlugin {
                             val times =
                                 (call.argument<List<*>>("times") ?: emptyList<Any>())
                                     .map { (it as Number).toLong() }
-                            result.success(scheduleExactAlarms(ctx, times))
+                            // docs/59 缺口1：useAlarmClock=false 时保持旧行为
+                            // （setExactAndAllowWhileIdle）；true 走特权通道。
+                            val useAlarmClock =
+                                call.argument<Boolean>("useAlarmClock") ?: false
+                            result.success(
+                                scheduleExactAlarms(ctx, times, useAlarmClock))
                         }
+                        "standbyBucket" -> result.success(appStandbyBucket(ctx))
                         "clearAlarms" -> {
                             clearExactAlarms(ctx)
                             result.success(true)
@@ -320,8 +327,21 @@ class NativeBridgePlugin : FlutterPlugin {
      * - `denied`：`SCHEDULE_EXACT_ALARM` 未授予（可跳系统设置恢复）；
      * - `unsupported`：平台层面不支持（预留；本分支在 Android 上恒 false）；
      * - `scheduled`：真正排上的条数（逐条 try/catch，失败不再静默吞掉整批）。
+     *
+     * ## useAlarmClock（2026-10，docs/59 缺口1）
+     * 传 true 走 `AlarmManager.setAlarmClock`：系统视为**用户可见闹钟**，
+     * Doze/待机深度休眠中准时触发、不受 `setExactAndAllowWhileIdle` 的
+     * 「9 分钟最小间隔」限制 —— Doze 中唯一保证准时的公开通道。代价是
+     * 状态栏常驻闹钟图标（用户知情契约，与"定时任务对用户可见"一致）。
+     * Android 12+ 同受 `canScheduleExactAlarms` 约束（denied 路径不变）；
+     * 排布失败逐条回退 setExactAndAllowWhileIdle 并在 error 中说明，
+     * 绝不静默假装排上了特权通道。
      */
-    private fun scheduleExactAlarms(ctx: Context, times: List<Long>): Map<String, Any> {
+    private fun scheduleExactAlarms(
+        ctx: Context,
+        times: List<Long>,
+        useAlarmClock: Boolean = false,
+    ): Map<String, Any> {
         val result = mutableMapOf<String, Any>(
             "expected" to times.size,
             "scheduled" to 0,
@@ -347,7 +367,12 @@ class NativeBridgePlugin : FlutterPlugin {
             // 都写的是 AllowWhileIdle），实现里并不成立。这是**向下兼容缺口**，不是新特性。
             // else 分支在 minSdk=24 下不可达，保留只为声明"更低的版本只能用 setExact"。
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (useAlarmClock) {
+                    // 特权通道：setAlarmClock（showIntent=null；状态栏闹钟图标
+                    // 即用户可见性契约，不弹界面）。
+                    am.setAlarmClock(
+                        AlarmManager.AlarmClockInfo(t, null), pi)
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t, pi)
                 } else {
                     am.setExact(AlarmManager.RTC_WAKEUP, t, pi)
@@ -356,7 +381,26 @@ class NativeBridgePlugin : FlutterPlugin {
                 ok++
             } catch (e: Exception) {
                 // 逐条捕获：一条失败不再吞掉整批，并把原因如实回报给 Dart 侧。
-                error = e.message ?: e.toString()
+                if (useAlarmClock) {
+                    // 特权通道失败 ⇒ 回退常规精确闹钟，并在回执里写明降级
+                    // （Dart 侧 alarmDiag 可见），不假装排上了 setAlarmClock。
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            am.setExactAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP, t, pi)
+                        } else {
+                            am.setExact(AlarmManager.RTC_WAKEUP, t, pi)
+                        }
+                        saved.add(t.toString())
+                        ok++
+                        error = (error?.plus("；") ?: "") +
+                            "setAlarmClock 失败已回退精确闹钟：${e.message}"
+                    } catch (e2: Exception) {
+                        error = e2.message ?: e2.toString()
+                    }
+                } else {
+                    error = e.message ?: e.toString()
+                }
             }
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -393,6 +437,40 @@ class NativeBridgePlugin : FlutterPlugin {
     }
 
     // ---------- 环境状态（v1.7 条件层扩展） ----------
+
+    /**
+     * 本应用当前的 **App Standby Bucket**（docs/59 缺口2 自检）。
+     *
+     * 取值：`active` / `working_set` / `frequent` / `rare` / `restricted` /
+     * `unknown`。`unknown` = **无法判定**（API<28 / 未授予使用情况访问权 /
+     * 平台异常），语义是"读不到"而不是"某种确定状态" —— 与 Dart 侧
+     * `isOnWifi()` 返回 null 的先例一致（BUG-041）：不能把读不到当成
+     * "rare/restricted"去弹警告，也不能当成"active"假装没问题。
+     *
+     * 为什么需要它：rare/restricted 桶里，JobScheduler/AlarmManager 任务
+     * 会被推迟数小时；app 内无法自提权（`am set-standby-bucket` 需要
+     * shell/系统权限），只能**如实告诉用户**并由他跳厂商设置页处理。
+     */
+    private fun appStandbyBucket(ctx: Context): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return "unknown"
+        return try {
+            val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE)
+                    as? UsageStatsManager
+                ?: return "unknown"
+            when (usm.appStandbyBucket) {
+                UsageStatsManager.STANDBY_BUCKET_ACTIVE -> "active"
+                UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "working_set"
+                UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "frequent"
+                UsageStatsManager.STANDBY_BUCKET_RARE -> "rare"
+                UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "restricted"
+                else -> "unknown"
+            }
+        } catch (e: Exception) {
+            // 典型：未授予 PACKAGE_USAGE_STATS（appop）时抛 SecurityException。
+            // 如实归为 unknown，由调用方按"无法判定"处理，不猜。
+            "unknown"
+        }
+    }
 
     /**
      * 是否正在通话（含 VoIP / 视频通话）。

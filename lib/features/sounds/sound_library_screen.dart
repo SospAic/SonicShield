@@ -1,9 +1,7 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -142,42 +140,29 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
   ///
   /// 60 条**一次事务**写完（BUG-047）：逐条 `insert` 除了 60 次平台往返，
   /// 还会在第 k 条失败时留下 k-1 条"半套库"。
+  ///
+  /// 实现已下沉到 [importBundledPresets]（引擎的空库自愈与这里共用同一条
+  /// 通路，避免两套导入逻辑漂移）。
   Future<void> _importPresets() async {
     if (_importingPresets) return;
     setState(() => _importingPresets = true);
     try {
-      final raw =
-          await rootBundle.loadString('assets/audio/presets_manifest.json');
-      final manifest = jsonDecode(raw) as Map<String, dynamic>;
-      final items = (manifest['items'] as List).cast<Map<String, dynamic>>();
-      final docs = await getApplicationDocumentsDirectory();
       final repo = await _assets();
-      final entries = <AssetImportEntry>[
-        for (final it in items)
-          AssetImportEntry(
-            name: '[预置]${it['name']}',
-            // 第三个 tag 是 manifest 里的**稳定 id**（如 `annoy_spit`）：
-            // 反击计划（v2.0）按它回查"本机装了哪些计划点名的音效"。
-            // 资产行 id 是导入时生成的 UUID，无法反推 manifest id，故必须落 tag。
-            tags: ['预置', '${it['category']}', '${it['id']}'],
-            durationMs: (it['durationMs'] as num?)?.toInt() ?? 0,
-            materialize: (id) async {
-              final data = await rootBundle.load('assets/audio/${it['file']}');
-              // P2-23：同上，预置库落盘也走原子写入。
-              final dest = '${docs.path}/audio_$id.wav';
-              await atomicWrite(dest,
-                  (tmp) => File(tmp).writeAsBytes(data.buffer.asUint8List(),
-                      flush: true));
-              return AssetBlob(path: dest, sizeBytes: data.lengthInBytes);
-            },
-          ),
-      ];
-      final importer = _importer(repo, existingNames: repo.nameSet);
-      final outcome = await importer.importAll(entries);
+      final outcome = await importBundledPresets(
+        existingNames: repo.nameSet,
+        saveAll: repo.upsertMany,
+        removeFile: (p) async {
+          final f = File(p);
+          if (await f.exists()) await f.delete();
+        },
+      );
       if (mounted) {
+        // 文案与旧版逐字对齐（含「库内共 N 条」——既有 SLB 锁按此断言；
+        // added + skipped 即 manifest 总条数，数值等价）。
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('预置音效导入完成：新增 ${outcome.added} 条，'
-                '跳过已存在 ${outcome.skipped} 条（库内共 ${items.length} 条）')));
+                '跳过已存在 ${outcome.skipped} 条'
+                '（库内共 ${outcome.added + outcome.skipped} 条）')));
         _reloadAssets();
       }
     } catch (e) {

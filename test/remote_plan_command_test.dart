@@ -5,6 +5,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
 import 'package:sonic_shield/data/repositories/counter_plan_store.dart';
 import 'package:sonic_shield/data/repositories/log_repository.dart';
+import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/counter_plan.dart';
 import 'package:sonic_shield/remote/assist.dart';
 import 'package:sonic_shield/remote/endpoint_service.dart';
@@ -48,13 +49,29 @@ void main() {
   late PairedEndpoint peer;
 
   setUp(() async {
-    SharedPreferences.setMockInitialValues({});
+    // 2026-10 新门（docs/62）：本机「动态反击」开关是远程 plan.apply 的准入线
+    // —— 本机关闭时拒绝启用反击计划（"关了还在响"的远程变体）。
+    // 本文件测的是"用户已开启"的正常通路，故默认置 true；
+    // 「本机关闭 ⇒ 拒绝」由 RP-04 反向锁住。
+    SharedPreferences.setMockInitialValues({
+      'reactive_counter_enabled': true,
+    });
     prefs = await SharedPreferences.getInstance();
     store = RemoteStore(prefs);
     await store.setIdentity(ownId, '端点RP');
     await store.setBroker(broker);
     await store.ensurePairingCode();
     db = await AppDatabase.open(inMemoryDatabasePath);
+    // 2026-10 新契约（docs/62）：反击只出随机噪音 —— 音源库为空时计划无法
+    // 物化（`apply` 如实失败，不再兜底 TTS）。故本文件先落一条命中
+    // `CounterPlan.defaultPresetIds` 的音源，模拟"用户已导入预置库"的真实场景。
+    await AssetRepository(db).upsert(AudioAsset(
+      id: 'a-cough',
+      name: '[预置]咳嗽',
+      path: 'audio_cough.wav',
+      tags: const ['预置', 'cough', 'annoy_cough_fit'],
+      createdAt: DateTime(2026, 1, 1),
+    ));
     peer = PairedEndpoint(
       deviceId: ctrlId,
       name: '控制端RP',
@@ -211,6 +228,27 @@ void main() {
           reason: '不合格计划绝不落库');
       expect(prefs.getString('counter_plan_json'), isNull);
       expect(await hasLog(action: 'plan.apply', status: 'failed'), isTrue);
+    });
+
+    test('RP-03c 本机「动态反击」关闭 → 拒绝启用（2026-10 新门，docs/62）',
+        () async {
+      // 覆盖"关了还在响"的远程变体：本机关闭动态反击时，远程 plan.apply
+      // 不得启用计划（与 docs/08 §2「任何对端都无法单方面绕过本机护栏」同口径）。
+      await prefs.setBool('reactive_counter_enabled', false);
+      final msg = cmd(RcCmd.planApply, {
+        'plan': CounterPlan.defaults().toJson(),
+      });
+      final wires = await dispatchCapture(msg);
+
+      final ack = await findSent(wires, RcEvt.ack);
+      expect(ack, isNotNull);
+      expect(ack!.payload['for'], msg.id);
+      expect(ack.payload['ok'], isFalse);
+      expect(ack.payload['data'] as String, contains('动态反击'));
+      expect(prefs.getBool('counter_plan_enabled'), isNot(true),
+          reason: '本机关闭时远程不得启用计划');
+      expect(prefs.getString('counter_plan_json'), isNull);
+      expect(await hasLog(action: 'plan.apply', status: 'skipped'), isTrue);
     });
   });
 

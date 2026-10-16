@@ -17,6 +17,12 @@
 /// - **零引擎改动**：复用既有 `FixedOnceTrigger` + `ScheduleEngine` 通路，
 ///   不与手动任务抢语义，也不需要新增"按日切换参数"的调度分支（崩溃面最小）。
 ///
+/// ## 动作形态：只出随机噪音，不出 TTS（2026-10 产品决策）
+/// 守护反击一律播放随机音效（"尤其是噪音"）：可识别语音会暴露意图、
+/// 录音取证价值低，与「不可预测」的目标相反。`CounterPlan.ttsTexts`
+/// 字段为兼容旧 JSON 而保留，但本物化器**不再生成 TTS 动作** ——
+/// 即便导入的 plan 带 ttsTexts，也全部物化为音效播放。
+///
 /// ## 命名空间隔离（不与手动内容冲突）
 /// 任务 id 形如 `counter:{planId}:{yyyyMMdd}{D|N}{序号}`，前缀 [taskPrefix]。
 /// 手动任务 id 是 UUID，两者不可能碰撞；下线计划时按前缀整族删除，
@@ -63,9 +69,8 @@ abstract final class CounterPlanMaterializer {
     // 展示标识）：manifest id → 库内资产 id 的映射由调用方完成（需要读 manifest
     // 与音源库，属于设备/数据层职责）。排序 ⇒ 抽取可复现。
     final pool = assetIdPool.toList()..sort();
-    final hasAudio = pool.isNotEmpty;
-    final hasTts = plan.ttsTexts.isNotEmpty;
-    if (!hasAudio && !hasTts) return const <Task>[];
+    // 弃 TTS 后音效是主资源，但**震动不需要音源** —— 无音源时不直接返回空，
+    // 是否产出交给窗口配比决定（震动能出就出，全不可用才跳过该时刻）。
 
     final created = now ?? DateTime.now();
     final sched = _resolveSchedule(plan, from, days);
@@ -88,8 +93,6 @@ abstract final class CounterPlanMaterializer {
           isNight: isNight,
           w: w,
           audioPool: pool,
-          hasAudio: hasAudio,
-          hasTts: hasTts,
           created: created,
           now: now,
         ));
@@ -160,8 +163,6 @@ abstract final class CounterPlanMaterializer {
     required bool isNight,
     required CounterWindow w,
     required List<String> audioPool,
-    required bool hasAudio,
-    required bool hasTts,
     required DateTime created,
     required DateTime? now,
   }) {
@@ -196,29 +197,23 @@ abstract final class CounterPlanMaterializer {
       final taskId = '$taskPrefix$planId:$key';
       // 每次反击独立抽动作（种子绑定到具体时刻 ⇒ 与排序无关，可复现）。
       //
-      // **按窗口的"动作配比"抽**（TTS / 震动 / 音效）——这是"昼夜导向"的落点：
-      // 白天窗口 `ttsWeight=0` ⇒ **永不喊话**（只放噪音 + 少量震动）；
-      // 夜间窗口 `ttsWeight` 占主导 ⇒ **以喊话为主**。不可用的一类（无音源 /
-      // 无文案）权重置零后**重新归一化**，只要任一类可用就一定抽得到。
+      // **弃 TTS（2026-10 产品决策）**：反击一律出随机噪音，不播 TTS 语音。
+      // 保留「动作配比」框架（震动 / 音效），TTS 类**整体移除** ——
+      // `plan.ttsTexts` 与 `w.ttsWeight` 不再参与配比（导入的文案会被忽略，
+      // 见 [CounterPlan.defaultTtsTexts]）。不可用的一类权重置零后**重新归一化**，
+      // 只要任一类可用就一定抽得到。
       final arng = Random(planSeed('$taskId#act', fireAt));
-      final wTts = hasTts ? w.ttsWeight : 0.0;
+      final hasAudio = audioPool.isNotEmpty;
       final wVib = w.vibrateWeight;
       final wAud = hasAudio ? w.audioWeight : 0.0;
-      final total = wTts + wVib + wAud;
-      final roll = arng.nextDouble() * (total > 0 ? total : 1.0);
+      final total = wVib + wAud;
+      // 无音源且该窗口不排震动 ⇒ 该时刻没有任何可用动作，跳过。
+      if (total <= 0) continue;
+      final roll = arng.nextDouble() * total;
       final ActionConfig action;
       final ActionType type;
       final List<String> assetIds;
-      if (wTts > 0 && roll < wTts) {
-        assetIds = const <String>[];
-        action = TtsAction(
-          text: plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)],
-          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
-          channel: AudioChannel.media,
-          voiceId: plan.voiceId,
-        );
-        type = ActionType.tts;
-      } else if (wVib > 0 && roll < wTts + wVib) {
+      if (wVib > 0 && roll < wVib) {
         assetIds = const <String>[];
         action = RandomVibrateAction(
           durationSecMin: w.durationSecMin,
@@ -227,40 +222,17 @@ abstract final class CounterPlanMaterializer {
           amplitudeMax: w.vibrateAmplitudeMax,
         );
         type = ActionType.randomVibrate;
-      } else if (wAud > 0) {
-        assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
-        action = PlayAudioAction(
-          volumeMin: w.volumeMin,
-          volumeMax: w.volumeMax,
-          durationSecMin: w.durationSecMin,
-          durationSecMax: w.durationSecMax,
-          channel: AudioChannel.media,
-          respectDnd: true,
-        );
-        type = ActionType.playAudio;
-      } else if (hasTts) {
-        // 兜底（配比与可用性完全对不上时）：退到 TTS。
-        assetIds = const <String>[];
-        action = TtsAction(
-          text: plan.ttsTexts[arng.nextInt(plan.ttsTexts.length)],
-          volume: ((w.volumeMin + w.volumeMax) / 2).clamp(0.0, 1.0),
-          channel: AudioChannel.media,
-          voiceId: plan.voiceId,
-        );
-        type = ActionType.tts;
-      } else if (hasAudio) {
-        assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
-        action = PlayAudioAction(
-          volumeMin: w.volumeMin,
-          volumeMax: w.volumeMax,
-          durationSecMin: w.durationSecMin,
-          durationSecMax: w.durationSecMax,
-          channel: AudioChannel.media,
-          respectDnd: true,
-        );
-        type = ActionType.playAudio;
       } else {
-        continue; // 不可达（物化入口已保证至少一类可用）。
+        assetIds = <String>[audioPool[arng.nextInt(audioPool.length)]];
+        action = PlayAudioAction(
+          volumeMin: w.volumeMin,
+          volumeMax: w.volumeMax,
+          durationSecMin: w.durationSecMin,
+          durationSecMax: w.durationSecMax,
+          channel: AudioChannel.media,
+          respectDnd: true,
+        );
+        type = ActionType.playAudio;
       }
       tasks.add(Task(
         id: taskId,

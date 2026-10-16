@@ -300,15 +300,13 @@ class CounterPlan {
     'annoy_mocking_laugh',
   ];
 
-  /// 出厂 TTS 文案池（与音效池混用；音色由 [voiceId] 决定）。
-  static const List<String> defaultTtsTexts = <String>[
-    '干啥呢？',
-    '小点声行不行？',
-    '还让不让人睡了？',
-    '有完没完？',
-    '咳、咳。',
-    '差不多得了。',
-  ];
+  /// 出厂 TTS 文案池 —— **2026-10 起恒为空**。
+  ///
+  /// 守护反击的产品决策：一律使用随机噪音音效，不再播 TTS 语音
+  /// （喊话内容可被识别/录音取证价值低，且与「不可预测」的目标相反）。
+  /// 字段与解析保留（旧 JSON/远程模版兼容）：导入的 `ttsTexts` 仍会被
+  /// [CounterPlanMaterializer] **忽略**，见该文件顶部说明。
+  static const List<String> defaultTtsTexts = <String>[];
 
   /// 固定 schema 标识。导入前先比对，避免"旧文件按新语义解读"。
   static const String schemaId = 'sonicshield.counterPlan/1';

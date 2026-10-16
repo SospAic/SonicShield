@@ -52,4 +52,31 @@ class PowerService {
       NativeBridge.openExactAlarmSettings();
   Future<void> openOemAutostart(String vendor) =>
       NativeBridge.openOemAutostart(vendor);
+
+  /// 本应用当前 App Standby 桶（docs/59 缺口2）。
+  ///
+  /// `unknown` = **无法判定**（API<28 / 未授予使用情况访问权 / 桥不可用），
+  /// 调用方必须按"不知道"处理：既不弹警告也不报告"正常"。
+  Future<String> standbyBucket() => NativeBridge.appStandbyBucket();
+
+  /// 桶是否已降到会**明显推迟**后台任务的两档（rare / restricted）。
+  ///
+  /// 这两档里 JobScheduler/AlarmManager 任务可被推迟数小时；app 内无法
+  /// 自提权（`am set-standby-bucket` 要 shell 权限），只能提示用户去
+  /// 厂商设置页。`unknown` 返回 **false** —— 读不到 ≠ 受限，不能拿猜测
+  /// 去骚扰用户（BUG-041 同款纪律）。
+  Future<bool> standbyRestricted() async {
+    final b = await standbyBucket();
+    return b == 'rare' || b == 'restricted';
+  }
+
+  /// 面向 UI 的桶状态人话（无法判定给 null，让调用方决定不显示）。
+  static String? standbyBucketLabel(String bucket) => switch (bucket) {
+        'active' => '活跃（不受省电策略限制）',
+        'working_set' => '常用（限制很轻）',
+        'frequent' => '较常用（轻度限制）',
+        'rare' => '很少使用（后台任务可能被大幅推迟，建议处理）',
+        'restricted' => '受限（后台任务几乎被冻结，建议立即处理）',
+        _ => null,
+      };
 }
