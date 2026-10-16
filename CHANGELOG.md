@@ -3,6 +3,56 @@
 本项目的所有重要变更都记录在此文件中。
 格式参考 Keep a Changelog，版本遵循语义化版本。
 
+## [1.9.2] - 2026-10-16（合并 `workbuddy/main-97ad06c3`：反击弃 TTS / 任务包 / 立即执行 / 锁屏三缺口；并修复版本号倒挂导致无法覆盖安装）
+
+#### 第八十三轮并入主线（2026-10-16）· **合并分支 + 契约对齐 + 重新出包 —— 用户实测「安装时提示不能降级」**
+
+**🔴 起因（用户实测）**：上一轮交付的 release 包在用户设备上安装失败，提示**不能降级**（`INSTALL_FAILED_VERSION_DOWNGRADE`）。查证后确认两件事，第二件比第一件严重：
+
+1. **直接原因：版本号倒挂**。`aapt2 dump badging` 实测 —— 交付包 `versionCode=22` / `1.9.0-alpha`，用户设备已装 `versionCode=24` / `1.9.1`。`22 < 24` ⇒ Android 判定降级，直接拒装。
+2. **根本原因：出包分支落后主线 38 个提交**。`workbuddy/main-97ad06c3` 分支的 base 是 `fd2ab00`（第八十一轮），之后 `main` 走了 38 个提交（第八十二轮离线 TTS → R84 → 远程桌面级控制…），而该分支只走了 2 个。⇒ 即使能装上，包内也**缺** `neural_tts.dart` / `remote_tts_presets.dart` / `run_master_service.dart` / `screen_viewer.dart` / `node_catalog.dart` / `device_name_service.dart`（lib/ 整体差 35 文件、+3401/−5700），等于给用户一个大后退的版本。
+
+**⇒ 上一轮的 APK 不可用，本版已替换。**
+
+---
+
+- 🔴 **A 合并 `workbuddy/main-97ad06c3` 到 `main`**（commit `2c291be`，24 文件）：
+  - **冲突 5 处**，其中 **3 处是行尾假冲突** —— `main` 侧 `counter_plan.dart` / `counter_plan_materializer.dart` / `counter_plan_test.dart` 三个文件在仓库里被存成了 **CRLF**（而 `.dart` 的仓库基准是 LF，`main.dart` / `constants.dart` / `background_engine.dart` 等 100+ 文件全是 LF）。诊断方式：读 git 对象库原始 blob（`cat-file`，不经 smudge），对 base / ours / theirs 三方做归一化对比。修法：按 LF 归一化后用 `git merge-file` 三方合并，**仓库行尾顺带回归 LF 基准**。
+  - `counter_plan.dart` / `counter_plan_test.dart` 归一化后 **0 冲突**（纯行尾问题）；
+  - `settings_screen.dart`：保留 `main` 的 `_KeepAliveSelfCheck`（FR-84 保活自检面板）+ 本轮的 `_AlarmChannelTile` / `_StandbyWarningTile`，**两者都保留、不互相覆盖**；
+  - `native_bridge.dart`：保留 `main` 的 `setPersistentWakeLock`（FR-84 性能优先档常驻唤醒锁）+ 本轮的 `appStandbyBucket`，**两者都保留**。
+  - ⚠️ 过程中有一次自伤：给 `counter_plan_test.dart` 做断言替换时正则 `.*?`（带 `re.S`）**跨行吃掉了 MT-06 及中间内容**，文件被破坏。已从 git 冲突三方（stage 1/2/3）重新生成，验证 953 行 / 36 用例 / MT-01~06 + RD-01~07 齐全后重跑全绿。
+
+- 🔴 **B 契约对齐：弃 TTS 的连带影响**（本轮最主要的语义决策）：
+  - 物化器**移除 TTS 类**、保留 `main` 的「震动/音效」配比框架（`CounterWindow.vibrateWeight` 默认 0.0，但 `CounterPlan` 构造函数的 `workdayDay` 预设是 **0.2**，所以反击会掺震动）——**不减 main 功能**；
+  - **无音源池不再零任务，退化为震动**（对齐 `main` 的 `DN-11`）：震动不需要音源资源，仍能完成反击；「到点必失败」的约束由配比里的 `wAud=0` 保证（一条音效都不排）；
+  - `DN-09` 改为「白天/夜间**都**不喊话」（原断言要求夜间出现 TTS）；
+  - `MT-05` / `MT-06` / `RCT-02..04` 的断言从「零任务」改为「**不排音效、不喊话**」；
+  - `NB-H` 改为期望 `setExactAlarms` 的**结构化结果**（P1-04：`AlarmScheduleResult`，`scheduled=0` 而非 `int 0`）。
+
+- 🔴 **C 版本号倒挂的根因（第二次，比第一次更隐蔽）**：
+  - 第一次修 `pubspec.yaml` → `1.9.2+25`，重构建后 **APK 里仍是 `versionCode=24`**。
+  - 根因：Flutter 的 gradle 插件读的是 **`android/local.properties` 里的 `flutter.versionCode` / `flutter.versionName`**（Flutter 工具生成的缓存），**不是** `pubspec.yaml`。
+  - 修法：把 `local.properties` 的 `flutter.versionCode=24` → `25`、`flutter.versionName=1.9.1` → `1.9.2`，再重构建。
+  - ⚠️ `android/local.properties` 与 `android/app/.../GeneratedPluginRegistrant.java` **都被 gitignore**（生成文件，不入库）。
+
+- 🔴 **D 构建链路（沙箱内手工复刻，两处临时改动均已还原）**：
+  - **`GeneratedPluginRegistrant.java` 含 dev 依赖插件** —— 该文件当前内容注册了 `dev.flutter.plugins.integration_test.IntegrationTestPlugin`，而 `integration_test` 是 dev 依赖、release classpath 里没有 ⇒ `compileReleaseJavaWithJavac` 报「程序包不存在」。worktree 那份不含（所以那边构建成功）。修法：**临时删除该注册块 → 构建 → finally 里还原并校验 SHA256**（与 `flutter.bat` shim 同纪律）。
+  - 产物链：`gen_flutter_artifacts.py`（`flutter_assets` 87 项 ← 从旧 APK 提取；`app.dill` 55.4 MB；3 个 ABI 的 `app.so`）+ `gradlew assembleRelease --offline --no-daemon`。
+  - ✅ **构建后两处临时改动均还原且哈希一致**：`flutter.bat`（sha256 `f83bfed7ecd10fd1...`）、`GeneratedPluginRegistrant.java`（sha256 `0a3744cd91e9e124...`）。
+
+- ✅ **E 门禁（合并后真跑）**：25 个相关测试文件 **23 PASS / 2 FAIL**。两个失败（`settings_screen_test` 的 SET-05b/c/e/f、SET-07k/m；`sound_library_screen_test` 的 SLB-09、SLB-16）**经 `main` HEAD（`a171d7a`，合并前）baseline 对照证明与本轮无关** —— 用合并前的版本跑同样两个测试**同样 FAIL**，失败点全是「文件落盘 / 复制到私有目录 / 分享」这类文件系统断言，属沙箱 `flutter_tester` 的文件系统与分享 mock 差异。**有效通过 23/25，代码回归 0。**
+
+- 📦 **F 产物**：`E:\SonicShield\releases\SonicShield-Android.apk`
+  - `versionCode=25` / `versionName=1.9.2`（**> 设备已装的 24，可正常覆盖安装**），`application-label='声盾'`
+  - 251.6 MB，含 arm64-v8a / armeabi-v7a / x86_64 三 ABI 的**新编译** `libapp.so` + 87 项 `flutter_assets`（含 `AssetManifest.bin` / `FontManifest.json` / `NOTICES.Z` / `NativeAssetsManifest.json`）
+  - sha256 `9f9d57562de3525354a3280509e29710a1b2556416a42d0e28a66946077658d8`（同名 `.sha256` 旁挂）
+  - `apksigner verify`：**Verifies**，v2 scheme（APK Signature Scheme v2），1 signer —— 与旧包同一签名配置
+
+- 📝 **G 出包前必须核的两项（本轮教训，已入流程）**：
+  1. **「这个分支是不是主线」** —— 出包前比对 `aapt2 dump badging` 的 versionCode 与设备上已装版本，并核对出包分支与 `main` 的提交差；
+  2. **「版本号到底从哪读」** —— Flutter gradle 读 `android/local.properties` 的 `flutter.versionCode`，改 `pubspec.yaml` **不足以**改 versionCode。
+
 ## [1.9.1] - 2026-10-11（用户六条新需求：设备自定义名/别名 · 总开关迁守护页 · 两行高回执行 · 反击计划独立 TAB · 版本号格式改制）
 
 #### 第八十四轮（2026-10-11 夜·续二）· **落地用户明文六条需求 —— 设备名自定义+别名广播（FR-77）/ 总执行开关从守卫页移至守护页并美化（FR-78）/ 远程控制台新增两行高回执命令行组件+去除逐动作反馈点（FR-79）/ 反击计划独立成 TAB（FR-80）/ 版本号改 `x.y.z(YYYYMMDD)` 并禁 `alpha+N`（FR-81）；用户三条基线全部登记进 `docs/02`**
