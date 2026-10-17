@@ -1594,7 +1594,7 @@ class RcEndpointService {
     }
     final prefs = await SharedPreferences.getInstance();
     if (!(prefs.getBool(PrefsKeys.reactiveCounterEnabled) ?? false)) {
-      final why = '本机已关闭「动态反击」，拒绝启用反击计划（请先在本机开启）';
+      const why = '本机已关闭「动态反击」，拒绝启用反击计划（请先在本机开启）';
       await logs.append(
           source: 'remote',
           action: 'plan.apply',

@@ -252,6 +252,28 @@ class TaskWithMeta {
   final DateTime? nextFireAt;
 }
 
+/// 任务表发生任何变更（新建 / 编辑 / 复制 / 删除 / 批量 / 导入）后，
+/// **一次性失效**所有从 `tasks` 表派生的 UI 缓存。
+///
+/// ## 为什么必须集中（BUG-083，2026-10-17 全量审计）
+/// 三个 provider 都从 `tasks` 表派生，但彼此**没有依赖关系**：
+/// - [taskListProvider]（任务列表的「下次触发」）；
+/// - [forceRunTasksProvider]（守护页「全局执行总开关 · 例外清单」）；
+/// - [quietExemptOverrideTasksProvider]（设置页「夜间豁免例外清单」）。
+///
+/// 于是"只失效其中一个"是极易犯的错：任务编辑完只 invalidate 列表，
+/// 另外两份清单会**一直**拿着旧快照 —— 而这两个 provider 都**刻意不是
+/// `autoDispose`**（见各自 doc），缓存不会因切页失效，因此表现为
+/// "改了任务级豁免/强制例外，两个页面的清单**永远不更新**"。
+/// 实测：`forceRunTasksProvider` 在全仓此前**从未**被失效过。
+///
+/// 任何改动 `tasks` 表的地方都走本函数，而不是逐个 `ref.invalidate`。
+void invalidateTaskDerivedCaches(WidgetRef ref) {
+  ref.invalidate(taskListProvider);
+  ref.invalidate(forceRunTasksProvider);
+  ref.invalidate(quietExemptOverrideTasksProvider);
+}
+
 /// 引擎状态流。
 final engineStateProvider = StreamProvider((ref) {
   return BackgroundServiceManager.instance.state;

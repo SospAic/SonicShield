@@ -221,6 +221,44 @@ Future<void> _engineBody(ServiceInstance service) async {
   final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
 
+  /// 跨 isolate 的**设置同步**（BUG-082，2026-10-17）：读设置前把 prefs 重新拉一遍。
+  ///
+  /// ## 为什么必须有它（用户实测：「开启夜间豁免后，新建的任务到点不执行」）
+  /// 本引擎跑在 `flutter_background_service` 的**独立 `FlutterEngine` isolate** 里
+  /// （`flutter_background_service_android-6.3.1/.../BackgroundService.java:211,228`），
+  /// 而 `SharedPreferences` 的 Dart 侧是**按 isolate 缓存**的：
+  /// `shared_preferences-2.5.5/lib/src/shared_preferences_legacy.dart:28` 的
+  /// `static Completer<SharedPreferences>? _completer` + `:107` 的
+  /// `_preferenceCache` ⇒ `getInstance()` 只在**首次**把整份 KV 读进内存，
+  /// 之后 `getXxx()` 全部命中这份**本 isolate 的**快照。
+  /// Android legacy 通道也**没有**变更回推（`LegacySharedPreferencesPlugin.kt`
+  /// 未注册 `OnSharedPreferenceChangeListener`）⇒ UI isolate 之后的任何写入，
+  /// 本 isolate **永远看不到**。
+  ///
+  /// 后果（全部是"界面回显变了、落库也变了，行为一点没变"）：
+  /// - `quietExemptMaster`：用户开启夜间豁免后，引擎仍按"未授权"物化 ⇒
+  ///   新建的夜间任务被判跳过、**到点不执行**（本次用户报的现象）；
+  /// - `quietStartHour/quietEndHour`：BUG-070 的修复只在"引擎重启后"才成立；
+  /// - `runMasterMode`：全局执行总开关改档后，执行期暂停判据仍是旧模式；
+  /// - `alarmClockChannel`：通道选择不生效；
+  /// - `CounterPlanStore`（反击计划本体 / 节假日覆盖表）：引擎侧读到旧表 ⇒
+  ///   反击计划续算与暂停窗口都用旧值。
+  ///
+  /// ⚠️ 这类缺陷**只有"引擎已在运行"时才复现**，重启引擎即自愈 ——
+  /// 所以它躲过了所有"重启后跑一遍"的手工验证，必须靠本函数在**每个读设置
+  /// 的入口**显式同步。
+  ///
+  /// ## 失败方向
+  /// `reload()` 抛（平台通道异常）⇒ **沿用旧缓存**继续调度：宁可短暂用旧设置，
+  /// 也不能让一次 KV 读取失败把整个 tick 打断（与 `stepGuarded` 同一条纪律）。
+  Future<void> syncPrefs() async {
+    try {
+      await prefs.reload();
+    } on Object {
+      // 读不到就沿用旧缓存，不阻断调度。
+    }
+  }
+
   /// 应用电源模式副作用（v1.9.1 新增）：**仅** `performance` 档持有常驻唤醒锁。
   ///
   /// 背景：此前 `power_mode` 是**死设置** —— 设置页写入、`setPowerMode` 发
@@ -761,6 +799,10 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 返回 null = 通过；否则写审计并返回未通过原因。
   Future<String?> admitExecution(Task task, ConditionEnv env, String source,
       {String? occurrenceId}) async {
+    // 设置同步（BUG-082）：本入口（声音触发 / 远程立即执行）不走 `executeDue`，
+    // 但同样要读全局执行总开关 + 节假日表 ⇒ 先 reload，否则改档在引擎运行期间
+    // 对这两条通路完全无效。
+    await syncPrefs();
     // 全局执行总开关（v79，docs/20 §9）：暂停期间除显式例外一律不放行。
     // 放在最前 —— 它是比条件/概率更粗的刹车，不该先做无谓的平台读取与随机掷骰。
     if (!task.forceRun && pausedAt(DateTime.now())) {
@@ -1043,6 +1085,10 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
     replanning = true;
     try {
+      // 设置同步（BUG-082）：本函数是**唯一**读取免打扰窗口 + 夜间豁免主开关
+      // 的地方，必须先 `reload()` —— 否则用户在引擎运行期间改的这两项在
+      // 本 isolate 里全是旧值（详见 [syncPrefs]）。
+      await syncPrefs();
       final now = DateTime.now();
       final all = await tasksRepo.listAll(enabledOnly: true);
       // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
@@ -1146,6 +1192,10 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// - 未启用 / 尚无计划本体 ⇒ 直接返回，不算失败；
   /// - 任何异常只写一条审计，**绝不阻断**引擎主流程（与 [replan] 同一条纪律）。
   Future<void> extendCounterPlan() async {
+    // 设置同步（BUG-082）：`CounterPlanStore` 的键（计划本体 / 启用位 /
+    // 节假日覆盖表）由 UI isolate 写入 ⇒ 不 reload 就永远读到旧表，
+    // 表现为"UI 里启用了反击计划，引擎却不续算"（7 天 horizon 跑完即静默停摆）。
+    await syncPrefs();
     final store = CounterPlanStore(prefs);
     if (!store.enabled) return; // 未启用：无事可做，且省掉一次 DB 查询
     final svc = CounterPlanService(
@@ -1184,6 +1234,9 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
     executing = true;
     try {
+      // 设置同步（BUG-082）：下面 `pausedAt()` 读的是全局执行总开关
+      // （`runMasterMode`，UI isolate 写入）⇒ 先 reload，改档才能即时生效。
+      await syncPrefs();
       final now = DateTime.now();
       final due = await occs.due(now, limit: SchedulerConfig.catchUpLimit);
       // 全局执行总开关（v79，docs/20 §9）：**轮首算一次**，轮内所有到期计划复用。

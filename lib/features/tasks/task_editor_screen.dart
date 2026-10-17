@@ -1543,6 +1543,12 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       final repo = await ref.read(taskRepoProvider.future);
       await repo.upsert(task);
       await BackgroundServiceManager.instance.replan();
+      // 保存后**本页也要负责失效缓存**（BUG-083）：调用方（任务列表的
+      // 新建/编辑入口）只在 `push` 返回后失效 `taskListProvider`，
+      // 而本页保存的 `quietExempt` / `forceRun` 正是两份「例外清单」
+      // （设置页 / 守护页）的判据 —— 那两页常驻、provider 又非 autoDispose，
+      // 不在这里一并失效，清单就会一直显示旧内容。
+      invalidateTaskDerivedCaches(ref);
     } on Object catch (e) {
       // 失败必须可见：不能让异常穿透 onChanged 变成未处理错误，
       // 也不能不 pop 让用户误以为"没保存成功"却不知原因。

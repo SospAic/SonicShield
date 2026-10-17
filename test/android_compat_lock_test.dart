@@ -373,37 +373,46 @@ void main() {
       // ⚠️ 分析器**无法识别 else 的否定语义** —— 它只能看到"上面最近的守卫是 >= M"。
       // 所以这里用**结构组合**判定：`>= M` 的守卫 + 紧邻上一行是 `} else {`，
       // 两条同时成立才等价于"这是 >= M 的 else 分支"。少任何一条都说明结构被改了。
+      //
+      // ⚠️ 第八十五轮（2026-10-17）**判据从「计数 == 1」改为「逐处结构检查」**：
+      // 第八十三轮（`d3dba8d`）给 `setAlarmClock` 特权通道加了**失败回退**，
+      // 回退里同样需要 `>= M ? AllowWhileIdle : setExact` ⇒ 合法地出现第 2 处。
+      // 旧的 `expect(idx.length, 1)` 因此判红，但它抓的其实**不是**真正的不变量 ——
+      // 真正的不变量是「**每一处** `setExact` 都落在 `>= M` 的 else 兜底里」。
+      // 改为逐处检查后判据**更强**（原来只查唯一那一处），且不再因合法新增假红。
       final lines = sanitize(read(pluginKt)).split('\n');
       final idx = <int>[];
       for (var i = 0; i < lines.length; i++) {
         if (lines[i].contains('am.setExact(')) idx.add(i);
       }
       expect(
-        idx.length,
-        1,
-        reason: 'am.setExact( 出现了 ${idx.length} 次（期望恰好 1 次）。'
-            '它只能有一处兜底；多出来说明有人又在别处用了它。',
+        idx,
+        isNotEmpty,
+        reason: '找不到 `am.setExact(` —— 兜底分支被删除或改名，本锁失去判据（不许跳过）。',
       );
-      final i = idx.single;
-      final g = nearestGuard(lines, i);
-      expect(g?.level, 23,
-          reason: 'am.setExact( 上面最近的守卫不是 M(23)，是 ${g?.level}。');
-      expect(g?.op, '>=',
-          reason: 'am.setExact( 上面最近的守卫不是 `>=` 形式，是 `${g?.op}`。');
-      String? prev;
-      for (var j = i - 1; j >= 0; j--) {
-        if (lines[j].trim().isEmpty) continue;
-        prev = lines[j].trim();
-        break;
+      for (final i in idx) {
+        final g = nearestGuard(lines, i);
+        expect(g?.level, 23,
+            reason: '第 ${i + 1} 行的 `am.setExact(` 上面最近的守卫不是 M(23)，'
+                '是 ${g?.level}。');
+        expect(g?.op, '>=',
+            reason: '第 ${i + 1} 行的 `am.setExact(` 上面最近的守卫不是 `>=` 形式，'
+                '是 `${g?.op}`。');
+        String? prev;
+        for (var j = i - 1; j >= 0; j--) {
+          if (lines[j].trim().isEmpty) continue;
+          prev = lines[j].trim();
+          break;
+        }
+        expect(
+          prev,
+          '} else {',
+          reason: '第 ${i + 1} 行的 `am.setExact(` 的上一行是 `$prev`，不是 `} else {`。\n'
+              '⇒ 它不再是 `>= M` 的兜底分支。若它落在 `>= M` 的主分支里，'
+              '就等于把 AllowWhileIdle 换回了 setExact —— '
+              'API 24–30 在 Doze 下会被推迟到下一个维护窗口。',
+        );
       }
-      expect(
-        prev,
-        '} else {',
-        reason: 'am.setExact( 的上一行是 `$prev`，不是 `} else {`。\n'
-            '⇒ 它不再是 `>= M` 的兜底分支。若它落在 `>= M` 的主分支里，'
-            '就等于把 AllowWhileIdle 换回了 setExact —— '
-            'API 24–30 在 Doze 下会被推迟到下一个维护窗口。',
-      );
     });
 
     test('GUARD-03 精确闹钟权限引导与查询守卫必须是 S(31)', () {

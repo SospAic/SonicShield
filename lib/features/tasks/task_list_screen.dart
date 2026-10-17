@@ -86,11 +86,11 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       for (final m in pack.items) {
         await repo.setEnabled(m.task.id, enabled);
       }
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       await BackgroundServiceManager.instance.replan();
       _snack('已$what「${pack.title}」全部 ${pack.items.length} 条');
     } on Object catch (e) {
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       _snack('任务包$what失败：$e');
     }
   }
@@ -120,11 +120,11 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
         await repo.delete(m.task.id);
         await occ.deleteForTask(m.task.id);
       }
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       await BackgroundServiceManager.instance.replan();
       _snack('已删除「${pack.title}」全部 ${pack.items.length} 条');
     } on Object catch (e) {
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       _snack('任务包删除失败：$e');
     }
   }
@@ -191,14 +191,14 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       for (final id in ids) {
         await repo.setEnabled(id, enabled);
       }
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       await BackgroundServiceManager.instance.replan();
       _exitSelection();
       _snack('已$what ${ids.length} 个任务');
     } on Object catch (e) {
       // 失败必须可见：库可能只改了一半，重排也可能没跟上 —— 回读库让界面
       // 与服务真实状态一致，并把原因如实告诉用户（不许静默）。
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       _snack('批量$what失败：$e');
     }
   }
@@ -231,12 +231,12 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
         // 任务没了、计划还在 = 引擎仍会"替不存在的人响"（孤儿 occurrence）。
         await occ.deleteForTask(id);
       }
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       await BackgroundServiceManager.instance.replan();
       _exitSelection();
       _snack('已删除 ${ids.length} 个任务');
     } on Object catch (e) {
-      ref.invalidate(taskListProvider);
+      invalidateTaskDerivedCaches(ref);
       _snack('批量删除失败：$e');
     }
   }
@@ -324,7 +324,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
     // 列表仍显示旧「下次触发」（用户实测：改免打扰窗口 / 豁免开关后列表不变）。
     // 这里在引擎状态变化时重读 DB，兜住所有"引擎重排但 UI 未失效"的场景；
     // 广播本身是**低频**事件（tick 仅在 pending 少于阈值时才 replan），不放大查询。
-    ref.listen(engineStateProvider, (_, __) => ref.invalidate(taskListProvider));
+    ref.listen(engineStateProvider, (_, __) => invalidateTaskDerivedCaches(ref));
     final tasks = ref.watch(taskListProvider);
     return Scaffold(
       appBar: widget.embedded
@@ -339,7 +339,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
               label: const Text('新建任务'),
               onPressed: () async {
                 await context.push('/tasks/new');
-                ref.invalidate(taskListProvider);
+                invalidateTaskDerivedCaches(ref);
               },
             ),
       body: tasks.when(
@@ -356,7 +356,7 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
           final Widget content = list.isEmpty
               ? const _EmptyHint()
               : RefreshIndicator(
-                  onRefresh: () async => ref.invalidate(taskListProvider),
+                  onRefresh: () async => invalidateTaskDerivedCaches(ref),
                   child: _selectionMode
                       ? ListView.builder(
                           itemCount: list.length,
@@ -581,10 +581,10 @@ class _PackTaskRow extends ConsumerWidget {
           try {
             final repo = await ref.read(taskRepoProvider.future);
             await repo.setEnabled(t.id, v);
-            ref.invalidate(taskListProvider);
+            invalidateTaskDerivedCaches(ref);
             await BackgroundServiceManager.instance.replan();
           } on Object catch (e) {
-            ref.invalidate(taskListProvider);
+            invalidateTaskDerivedCaches(ref);
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text('切换失败：$e')));
@@ -662,7 +662,7 @@ class _TaskTile extends ConsumerWidget {
                         final occ =
                             await ref.read(occurrenceRepoProvider.future);
                         final n = await occ.skipNextForTask(t.id);
-                        ref.invalidate(taskListProvider);
+                        invalidateTaskDerivedCaches(ref);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                               content: Text(n > 0
@@ -677,13 +677,13 @@ class _TaskTile extends ConsumerWidget {
                       try {
                         final repo = await ref.read(taskRepoProvider.future);
                         await repo.setEnabled(t.id, v);
-                        ref.invalidate(taskListProvider);
+                        invalidateTaskDerivedCaches(ref);
                         await BackgroundServiceManager.instance.replan();
                       } on Object catch (e) {
                         // 开关失败必须可见（历史 BUG-A 同形：失败时开关弹回 +
                         // 零提示，用户以为"开关关不掉"）。失败后同样 invalidate，
                         // 让开关回到与服务真实状态一致的回执值。
-                        ref.invalidate(taskListProvider);
+                        invalidateTaskDerivedCaches(ref);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(content: Text('切换失败：$e')));
@@ -697,7 +697,7 @@ class _TaskTile extends ConsumerWidget {
             ? () => onToggle?.call()
             : () async {
                 await context.push('/tasks/${t.id}/edit');
-                ref.invalidate(taskListProvider);
+                invalidateTaskDerivedCaches(ref);
               },
         onLongPress: selectionMode
             ? null
@@ -763,7 +763,7 @@ class _TaskTile extends ConsumerWidget {
                   await repo.delete(t.id);
                   await occ.deleteForTask(t.id);
                 }
-                ref.invalidate(taskListProvider);
+                invalidateTaskDerivedCaches(ref);
                 await BackgroundServiceManager.instance.replan();
               },
       ),

@@ -18,10 +18,10 @@ void main() {
     });
 
     test('RCT-02 导入的旧 plan 带 ttsTexts ⇒ 物化全部忽略，绝不出 TtsAction', () {
-      final plan = CounterPlan(
-        presetIds: const ['annoy_cough_fit'],
-        ttsTexts: const ['干啥呢？', '小点声行不行？'], // 旧 JSON 兼容输入
-        workdayDay: const CounterWindow(
+      const plan = CounterPlan(
+        presetIds: ['annoy_cough_fit'],
+        ttsTexts: ['干啥呢？', '小点声行不行？'], // 旧 JSON 兼容输入
+        workdayDay: CounterWindow(
             volumeMin: 0.5, volumeMax: 0.8, durationSecMin: 3, durationSecMax: 8),
       );
       final tasks = CounterPlanMaterializer.materialize(
@@ -44,9 +44,9 @@ void main() {
     });
 
     test('RCT-03 无可用音效 ⇒ 一条音效都不排（不空转、不假装成功）', () {
-      final plan = CounterPlan(
-        presetIds: const ['annoy_cough_fit'],
-        ttsTexts: const ['干啥呢？'],
+      const plan = CounterPlan(
+        presetIds: ['annoy_cough_fit'],
+        ttsTexts: ['干啥呢？'],
       );
       final tasks = CounterPlanMaterializer.materialize(
         plan,
@@ -64,7 +64,7 @@ void main() {
     });
 
     test('RCT-04 无音源池时也不退化到 TTS（旧兜底路径彻底关闭）', () {
-      final plan = CounterPlan(presetIds: const ['x']);
+      const plan = CounterPlan(presetIds: ['x']);
       final tasks = CounterPlanMaterializer.materialize(
         plan,
         planId: 'p',

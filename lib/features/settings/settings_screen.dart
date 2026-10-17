@@ -268,6 +268,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
       await repo.upsertMany(parsed);
       final imported = parsed.length;
+      // 导入会新增/覆盖任务行 ⇒ 三份派生缓存一并失效（BUG-083）。
+      if (mounted) invalidateTaskDerivedCaches(ref);
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('导入完成：$imported 条任务（默认停用）')));
@@ -287,11 +289,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // 进入页面时让豁免计数重新算一次（provider 刻意不是 `autoDispose` ——
     // 靠这一句保证"每次进来都是新的"，同时避开 autoDispose 的零延时 Timer）。
     //
+    // ⚠️ **例外清单同理必须一并刷新**（BUG-083）：`forceRunTasksProvider` /
+    // `quietExemptOverrideTasksProvider` 都不是 `autoDispose`，本页又在
+    // `StatefulShellRoute.indexedStack` 下**常驻** ⇒ 不在进入时失效的话，
+    // 用户刚在任务编辑器里改完任务级豁免、切回本页看到的仍是旧清单。
+    //
     // ⚠️ 必须放进 post-frame 回调：`ref.invalidate` 会去 `dependOnInheritedWidget`
     // 找 `UncontrolledProviderScope`，而在 `initState()` 返回之前做这件事会被
     // 框架直接断言拦下（实测：整页用例全红）。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.invalidate(quietExemptCountProvider);
+      if (!mounted) return;
+      ref.invalidate(quietExemptCountProvider);
+      invalidateTaskDerivedCaches(ref);
     });
   }
 
@@ -690,12 +699,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await BackgroundServiceManager.instance.replan();
     if (mounted) {
       ref.invalidate(quietExemptCountProvider);
-      ref.invalidate(quietExemptOverrideTasksProvider);
-      // ⚠️ 必须一并失效**任务列表**：本页在 `StatefulShellRoute.indexedStack` 下
-      // 与任务列表**同时常驻**，`taskListProvider`（autoDispose）被列表页持续
-      // watch ⇒ 缓存不会因切页而失效。豁免开关改变了「下一触发」的物化结果，
-      // 不失效这里，列表会一直显示旧时间（用户实测："豁免后下一任务时间没变"）。
-      ref.invalidate(taskListProvider);
+      // ⚠️ 必须一并失效**任务列表与两份例外清单**：本页在
+      // `StatefulShellRoute.indexedStack` 下与任务列表**同时常驻**，
+      // `taskListProvider`（autoDispose）被列表页持续 watch ⇒ 缓存不会因切页失效。
+      // 豁免开关既改变「下一触发」的物化结果（不失效这里，列表会一直显示旧时间
+      // —— 用户实测："豁免后下一任务时间没变"），也改变例外清单的判据
+      // （清单 = `t.quietExempt != 主开关`，随主开关实时重算）⇒ 走集中入口。
+      invalidateTaskDerivedCaches(ref);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(next
               ? '已开启夜间豁免主开关：所有任务默认豁免（个别可强制不豁免）'
@@ -716,7 +726,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await p.setInt(PrefsKeys.quietEndHour, _quietEnd);
     await BackgroundServiceManager.instance.replan();
     // 同上：免打扰窗口变更也会改变物化结果（平移点变了）⇒ 一并失效任务列表。
-    ref.invalidate(taskListProvider);
+    invalidateTaskDerivedCaches(ref);
   }
 
   @override

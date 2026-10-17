@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
-import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
-import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/task.dart';
@@ -50,11 +48,6 @@ void main() {
     BackgroundServiceManager.startHook = null;
     await db.close();
   });
-
-  Future<T> dbRead<T>(WidgetTester tester, Future<T> Function() body) async {
-    final r = await tester.runAsync(body);
-    return r as T;
-  }
 
   Future<void> dbWrite(
       WidgetTester tester, Future<void> Function() body) async {

@@ -262,22 +262,40 @@ String? judgeOnGuardStreamError(String src) {
 ///
 /// [P1-04 加强] 除 null/异常两态外，还必须**解析结构化结果**并把降级回投给 UI：
 /// 旧实现把"权限被拒返回 `0`"当成普通成功，界面照常显示运行中，系统级唤醒却没排上。
+///
+/// ⚠️ 第八十五轮（2026-10-17）**锚点重校**：本锁原用
+/// `src.substring(i, i + 1400)` 的**定长窗口** + `invokeMethod('setExactAlarms'`
+/// 作锚点。两处都随实现演进而失效：
+///   * 调用点已从 `native.invokeMethod('setExactAlarms', …)` 迁到
+///     `NativeBridge.setExactAlarms(times, useAlarmClock:)`（结构化回执
+///     `AlarmScheduleResult`，解析移到 `native_bridge.dart`）；
+///   * "平台未回执"分支已从 `if (n == null)` 改为**结构化判据**
+///     `res.unsupported && res.scheduled == 0 && res.expected > 0 && …`。
+/// 定长窗口同时是**脆弱**的：函数体一超长就静默截断（"切片平衡但错误"，
+/// 正是 `support/source_text.dart` 警告的那类失效）⇒ 改为 `balancedSlice`
+/// 按大括号配对取**整段函数体**，并改用与调用风格无关的 `setExactAlarms(`
+/// 作锚点。
 String? judgePushExactAlarms(String src) {
   final i = src.indexOf('Future<void> pushExactAlarms');
   if (i < 0) return '锚点丢失：pushExactAlarms 被删除';
-  final body = src.substring(i, (i + 1400).clamp(0, src.length));
-  if (!body.contains("invokeMethod('setExactAlarms'")) {
+  final open = src.indexOf('{', i);
+  if (open < 0) return '锚点丢失：pushExactAlarms 没有函数体';
+  final body = balancedSlice(src, open);
+  if (body == null) return '锚点丢失：pushExactAlarms 函数体未闭合';
+  if (!body.contains('setExactAlarms(')) {
     return '锚点丢失：setExactAlarms 调用不在函数体内';
   }
-  if (!body.contains('if (n == null)')) {
-    return '没有检查原生回执为 null 的分支（iOS/桌面未实现该通道 → 通道B失效但零痕迹）';
+  if (!body.contains('res.unsupported')) {
+    return '没有检查原生"本平台未实现该通道"的回执分支'
+        '（iOS/桌面未实现该通道 → 通道B失效但零痕迹）';
   }
   if (!body.contains("status: 'skipped'") ||
       !body.contains('进程被杀后不再补触发')) {
-    return 'null 回执分支没有写 skipped 审计并说明后果';
+    return '未回执分支没有写 skipped 审计并说明后果';
   }
-  if (!body.contains('AlarmScheduleResult.fromRaw') ||
-      !body.contains('res.degraded')) {
+  if (!body.contains('res.degraded') ||
+      !body.contains('res.expected') ||
+      !body.contains('res.scheduled')) {
     return '★ P1-04：没有解析结构化排布结果 —— 权限被拒/部分排布会被当成成功'
         '（界面显示运行中，系统级唤醒却没排上）';
   }
