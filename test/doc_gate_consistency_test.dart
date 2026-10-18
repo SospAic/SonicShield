@@ -303,11 +303,19 @@ const String kGlobalLabel = r'全局|对外诚实数字';
 /// ⇒ 豁免面分母 **767 → 795**。`main.dart`（70）与 `neural_tts.dart`（70）未动；
 /// 已覆盖行仍为 **9**（`background_engine` 8 + `main.dart` 0 + `neural_tts` 1）。
 /// 实测依据：第八十五轮门禁 `_pt/gates_覆盖率.log`（`设备层豁免 1.13% 9 / 795（3 个文件）`）。
-const int kDeviceExemptLines = 655 + 70 + 70;
+/// ⚠️ 第八十六轮（2026-10-18）：按权威 `coverage/lcov.info` 实测校正 ——
+/// - `background_engine.dart` BUG-087 修复把 `replan()` 的补跑改成
+///   **双层 try/finally**（内层只管复位、外层锁外补跑，见该处长注释），
+///   `LF` **655 → 663**（+8）⇒ 豁免面分母 **795 → 803**；
+/// - `neural_tts.dart` 本轮新增 `test/neural_tts_pack_test.dart`（10 例）
+///   ⇒ 已覆盖行 **1 → 50**。
+/// 合计：分母 **803**（663 + 70 + 70），已覆盖 **58**（8 + 50 + 0）。
+/// 实测依据：第八十六轮门禁 `_pt/lcov_r86b.info`（逐文件 LF/LH 独立复算）。
+const int kDeviceExemptLines = 663 + 70 + 70;
 
 /// 设备层豁免面**已覆盖**行（`background_engine.dart` 8 + `main.dart` 0 +
-/// `neural_tts.dart` 1 ⇒ 9）。
-const int kDeviceExemptCovered = 9;
+/// `neural_tts.dart` 50 ⇒ 58）。
+const int kDeviceExemptCovered = 58;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 

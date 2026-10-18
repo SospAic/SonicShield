@@ -370,3 +370,42 @@ class ScheduleEngine {
     return out;
   }
 }
+
+/// 计划是否需要续算（BUG-086 修复，2026-10-18）。
+///
+/// ## 旧判据错在哪（必须记住，防止有人改回去）
+///
+/// 引擎主循环原来是：
+/// ```dart
+/// final pending = await occs.pendingCountAfter(DateTime.now());
+/// if (pending < SchedulerConfig.planExtendThreshold.inHours) { … replan … }
+/// ```
+/// `pendingCountAfter` 返回的是**条数**（`SELECT COUNT(*)`），而
+/// `planExtendThreshold.inHours` 是**小时数**（默认 12）——拿两个不同
+/// 量纲的值比大小。任务一多，条数常年 ≥ 12 ⇒ `pending < 12` 恒为 false
+/// ⇒ **续算 tick 永不触发** ⇒ 未来计划视界从 `planHorizon`（48h）只耗不补，
+/// 逐轮缩进。
+///
+/// 真机实证（Redmi K70 Pro / Android 16，2026-10-18 取证）：
+/// 本应用 pending alarm **0 条**、未来覆盖 **0 小时**、**22:00–07:00**
+/// 夜间窗口 occurrence **0 条**、JobScheduler 无本应用注册任务。
+/// 于是"夜间豁免主开关开与不开"表现完全一样 —— 因为**夜里根本没有任何
+/// 计划条目可被豁免**。
+///
+/// ## 新判据
+///
+/// [coverEnd] = 当前最晚一条 pending 的触发时间（`null` = 一条都没有）。
+/// 覆盖末端已缩进 `now + threshold` 之内（或压根没有计划）⇒ 该重新物化，
+/// 把覆盖推回 `planHorizon`。
+///
+/// 稳态开销：每轮 replan 后覆盖 48h，要等 `now + 12h` 越过最后一条才触发
+/// ⇒ 约 36h 一次全量重算；其余 tick 只付一次 `MAX(fire_at)` 查询。
+/// 空表 / 新装 / 清库 / 引擎重启后，本判据返回 true ⇒ 自愈补排。
+bool planNeedsExtend(
+  DateTime? coverEnd, {
+  required DateTime now,
+  required Duration threshold,
+}) {
+  if (coverEnd == null) return true;
+  return !coverEnd.isAfter(now.add(threshold));
+}

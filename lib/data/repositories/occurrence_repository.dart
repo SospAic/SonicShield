@@ -29,12 +29,20 @@ class OccurrenceRepository {
   /// 只由「任务 id + 定义版本 + 当地日期」决定，重算得到同一批 `occurrenceId`，
   /// 所以"删未来 pending 再插入"对未变更的任务是**幂等**的、对已变更的是**正确替换**。
   ///
-  /// 保留 `done/failed/skipped`：它们是**审计**，不是计划。
+  /// 保留 `done/failed`：它们是**审计**，不是计划。
   /// 保留 `fire_at <= now` 的 pending：它们已到期、正由 `executeDue` 补执行，
   /// 删掉会漏触发（陈旧判定交给执行层的 10 分钟上限）。
   ///
-  /// 为什么用单事务：避免"删完还没插"的中间态被 `executeDue` 观察到
-  /// （虽然两通道各自持重入守卫，但删/插之间不应存在空窗）。
+  /// ## 未来 `skipped` 的处理（BUG-092 修复，2026-10-18）
+  /// 旧实现**只删 pending**。而 `skipped` 有两种来源：
+  /// - **用户在任务列表「跳过下一次」** —— 这是**意图**，投影内必须保留
+  ///   （否则用户刚点的跳过会被一次 replan 复活）；
+  /// - **定义变更留下的残影** —— 触发器/免打扰窗口改了以后，旧定义算出来的
+  ///   那一条已不在本轮投影里，同 id 复现时又被 `insert ignore` 挡住
+  ///   ⇒ "改回原设置后某一格永久不响"。
+  ///
+  /// 判据用**是否在本轮投影内**区分二者：投影内的 skipped 保留（意图），
+  /// 不在投影内的删除（残影）。`fire_at <= now` 的 skipped 仍是审计，不动。
   Future<void> reconcile(
     Iterable<String> taskIds,
     List<PlannedOccurrence> entries,
@@ -48,6 +56,25 @@ class OccurrenceRepository {
           where: "task_id = ? AND status = 'pending' AND fire_at > ?",
           whereArgs: [id, now.millisecondsSinceEpoch],
         );
+      }
+      // BUG-092：一次查出所有"未来 skipped"，按投影归属决定去留。
+      final projectedByTask = <String, Set<String>>{};
+      for (final o in entries) {
+        (projectedByTask[o.taskId] ??= <String>{}).add(o.id);
+      }
+      final scope = taskIds.toSet();
+      final stale =
+          await txn.query('occurrences', columns: ['id', 'task_id'], where: "status = 'skipped' AND fire_at > ?", whereArgs: [
+        now.millisecondsSinceEpoch
+      ]);
+      for (final row in stale) {
+        final tid = row['task_id'] as String?;
+        final oid = row['id'] as String?;
+        if (tid == null || oid == null || !scope.contains(tid)) continue;
+        final projected = projectedByTask[tid] ?? const <String>{};
+        if (!projected.contains(oid)) {
+          batch.delete('occurrences', where: 'id = ?', whereArgs: [oid]);
+        }
       }
       for (final o in entries) {
         batch.insert('occurrences', o.toRow(),
@@ -76,6 +103,27 @@ class OccurrenceRepository {
       [t.millisecondsSinceEpoch],
     );
     return (r.first['c'] as int?) ?? 0;
+  }
+
+  /// 未来 pending 的**覆盖末端**（最晚一条 pending 的 `fire_at`）。
+  ///
+  /// 计划续算判据的输入（BUG-086，2026-10-18）：旧判据是
+  /// `pendingCountAfter(now) < planExtendThreshold.inHours` —— 拿**条数**
+  /// 和**小时**比大小，任务一多恒不成立 ⇒ 续算永不触发 ⇒ 未来计划视界
+  /// 只耗不补，夜间时段没有任何 plan entry（真机实证 pending alarm = 0）。
+  ///
+  /// 这里改为取 `MAX(fire_at)`：一条聚合查询，比把整个列表拉回来更省，
+  /// 且与 [pendingCountAfter] 同样是"只看未来 pending"。
+  /// 返回 null = 未来一条 pending 都没有 ⇒ 调用方应判定"需要续算"
+  /// （空表 / 新装 / 清库 / 引擎重启后的自愈路径全靠它）。
+  Future<DateTime?> latestPendingFireAt(DateTime after) async {
+    final r = await _db.db.rawQuery(
+      'SELECT MAX(fire_at) AS m FROM occurrences '
+      "WHERE status = 'pending' AND fire_at > ?",
+      [after.millisecondsSinceEpoch],
+    );
+    final m = r.first['m'];
+    return m is int ? DateTime.fromMillisecondsSinceEpoch(m) : null;
   }
 
   /// 供原生精确闹钟排布：未来 horizon 内的 pending 条目。
@@ -132,6 +180,23 @@ class OccurrenceRepository {
         where: 'id = ?',
         whereArgs: [id],
       );
+
+  /// 某任务的**全部**计划条目（含审计态，按触发时间升序）。
+  ///
+  /// 为什么需要：[reconcile] 现在要区分「用户主动跳过的下一次」（保留）
+  /// 与「定义变更留下的残影」（删除），二者的差别只在**行在不在**，
+  /// 而 `pendingWithin` / `due` 都只看 `status = 'pending'`，
+  /// 断言不到 skipped 行的存亡 ⇒ 测试无法验证这个语义。
+  /// 审计侧（"那次到底跳过没有"）也缺一个读出口。
+  Future<List<PlannedOccurrence>> allForTask(String taskId) async {
+    final rows = await _db.db.query(
+      'occurrences',
+      where: 'task_id = ?',
+      whereArgs: [taskId],
+      orderBy: 'fire_at ASC',
+    );
+    return rows.map(PlannedOccurrence.fromRow).toList();
+  }
 
   /// 某任务最近一次成功执行时间（null = 无）。
   Future<DateTime?> lastDoneFor(String taskId) async {

@@ -246,11 +246,20 @@ abstract final class CounterPlanMaterializer {
         assetIds: assetIds,
         cooldownSec: plan.cooldownSec,
         quietPolicy: QuietPolicy.skip,
-        // v79 三态映射（与旧行为逐字等价，但改走"主开关默认值"语义）：
-        // - 遵循免打扰（默认）= `false`（强制不豁免）—— 无论主开关如何都受护栏约束；
-        // - 不遵循免打扰     = `null`（跟随主开关）—— 只有**本机**主开关开启时才豁免，
-        //   任何对端/计划都无法单方面绕过本机合规护栏（docs/08 §2 红线）。
-        quietExempt: plan.respectQuietHours ? false : null,
+        // v79 规格（docs/20 §8.1）：「反击计划生成的任务**一律** `null`
+        // （跟随本机主开关）」。旧写法是 `plan.respectQuietHours ? false : null`
+        // —— 而 `respectQuietHours` 默认 `true` ⇒ 物化出来的任务几乎总是
+        // `quietExempt: false`（**强制不豁免**）。于是用户在设置页打开
+        // 「夜间豁免主开关」后，反击计划任务**照样不在夜间执行**，
+        // 用户直接感知为"豁免开关没用"（真机双线证实的第二根因）。
+        //
+        // 改为一律 `null` 后，是否豁免完全由**本机主开关**决定：
+        // fail-safe 方向不降级（主开关默认 false ⇒ 默认全不豁免），
+        // 且任何对端/计划配置都无法单方面绕过本机合规护栏（docs/08 §2）。
+        //
+        // ⚠️ `CounterPlanParams.respectQuietHours` 字段保留（远程配置/导入
+        // 导出兼容），但**不再映射到 `quietExempt`** —— 已在字段 doc 注明。
+        quietExempt: null,
         priority: 0,
         createdAt: created,
         updatedAt: created,

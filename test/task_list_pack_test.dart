@@ -248,4 +248,83 @@ void main() {
     await waitForText(tester, '还没有任务');
     expect(find.widgetWithText(FloatingActionButton, '新建任务'), findsOne);
   }, timeout: perTest);
+
+  testWidgets('TLS-PACK-05 包头部开关：整组停用并如实回报条数', (tester) async {
+    await dbWrite(tester, () async {
+      final repo = TaskRepository(db);
+      await repo.upsert(counterTask('p1', '20261020D00', '反击·工作日白天 10:15'));
+      await repo.upsert(counterTask('p1', '20261020N00', '反击·工作日夜间 22:15'));
+    });
+
+    await pumpList(tester);
+    await waitForText(tester, '反击计划 · p1');
+
+    // 包未展开时卡内只有头部那一个 Switch（包内行尚未构建）。
+    final card = find.ancestor(
+      of: find.text('反击计划 · p1'),
+      matching: find.byType(Card),
+    );
+    final packSwitch = find.descendant(of: card, matching: find.byType(Switch));
+    expect(packSwitch, findsOne, reason: '包头部应有整组开关');
+
+    await tester.tap(packSwitch);
+    await waitForText(tester, '已停用「反击计划 · p1」全部 2 条');
+    await settleSnackBars(tester);
+  }, timeout: perTest);
+
+  testWidgets('TLS-PACK-06 菜单「删除整包」：二次确认后整包删除', (tester) async {
+    await dbWrite(tester, () async {
+      final repo = TaskRepository(db);
+      await repo.upsert(counterTask('p1', '20261020D00', '反击·工作日白天 10:15'));
+      await repo.upsert(counterTask('p1', '20261020N00', '反击·工作日夜间 22:15'));
+    });
+
+    await pumpList(tester);
+    await waitForText(tester, '反击计划 · p1');
+
+    await tester.tap(find.byIcon(Icons.more_vert).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await waitForText(tester, '删除整包');
+
+    await tester.tap(find.text('删除整包'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // 二次确认：文案要带包名与条数，避免误删。
+    await waitForText(tester, '删除「反击计划 · p1」全部 2 条？');
+    await tester.tap(find.text('删除'));
+    await waitForText(tester, '已删除「反击计划 · p1」全部 2 条');
+    await settleSnackBars(tester);
+
+    // 整包消失（列表回到空态）。
+    await waitFor(
+      tester,
+      () => find.text('反击计划 · p1').evaluate().isEmpty,
+      reason: '删除后任务包卡片应消失',
+    );
+  }, timeout: perTest);
+
+  testWidgets('TLS-PACK-07 菜单「立即执行下一条」：选中最早触发那条并如实回报',
+      (tester) async {
+    await dbWrite(tester, () async {
+      final repo = TaskRepository(db);
+      // 两条都启用：应挑 nextFireAt 最早的那条（此处顺序无关，只验入口连通）。
+      await repo.upsert(counterTask('p1', '20261020D00', '反击·工作日白天 10:15'));
+      await repo.upsert(counterTask('p1', '20261020N00', '反击·工作日夜间 22:15'));
+    });
+
+    await pumpList(tester);
+    await waitForText(tester, '反击计划 · p1');
+
+    await tester.tap(find.byIcon(Icons.more_vert).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await waitForText(tester, '立即执行下一条');
+
+    await tester.tap(find.text('立即执行下一条'));
+    // 引擎未运行 ⇒ 必须如实告知「未执行」，不许假成功。
+    await waitForText(tester, '未执行');
+    await settleSnackBars(tester);
+  }, timeout: perTest);
 }

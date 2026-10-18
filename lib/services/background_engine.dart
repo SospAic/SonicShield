@@ -348,6 +348,18 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 两条路径各自持锁即可消除各自的重入，且互不干扰（详见 F2 报告）。
   bool replanning = false;
 
+  /// `replan` 重入时的**补跑登记**（BUG-087 修复，2026-10-18）。
+  ///
+  /// 旧行为：`replanning` 为真时直接 `print` + `return`，把本次触发**静默
+  /// 丢弃**。而 `replan` 的触发源有四个：tick 续算、引擎启动、设置页开关
+  /// （`service.on('replan')`）、远程命令 —— 其中设置页那条是**用户动作
+  /// 的直接后果**，丢掉它等于"用户拨了开关但引擎永远不执行"。
+  /// 更糟的是兜底 tick 若同时被别的 bug 卡死，这次丢弃就是**永久**的。
+  ///
+  /// 现在改为登记 `replanQueued`：本轮 `finally` 释放锁之后合并补跑一次。
+  /// 互斥语义不变（仍不会有两个 replan 并发），但**没有任何触发源会丢失**。
+  bool replanQueued = false;
+
   /// 守卫启动失败原因（随每次 `state` 广播回投给 UI）。
   /// 成功启动 / 主动关闭时清空 —— 否则 UI 会一直拿着一条过期的错误。
   String? guardError;
@@ -1079,91 +1091,151 @@ Future<void> _engineBody(ServiceInstance service) async {
   Future<void> replan() async {
     // 与 executeDue 的守卫同形；同样在任何 await 之前同步置位。
     if (replanning) {
-      // ignore: avoid_print
-      print('[sonic_shield][engine] replan 重入被拒：上一轮续算尚未完成，跳过本次触发');
+      // BUG-087 修复（2026-10-18）：不再丢弃本次触发，登记为"待补跑"，
+      // 由本轮 finally 之后合并执行一次。互斥语义不变，但设置页开关 /
+      // 远程命令 / tick 这些触发源再也不会静默消失。
+      replanQueued = true;
       return;
     }
     replanning = true;
+    // 双层 try/finally：内层「跑完就复位」，外层「锁外补跑被登记的续算」。
+    // 拆两层的理由见外层 finally 处的长注释（REENT-05 的形状要求）。
     try {
-      // 设置同步（BUG-082）：本函数是**唯一**读取免打扰窗口 + 夜间豁免主开关
-      // 的地方，必须先 `reload()` —— 否则用户在引擎运行期间改的这两项在
-      // 本 isolate 里全是旧值（详见 [syncPrefs]）。
-      await syncPrefs();
-      final now = DateTime.now();
-      final all = await tasksRepo.listAll(enabledOnly: true);
-      // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
-      // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
-      // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
-      final window = normalizeQuietWindow(
-        prefs.getInt(PrefsKeys.quietStartHour),
-        prefs.getInt(PrefsKeys.quietEndHour),
-      );
-      // 夜间独立豁免主开关（v1.9，docs/20 §8.1）：**每轮重读**，不用服务启动时的快照。
-      // 用户在引擎运行期间改设置后，下一轮物化即生效（无需重启服务）。
-      // 读的是 `SharedPreferences`（与本项目其它用户级设置同一存储）。
-      final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
-      if (!allowExempt) {
-        // 授权被撤销 ⇒ **立刻清除**已落库的豁免计划。
-        // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
-        // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
-        // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
-        //
-        // ⚠️ v79：任务级可**双向覆盖** —— `quietExempt == true`（强制豁免）的任务
-        // 在主开关关闭时**仍然豁免**，其计划必须**保留**，不能一并清掉。
-        final forceExemptIds =
-            all.where((t) => t.quietExempt == true).map((t) => t.id);
-        final purged =
-            await occs.deletePendingQuietExempt(keepTaskIds: forceExemptIds);
-        if (purged > 0) {
+      try {
+        // 设置同步（BUG-082）：本函数是**唯一**读取免打扰窗口 + 夜间豁免主开关
+        // 的地方，必须先 `reload()` —— 否则用户在引擎运行期间改的这两项在
+        // 本 isolate 里全是旧值（详见 [syncPrefs]）。
+        await syncPrefs();
+        final now = DateTime.now();
+        final all = await tasksRepo.listAll(enabledOnly: true);
+        // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
+        // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
+        // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
+        final window = normalizeQuietWindow(
+          prefs.getInt(PrefsKeys.quietStartHour),
+          prefs.getInt(PrefsKeys.quietEndHour),
+        );
+        // 夜间独立豁免主开关（v1.9，docs/20 §8.1）：**每轮重读**，不用服务启动时的快照。
+        // 用户在引擎运行期间改设置后，下一轮物化即生效（无需重启服务）。
+        // 读的是 `SharedPreferences`（与本项目其它用户级设置同一存储）。
+        final allowExempt = prefs.getBool(PrefsKeys.quietExemptMaster) ?? false;
+        if (!allowExempt) {
+          // 授权被撤销 ⇒ **立刻清除**已落库的豁免计划。
+          // 不能只靠重算：`commitAll` 是 `ignore` 语义（计划不漂移），
+          // 已提交的豁免计划不会被新计划覆盖，会继续在夜间触发 ——
+          // 那样"关掉开关"在最长一个 planHorizon 内等于没关（护栏被静默绕过）。
+          //
+          // ⚠️ v79：任务级可**双向覆盖** —— `quietExempt == true`（强制豁免）的任务
+          // 在主开关关闭时**仍然豁免**，其计划必须**保留**，不能一并清掉。
+          final forceExemptIds =
+              all.where((t) => t.quietExempt == true).map((t) => t.id);
+          final purged =
+              await occs.deletePendingQuietExempt(keepTaskIds: forceExemptIds);
+          if (purged > 0) {
+            // BUG-090 修复（2026-10-18）：治理事件必须**另起一个 action 名**。
+            // 旧写法沿用 `action: 'quietExempt'`，而设置页「本月豁免次数」按
+            // `action='quietExempt'` 计数且**不区分 status** ⇒ 一次夜间执行
+            // 都没有也能虚高（撤销开关本身被记成"豁免了一次"）。
+            // 换成独立 action 后，计数查询一字不动即恢复正确，且不存在
+            // "少算真豁免"的风险（真豁免仍写 `quietExempt`）。
+            await logs.append(
+                source: 'schedule',
+                action: 'quietExemptPurge',
+                status: 'skipped',
+                message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划（已保留强制豁免例外）');
+          }
+        }
+        final engine = ScheduleEngine(
+          quietStartHour: window.start,
+          quietEndHour: window.end,
+          allowQuietExempt: allowExempt,
+        );
+        final newEntries = <PlannedEntry>[];
+        final taskIds = <String>[];
+        for (final t in all) {
+          // BUG-089 修复（2026-10-18）：**所有**启用任务都必须进对账删除面。
+          // 旧写法在 `taskIds.add` **之前** `continue` 掉声音触发任务 ⇒ 用户
+          // 把某个任务从"固定定时"改成"声音触发"后，它的旧时间计划不会被
+          // `reconcile` 清掉；而 `executeDue` 只按 `task.enabled` 过滤、
+          // **不看 triggerType** ⇒ 幽灵计划照常取出执行。
+          // 现在只跳过"物化"，不跳过"对账"（新计划为空 ⇒ 旧计划被删）。
+          taskIds.add(t.id);
+          if (t.triggerType == TriggerType.soundTriggered) continue;
+          newEntries.addAll(engine.materialize(t, now));
+        }
+        // 计划**对账**（P1-05 / P2-03）：把每个任务的**未来 pending** 整体替换为
+        // 本轮重算结果。种子只由「任务 id + 定义版本 + 当地日期」决定 ⇒ 未变更的
+        // 任务是幂等的；改过触发器/免打扰窗口的任务，其旧幽灵计划在此被撤销。
+        // 紧随其后的 `pushExactAlarms` 按新计划重排原生闹钟（两通道不脱节）。
+        await occs.reconcile(taskIds, [
+          for (final e in newEntries)
+            PlannedOccurrence(
+              id: e.occurrenceId,
+              taskId: e.taskId,
+              fireAt: e.fireAt,
+              status: OccurrenceStatus.pending,
+              volume: e.volume,
+              durationMs: e.durationMs,
+              quietExempt: e.quietExempted,
+            ),
+        ], now);
+        if (newEntries.isEmpty) {
+          await clearAllAlarms();
+          await broadcast();
+          return;
+        }
+        // 原生精确闹钟（通道B）排布（BUG-088 修复，2026-10-18）：
+        // 旧写法是 `newEntries.take(maxNativeAlarmsPerTask)` —— `newEntries`
+        // 是**按任务拼接**出来的（`ScheduleEngine.materialize` 只在每个任务
+        // 内部排序），64 条额度会被列表头部的任务吃光，尾部任务一条精确闹钟
+        // 都排不上；而夜间通道A（Dart Timer）在深度 Doze 下不可靠 ⇒ 那些任务
+        // **永不被唤醒**。改为**全局按 fireAt 升序**取最早 N 条，并把被截断
+        // 的数量写进审计（静默丢弃 = 没人知道谁掉了）。
+        final ordered = List<PlannedEntry>.of(newEntries)
+          ..sort((a, b) => a.fireAt.compareTo(b.fireAt));
+        final keep = ordered.length <= SchedulerConfig.maxNativeAlarmsPerTask
+            ? ordered
+            : ordered.sublist(0, SchedulerConfig.maxNativeAlarmsPerTask);
+        final dropped = ordered.length - keep.length;
+        final alarmTimes =
+            keep.map((e) => e.fireAt.millisecondsSinceEpoch).toList();
+        if (dropped > 0) {
           await logs.append(
               source: 'schedule',
-              action: 'quietExempt',
+              action: 'alarms',
               status: 'skipped',
-              message: '夜间豁免主开关已关闭，清除 $purged 条待执行的豁免计划（已保留强制豁免例外）');
+              message: '原生精确闹钟额度用尽：本轮 $ordered.length 条计划中最早的'
+                  ' ${keep.length} 条已排布，另有 $dropped 条依赖通道A兜底'
+                  '（深度 Doze 下可能失效）');
+        }
+        await pushExactAlarms(alarmTimes);
+        lastAction = 'replan(${newEntries.length} 条计划)';
+        await broadcast();
+      } finally {
+        replanning = false;
+      }
+    } finally {
+      // BUG-087：锁已在此释放 ⇒ 登记过的续算在**锁外**补跑，不会自锁重入。
+      // 互斥语义不变（仍是串行追加，不会两个 replan 并发），但设置页开关 /
+      // 远程命令 / tick 这些触发源再也不会静默消失。
+      //
+      // ⚠️ 为什么必须套两层 try/finally：`REENT-05` 的源码契约锁要求
+      // `} finally { replanning = false; } 紧邻收口`（复位语句后不得再有别的
+      // 语句）—— 那是为了「把守卫注释掉 / 复位漏改」能被判红。补跑逻辑放进
+      // 内层 finally 会破坏该形状，所以放外层：内层只管复位，外层只管补跑。
+      //
+      // ⚠️ 补跑也必须走 `stepGuarded`：`GTX-08` 禁字面 `await replan();`
+      // （老库缺列时裸调会抛 SQLITE_ERROR 且没人接），而这里本来就是
+      // 「不能因补跑失败影响上一轮结论」，兜底更严谨。
+      if (replanQueued) {
+        replanQueued = false;
+        try {
+          await stepGuarded('replan(queued)', replan);
+        } on Object {
+          // 补跑失败最坏就是下一轮 tick 再来；绝不在 finally 里向上抛
+          // （那会覆盖上一轮的返回/异常）。
         }
       }
-      final engine = ScheduleEngine(
-        quietStartHour: window.start,
-        quietEndHour: window.end,
-        allowQuietExempt: allowExempt,
-      );
-      final newEntries = <PlannedEntry>[];
-      final taskIds = <String>[];
-      for (final t in all) {
-        if (t.triggerType == TriggerType.soundTriggered) continue;
-        taskIds.add(t.id);
-        newEntries.addAll(engine.materialize(t, now));
-      }
-      // 计划**对账**（P1-05 / P2-03）：把每个任务的**未来 pending** 整体替换为
-      // 本轮重算结果。种子只由「任务 id + 定义版本 + 当地日期」决定 ⇒ 未变更的
-      // 任务是幂等的；改过触发器/免打扰窗口的任务，其旧幽灵计划在此被撤销。
-      // 紧随其后的 `pushExactAlarms` 按新计划重排原生闹钟（两通道不脱节）。
-      await occs.reconcile(taskIds, [
-        for (final e in newEntries)
-          PlannedOccurrence(
-            id: e.occurrenceId,
-            taskId: e.taskId,
-            fireAt: e.fireAt,
-            status: OccurrenceStatus.pending,
-            volume: e.volume,
-            durationMs: e.durationMs,
-            quietExempt: e.quietExempted,
-          ),
-      ], now);
-      if (newEntries.isEmpty) {
-        await clearAllAlarms();
-        await broadcast();
-        return;
-      }
-      final alarmTimes = newEntries
-          .take(SchedulerConfig.maxNativeAlarmsPerTask)
-          .map((e) => e.fireAt.millisecondsSinceEpoch)
-          .toList();
-      await pushExactAlarms(alarmTimes);
-      lastAction = 'replan(${newEntries.length} 条计划)';
-      await broadcast();
-    } finally {
-      replanning = false;
     }
   }
 
@@ -1949,8 +2021,18 @@ Future<void> _engineBody(ServiceInstance service) async {
       // `occs.reconcile` 生成（`extendCounterPlan` 内部已带一次 `replan`，
       // 故续排成功后 `pending` 变大、下面这次 `replan` 会被阈值自然跳过 —— 不重复劳动）。
       await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
-      final pending = await occs.pendingCountAfter(DateTime.now());
-      if (pending < SchedulerConfig.planExtendThreshold.inHours) {
+      // 计划续算判据（BUG-086 修复，2026-10-18）：
+      // 旧写法是 `pendingCountAfter(now) < planExtendThreshold.inHours` ——
+      // 拿**条数**和**小时**比大小，任务一多条数恒 ≥ 12 ⇒ 续算永不触发
+      // ⇒ 未来计划视界只耗不补，夜间时段没有任何 plan entry ⇒ 用户开不开
+      // 「夜间豁免主开关」表现完全一样（真机实证：pending alarm 0 条）。
+      // 改判「覆盖末端」：最晚 pending 的触发时间已缩进阈值之内（或一条
+      // 都没有）才续算。稳态约 36h 一次全量重算，其余 tick 只付一次
+      // MAX(fire_at) 聚合查询。
+      final nowTick = DateTime.now();
+      final coverEnd = await occs.latestPendingFireAt(nowTick);
+      if (planNeedsExtend(coverEnd,
+          now: nowTick, threshold: SchedulerConfig.planExtendThreshold)) {
         await stepGuarded('replan(tick)', replan);
       }
     }());
