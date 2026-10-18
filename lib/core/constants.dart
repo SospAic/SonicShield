@@ -23,7 +23,7 @@ class AppMeta {
   /// 🔴 第八十四轮用户基线：**禁止** `alpha+N` 之类预发布后缀表述；
   /// 版本号一律为纯 `x.y.z`，且**每轮迭代至少 +0.0.1**（不得同号复用）。
   /// 迭代日期改由 [buildDate] 承载（见 [displayVersion]）。
-  static const String version = '1.9.4';
+  static const String version = '1.9.5';
 
   /// 与 pubspec.yaml 的 `+N` **构建号**同步（第七十七轮基线新增）。
   ///
@@ -35,7 +35,7 @@ class AppMeta {
   /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
   /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
   /// 并锁死界面不得再出现写死的版本号。
-  static const String buildNumber = '27';
+  static const String buildNumber = '28';
 
   /// 迭代日期（年月日），每次迭代随版本信息一起更新。
   ///
@@ -70,6 +70,14 @@ class NotificationChannels {
   static const String events = 'sonicshield_events'; // 执行结果通知
   static const String guard = 'sonicshield_guard'; // 声音守卫告警
   static const String evidence = 'sonicshield_evidence'; // 取证完成
+
+  /// 来电（BUG-145）。
+  ///
+  /// 为什么必须**单独一个渠道**：`events` 是"任务执行结果"的低价值流，
+  /// 用户完全可能把它静音或降级；来电却必须能打断一切。两者共用渠道的后果
+  /// 就是"来电通知被当成执行日志静音掉"—— 即"来电丢失"。
+  /// 独立渠道还让用户能在系统设置里单独给来电放行全屏意图与响铃。
+  static const String calls = 'sonicshield_calls';
 }
 
 /// 调度引擎参数（调优入口，均可在设置页覆盖）。
@@ -101,6 +109,14 @@ class ComplianceGuardrails {
   /// 默认强制免打扰时段（本地时区）。
   static const int defaultQuietStartHour = 22;
   static const int defaultQuietEndHour = 7;
+
+  /// 开始小时的可调范围（**只能调窄，不能调宽**，docs/08 §51 / FR-62）。
+  ///
+  /// BUG-107：设置页下拉此前是 `20..23`，用户能把窗口从 22:00 提前到 20:00
+  /// —— 比默认**更宽**，直接违反护栏语义（而页面文案还写着"只能调窄"）。
+  /// 区间收窄到这里，`_load()` 也会把历史脏值（20/21）归一到 22。
+  static const int minQuietStartHour = 22;
+  static const int maxQuietStartHour = 23;
 
   /// 系统音量百分比硬上限（media 通道）。
   static const double maxMediaVolumePercent = 100;
@@ -144,6 +160,20 @@ abstract final class PrefsKeys {
   /// 而且 prefs 是**进程内同步可读**的，UI 读它不产生平台往返
   /// （kv 表要走一次 sqflite 查询，会让整页 widget 测试留下未完成的 Timer）。
   static const String quietExemptMaster = 'quiet_exempt_master';
+
+  /// 声音守卫（麦克风常开检测）开关。默认 false。
+  ///
+  /// 读取方：引擎装配 `SoundGuardService` 时决定是否起采流
+  /// （`background_engine` 的 `guardEnabled`）；
+  /// 写入方：引擎 `setGuardEnabled` 与守卫页开关；**撤销麦克风通行证时
+  /// 必须一并置 false**（通行证已被撤，若仍持久化为 true，下次启动会
+  /// 在无通行证的情况下尝试起麦克风 —— 系统会直接拒，用户看到的是
+  /// "守卫开关是开的但没反应"）。
+  ///
+  /// ⚠️ 抽成常量而不是散落的裸字符串：这是**跨进程共享的持久化键**
+  /// （引擎 isolate 与 UI isolate 都读它），拼错一个字母不会报错，
+  /// 只会表现为"守卫开关记不住"。
+  static const String guardEnabled = 'guard_enabled';
 
   /// 「实时随机动态反击」开关（v2.0 阶段 D）。默认 false。
   ///

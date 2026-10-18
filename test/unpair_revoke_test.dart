@@ -410,17 +410,26 @@ void main() {
     });
 
     test('UR-27 指令组归属在 run() 之前落、之后清（无窗口期、无残留）', () {
-      final body = methodBody(source, 'Future<void> _runScript(');
-      final setAt = body.indexOf('_activeScriptOwner = peer.deviceId;');
-      final runAt = body.indexOf('RcScriptExecutor.instance.run(');
-      final clearAt =
-          body.indexOf('_activeScriptOwner = null;', runAt);
+      // BUG-121 把一次执行拆成「预占段 `_runScript`」+「实跑段
+      // `_runClaimedScript`」：归属赋值跟着 `run()` 一起搬进了实跑段，
+      // 而释放仍在 `_runScript` 的 finally 里（异常逃逸也要清）。
+      final claim = methodBody(source, 'Future<void> _runClaimedScript(');
+      final outer = methodBody(source, 'Future<void> _runScript(');
+      final setAt = claim.indexOf('_activeScriptOwner = peer.deviceId;');
+      final runAt = claim.indexOf('RcScriptExecutor.instance.run(');
       expect(setAt, greaterThanOrEqualTo(0), reason: '缺归属赋值');
       expect(runAt, greaterThan(setAt),
           reason: '★ 必须在 run() **之前**落归属：否则"已在跑但 owner 还是 null"'
               '这段窗口期里解除配对会漏掉它 —— 正是要修的形状');
-      expect(clearAt, greaterThan(runAt),
-          reason: '结束（含被终止）后必须清空，否则下次撤销会误停别人的作业');
+      // 释放：外层 finally 里清空（正常返回 / 异常 / 被终止都要清）
+      final finAt = outer.indexOf('finally');
+      final clearAt = outer.indexOf('_activeScriptOwner = null;');
+      expect(finAt, greaterThanOrEqualTo(0), reason: '预占段必须有 try/finally');
+      expect(clearAt, greaterThan(finAt),
+          reason: '结束（含被终止）后必须清空，否则下次撤销会误停别人的作业；'
+              '且必须写在 finally 里，异常路径才不会留下残留归属');
+      // 置位点唯一 —— 多一条路径就会绕开归属
+      expect('_activeScriptOwner = peer.deviceId;'.allMatches(source).length, 1);
     });
   });
 }

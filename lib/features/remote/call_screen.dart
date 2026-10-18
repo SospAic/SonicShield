@@ -73,7 +73,6 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     if (!mounted) return;
     setState(() {
       _endpoints = store.paired();
-      _autoAnswer = store.paired().isNotEmpty ? _autoAnswer : _autoAnswer;
       _selected = widget.preselectEndpointId ??
           (_endpoints.isEmpty ? null : _endpoints.first.deviceId);
     });

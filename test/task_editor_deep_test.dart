@@ -83,6 +83,7 @@ void main() {
     String? remoteName,
     String? taskId,
     Size viewport = const Size(1080, 6000),
+    List<Override> extraOverrides = const [],
   }) async {
     bigViewport(tester, viewport);
     RemoteTaskTarget? remote;
@@ -91,7 +92,10 @@ void main() {
           RemoteTaskTarget(endpointName: remoteName ?? '端点', save: remoteSave);
     }
     await tester.pumpWidget(ProviderScope(
-      overrides: [databaseProvider.overrideWith((ref) async => db)],
+      overrides: [
+        databaseProvider.overrideWith((ref) async => db),
+        ...extraOverrides,
+      ],
       child: MaterialApp(
         home: Builder(
           builder: (ctx) => Scaffold(
@@ -1411,5 +1415,228 @@ void main() {
     await tapSave(tester);
     expect(find.textContaining('固定一次的时间必须晚于当前时间'), findsOneWidget);
     expect(sent, isNull, reason: '校验失败不得保存');
+  }, timeout: perTest);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // TEI-G · R87 覆盖率回补：宿主可达但既有用例没点到的分支
+  // （日期选择器 / 跨午夜开关双向 / 随机间隔与声音触发的字段原样带回 /
+  //   「跟随主开关」chip / 音源库空与读失败）
+  // 🔴 `RcStepKind.delay` 的 `_setIcon`/`_setLabel`/物化三分支为**穷举死分支**
+  //   （候选清单 `kinds` 不含 delay，UI 不可达）—— 不为覆盖率造假，如实豁免。
+  // ══════════════════════════════════════════════════════════════════════
+
+  testWidgets('TEI-G1 固定一次：日期选择器确认后真的回写日期并落库',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.fixedOnce,
+        trigger: FixedOnceTrigger(at: DateTime(2026, 11, 2, 6, 5)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    final before = textOf(tester, find.textContaining('日期：'));
+    expect(before, contains('2026-11-02'));
+
+    await tester.tap(find.textContaining('日期：'));
+    await tester.pumpAndSettle(); // 日历对话框
+    // 点一个与初始日期不同的日子（11 月，无重复数字：表头只显示初始日）。
+    await tester.tap(find.text('15'));
+    await tester.pump();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    final after = textOf(tester, find.textContaining('日期：'));
+    expect(after, contains('2026-11-15'), reason: '确认后日期必须真的回写');
+    expect(after, isNot(before));
+
+    await tapSave(tester);
+    final at = (sent!.trigger as FixedOnceTrigger).at;
+    expect(at.year, 2026);
+    expect(at.month, 11);
+    expect(at.day, 15, reason: '保存产物必须携带选择器写回的那一天');
+    expect(at.hour, 6, reason: '日期换了，时刻必须原样保留');
+  }, timeout: perTest);
+
+  testWidgets('TEI-G2 随机窗口：跨午夜开关可开可关（开→落库，再关→回 false）',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.randomWindow,
+        trigger: RandomWindowTrigger(
+          dateRange: DateRange(
+              start: DateTime(2027, 1, 1), end: DateTime(2027, 1, 31)),
+          windowStart: const TimeSpec(hour: 20),
+          windowEnd: const TimeSpec(hour: 2),
+          timesPerDay: 2,
+        ),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    const tile = '窗口跨午夜（结束在次日）';
+    expect(switchValue(tester, tile), isFalse);
+    await tester.tap(find.widgetWithText(SwitchListTile, tile));
+    await tester.pump();
+    expect(switchValue(tester, tile), isTrue);
+    await tapSave(tester);
+    expect((sent!.trigger as RandomWindowTrigger).windowEndNextDay, isTrue);
+
+    // 再关：开关是双向的，反向路径也要真的写回。
+    Task? sent2;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent2 = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'y',
+        triggerType: TriggerType.randomWindow,
+        trigger: RandomWindowTrigger(
+          dateRange: DateRange(
+              start: DateTime(2027, 1, 1), end: DateTime(2027, 1, 31)),
+          windowStart: const TimeSpec(hour: 20),
+          windowEnd: const TimeSpec(hour: 2),
+          timesPerDay: 2,
+          windowEndNextDay: true,
+        ),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    expect(switchValue(tester, tile), isTrue);
+    await tester.tap(find.widgetWithText(SwitchListTile, tile));
+    await tester.pump();
+    await tapSave(tester);
+    expect((sent2!.trigger as RandomWindowTrigger).windowEndNextDay, isFalse);
+  }, timeout: perTest);
+
+  testWidgets('TEI-G3 随机间隔：activeStart/activeEnd/maxPerDay 原样带回',
+      (tester) async {
+    // 这三个字段编辑器没有控件（BUG-098 同源：阈值/时段在别处配），
+    // 保存一次就把用户调好的生效时段重置成默认 = 静默丢配置。
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.randomInterval,
+        trigger: RandomIntervalTrigger(
+          dateRange: DateRange(
+              start: DateTime(2026, 11, 1), end: DateTime(2026, 12, 1)),
+          minGap: const Duration(minutes: 11),
+          maxGap: const Duration(minutes: 99),
+          activeStart: const TimeSpec(hour: 4, minute: 0),
+          activeEnd: const TimeSpec(hour: 21, minute: 30),
+          maxPerDay: 5,
+        ),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tapSave(tester);
+    final tr = sent!.trigger as RandomIntervalTrigger;
+    expect(tr.activeStart.hour, 4, reason: '生效开始必须原样带回，不得重置为 0:00');
+    expect(tr.activeStart.minute, 0);
+    expect(tr.activeEnd.hour, 21, reason: '生效结束必须原样带回，不得重置为 23:59');
+    expect(tr.activeEnd.minute, 30);
+    expect(tr.maxPerDay, 5, reason: '每日上限必须原样带回，不得重置为 8');
+  }, timeout: perTest);
+
+  testWidgets('TEI-G4 声音触发：阈值/最短持续/冷却/仅充电 原样带回',
+      (tester) async {
+    Task? sent;
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async {
+        sent = t;
+        return true;
+      },
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.soundTriggered,
+        trigger: const SoundTrigger(
+          thresholdDb: -42,
+          minDurationMs: 3500,
+          cooldownSec: 77,
+          onlyWhileCharging: true,
+        ),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tapSave(tester);
+    final tr = sent!.trigger as SoundTrigger;
+    expect(tr.thresholdDb, -42, reason: '阈值无控件 ≠ 可以重置 —— 必须原样带回');
+    expect(tr.minDurationMs, 3500);
+    expect(tr.cooldownSec, 77);
+    expect(tr.onlyWhileCharging, isTrue);
+  }, timeout: perTest);
+
+  testWidgets('TEI-G5 夜间豁免：强制豁免 → 「跟随主开关」chip 可切回 null',
+      (tester) async {
+    // ⚠️ 本机模式：三态区块只在**本机**渲染（TEI-F9：远程恒压回 null）。
+    await pumpEditor(tester, viewport: const Size(1080, 8000));
+    await tester.tap(chip('强制豁免'));
+    await tester.pump();
+    expect(tester.widget<ChoiceChip>(chip('强制豁免')).selected, isTrue);
+    await tester.tap(chip('跟随主开关'));
+    await tester.pump();
+    expect(tester.widget<ChoiceChip>(chip('跟随主开关')).selected, isTrue,
+        reason: '三态是单选：切回跟随必须把强制档取消');
+    await tester.enterText(find.byType(TextField).first, '跟随切换任务');
+    await tester.pump();
+    await tapSave(tester);
+    await waitFor(tester, () => find.text('保存任务').evaluate().isEmpty,
+        reason: '本机保存成功后应 pop 回宿主页');
+    final all = await dbRead(tester, () => TaskRepository(db).listAll());
+    final saved = all.firstWhere((t) => t.name == '跟随切换任务');
+    expect(saved.quietExempt, isNull, reason: '跟随主开关必须落库为 null');
+  }, timeout: perTest);
+
+  testWidgets('TEI-G7 播放：音源库为空时点开选择器 → 明确告警（不静默空选）',
+      (tester) async {
+    await pumpEditor(tester, remoteSave: (t) async => true);
+    // 库是空的（setUp 只开库，没插音源）。
+    expect(find.text('音源：未选择'), findsOneWidget);
+    await tester.tap(find.text('音源：未选择'));
+    await waitFor(tester,
+        () => find.textContaining('音源库为空').evaluate().isNotEmpty,
+        reason: '空库必须用 toast 指路「先去「声音」页导入」');
+  }, timeout: perTest);
+
+  testWidgets('TEI-G8 播放：音源库读取失败 → toast 报错并中止（不崩）',
+      (tester) async {
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async => true,
+      extraOverrides: [
+        assetRepoProvider.overrideWith((ref) async => throw Exception('库炸了')),
+      ],
+    );
+    expect(find.text('音源：未选择'), findsOneWidget);
+    await tester.tap(find.text('音源：未选择'));
+    await waitFor(tester,
+        () => find.textContaining('音源库读取失败').evaluate().isNotEmpty,
+        reason: '读失败必须可见（含错误原因），不允许静默无响应');
   }, timeout: perTest);
 }

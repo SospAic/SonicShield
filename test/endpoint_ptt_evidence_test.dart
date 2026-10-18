@@ -275,8 +275,12 @@ void main() {
     test('PT-04 全链路成功 → 通知 + 审计 success + rc.ptt{ok:true}', () async {
       await svc.start(store, db);
       final sentBefore = fake.sentWires.length;
+      var existedAtPlay = false;
       svc.playHandler = (path, volume, durationMs, {loop = false}) async {
         played.add((path: path, volume: volume, durationMs: durationMs, loop: loop));
+        // 播放器被调用的**那一刻**文件必须已经落盘 —— 这是 PT-03 的前提，
+        // 也是"先落盘再播"的顺序锁。不能改成播完再看（见下面的清理断言）。
+        existedAtPlay = File(path).existsSync();
         return true;
       };
       await emitCmd(inbound(RcCmd.pttVoice,
@@ -284,7 +288,12 @@ void main() {
       await waitPttAckSent(sentBefore);
 
       expect(played.single.path.endsWith('.m4a'), isTrue);
-      expect(File(played.single.path).existsSync(), isTrue);
+      expect(existedAtPlay, isTrue,
+          reason: '交给播放器的路径必须指向已真实落盘的文件');
+      // BUG-114：播放成功后必须删掉临时文件 —— v1 对讲曾把音频写进文档目录
+      // 后从不删除，每用一次就永久残留一个 m4a。
+      expect(File(played.single.path).existsSync(), isFalse,
+          reason: '播放结束后必须清理临时音频，否则对讲用一次漏一个文件');
       expect(shown, hasLength(1), reason: '"来自 x 的语音"必须真的发了通知');
       expect(
           (shown.single as Map)['title'], '声盾 · 对讲');

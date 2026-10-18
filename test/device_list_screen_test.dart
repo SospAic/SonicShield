@@ -241,14 +241,17 @@ void main() {
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
 
-    // 对话框必须说清"重新连接要再扫码" —— 这是不可逆操作。
+    // 对话框必须说清"删除之后对方会被拒" —— 这是不可逆操作。
     expect(find.text('删除这台设备？'), findsOneWidget);
-    expect(find.textContaining('重新连接需要再次扫码配对'), findsOneWidget);
+    expect(find.textContaining('再发配对请求会被拒'), findsOneWidget,
+        reason: '删了却不说后果，用户会以为只是从列表里藏起来');
     // P1-01：撤销强度边界必须对用户可见（共享配对码 ⇒ 删除≠密码学撤销），
     // 并给出可执行的更强手段入口（重置配对码）。
-    expect(find.textContaining('撤销强度说明'), findsOneWidget,
+    expect(find.textContaining('旧码派生的密钥全部失效'), findsOneWidget,
         reason: '把"删除列表"说成"已彻底撤权"是夸大承诺（P1-01）');
-    expect(find.textContaining('重置配对码'), findsOneWidget,
+    expect(find.textContaining('其它已配对设备也需要重新扫码'), findsOneWidget,
+        reason: '更强手段的代价必须提前说，不能等用户点下去才炸');
+    expect(find.textContaining('重置配对码'), findsWidgets,
         reason: '只说局限不给下一步，用户没有可执行的更强手段');
 
     await tester.tap(find.widgetWithText(FilledButton, '删除'));

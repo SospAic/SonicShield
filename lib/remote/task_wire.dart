@@ -567,11 +567,21 @@ abstract final class TaskWire {
   }
 
   static TaskCondition? _condition(Object? v) {
+    // BUG-118：区分「没带条件」（null）与「带了但解析不出来」。
+    // 旧实现两者都返回 null ⇒ 对端发来畸形 condition 时任务照常落库、
+    // **只是条件被静默丢弃**，对端却以为条件已生效（"我设了只在充电时执行，
+    // 结果它半夜响"）。带了就必须解析成功，否则由 `fromWire` 的 catch
+    // 把**整条任务**拒掉（与该函数其余校验同口径）。
+    if (v == null) return null;
     final m = _asMap(v);
-    if (m == null) return null;
+    if (m == null) {
+      throw const FormatException('condition 必须是对象');
+    }
     // 复用既有解析（入参为 JSON 字符串），并夹紧数值范围。
     final parsed = TaskCondition.fromJsonOrNull(jsonEncode(m));
-    if (parsed == null) return null;
+    if (parsed == null) {
+      throw const FormatException('condition 无法解析');
+    }
     return TaskCondition(
       requireCharging: parsed.requireCharging,
       minBatteryPct: parsed.minBatteryPct?.clamp(0, 100),

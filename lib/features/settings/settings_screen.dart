@@ -115,6 +115,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'condition_json': t.condition == null
                   ? null
                   : jsonEncode(t.condition!.toJson()),
+              // BUG-103：备份必须带上 `forceRun`（暂停期间强制执行），否则
+              // 「导出 → 导入」后它会静默回落 false，用户感知为「恢复备份后
+              // 我的设置丢了」。
+              //
+              // ⚠️ **`quietExempt` 不随备份走**（QE-15 的硬约束，已裁决）：
+              // 它是**授权**（允许在免打扰时段放行），不是普通配置。
+              // 让授权随数据走，意味着"导入一份他人给的备份"就能带上夜间
+              // 豁免意图 —— 与「授权必须在本机显式给出」的红线冲突。
+              // 代价是恢复备份后需在本机重新勾选，这个代价是刻意的。
+              'force_run': t.forceRun,
               'created_at': t.createdAt.millisecondsSinceEpoch,
             },
         ],
@@ -167,44 +177,53 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<String?> _askPassword(String title, {bool confirm = true}) async {
     final c1 = TextEditingController();
     final c2 = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-                controller: c1,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: '密码')),
-            if (confirm)
+    try {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               TextField(
-                  controller: c2,
+                  controller: c1,
                   obscureText: true,
-                  decoration: const InputDecoration(labelText: '确认密码')),
+                  decoration: const InputDecoration(labelText: '密码')),
+              if (confirm)
+                TextField(
+                    controller: c2,
+                    obscureText: true,
+                    decoration: const InputDecoration(labelText: '确认密码')),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('确定')),
-        ],
-      ),
-    );
-    if (ok != true) return null;
-    if (c1.text.isEmpty) return '';
-    if (confirm && c1.text != c2.text) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('两次密码不一致')));
+      );
+      if (ok != true) return null;
+      if (c1.text.isEmpty) return '';
+      if (confirm && c1.text != c2.text) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('两次密码不一致')));
+        }
+        return null;
       }
-      return null;
+      return c1.text;
+    } finally {
+      // BUG-146：两个控制器**必须**释放。旧实现直接 return 出函数，控制器
+      // 连同它注册的输入法连接一起泄漏 —— 每导出/导入一次备份漏两个
+      // （输入法侧还会保留上一次的文本缓冲）。`finally` 保证取消、不一致、
+      // 成功三条路径都释放。
+      c1.dispose();
+      c2.dispose();
     }
-    return c1.text;
   }
 
   Future<void> _importTasks() async {
@@ -260,6 +279,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               .byName(row['quiet_policy'] as String? ?? 'skip'),
           condition:
               TaskCondition.fromJsonOrNull(row['condition_json'] as String?),
+          // BUG-103：`forceRun` 随备份往返（旧备份没有这个键 ⇒ 回落 false）。
+          // `quietExempt` **不读**：授权不随数据走（见导出侧的说明 / QE-15），
+          // 导入的任务一律回到"跟随本机主开关"（null）。
+          forceRun: row['force_run'] as bool? ?? false,
           priority: row['priority'] as int? ?? 0,
           createdAt: DateTime.fromMillisecondsSinceEpoch(
               row['created_at'] as int? ?? 0),
@@ -311,6 +334,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final planStore = CounterPlanStore(p);
     setState(() {
       _powerMode = p.getString(PrefsKeys.powerMode) ?? 'balanced';
+      // BUG-107（返工）：**不得**在这里 clamp。历史/导入的 `quiet_start` 可能
+      // 落在允许区间之外（早期版本允许 20/21），而 clamp 会让"只是进设置页
+      // 改结束小时"也把开始小时悄悄改写（静默数据变更，SET-03b 抓的就是它），
+      // 界面还会显示 22 而库里是 20（正是 SET-01c 要防的"永远显示默认值"）。
+      // 越界值由下拉的候选项**兜住显示**，见下方 `quietStartItems`。
       _quietStart = p.getInt(PrefsKeys.quietStartHour) ??
           ComplianceGuardrails.defaultQuietStartHour;
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
@@ -325,6 +353,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _plan = planStore.loadPlan();
       _planEnabled = planStore.enabled;
       _planParams = planStore.loadParams() ?? CounterPlanParams.defaults();
+      // BUG-105：进页时必须一并读节假日状态。旧实现只把它们放在
+      // `_reloadPlan()`（生成/导入后）里 ⇒ 用户此前更新过节假日，重进本页
+      // 「反击计划」TAB 仍显示「拉取公开数据源…」，与实际数据不符。
+      _holidayDayCount = planStore.autoOverrides().length;
+      _holidayUpdatedAt = planStore.autoOverridesUpdatedAt();
     });
   }
 
@@ -417,6 +450,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final p = await SharedPreferences.getInstance();
     final store = CounterPlanStore(p);
     if (!mounted) return;
+    // BUG-104：反击计划的 apply/disable 会**直接改 tasks 表**（物化 + 删除
+    // `counter:` 前缀任务），而任务列表页 / 首页例外清单 / 守护页常驻、
+    // provider 又非 autoDispose ⇒ 不在这里失效，用户切回列表会看到旧内容
+    // （"计划明明生成了，任务列表里没有"）。BUG-083 的契约是「任何改动
+    // tasks 表的地方都必须走本函数」，设置页这四处此前是缺口。
+    invalidateTaskDerivedCaches(ref);
     setState(() {
       _plan = store.loadPlan();
       _planEnabled = store.enabled;
@@ -620,7 +659,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ListTile(
         leading: const Icon(Icons.auto_awesome),
         title: const Text('一键 AI 生成并导入'),
-        subtitle: const Text('需先配置 DeepSeek Key'),
+        // BUG-149：文案不能写死"需先配置 DeepSeek Key" —— 内置默认 Key
+        // 让这条能力**开箱可用**（`ApiConfigStore.apiKey` 在"从未配置"时
+        // 回落内置值，只有用户**显式清空**才会返回空串）。
+        // 写死的提示与真实行为矛盾，会让用户以为功能不可用而不去点。
+        subtitle: Text(_dsApiKey.trim().isEmpty
+            ? '当前无可用 Key（已显式清空）：请先在下方配置'
+            : '用内置/已配置的 DeepSeek Key 生成计划'),
         onTap: _genAiPlan,
       ),
       ListTile(
@@ -796,7 +841,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             padding: EdgeInsets.symmetric(vertical: AppSpacing.sm),
             child: Text(
                 '性能优先：额外持有唤醒锁，锁屏后 CPU 不休眠、定时最准（更耗电）；'
-                '省电模式：电量 < 15% 且未充电时自动暂停随机类任务与守卫，仅保留固定定时。',
+                // BUG-150：阈值从 `PowerConfig.saverBatteryLevel` 取，不再写死
+                // "15%" —— 否则改常量时这句文案会静默说谎（用户按文案理解行为）。
+                // 常量插值在 const 上下文里合法（`saverBatteryLevel` 是 const int）。
+                '省电模式：电量 < ${PowerConfig.saverBatteryLevel}% 且未充电时'
+                '自动暂停随机类任务与守卫，仅保留固定定时。',
                 style: AppText.bodySmall),
           ),
           const Divider(height: 32),
@@ -807,8 +856,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             trailing: DropdownButton<int>(
               value: _quietStart,
               items: [
-                for (var h = 20; h <= 23; h++)
+                // BUG-107：只允许 22–23（docs/08 §51：只能调窄不可调宽）。
+                // 但 `DropdownButton` 要求 `value` 必须能在 items 里找到，
+                // 否则直接断言崩 —— 历史/导入值可能落在区间外（早期允许
+                // 20/21），故把**当前值**补进候选项：显示得出来、不崩、
+                // 也不改写库里的值。用户一旦改选，就只能落在 22–23。
+                for (var h = ComplianceGuardrails.minQuietStartHour;
+                    h <= ComplianceGuardrails.maxQuietStartHour;
+                    h++)
                   DropdownMenuItem(value: h, child: Text('$h:00')),
+                if (_quietStart < ComplianceGuardrails.minQuietStartHour ||
+                    _quietStart > ComplianceGuardrails.maxQuietStartHour)
+                  DropdownMenuItem(
+                      value: _quietStart, child: Text('$_quietStart:00')),
               ],
               onChanged: (v) {
                 if (v == null) return;
@@ -824,6 +884,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               items: [
                 for (var h = 5; h <= 9; h++)
                   DropdownMenuItem(value: h, child: Text('$h:00')),
+                // 同 `_quietStart`：越界的历史值必须能显示，否则断言崩。
+                if (_quietEnd < 5 || _quietEnd > 9)
+                  DropdownMenuItem(value: _quietEnd, child: Text('$_quietEnd:00')),
               ],
               onChanged: (v) {
                 if (v == null) return;

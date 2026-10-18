@@ -19,6 +19,21 @@ class NativeBridge {
 
   static const MethodChannel _ch = MethodChannel(ChannelsMethod.channel);
 
+  /// 统一的通道调用出口。
+  ///
+  /// ## 为什么必须兜到 `Object`（BUG-125）
+  /// 旧实现只捕 `PlatformException` / `MissingPluginException`，漏掉**第三类**
+  /// 失败：**回执类型不匹配**。`invokeMethod<T>` 在解码后要 `as T?`，原生若
+  /// 返回了别的类型（老版本插件、Kotlin 侧分支漏改、Map 的键类型是 `Object?`
+  /// 而非 `String`），抛的是 `TypeError` —— 它会**穿透**这两个 catch，
+  /// 一路逃到调用栈顶变成未处理异步错误。
+  ///
+  /// 后果在引擎侧尤其严重：`_invoke` 的调用点（闹钟排布 / 振动 / 音量）
+  /// 都在 tick 的关键路径上，异常逃出去就**整轮 tick 中断**，表现为
+  /// "某天起所有任务都不触发了"，而审计里一条记录都没有。
+  ///
+  /// `_invoke` 的契约本来就是"读不到 ⇒ null ⇒ 调用方如实降级"，把
+  /// `TypeError` 也归到 null 是同一条语义，不是新加一层静默。
   static Future<T?> _invoke<T>(String method,
       [Map<String, dynamic>? args]) async {
     try {
@@ -27,6 +42,9 @@ class NativeBridge {
       // 桌面/测试/未实现平台上静默降级；日志由调用方记录。
       return null;
     } on MissingPluginException {
+      return null;
+    } on Object {
+      // 类型不匹配（TypeError）/ 通道被销毁等：同样归为"读不到"。
       return null;
     }
   }
@@ -294,6 +312,9 @@ class NativeBridge {
     } on PlatformException {
       return false;
     } on MissingPluginException {
+      return false;
+    } on Object {
+      // 同 [_invoke]：类型不匹配也归为"未受理"，不得让异常逃到调用栈顶。
       return false;
     }
   }

@@ -244,12 +244,26 @@ class BackgroundServiceManager {
     final completer = Completer<RunNowResult>();
     _pendingRun[reqId] = completer;
     // invoke 返回 void（fire-and-forget）：结果由 rcRunResult 回投。
-    _svc.invoke(method, args);
+    //
+    // BUG-097：`invoke` 本身可能**同步抛**（服务已死但 `isRunning` 还是陈旧
+    // true；非移动平台会抛 UnsupportedError）。旧写法把 `_pendingRun[reqId]`
+    // 永久留在表里（completer 永不完成 ⇒ 每次泄漏一个），异常还会穿透到
+    // `runNow` 的调用方（UI 侧变成未捕获异步错误）。
+    try {
+      _svc.invoke(method, args);
+    } on Object catch (e) {
+      _pendingRun.remove(reqId);
+      return RunNowResult(ok: false, message: '引擎调用失败：$e');
+    }
     try {
       return await completer.future.timeout(timeout);
     } on TimeoutException {
       _pendingRun.remove(reqId);
       return const RunNowResult(ok: false, message: '引擎执行超时');
+    } on Object catch (e) {
+      // 兜底：回投侧 completeError 也要摘表，否则同样泄漏。
+      _pendingRun.remove(reqId);
+      return RunNowResult(ok: false, message: '引擎回投异常：$e');
     }
   }
 

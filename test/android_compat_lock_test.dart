@@ -591,9 +591,12 @@ void main() {
 
     test('ATTR-04 振动唯一出口仍是 applyEffect（v1.x 入口不得绕过）', () {
       final code = sanitize(read(pluginKt));
+      // BUG-133 起 `vibrate()` 返回 `Boolean`（真实回执，不再无条件 success(true)），
+      // 因此签名与 `{` 之间多了一段返回类型 —— 锁的**意图**是"必须转调
+      // vibrateWaveform"，故放宽为"可选返回类型"。
       expect(
-        RegExp(r'private fun vibrate\(ctx: Context, pattern: List<Long>\)\s*\{'
-                r'[^}]*vibrateWaveform\(')
+        RegExp(r'private fun vibrate\(ctx: Context, pattern: List<Long>\)'
+                r'(?::\s*\w+)?\s*\{[^}]*vibrateWaveform\(')
             .hasMatch(code),
         isTrue,
         reason: 'v1.x 的 vibrate() 入口必须转调 vibrateWaveform（带属性），'

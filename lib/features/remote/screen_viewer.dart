@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -55,6 +57,14 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
     _boot();
   }
 
+  /// 远端流订阅（BUG-143）。
+  ///
+  /// 旧实现把 `listen(...)` 的返回值丢掉：页面退出后订阅仍然存活，
+  /// 回调里 `_remote.srcObject = s` 会写到一个**已 dispose 的
+  /// `RTCVideoRenderer`** —— `mounted` 守卫只能挡住 `setState`，
+  /// 挡不住这行原生调用（表现为退出投屏页后偶发崩溃/黑屏）。
+  StreamSubscription<MediaStream?>? _remoteSub;
+
   Future<void> _boot() async {
     await _remote.initialize();
     if (!mounted) return;
@@ -67,7 +77,7 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
         _last = '已收到画面';
       });
     }
-    CallService.instance.remoteStreamChanges.listen((s) {
+    _remoteSub = CallService.instance.remoteStreamChanges.listen((s) {
       if (!mounted) return;
       _remote.srcObject = s;
       setState(() {
@@ -79,6 +89,8 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
 
   @override
   void dispose() {
+    _remoteSub?.cancel();
+    _remoteSub = null;
     _remote.dispose();
     super.dispose();
   }

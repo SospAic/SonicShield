@@ -298,4 +298,8 @@ class _FakeTasks implements TaskRepository {
 
   @override
   Future<void> delete(String id) async {}
+
+  // BUG-148 新增的仓储方法：本替身只服务节假日用例，无需真实语义。
+  @override
+  Future<int> removeAssetRef(String assetId) async => 0;
 }

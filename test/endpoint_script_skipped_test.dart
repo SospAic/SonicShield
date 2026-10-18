@@ -32,7 +32,15 @@ void main() {
 
   group('R-4 端点侧接线锁（源码契约）', () {
     final src = File('lib/remote/endpoint_service.dart').readAsStringSync();
-    final runScript = methodBody(src, 'Future<void> _runScript(');
+    // BUG-121：一次脚本执行被拆成三段 ——
+    // ① `_tryClaimScript`（检查 + 占位，**同步**原子段）
+    // ② `_runScript`（占位失败的回执；占位成功后进实跑段）
+    // ③ `_runClaimedScript`（heads-up / runner / 终态广播）
+    // 这些锁的**语义范围**是"一次脚本执行"，故按源码顺序拼接起来看 ——
+    // 拼接顺序即运行时顺序，`guard < success` / `guard < run` 这类顺序断言仍然成立。
+    final runScript = methodBody(src, 'bool _tryClaimScript() {') +
+        methodBody(src, 'Future<void> _runScript(') +
+        methodBody(src, 'Future<void> _runClaimedScript(');
     final runner = methodBody(runScript, 'Future<void> runner(RcStep step)');
 
     test('RSS-04 ⚠️ "已在跑"的判定必须在 success 审计**之前**', () {
@@ -111,6 +119,31 @@ void main() {
       expect(record, isNot(contains('_ack(')),
           reason: '录音结果若单独发 ack，控制端就要处理两种回执 —— '
               '它只需读终态的 skipped 列表（R-4③）');
+    });
+
+    test('RSS-11 ⚠️「检查 + 占位」必须在同一个同步段里（BUG-121）', () {
+      final claim = methodBody(src, 'bool _tryClaimScript() {');
+      expect(claim, contains('RcScriptExecutor.instance.isRunning'),
+          reason: '检查被搬走后，闸门就不再是同一个原子段');
+      expect(claim, contains('_scriptClaimed = true;'));
+      expect(claim, isNot(contains('await ')),
+          reason: '预占方法里出现 await ⇒ 两台控制端可同时穿过闸门：'
+              '先到者起跑、后到者 run() 返回 false 却被记成 success（BUG-121 原症状）');
+      // 置位/释放各只一处，否则"原子段"的前提不成立。
+      // ⚠️ 释放只能在 `_runScript` 体内数 —— 字段声明 `bool _scriptClaimed = false;`
+      // 本身就含 `_scriptClaimed = false;` 这个子串，扫全文会多数一个。
+      final body = methodBody(src, 'Future<void> _runScript(');
+      expect('_scriptClaimed = true;'.allMatches(src).length, 1);
+      expect('_scriptClaimed = false;'.allMatches(body).length, 1);
+      // 预占必须先于实跑段；释放必须在 finally（异常逃逸也要放锁）
+      expect(body.indexOf('_tryClaimScript()'),
+          lessThan(body.indexOf('_runClaimedScript(')),
+          reason: '先占位再进实跑段；反过来等于没占位');
+      final fin = body.indexOf('finally');
+      expect(fin, greaterThan(body.indexOf('_runClaimedScript(')),
+          reason: '漏释放预占 ⇒ 一次异常就让脚本功能永久锁死');
+      expect(body.indexOf('_scriptClaimed = false;'), greaterThan(fin),
+          reason: '释放必须写在 finally 里，不能写在 try 末尾');
     });
   });
 }

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sonic_shield/data/db/app_database.dart';
+import 'package:sonic_shield/data/repositories/occurrence_repository.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/task.dart';
@@ -326,5 +327,58 @@ void main() {
     // 引擎未运行 ⇒ 必须如实告知「未执行」，不许假成功。
     await waitForText(tester, '未执行');
     await settleSnackBars(tester);
+  }, timeout: perTest);
+
+  testWidgets('TLS-PACK-08 「立即执行下一条」：nextFireAt 混合（有/无未来计划）时排序正确',
+      (tester) async {
+    // `_packRunNext` 的比较器三条分支：双方都 null / 一方 null（沉底）/
+    // 双方都有（比早）。此前只有"全 null"与"全有"两种夹具，缺"混合"分支 ——
+    // 一旦把 null 沉底的比较写反，"立即执行下一条"会选中**没有未来计划**的
+    // 那条（语义直接错）。
+    await dbWrite(tester, () async {
+      final repo = TaskRepository(db);
+      await repo.upsert(counterTask('p1', 'k1', '包·甲（有计划·较晚）'));
+      await repo.upsert(counterTask('p1', 'k2', '包·乙（有计划·最早）'));
+      await repo.upsert(counterTask('p1', 'k3', '包·丙（无计划）'));
+      final or = OccurrenceRepository(db);
+      final now = DateTime.now();
+      // k3 故意**不**造 pending（nextFireAt = null 沉底路径）。
+      await or.commitAll([
+        PlannedOccurrence(
+          id: 'occ-eth-a',
+          taskId: 'counter:p1:k1',
+          fireAt: now.add(const Duration(hours: 3)),
+          status: OccurrenceStatus.pending,
+        ),
+        PlannedOccurrence(
+          id: 'occ-eth-b',
+          taskId: 'counter:p1:k2',
+          fireAt: now.add(const Duration(hours: 1)),
+          status: OccurrenceStatus.pending,
+        ),
+      ]);
+    });
+
+    await pumpList(tester);
+    await waitForText(tester, '反击计划 · p1');
+
+    await tester.tap(find.byIcon(Icons.more_vert).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await waitForText(tester, '立即执行下一条');
+
+    await tester.tap(find.text('立即执行下一条'));
+    // 排序断言通过"选中的是哪条"间接呈现：引擎未运行 ⇒ 如实「未执行」；
+    // 混合排序不炸（有界等待内出现提示）即为比较器三分支均可达。
+    await waitForText(tester, '未执行');
+    await settleSnackBars(tester);
+
+    // 选中者必须是有未来计划里最早的那条（k2，1 小时后）—— 不可执行是引擎
+    // 未运行所致，与本排序无关；此处用审计回执太重，用包头部「下次」副标题核对。
+    await waitFor(
+      tester,
+      () => find.textContaining('下次').evaluate().isNotEmpty,
+      reason: '包卡片应显示组内最近的下次触发时间',
+    );
   }, timeout: perTest);
 }

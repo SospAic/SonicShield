@@ -179,6 +179,14 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
   Future<void> _deleteAsset(AudioAsset a) async {
     final repo = await _assets();
     await repo.delete(a.id);
+    // BUG-148：把引用这条音源的任务一并摘干净。不做的话，任务触发时会
+    // 因为查不到 `audio_assets` 行而**无声失败**（只写一条"无可用音源"），
+    // 用户完全联想不到"我删了个音源"。
+    try {
+      await (await ref.read(taskRepoProvider.future)).removeAssetRef(a.id);
+    } on Object {
+      // 任务表不可用不影响删除本身：孤儿引用由 `pickAssetFor` 的空结果兜底。
+    }
     try {
       final f = File(a.path);
       if (await f.exists()) await f.delete();

@@ -338,7 +338,14 @@ class RcAssistHost {
       await _onHandshakeFailure(s, '密文校验失败');
       return;
     }
-    _rememberSeen(msg.id);
+    // BUG-119：`decode(seenIds: _seen)` 只是**只读查重**，与这里的写入之间
+    // 隔着一次异步解密 ⇒ 并发的同 ID 报文可以双双通过（QoS1 重投 + nonce 随机
+    // ⇒ 密文字节不同，密文级去重挡不住）⇒ 业务命令可能被执行两次。
+    // 改用与端点同款的**原子预占**：查重与写入在同一同步段完成。
+    if (!RcCodec.reserveInboundId(
+        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+      return; // 重复投递：不得执行任何副作用
+    }
 
     if (msg.type == RcAssistCmd.hello) {
       await _onHello(s, msg);
@@ -503,12 +510,6 @@ class RcAssistHost {
     await t.publishWire(s.topic, wire);
   }
 
-  void _rememberSeen(String id) {
-    if (id.isEmpty) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _seen[id] = now;
-    _seen.removeWhere((_, t) => now - t > 10 * 60 * 1000);
-  }
 
   /// 记录密文并淘汰超限的最旧条目（[Set] 保持插入序）。
   void _rememberWire(String wire) {

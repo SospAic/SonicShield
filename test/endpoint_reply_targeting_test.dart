@@ -123,7 +123,10 @@ void main() {
           contains('await _send(RcMessage.now(RcEvt.callMissed, '
               "{'callId': callId}));"),
           reason: '来电未接通知必须广播（主叫据此结束等待）');
-      final runScript = methodBody(src, 'Future<void> _runScript(');
+      // BUG-121 把一次脚本执行拆成「预占段 `_runScript`」+「实跑段
+      // `_runClaimedScript`」；进度/终态的广播都落在实跑段。按源码顺序拼接。
+      final runScript = methodBody(src, 'Future<void> _runScript(') +
+          methodBody(src, 'Future<void> _runClaimedScript(');
       expect(runScript, contains("'state': 'running'"),
           reason: '指令组进度保持广播（控制端 UI 靠它显示进度）');
       expect(runScript, contains('rcScriptStatePayload(script.scriptId'),

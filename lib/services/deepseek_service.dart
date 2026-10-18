@@ -111,21 +111,27 @@ class DeepSeekService {
   Future<(String?, String?, (int, int))> _chat(
       List<Map<String, String>> messages) async {
     try {
-      final resp = await _client.post(
-        Uri.parse(_config.chatCompletionsUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${_config.apiKey}',
-        },
-        body: jsonEncode({
-          'model': _config.model,
-          'messages': messages,
-          'temperature': 0.3,
-          'max_tokens': maxOutputTokens,
-          'stream': false,
-          'response_format': {'type': 'json_object'},
-        }),
-      );
+      // BUG-109：必须有总超时。旧实现裸 await `post` —— 网络挂起时
+      // `generatePlan` **永不返回**：设置页没有 loading 态、用户连点会
+      // 并发发起多次请求，最后全挂在那里。与 `HolidayUpdateService`
+      // 的 12s 超时同口径（AI 生成更慢，给 45s）。
+      final resp = await _client
+          .post(
+            Uri.parse(_config.chatCompletionsUrl),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ${_config.apiKey}',
+            },
+            body: jsonEncode({
+              'model': _config.model,
+              'messages': messages,
+              'temperature': 0.3,
+              'max_tokens': maxOutputTokens,
+              'stream': false,
+              'response_format': {'type': 'json_object'},
+            }),
+          )
+          .timeout(const Duration(seconds: 45));
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         return (null, 'DeepSeek 返回 HTTP ${resp.statusCode}', (0, 0));
       }

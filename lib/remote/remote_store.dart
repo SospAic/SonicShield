@@ -141,6 +141,15 @@ class RemoteStore {
   static const _kScripts = 'rc_scripts';
   static const _kOutbox = 'rc_outbox';
   static const _kPairCode = 'rc_pair_code';
+  /// 已撤销授权的设备 id 列表（BUG-110）。
+  ///
+  /// 为什么需要它：配对码是**全体控制端共享**的，`removePaired` 只把设备移出
+  /// 本机列表，拦不住它用旧码继续握手（`pair.request` 在准入里是**无条件放行**
+  /// 的，见 `decideRcAdmission`）。这里记下"曾被本机撤销"的 id，
+  /// 让**诚实自报身份**的被撤销方在配对握手这一步就被拒，
+  /// 而不是靠"它自己不提 from"的运气。彻底吊销仍需轮换配对码
+  /// （`rotatePairingCode` 会清空本表：新码 = 新的授权基线）。
+  static const _kRevoked = 'rc_revoked';
   static const _kSelected = 'rc_selected_endpoint';
 
   // ---- v1.7 S5：可选 TURN 中继（docs/18 §S5） ----
@@ -347,6 +356,9 @@ class RemoteStore {
   Future<String> rotatePairingCode() async {
     final next = RcCodec.rotatedPairingCode(pairingCode).replaceAll('-', '');
     await _prefs.setString(_kPairCode, next);
+    // BUG-110：新码 = 新的授权基线。旧码派生出的所有密钥已失效，
+    // 撤销名单随之作废（否则被撤销的设备换了新码也永远配不上）。
+    await clearRevoked();
     return next;
   }
 
@@ -400,6 +412,39 @@ class RemoteStore {
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
     // 删掉的若正是当前目标，清空选择（否则列表里会出现"选中了一个不存在的端点"）。
     if (selectedEndpointId == deviceId) await selectEndpoint('');
+    // BUG-110：同时登记"已撤销"，让它的配对握手请求在准入层就被拒。
+    if (deviceId.isNotEmpty) await revoke(deviceId);
+  }
+
+  // ---------------- 授权撤销（BUG-110） ----------------
+
+  /// 已撤销授权的设备 id（**新列表**，调用方可安全修改）。
+  List<String> revokedIds() {
+    final raw = _prefs.getString(_kRevoked);
+    if (raw == null || raw.isEmpty) return <String>[];
+    try {
+      return (jsonDecode(raw) as List).map((e) => '$e').toList();
+    } on Object {
+      // 存储被写坏时**不放行**也不崩：按空表处理，等下一次撤销重建。
+      return <String>[];
+    }
+  }
+
+  bool isRevoked(String deviceId) =>
+      deviceId.isNotEmpty && revokedIds().contains(deviceId);
+
+  /// 登记撤销（幂等）。
+  Future<void> revoke(String deviceId) async {
+    if (deviceId.isEmpty) return;
+    final list = revokedIds();
+    if (list.contains(deviceId)) return;
+    list.add(deviceId);
+    await _prefs.setString(_kRevoked, jsonEncode(list));
+  }
+
+  /// 清空撤销表（轮换配对码后调用：新码即新的授权基线）。
+  Future<void> clearRevoked() async {
+    await _prefs.remove(_kRevoked);
   }
 
   // ---------------- 「我的设备」列表（向日葵式：保存连接 + 快速连接） ----------------

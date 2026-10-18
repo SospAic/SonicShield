@@ -179,6 +179,16 @@ Future<void> executeDue() async {
       expect(entersGuardedTry(withoutLineComments(commentedGuard), 'executing'), isFalse,
           reason: '注释掉的守卫必须判红 —— 证明锁不会被"注释掉代码"骗过');
 
+      // ---- 反面 5：终态写死 done（与执行结果无关）—— 必须判红 ----
+      const statusIgnoringResult = '''
+Future<void> executeDue() async {
+  final ok = await runAction(task, 0.8, 0, 'schedule', occurrenceId: o.id);
+  await occs.markStatus(o.id, OccurrenceStatus.done);
+}
+''';
+      expect(finalStatusFromResult(statusIgnoringResult), isFalse,
+          reason: '不看执行结果就写 done ⇒ 失败被记成成功，必须判红');
+
       // ---- 正面样本：与真实代码同构，必须**不**被误报 ----
       const okSample = '''
 Future<void> executeDue() async {
@@ -190,8 +200,12 @@ Future<void> executeDue() async {
   try {
     final due = await occs.due(now, limit: 3);
     await occs.markStatus(o.id, OccurrenceStatus.failed);
-    final ok = await runAction(task, 0.8, 0, 'schedule', occurrenceId: o.id);
-    await occs.markStatus(o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+    final outcome = await runAction(task, 0.8, 0, 'schedule', occurrenceId: o.id);
+    final ok = outcome.ok;
+    final terminal = outcome.isSkipped
+        ? OccurrenceStatus.skipped
+        : (ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+    await occs.markStatus(o.id, terminal);
   } finally {
     executing = false;
   }
@@ -446,8 +460,27 @@ bool claimsBeforeRunAction(String body) => RegExp(
       r'[\s\S]*?await\s+runAction\(',
     ).hasMatch(body);
 
-/// 形态：`await occs.markStatus(o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed)`。
-bool finalStatusFromResult(String body) => RegExp(
-      r'await\s+occs\.markStatus\(\s*o\.id\s*,\s*ok\s*\?\s*'
-      r'OccurrenceStatus\.done\s*:\s*OccurrenceStatus\.failed\s*\)',
-    ).hasMatch(body);
+/// 终态由 `runAction` 的结果决定。两种合法形状：
+///
+/// ① 内联（旧）：`await occs.markStatus(o.id, ok ? done : failed)`；
+/// ② 变量（BUG-093 起）：`skipped` 必须单独落成 `skipped`，不能并进 done，
+///    于是先算 `final terminal = outcome.isSkipped ? skipped : (ok ? done : failed)`，
+///    再 `await occs.markStatus(o.id, terminal)`。
+///
+/// 锁的是**语义**（终态由执行结果派生），不是某一种写法。
+bool finalStatusFromResult(String body) {
+  final inline = RegExp(
+    r'await\s+occs\.markStatus\(\s*o\.id\s*,\s*ok\s*\?\s*'
+    r'OccurrenceStatus\.done\s*:\s*OccurrenceStatus\.failed\s*\)',
+  ).hasMatch(body);
+  if (inline) return true;
+  final derived = RegExp(
+    r'terminal\s*=\s*outcome\.isSkipped\s*\?\s*OccurrenceStatus\.skipped\s*'
+    r':\s*\(?\s*ok\s*\?\s*OccurrenceStatus\.done\s*:\s*'
+    r'OccurrenceStatus\.failed\s*\)?',
+  ).hasMatch(body);
+  final written = RegExp(
+    r'await\s+occs\.markStatus\(\s*o\.id\s*,\s*terminal\s*\)',
+  ).hasMatch(body);
+  return derived && written;
+}

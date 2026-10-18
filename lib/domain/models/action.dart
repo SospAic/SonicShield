@@ -57,6 +57,73 @@ enum AudioChannel {
       };
 }
 
+/// 动作参数**运行时**夹紧工具（BUG-123）。
+///
+/// ## 为什么 `assert` 不够
+/// 本文件的区间约束全部写在构造函数 `assert` 里，而 **release 构建会整段剥离
+/// assert**。`action_json` 有两个来源，**都不是可信输入**：
+/// 1. 本机 sqlite（旧版本写过、手工改过、从备份 JSON 导入过 —— 见
+///    `settings_screen` 的导入路径，那里**不经过** `TaskWire` 的线协议校验）；
+/// 2. 控制端的 `task.upsert`（这条路径已有 `TaskWire._sanitizeActionMap`，
+///    但那是**另一个出口**，两条路必须各自安全）。
+///
+/// 少了这一层，`RandomVibrateAction(pulseOnMsMin: 500, pulseOnMsMax: 100)` 在
+/// release 下会被照单全收，物化期 `min + rng.nextInt(max - min + 1)` 于是拿到
+/// **负数上界** ⇒ `RangeError` 抛出 ⇒ 引擎 tick 整体崩掉，表现为"整个调度
+/// 静默死掉、任何任务都不再触发"，而用户看到的只是"不响了"。
+///
+/// ## 归一化策略：夹紧 + 交换，**不抛错**
+/// 与 `TaskWire` 的"结构不可接受就拒绝整条任务"不同，这里是**本地已落库**
+/// 的配置：拒绝等于让用户丢任务。区间方向填反了（10–3）语义上仍是同一个
+/// 区间，**交换**即可；越界值夹到边界。唯一无法归一的是"结构缺失"
+/// （如动作集一个候选都没有），那种情况由各自的 `fromJson` 单独兜底。
+int _clampInt(Object? v, int def, int lo, int hi) {
+  final n = v is num ? v.toInt() : def;
+  if (n < lo) return lo;
+  if (n > hi) return hi;
+  return n;
+}
+
+double _clampDouble(Object? v, double def, double lo, double hi) {
+  final n = v is num ? v.toDouble() : def;
+  if (n.isNaN) return def; // NaN 与任何值比较都是 false ⇒ 必须单独挡
+  if (n < lo) return lo;
+  if (n > hi) return hi;
+  return n;
+}
+
+/// 夹紧一对整数区间：各自夹进 `[lo, hi]`，再保证 `min <= max`（颠倒则交换）。
+({int min, int max}) _rangeInt(
+    Object? a, Object? b, int defMin, int defMax, int lo, int hi) {
+  var mn = _clampInt(a, defMin, lo, hi);
+  var mx = _clampInt(b, defMax, lo, hi);
+  if (mn > mx) {
+    final t = mn;
+    mn = mx;
+    mx = t;
+  }
+  return (min: mn, max: mx);
+}
+
+/// 夹紧一对浮点区间（语义同 [_rangeInt]）。
+({double min, double max}) _rangeDouble(
+    Object? a, Object? b, double defMin, double defMax, double lo, double hi) {
+  var mn = _clampDouble(a, defMin, lo, hi);
+  var mx = _clampDouble(b, defMax, lo, hi);
+  if (mn > mx) {
+    final t = mn;
+    mn = mx;
+    mx = t;
+  }
+  return (min: mn, max: mx);
+}
+
+/// 动作时长类字段的粗上界（24h）。
+///
+/// 与 `VibrateLimits.maxDurationSec` 同量级，只用来拒绝畸形值
+/// （例如误填 999999 小时），**不是产品限制**。
+const int _maxActionDurationSec = 86400;
+
 /// 动作配置（sealed）。
 sealed class ActionConfig {
   const ActionConfig();
@@ -126,20 +193,28 @@ class PlayAudioAction extends ActionConfig {
   final int rampUpSec;
   final bool loopFill;
 
-  factory PlayAudioAction.fromJson(Map<String, dynamic> j) => PlayAudioAction(
-        volumeMin: (j['volumeMin'] as num? ?? 0.6).toDouble(),
-        volumeMax: (j['volumeMax'] as num? ?? 1.0).toDouble(),
-        durationSecMin: (j['durationSecMin'] as num? ?? 3).toInt(),
-        durationSecMax: (j['durationSecMax'] as num? ?? 15).toInt(),
-        fadeInSec: (j['fadeInSec'] as num? ?? 0).toInt(),
-        fadeOutSec: (j['fadeOutSec'] as num? ?? 0).toInt(),
-        channel: (j['channel'] as String?) == 'alarm'
-            ? AudioChannel.alarm
-            : AudioChannel.media,
-        respectDnd: j['respectDnd'] as bool? ?? true,
-        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
-        loopFill: j['loopFill'] as bool? ?? false,
-      );
+  factory PlayAudioAction.fromJson(Map<String, dynamic> j) {
+    // BUG-123：区间方向/越界必须在**这里**归一 —— release 下构造函数 assert
+    // 已被剥离，而 `durationSecMin > durationSecMax` 会让物化期
+    // `rng.nextInt(max - min + 1)` 拿到负数上界直接抛 `RangeError`。
+    final vol = _rangeDouble(j['volumeMin'], j['volumeMax'], 0.6, 1.0, 0, 1);
+    final dur = _rangeInt(
+        j['durationSecMin'], j['durationSecMax'], 3, 15, 1, _maxActionDurationSec);
+    return PlayAudioAction(
+      volumeMin: vol.min,
+      volumeMax: vol.max,
+      durationSecMin: dur.min,
+      durationSecMax: dur.max,
+      fadeInSec: _clampInt(j['fadeInSec'], 0, 0, 600),
+      fadeOutSec: _clampInt(j['fadeOutSec'], 0, 0, 600),
+      channel: (j['channel'] as String?) == 'alarm'
+          ? AudioChannel.alarm
+          : AudioChannel.media,
+      respectDnd: j['respectDnd'] as bool? ?? true,
+      rampUpSec: _clampInt(j['rampUpSec'], 0, 0, 3600),
+      loopFill: j['loopFill'] as bool? ?? false,
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {
@@ -173,7 +248,8 @@ class TtsAction extends ActionConfig {
 
   factory TtsAction.fromJson(Map<String, dynamic> j) => TtsAction(
         text: j['text'] as String? ?? '',
-        volume: (j['volume'] as num? ?? 0.8).toDouble(),
+        // BUG-123：音量越界会让 `AudioPlayer.setVolume` 抛错（音量必须 0..1）。
+        volume: _clampDouble(j['volume'], 0.8, 0, 1),
         channel: (j['channel'] as String?) == 'alarm'
             ? AudioChannel.alarm
             : AudioChannel.media,
@@ -215,8 +291,10 @@ class RecordEvidenceAction extends ActionConfig {
 
   final int seconds;
 
+  /// BUG-123：`seconds <= 0` 会让录音器**立刻结束却报成功**（或直接抛错），
+  /// 取证文件变成 0 字节 —— 用户以为录到了，实际什么都没有。
   factory RecordEvidenceAction.fromJson(Map<String, dynamic> j) =>
-      RecordEvidenceAction(seconds: (j['seconds'] as num? ?? 60).toInt());
+      RecordEvidenceAction(seconds: _clampInt(j['seconds'], 60, 1, 1800));
 
   @override
   Map<String, dynamic> toJson() => {'kind': 'record', 'seconds': seconds};
@@ -227,12 +305,25 @@ class VibrateAction extends ActionConfig {
 
   final List<int> patternMs;
 
-  factory VibrateAction.fromJson(Map<String, dynamic> j) => VibrateAction(
-        patternMs: (j['patternMs'] as List?)
-                ?.map((e) => (e as num).toInt())
-                .toList() ??
-            const [0, 300, 200, 300],
-      );
+  /// BUG-123：两处都得兜。
+  /// - `(e as num)` 遇到非数字元素直接抛 `TypeError` ⇒ 整条任务读不出来；
+  /// - 负数/超大单步时长会被原生 `vibrate(pattern)` 原样接收（release 下
+  ///   `assert` 已剥离），表现为"点了没反应"或系统日志刷错。
+  factory VibrateAction.fromJson(Map<String, dynamic> j) {
+    final raw = j['patternMs'];
+    final cleaned = <int>[
+      if (raw is List)
+        for (final e in raw)
+          if (e is num) e.toInt().clamp(0, VibrateLimits.maxPatternStepMs),
+    ];
+    return VibrateAction(
+      patternMs: cleaned.isEmpty
+          ? const [0, 300, 200, 300]
+          : (cleaned.length > VibrateLimits.maxPatternSteps
+              ? cleaned.sublist(0, VibrateLimits.maxPatternSteps)
+              : cleaned),
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {'kind': 'vibrate', 'patternMs': patternMs};
@@ -322,20 +413,32 @@ class RandomVibrateAction extends ActionConfig {
   /// 与音频 `AudioChannel.alarm` 同一合规口径，UI 必须显式提示）。
   final bool respectDnd;
 
-  factory RandomVibrateAction.fromJson(Map<String, dynamic> j) =>
-      RandomVibrateAction(
-        durationSecMin: (j['durationSecMin'] as num? ?? 3).toInt(),
-        durationSecMax: (j['durationSecMax'] as num? ?? 10).toInt(),
-        pulseOnMsMin: (j['pulseOnMsMin'] as num? ?? 150).toInt(),
-        pulseOnMsMax: (j['pulseOnMsMax'] as num? ?? 400).toInt(),
-        pulseOffMsMin: (j['pulseOffMsMin'] as num? ?? 100).toInt(),
-        pulseOffMsMax: (j['pulseOffMsMax'] as num? ?? 600).toInt(),
-        amplitudeMin: (j['amplitudeMin'] as num? ?? 0.4).toDouble(),
-        amplitudeMax: (j['amplitudeMax'] as num? ?? 1.0).toDouble(),
-        maxPulses: (j['maxPulses'] as num? ?? 200).toInt(),
-        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
-        respectDnd: j['respectDnd'] as bool? ?? true,
-      );
+  /// BUG-123：四个区间都必须运行时夹紧 —— 这是最容易崩的一族。
+  /// `pulseOnMsMin > pulseOnMsMax` 在 release 下会被照收，物化期
+  /// `min + rng.nextInt(max - min + 1)` 拿到负数上界 ⇒ `RangeError` ⇒ 引擎 tick 崩。
+  factory RandomVibrateAction.fromJson(Map<String, dynamic> j) {
+    final dur = _rangeInt(j['durationSecMin'], j['durationSecMax'], 3, 10, 1,
+        VibrateLimits.maxDurationSec);
+    final on = _rangeInt(j['pulseOnMsMin'], j['pulseOnMsMax'],
+        VibrateLimits.minPulseOnMs, VibrateLimits.maxPulseOnMs,
+        VibrateLimits.minPulseOnMs, VibrateLimits.maxPulseOnMs);
+    final off = _rangeInt(j['pulseOffMsMin'], j['pulseOffMsMax'], 100, 600, 0,
+        VibrateLimits.maxPulseOffMs);
+    final amp = _rangeDouble(j['amplitudeMin'], j['amplitudeMax'], 0.4, 1.0, 0, 1);
+    return RandomVibrateAction(
+      durationSecMin: dur.min,
+      durationSecMax: dur.max,
+      pulseOnMsMin: on.min,
+      pulseOnMsMax: on.max,
+      pulseOffMsMin: off.min,
+      pulseOffMsMax: off.max,
+      amplitudeMin: amp.min,
+      amplitudeMax: amp.max,
+      maxPulses: _clampInt(j['maxPulses'], 200, 1, VibrateLimits.maxPulses),
+      rampUpSec: _clampInt(j['rampUpSec'], 0, 0, VibrateLimits.maxRampSec),
+      respectDnd: j['respectDnd'] as bool? ?? true,
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {
@@ -407,20 +510,29 @@ class ContinuousVibrateAction extends ActionConfig {
 
   final bool respectDnd;
 
-  factory ContinuousVibrateAction.fromJson(Map<String, dynamic> j) =>
-      ContinuousVibrateAction(
-        durationSecMin: (j['durationSecMin'] as num? ?? 10).toInt(),
-        durationSecMax: (j['durationSecMax'] as num? ?? 30).toInt(),
-        amplitudeMin: (j['amplitudeMin'] as num? ?? 0.5).toDouble(),
-        amplitudeMax: (j['amplitudeMax'] as num? ?? 1.0).toDouble(),
-        jitterMs: (j['jitterMs'] as num? ?? 0).toInt(),
-        sharpnessMin: (j['sharpnessMin'] as num? ?? 0.0).toDouble(),
-        sharpnessMax: (j['sharpnessMax'] as num? ?? 0.0).toDouble(),
-        dutyCyclePct: (j['dutyCyclePct'] as num? ?? 100).toInt(),
-        rampUpSec: (j['rampUpSec'] as num? ?? 0).toInt(),
-        rampDownSec: (j['rampDownSec'] as num? ?? 0).toInt(),
-        respectDnd: j['respectDnd'] as bool? ?? true,
-      );
+  /// BUG-123：区间/占空比全部运行时夹紧（理由同 [RandomVibrateAction.fromJson]）。
+  /// `dutyCyclePct < 10` 会让原生侧算出的 on/off 分片表退化成"全 off"，
+  /// 即**配置了却完全不振**，且不报错。
+  factory ContinuousVibrateAction.fromJson(Map<String, dynamic> j) {
+    final dur = _rangeInt(j['durationSecMin'], j['durationSecMax'], 10, 30, 1,
+        VibrateLimits.maxDurationSec);
+    final amp = _rangeDouble(j['amplitudeMin'], j['amplitudeMax'], 0.5, 1.0, 0, 1);
+    final sharp =
+        _rangeDouble(j['sharpnessMin'], j['sharpnessMax'], 0.0, 0.0, 0, 1);
+    return ContinuousVibrateAction(
+      durationSecMin: dur.min,
+      durationSecMax: dur.max,
+      amplitudeMin: amp.min,
+      amplitudeMax: amp.max,
+      jitterMs: _clampInt(j['jitterMs'], 0, 0, VibrateLimits.maxJitterMs),
+      sharpnessMin: sharp.min,
+      sharpnessMax: sharp.max,
+      dutyCyclePct: _clampInt(j['dutyCyclePct'], 100, 10, 100),
+      rampUpSec: _clampInt(j['rampUpSec'], 0, 0, VibrateLimits.maxRampSec),
+      rampDownSec: _clampInt(j['rampDownSec'], 0, 0, VibrateLimits.maxRampSec),
+      respectDnd: j['respectDnd'] as bool? ?? true,
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {
@@ -446,12 +558,29 @@ class CompositeAction extends ActionConfig {
   final ActionConfig primary;
   final NotifyAction? prefixNotify;
 
-  factory CompositeAction.fromJson(Map<String, dynamic> j) => CompositeAction(
-        primary: ActionConfig.fromJson(j['primary'] as Map<String, dynamic>),
-        prefixNotify: j['prefixNotify'] == null
-            ? null
-            : NotifyAction.fromJson(j['prefixNotify'] as Map<String, dynamic>),
-      );
+  /// BUG-123：`primary` 缺失/损坏时**不能抛** —— 抛出去会让整条任务读不出来
+  /// （`TaskRepository.listAll` 是 `rows.map(Task.fromRow)`，一行炸全表空）。
+  /// 退化为一条明说原因的通知，执行期可见。
+  factory CompositeAction.fromJson(Map<String, dynamic> j) {
+    ActionConfig primary;
+    try {
+      primary = ActionConfig.fromJson(
+          (j['primary'] as Map).cast<String, dynamic>());
+    } on Object {
+      primary = const NotifyAction(
+          title: '声盾', body: '组合动作的主配置缺失或损坏，本次动作已跳过');
+    }
+    NotifyAction? prefix;
+    final rawPrefix = j['prefixNotify'];
+    if (rawPrefix is Map) {
+      try {
+        prefix = NotifyAction.fromJson(rawPrefix.cast<String, dynamic>());
+      } on Object {
+        prefix = null; // 前缀通知坏了就不发，但主动作照常执行。
+      }
+    }
+    return CompositeAction(primary: primary, prefixNotify: prefix);
+  }
 
   @override
   Map<String, dynamic> toJson() => {
@@ -482,32 +611,51 @@ class SoundscapeTrack {
         'loop': loop,
       };
 
-  static SoundscapeTrack fromJson(Map<String, dynamic> j) => SoundscapeTrack(
-        presetCategory: j['presetCategory'] as String?,
-        assetId: j['assetId'] as String?,
-        volume: (j['volume'] as num? ?? 0.6).toDouble(),
-        loop: j['loop'] as bool? ?? true,
-      );
+  /// BUG-123：两个来源都为空时**返回 null**，由 [SoundscapeAction.fromJson]
+  /// 过滤掉这一轨。旧写法直接构造 —— release 下 assert 被剥离后得到一条
+  /// "什么都指不到"的轨，执行期只能解析失败（且用户看不出是哪一轨的问题）。
+  static SoundscapeTrack? fromJson(Map<String, dynamic> j) {
+    final cat = j['presetCategory'] as String?;
+    final id = j['assetId'] as String?;
+    if ((cat == null || cat.isEmpty) && (id == null || id.isEmpty)) return null;
+    return SoundscapeTrack(
+      presetCategory: (cat == null || cat.isEmpty) ? null : cat,
+      assetId: (id == null || id.isEmpty) ? null : id,
+      // 音量越界会让 `AudioPlayer.setVolume` 抛错。
+      volume: _clampDouble(j['volume'], 0.6, 0, 1),
+      loop: j['loop'] as bool? ?? true,
+    );
+  }
 }
 
 /// 声景混音：最多 4 轨同时叠加，总时长到点渐出。
 class SoundscapeAction extends ActionConfig {
+  /// BUG-123：**只保留上界断言**。下界（≥1 轨）此前也在 assert 里，而
+  /// release 下它被剥离 ⇒ 空轨声景照样落库；`fromJson` 又无法凭空造出一轨，
+  /// 于是 debug 抛错、release 静默 —— 两条路行为不一致。现在允许空集，
+  /// 由执行期**如实报错**（`background_engine` 的「无可解析的音轨」分支）。
   const SoundscapeAction(
       {required this.tracks, this.durationSec = 60, this.fadeOutSec = 5})
-      : assert(tracks.length >= 1 && tracks.length <= 4);
+      : assert(tracks.length <= 4);
 
   final List<SoundscapeTrack> tracks;
   final int durationSec;
   final int fadeOutSec;
 
-  factory SoundscapeAction.fromJson(Map<String, dynamic> j) => SoundscapeAction(
-        tracks: [
-          for (final t in (j['tracks'] as List?) ?? [])
-            SoundscapeTrack.fromJson((t as Map).cast<String, dynamic>()),
-        ],
-        durationSec: (j['durationSec'] as num? ?? 60).toInt(),
-        fadeOutSec: (j['fadeOutSec'] as num? ?? 5).toInt(),
-      );
+  factory SoundscapeAction.fromJson(Map<String, dynamic> j) {
+    final raw = (j['tracks'] as List?) ?? const [];
+    final cleaned = <SoundscapeTrack>[];
+    for (final t in raw) {
+      if (t is! Map) continue;
+      final track = SoundscapeTrack.fromJson(t.cast<String, dynamic>());
+      if (track != null) cleaned.add(track);
+    }
+    return SoundscapeAction(
+      tracks: cleaned.length > 4 ? cleaned.sublist(0, 4) : cleaned,
+      durationSec: _clampInt(j['durationSec'], 60, 1, _maxActionDurationSec),
+      fadeOutSec: _clampInt(j['fadeOutSec'], 5, 0, 600),
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {
@@ -528,30 +676,59 @@ class ActionSetCandidate {
   Map<String, dynamic> toJson() =>
       {'weight': weight, 'action': action.toJson()};
 
-  static ActionSetCandidate fromJson(Map<String, dynamic> j) =>
-      ActionSetCandidate(
-        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
-        action:
-            ActionConfig.fromJson((j['action'] as Map).cast<String, dynamic>()),
-      );
+  /// BUG-123：`action` 缺失/不是 Map 时返回 null（由 [ActionSetAction.fromJson]
+  /// 过滤）。旧写法 `(j['action'] as Map)` 会抛 `TypeError` ⇒ 整条任务读不出来。
+  static ActionSetCandidate? fromJson(Map<String, dynamic> j) {
+    final raw = j['action'];
+    if (raw is! Map) return null;
+    final ActionConfig inner;
+    try {
+      inner = ActionConfig.fromJson(raw.cast<String, dynamic>());
+    } on Object {
+      // 内层 kind 未知/结构损坏：丢掉这个候选而不是让整条任务报废。
+      return null;
+    }
+    return ActionSetCandidate(
+      // 权重：负数会让 `pick()` 的累计和变负 ⇒ 落到"永远选最后一个"；
+      // 上界与 `TaskWire.maxActionSetWeight` 同量级（防溢出成 inf）。
+      weight: _clampDouble(j['weight'], 1.0, 0, 1e6),
+      action: inner,
+    );
+  }
 }
 
 /// **动作集（随机指令集，v1.8）**：触发命中后，按权重随机从候选动作中
 /// 选**一个**执行——"到点随机播放声音中的某一个 / 随机执行某一指令"。
 /// 行业对应：iOS Shortcuts 的 Choose from List + Tasker 的 Random。
 class ActionSetAction extends ActionConfig {
+  /// BUG-123：下界从 2 放宽到 1 —— `fromJson` 过滤后可能只剩一个，
+  /// 而"只有一个候选"仍然是合法可执行的（随机性退化，不是错误）。
+  /// 上界保留：超过 12 个候选会让编辑器与 UI 同时失去可用性。
   const ActionSetAction({required this.candidates})
-      : assert(candidates.length >= 2, '动作集至少需要 2 个候选才有随机意义'),
+      : assert(candidates.length >= 1, '动作集至少需要 1 个候选'),
         assert(candidates.length <= 12, '动作集最多 12 个候选');
 
   final List<ActionSetCandidate> candidates;
 
+  /// **空集兜底候选**：只在配置损坏（候选全被过滤掉）时出现。
+  ///
+  /// 为什么不静默跳过：项目红线是"失败必须让用户知道"。一条明说原因的
+  /// 通知，比"到点了什么都没发生"更容易定位问题。
+  static const ActionSetCandidate fallbackCandidate = ActionSetCandidate(
+    weight: 1,
+    action: NotifyAction(title: '声盾', body: '动作集配置为空，本次动作已跳过'),
+  );
+
   /// 加权随机选中一个候选（调用方注入 [rng] 以便测试）。
+  ///
+  /// BUG-123：空集此前会让 `Random().nextInt(0)` / `candidates.last` 抛
+  /// `RangeError`（release 下 `assert` 已剥离，空集是真能构造出来的）。
   ActionSetCandidate pick(Random rng) {
+    if (candidates.isEmpty) return fallbackCandidate;
     final total = candidates.fold<double>(0, (s, c) => s + c.weight);
     if (total <= 0) {
       // 全零权重：等概率兜底（配置错误时的安全行为）。
-      return candidates[Random().nextInt(candidates.length)];
+      return candidates[rng.nextInt(candidates.length)];
     }
     var roll = rng.nextDouble() * total;
     for (final c in candidates) {
@@ -561,12 +738,20 @@ class ActionSetAction extends ActionConfig {
     return candidates.last;
   }
 
-  factory ActionSetAction.fromJson(Map<String, dynamic> j) => ActionSetAction(
-        candidates: [
-          for (final c in (j['candidates'] as List?) ?? [])
-            ActionSetCandidate.fromJson((c as Map).cast<String, dynamic>()),
-        ],
-      );
+  factory ActionSetAction.fromJson(Map<String, dynamic> j) {
+    final raw = (j['candidates'] as List?) ?? const [];
+    final cleaned = <ActionSetCandidate>[];
+    for (final c in raw) {
+      if (c is! Map) continue;
+      final cand = ActionSetCandidate.fromJson(c.cast<String, dynamic>());
+      if (cand != null) cleaned.add(cand);
+    }
+    return ActionSetAction(
+      candidates: cleaned.isEmpty
+          ? const [fallbackCandidate]
+          : (cleaned.length > 12 ? cleaned.sublist(0, 12) : cleaned),
+    );
+  }
 
   @override
   Map<String, dynamic> toJson() => {

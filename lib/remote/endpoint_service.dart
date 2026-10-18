@@ -112,6 +112,14 @@ class RcEndpointService {
   /// "对端是谁"，且它随通话收尾一并清空（少一份会漂移的状态）。
   String? _activeScriptOwner;
 
+  /// 指令组**起跑预占**（BUG-121）。`_runScript` 从"检查"到"`run()` 真正置位"
+  /// 之间隔着 heads-up 与审计两处 `await`；只靠 `RcScriptExecutor.isRunning`
+  /// 挡不住并发双发（两条都能过检查）。这个标志在**同一个同步段**里完成
+  /// "检查 + 占位"，跨越后续所有 await 窗口，直到本次执行收尾才释放。
+  ///
+  /// 必须在 `finally` 里释放：异常逃逸时漏释放会让端点**永久**拒绝新指令组。
+  bool _scriptClaimed = false;
+
   /// 本机配对码（共享秘密）：接收消息时用它派生解密密钥。
   String _ownCode = '';
 
@@ -508,6 +516,16 @@ class RcEndpointService {
   Future<void> onPeerRevoked(String deviceId) async {
     if (deviceId.isEmpty) return;
 
+    // BUG-116：解除配对后必须**退订**该端点的 `evt` 主题。
+    // `refreshSubscriptions` 只增不退 —— 单侧删除配对（对端未删）时，
+    // 对端的广播会持续到达，每一条都走一遍解密与噪声审计。
+    try {
+      // ⚠️ `unsubscribe` 返回 `void`（不是 Future）—— 不能 await。
+      _client?.unsubscribe('sonicshield/v1/$deviceId/evt');
+    } on Object {
+      // 未连接/客户端已销毁：退订失败无副作用（重连后订阅集合会重建）。
+    }
+
     final plan = decideRevokeCleanup(
       revokedId: deviceId,
       scriptOwnerId: _activeScriptOwner,
@@ -885,6 +903,8 @@ class RcEndpointService {
       senderId: msg.from,
       type: msg.type,
       senderPaired: endpointById(store.paired(), msg.from) != null,
+      // BUG-110：撤销名单是比配对握手更强的否决（详见 decideRcAdmission）。
+      senderRevoked: store.isRevoked(msg.from),
     );
     if (!admission.allowed) {
       // 拒绝必须**留痕**且**不得执行**：审计后直接 return，绝不落到 _dispatch。
@@ -1160,19 +1180,48 @@ class RcEndpointService {
         await _sendPresets(msg);
       case RcCmd.taskToggle:
         final id = msg.payload['taskId'] as String?;
-        final enabled = msg.payload['enabled'] as bool? ?? false;
+        // BUG-112：布尔解析必须宽容且**方向正确**。
+        // 旧写法 `as bool? ?? false` 对 `enabled: 1` / `'true'` 会静默变成
+        // **false**（把"启用"执行成"停用"，方向翻转）；而 `TaskWire._asBool`
+        // 明确接受 0/1/'true'。这里与它同口径，且**无法解析时显式失败**，
+        // 不再猜一个默认值。
+        final enabledRaw = msg.payload['enabled'];
+        final enabled = switch (enabledRaw) {
+          final bool b => b,
+          final num n => n != 0,
+          final String s when s.toLowerCase() == 'true' || s == '1' => true,
+          final String s when s.toLowerCase() == 'false' || s == '0' => false,
+          _ => null,
+        };
         if (id == null || id.isEmpty) {
           // 缺 taskId 必须**显式失败**（对齐 taskDelete）：静默不回执会让
           // 控制器一直等到超时，而真实原因是"我发的命令少了参数"。
           await _ack(msg, false, data: '缺少 taskId');
           return;
         }
+        if (enabled == null) {
+          await _ack(msg, false, data: 'enabled 必须是布尔（true/false/1/0）');
+          return;
+        }
         // ---- D-7 残余面：动作级权限裁决 ----
         // 关闭任务（`enabled == false`）**永远放行**（关掉是更安全的一侧）；
         // 打开时才要求该任务动作所需的权限位齐备（判据见 [taskActionPermDeny]）。
         final toggleTask = await tasks.get(id);
-        final toggleDeny =
-            toggleTask == null ? null : _assistActionDeny(toggleTask, enabling: enabled);
+        // BUG-113：任务不存在必须显式失败。旧实现拿 `null` 只跳过权限裁决，
+        // 随后 `setEnabled` 对 0 行 update **静默成功** ⇒ 回执 `ok=true`、
+        // 审计写 success，控制端以为改成功了（对比 taskDelete/taskGet 都有
+        // 存在性检查）。
+        if (toggleTask == null) {
+          await _ack(msg, false, data: '任务不存在：$id');
+          await logs.append(
+              source: 'remote',
+              action: 'task.toggle',
+              status: 'failed',
+              taskId: id,
+              message: 'by ${peer.name} · 任务不存在');
+          return;
+        }
+        final toggleDeny = _assistActionDeny(toggleTask, enabling: enabled);
         if (toggleDeny != null) {
           await logs.append(
               source: 'remote',
@@ -1253,7 +1302,13 @@ class RcEndpointService {
       case RcCmd.runMasterSet:
         await _setRunMaster(msg, peer, logs);
       case RcCmd.logsRecent:
-        final limit = (msg.payload['limit'] as num?)?.toInt() ?? 50;
+        // BUG-111：limit 必须夹紧。旧实现原样下传，而 sqflite 会把 LIMIT
+        // 直接拼进 SQL（负值 = 无上界）⇒ 远端一条 `{limit: -1}` 就能把
+        // **全部**审计日志塞进一条 MQTT 报文：公共 broker 通常 1MB 上限，
+        // 结果是拒发/断连（本机侧还有 OOM 风险）。
+        // 与同文件 `assetList` 的 clamp 口径一致。
+        final limit =
+            ((msg.payload['limit'] as num?)?.toInt() ?? 50).clamp(1, 500);
         final rows = await logs.recent(limit: limit);
         await _send(
             RcMessage.now(RcEvt.logs, {
@@ -1685,6 +1740,21 @@ class RcEndpointService {
               '（deviceId ${ctrlId.length} 位 / code ${code.length} 位）');
       await _ack(msg, false,
           data: '配对信息不完整：需要 deviceId(16 位) 与 code(8 位)');
+      return;
+    }
+
+    // BUG-110（纵深防御）：准入层已按 `msg.from` 拒过撤销名单，但 `from`
+    // 是发送方**自报**的字段；这里再按 payload 里真正的控制端 id 判一次 ——
+    // 被本机撤销过的设备即使换了 `from` 也登记不回来。
+    // 恢复路径：本机轮换配对码（会清空撤销表）。
+    if (_store!.isRevoked(ctrlId)) {
+      await logs.append(
+          source: 'remote',
+          action: 'pair.request',
+          status: 'failed',
+          message: 'by ${peer.name} · 拒绝：$ctrlId 已被本机撤销授权'
+              '（需本机轮换配对码后重新扫码）');
+      await _ack(msg, false, data: '该设备已被撤销授权：需本机重置配对码后重新扫码');
       return;
     }
 
@@ -2365,7 +2435,11 @@ class RcEndpointService {
   /// （`CallService.acceptPending` / `declinePending`），界面由
   /// `CallOverlayHost` 常驻监听 `CallService.phase` 弹出 —— **与当前在哪个路由无关**。
   Future<void> _handleCallInvite(RcMessage msg, PairedEndpoint peer) async {
-    final video = msg.payload['video'] as bool? ?? true;
+    // BUG-117：与 `CallService._onInvite` 同口径 —— 缺省是**音频**，
+    // 只有显式 `video: true` 才当作视频来电（通知文案也随之正确）。
+    final video = msg.payload['video'] is bool
+        ? msg.payload['video'] as bool
+        : false;
     final fromName = msg.payload['fromName'] as String? ?? peer.name;
     await NotificationService.instance.showEvent(
         title: '声盾 · 来电',
@@ -2470,7 +2544,15 @@ class RcEndpointService {
     // 在已有执行时**直接返回 false**（一次一组）。于是第二条指令组被报成
     // `state:'stopped'` —— 控制端看到"被终止了"，实际是"**压根没开始**"，
     // 而且端点审计里还躺着一条 success。两处都在说谎。
-    if (RcScriptExecutor.instance.isRunning) {
+    //
+    // BUG-121：只看 `RcScriptExecutor.isRunning` **仍然不够** —— 它在 `run()`
+    // 里才置位，而本函数在 `run()` 之前还有 heads-up 与审计两处 `await`。
+    // 两台控制端并发下发 `script.run` 时两条都能过检查：先到者起跑，后到者
+    // `run()` 返回 false ⇒ 后到者照样写 success 审计 + 回 `done:false`（正是
+    // 上面要消灭的"没开始却报被终止"），且 `_activeScriptOwner` 被后到者
+    // 覆盖 ⇒ 撤销时 `decideRevokeCleanup` 因 owner 不匹配漏停在途指令组。
+    // 故用 [_scriptClaimed] 把「检查 + 占位」收进**同一个同步段**。
+    if (!_tryClaimScript()) {
       final running = RcScriptExecutor.instance.currentScriptId ?? '未知';
       await logs.append(
           source: 'remote',
@@ -2480,6 +2562,31 @@ class RcEndpointService {
       await _ack(msg, false, data: '已有指令组在执行');
       return;
     }
+    try {
+      await _runClaimedScript(msg, peer, logs, script);
+    } finally {
+      // 释放预占 + 清 owner（含异常逃逸路径）。留着一个已结束的 owner 会让
+      // 下一次撤销误停到别人的作业上；漏释放预占会让端点永久拒绝新指令组。
+      _scriptClaimed = false;
+      _activeScriptOwner = null;
+    }
+  }
+
+  /// 「检查 + 占位」的**唯一入口**：必须是**同步**方法，中间不得出现 `await`。
+  ///
+  /// 这不是风格问题 —— 见 [_runScript] 里 BUG-121 的说明：任何一处 `await`
+  /// 都会把闸门重新打开，两台控制端并发下发时两条都能通过检查。
+  /// `test/endpoint_script_skipped_test.dart` 的 `RSS-11` 直接锁住
+  /// 「本方法体内一个 `await` 都没有」。
+  bool _tryClaimScript() {
+    if (_scriptClaimed || RcScriptExecutor.instance.isRunning) return false;
+    _scriptClaimed = true;
+    return true;
+  }
+
+  /// [_runScript] 的**实跑段**：预占已由调用方在同一同步段里取得。
+  Future<void> _runClaimedScript(RcMessage msg, PairedEndpoint peer,
+      LogRepository logs, RcScript script) async {
 
     // 弹 heads-up：发送方/时间 + 立即执行（通知栏进度与终止按钮由执行器管理）。
     await NotificationService.instance.showEvent(
@@ -2613,18 +2720,14 @@ class RcEndpointService {
       }
     }
 
-    await logs.append(
-        source: 'remote',
-        action: 'script.run',
-        status: 'success',
-        message:
-            '${script.fromName} · ${script.name}（${script.steps.length} 步）');
-
     // 记录发起方：`onPeerRevoked` 靠它判断"这个在途指令组是不是被撤销那台发的"。
     // 必须在 `run()` **之前**落，否则存在一个窗口期 —— 指令组已在跑、owner 还是
     // null，此时解除配对会漏掉它（正是要修的那个形状）。
     _activeScriptOwner = peer.deviceId;
-    final done = await RcScriptExecutor.instance.run(script, runner: runner,
+    // `run()` 是 async 函数：其**同步前缀**（`_current = script`）在调用瞬间就
+    // 执行完，直到第一个 `await` 才让出。因此这一行之后 `isRunning` 如实反映
+    // "到底有没有起跑"—— 预占成功但仍被外部占用的情形在这里显形。
+    final running = RcScriptExecutor.instance.run(script, runner: runner,
         onStep: (i, s) {
       unawaited(_send(RcMessage.now(RcEvt.scriptState, {
         'scriptId': script.scriptId,
@@ -2632,9 +2735,25 @@ class RcEndpointService {
         'stepIndex': i,
       })));
     });
-    // 结束即清空（含"被终止"的情况）：留着一个已结束的 owner 会让下一次
-    // 撤销误停到别人的作业上。
-    _activeScriptOwner = null;
+    if (!RcScriptExecutor.instance.isRunning) {
+      // 未起跑：**绝不**写 success 审计、**绝不**发 `done:false`（那会被控制端
+      // 读成"跑过但被终止"）。如实回执"已有指令组在执行"。
+      await logs.append(
+          source: 'remote',
+          action: 'script.run',
+          status: 'skipped',
+          message: 'by ${peer.name} · 未开始：执行器仍被占用');
+      await _ack(msg, false, data: '已有指令组在执行');
+      return;
+    }
+    // 起跑已确认，此时记账才是真的（旧顺序在起跑前就写 success，见 BUG-121）。
+    await logs.append(
+        source: 'remote',
+        action: 'script.run',
+        status: 'success',
+        message:
+            '${script.fromName} · ${script.name}（${script.steps.length} 步）');
+    final done = await running;
     unawaited(_send(
         RcMessage.now(
             RcEvt.scriptState, rcScriptStatePayload(script.scriptId,
@@ -2778,6 +2897,15 @@ class RcEndpointService {
           status: 'failed',
           durationMs: seconds * 1000,
           message: '录音取证失败：$e');
+    } finally {
+      // BUG-115：`AudioRecorder` 是平台资源（持有麦克风句柄），必须 dispose。
+      // 旧实现每次调用 `new AudioRecorder()` 后从不释放 —— 一个指令组含多个
+      // record 步（协议允许 ≤50 步）就会累积一堆句柄，后续录音可能直接失败。
+      try {
+        await rec.dispose();
+      } on Object {
+        // 释放失败不该覆盖上面已经写好的终态审计。
+      }
     }
   }
 
@@ -2826,6 +2954,14 @@ class RcEndpointService {
             'ok': true,
           }),
           targetPeerId: msg.from));
+      // BUG-114：v1 对讲把音频写进**文档目录**后从不删除 —— 每用一次对讲就
+      // 永久残留一个 m4a（v2 分片路径有 `deleteFiles: true` 兜底，v1 没有）。
+      // 播放已经返回，文件不再需要；删失败不影响业务（不吞掉成功路径）。
+      try {
+        await File(path).delete();
+      } on Object {
+        // 删不掉最坏是残留一个文件，不该把成功报成失败。
+      }
     } on Object catch (e) {
       await _pttFailed(msg, logs, from, '$e');
     }
@@ -3561,7 +3697,16 @@ RcAdmission decideRcAdmission({
   required String senderId,
   required String type,
   required bool senderPaired,
+  bool senderRevoked = false,
 }) {
+  // BUG-110：**已撤销授权**的设备一律拒，且**连配对握手也不放行**。
+  //
+  // 旧实现在第一行就无条件 `allowPairing`，于是「删掉设备」之后它只要再发
+  // 一次 `pair.request` 就能把自己重新登记回去（`_handlePairRequest` 查不到
+  // 记录就 `addPaired`），而配对码是共享且未轮换的 ⇒ 撤销形同虚设。
+  // 判据放在**最前**：撤销是比"配对握手"更强的否决。
+  // 恢复路径仍然存在 —— 本机轮换配对码（`rotatePairingCode` 会清空撤销表）。
+  if (senderRevoked) return RcAdmission.rejectRevoked;
   if (type == RcCmd.pairRequest) return RcAdmission.allowPairing;
   if (senderId.isEmpty) return RcAdmission.allowUnidentified;
   if (senderPaired) return RcAdmission.allowPaired;
@@ -3580,10 +3725,15 @@ enum RcAdmission {
   allowPaired,
 
   /// 发送方已不在配对表（从未配对或**已被解除配对**）：**拒绝执行**。
-  rejectUnpaired;
+  rejectUnpaired,
+
+  /// 发送方在**撤销名单**里（本机主动解除过它的配对）：**拒绝执行**，
+  /// 且**连配对握手都拒**（BUG-110）。恢复需本机轮换配对码。
+  rejectRevoked;
 
   /// 是否放行。**唯一**决定"要不要 `_dispatch`"的判据。
-  bool get allowed => this != RcAdmission.rejectUnpaired;
+  bool get allowed =>
+      this != RcAdmission.rejectUnpaired && this != RcAdmission.rejectRevoked;
 }
 
 /// 解密失败审计的**限频器**（R-2）：同一主题 [windowMs] 内只放行一条。

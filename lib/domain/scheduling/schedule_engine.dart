@@ -244,7 +244,11 @@ class ScheduleEngine {
     while (!day.isAfter(last)) {
       final at = t.time.on(day);
       if (_inRange(at, now, end)) out.add(at);
-      day = day.add(const Duration(days: 1));
+      // BUG-096：日历推进必须走「年/月/日 +1」，不能用 `add(Duration(days:1))`。
+      // 后者是**绝对 24 小时**：DST 回拨日（当天 25 小时）会把同一日历日
+      // 迭代两次（产出重复 occurrenceId，只靠 insert-ignore 兜住），
+      // 前拨日则跳过一天。`trigger.dart` 的同类问题（P2-29）已修，这里是孪生。
+      day = DateTime(day.year, day.month, day.day + 1);
     }
     return out;
   }
@@ -260,7 +264,8 @@ class ScheduleEngine {
         final inRange = t.dateRange == null || t.dateRange!.contains(day);
         if (inRange && _inRange(at, now, end)) out.add(at);
       }
-      day = day.add(const Duration(days: 1));
+      // BUG-096：同 `_daily`，日历推进走「年月日 +1」（DST 安全）。
+      day = DateTime(day.year, day.month, day.day + 1);
     }
     return out;
   }
@@ -320,7 +325,12 @@ class ScheduleEngine {
     for (final day in t.dateRange.days()) {
       final dayStart = t.activeStart.on(day);
       final dayEnd = t.activeEnd.on(day).add(
-            t.activeEnd.hour <= t.activeStart.hour
+            // BUG-095：跨午夜判据必须比**分钟**，不能只比 hour。
+            // 旧写法 `activeEnd.hour <= activeStart.hour` 把 08:00–08:30
+            // 这种「同一小时内的合法窗口」误判为跨午夜 ⇒ 窗口被撑成 24.5h，
+            // 夜里照样触发。与 `_randomWindow`（完整时刻比较）口径对齐。
+            (t.activeEnd.hour * 60 + t.activeEnd.minute) <=
+                    (t.activeStart.hour * 60 + t.activeStart.minute)
                 ? const Duration(days: 1)
                 : Duration.zero,
           );

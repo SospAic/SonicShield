@@ -217,9 +217,14 @@ class NativeBridgePlugin : FlutterPlugin {
                         "vibrate" -> {
                             val pattern =
                                 (call.argument<List<*>>("pattern") ?: emptyList<Any>())
-                                    .map { (it as Number).toLong() }
-                            vibrate(ctx, pattern)
-                            result.success(true)
+                                    .mapNotNull { (it as? Number)?.toLong() }
+                            // BUG-133：**必须回传真实结果**。旧实现调完 `vibrate()`
+                            // 就无条件 `result.success(true)`，而 `vibrate()` 在
+                            // 「没有振动器 / 模式为空 / 属性 API 抛异常」时**什么都没做**
+                            // —— Dart 侧于是把"压根没震"记成 success 审计（假阳性），
+                            // 控制端的 ack 也报 ok。"成功不得被误报"是既有判据
+                            // （BUG-073 同类），这里补齐。
+                            result.success(vibrate(ctx, pattern))
                         }
                         // ---- v1.9 振动能力（docs/20 §5.1）----
                         "vibrateCapabilities" ->
@@ -884,10 +889,16 @@ class NativeBridgePlugin : FlutterPlugin {
         }
     }
 
-    /** v1.x 固定节奏入口（向后兼容）。现已统一走 [vibrateWaveform]（带属性）。 */
-    private fun vibrate(ctx: Context, pattern: List<Long>) {
-        if (pattern.isEmpty()) return
-        vibrateWaveform(ctx, pattern, null, -1, false)
+    /**
+     * v1.x 固定节奏入口（向后兼容）。现已统一走 [vibrateWaveform]（带属性）。
+     *
+     * 返回**是否真的下发了振动**（BUG-133）：空模式直接 false；其余交给
+     * [vibrateWaveform] 的真实结果 —— 那里对"无振动器 / 无振幅控制 /
+     * 属性 API 抛异常"都会返回 false，调用方据此如实回执。
+     */
+    private fun vibrate(ctx: Context, pattern: List<Long>): Boolean {
+        if (pattern.isEmpty()) return false
+        return vibrateWaveform(ctx, pattern, null, -1, false)
     }
 
     // ---------- 音量（远程 volume.set，docs/16 §9） ----------

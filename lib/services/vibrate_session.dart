@@ -264,7 +264,26 @@ class VibrateSession {
           );
           return false;
         }
+        final prev = _active[occurrenceId];
         _active[occurrenceId] = session;
+        if (prev != null) {
+          // BUG-126：同 id 重入（重试 / 重新物化后再次触发 / 远程连按两次）此前是
+          // **直接覆盖** —— 旧会话的起始时刻、已下发片数、审计归属全部丢失，
+          // 而 `stopFor(id)` 从此只能停到新会话，旧会话的账目再也对不上。
+          // 原生侧本来就会被新的 `vibrate()` 取消（Android 语义），
+          // 所以这里只需**把旧会话的账结清**并如实记账。
+          await _log(
+            source: prev.source,
+            action: 'continuousVibrate',
+            status: 'skipped',
+            taskId: prev.taskId,
+            occurrenceId: prev.occurrenceId,
+            volume: prev.amplitude,
+            durationMs: prev.coveredMs,
+            message: '被同 id 的新会话接管（已下发 ${prev.chunks} 片 / '
+                '${prev.coveredMs}ms），旧会话按停止处理',
+          );
+        }
         _startTicker();
         await _persistActive();
         await _log(
@@ -387,6 +406,12 @@ class VibrateSession {
   /// 停止单个 occurrence 的振动。
   ///
   /// [skipNative] 为 true 时只清状态（由 [stopAll] 统一下发一次 cancel）。
+  ///
+  /// ⚠️ **原生 `cancel()` 没有"按 id 停"的粒度**：它停掉本应用发起的全部振动，
+  /// 因此停 A 会顺带打断 B 的当前片。这是刻意的取舍 —— S3「任何时刻都能停」
+  /// 优先级高于"精确停一个"；B 会在下一个 tick（≤`keepAliveTick`）按
+  /// `coveredMs` 续发，空隙有界且可解释。反过来若为了不打扰 B 而不发 cancel，
+  /// 就会出现"点了停，A 还在震到本片结束"，那才是真正违反 S3。
   Future<void> stopFor(
     String occurrenceId, {
     String reason = '任务停止',
@@ -442,10 +467,21 @@ class VibrateSession {
     await w(kvKeyActive, jsonEncode(_active.keys.toList()));
   }
 
+  /// 释放会话管理器：取消续发定时器 + 清状态 + **下发一次原生 cancel**。
+  ///
+  /// BUG-127：旧实现只取消定时器与清表 —— 原生侧当前片（最长
+  /// `VibrateRuntime.chunkMs` = 20s）会**继续震到自然结束**。S3 的字面要求是
+  /// 「任何时刻都能停」，而 `dispose()` 正是「引擎关停 / 远程遥控停用 / 页面
+  /// 销毁」的落点：用户关掉开关后手机还在震 20 秒，是四条失效安全里唯一
+  /// 没堵上的缺口。
+  ///
+  /// `dispose()` 是**同步**接口（调用点在引擎 teardown），因此 cancel 以
+  /// fire-and-forget 下发；通道已销毁时异常吞掉，不制造未处理异步错误。
   void dispose() {
     _ticker?.cancel();
     _ticker = null;
     _active.clear();
+    unawaited(stopNative().catchError((Object _) {}));
   }
 
   // ------------------------------------------------------------ 内部

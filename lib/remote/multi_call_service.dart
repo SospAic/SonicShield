@@ -92,6 +92,13 @@ class MultiCallSession {
   /// 因此需要在**路数变化**时对**所有路**重新下发档位
   /// （见 [MultiCallService._applyProfilesToAll]）。
   List<RTCRtpSender> senders = <RTCRtpSender>[];
+
+  /// 发起这一路时用的 store（BUG-136：`hangUp` 要发 `call.end` 需要它）。
+  ///
+  /// 为什么不放进 `hangUp` 的参数：`hangUp` 有两个调用来源 —— UI 挂断（有
+  /// store）与**收到对端 `call.end`**（没有 store）。把 store 挂在会话上，
+  /// 两条路径都能发信令，而不用给 UI 传参。
+  RemoteStore? store;
 }
 
 /// 多路视频同连（主控视角：同时连多台设备，点窗口切换目标）。
@@ -165,7 +172,9 @@ class MultiCallService {
       final c = payload['candidate'];
       if (c is Map) unawaited(_applyCandidate(s, c.cast<String, dynamic>()));
     } else if (type == RcCmd.callEnd) {
-      unawaited(hangUp(deviceId));
+      // BUG-136：对端已经发了 `call.end`，**不能再回一条** —— 否则两端互相
+      // 回 end，形成"挂断风暴"（每条 end 都触发对方再发一条）。
+      unawaited(hangUp(deviceId, notifyPeer: false));
     }
   }
 
@@ -271,10 +280,16 @@ class MultiCallService {
       {bool video = true}) async {
     final deviceId = peer.deviceId;
     if (_sessions.containsKey(deviceId)) return false; // 已有一路
+    // BUG-137：单会话通话（含来电/屏幕共享）正在进行时**不得**再起多路。
+    // 两个服务各自 `getUserMedia` 会争同一台摄像头：后到的那个直接失败，
+    // 或者更糟 —— 抢走前一个的相机句柄，让**正在进行的通话黑屏**。
+    // 两者共用同一套麦克风/扬声器路由，互斥是硬约束（见 CallService 类注释）。
+    if (CallService.instance.inCall) return false;
     if (_localStream == null && !await _ensureLocalStream(video: video)) {
       return false;
     }
-    final s = MultiCallSession(callId: const Uuid().v4(), peer: peer);
+    final s = MultiCallSession(callId: const Uuid().v4(), peer: peer)
+      ..store = store;
     _sessions[deviceId] = s;
     _byCallId[s.callId] = deviceId;
     _activeId ??= deviceId;
@@ -395,9 +410,26 @@ class MultiCallService {
         'audio': true,
         'video': video ? videoConstraintsFor(callVideoCapture) : false,
       });
+      // BUG-138：多路视频**必须开免提**。不开时 Android 把声音送到听筒，
+      // 视频通话里表现为"能看到画面但听不清"—— 与单路 `_ensureMedia` 同一
+      // 处置（那里早就开了，多路这一半漏了，属于两条路漂移）。
+      await _setSpeakerphone(true);
       return true;
     } on Object {
       return false;
+    }
+  }
+
+  /// 本端是否**主动**开过免提（收尾只归位自己开的那次）。
+  bool _speakerOn = false;
+
+  /// 切换免提扬声器（平台不支持时静默忽略：它不是通话能否建立的必要条件）。
+  Future<void> _setSpeakerphone(bool on) async {
+    try {
+      await Helper.setSpeakerphoneOn(on);
+      _speakerOn = on;
+    } on Object {
+      // 平台不支持 → 忽略（音频路由偏好失败，不该挡住通话本身）。
     }
   }
 
@@ -429,25 +461,57 @@ class MultiCallService {
 
   Future<bool> _send(PairedEndpoint peer, String type,
       Map<String, dynamic> payload, RemoteStore store) async {
-    return RcEndpointService.instance.sendTo(
-      peer,
-      RcMessage.now(type, payload),
-      store,
-      enqueueOnFail: false,
-    );
+    // BUG-135：信令发送**必须**自己兜异常。调用点之一是
+    // `pc.onIceCandidate` 里的 `unawaited(_send(...))` —— 那里没有任何
+    // try/catch，`sendTo` 抛出的编码/密钥/通道异常会变成**未处理的异步错误**
+    // （Release 下没人看见，Debug 下打断整条 ICE 收集）。
+    // 语义与 `CallService._sendCallMsg` 对齐：发不出去 = false，由调用方决定收场。
+    try {
+      return await RcEndpointService.instance.sendTo(
+        peer,
+        RcMessage.now(type, payload),
+        store,
+        enqueueOnFail: false,
+      );
+    } on Object {
+      return false;
+    }
   }
 
   /// 挂断一路（不影响其它路 —— 这是"保持视频链接"的关键）。
-  Future<void> hangUp(String deviceId) async {
+  ///
+  /// [notifyPeer] 为 false 时**不发** `call.end`（对端先发的场景，见 BUG-136）。
+  Future<void> hangUp(String deviceId, {bool notifyPeer = true}) async {
     final s = _sessions.remove(deviceId);
     if (s == null) return;
     _cancelWaitTimer(s);
     _cancelConnectTimer(s);
     _byCallId.remove(s.callId);
-    try {
-      await s.pc?.close();
-    } on Object {
-      // 关闭失败也要把状态清干净，不能留一路"僵尸会话"。
+    // BUG-136：主动挂断必须**告诉对端**。旧实现只关本地 PC —— 对端仍以为
+    // 通话在继续（摄像头/麦克风照开、UI 停在"已连接"），直到它自己的
+    // 45s 超时才发现。这与单路 `CallService.hangUp` 的行为也不一致。
+    final store = s.store;
+    if (notifyPeer && store != null) {
+      await _send(s.peer, RcCmd.callEnd,
+          {'callId': s.callId, 'reason': 'hangup'}, store);
+    }
+    // BUG-134：`close()` 只断连接，**不释放**原生 PeerConnection 与它注册的
+    // EventChannel。只 close 不 dispose ⇒ 每挂一路泄漏一个原生对象；
+    // 反复连/挂若干次后原生侧句柄堆积（`getStats`/渲染回调继续投递到已废弃
+    // 的 Dart 对象）。两步都要做，且各自吞异常（关不掉也要把状态清干净）。
+    final pc = s.pc;
+    s.pc = null;
+    if (pc != null) {
+      try {
+        await pc.close();
+      } on Object {
+        // 关闭失败也要继续 dispose。
+      }
+      try {
+        await pc.dispose();
+      } on Object {
+        // 已释放 / 平台不支持：忽略。
+      }
     }
     s.phase = MultiCallPhase.closed;
     // sender 随 `s.pc` 一起失效，断开引用避免后续误用。
@@ -455,6 +519,8 @@ class MultiCallService {
     if (_sessions.isEmpty) {
       _localStream?.getTracks().forEach((t) => unawaited(t.stop()));
       _localStream = null;
+      // 最后一路结束 → 归位免提（只关本端自己开过的那次）。
+      if (_speakerOn) await _setSpeakerphone(false);
     }
     _activeId = nextActiveId(_sessions.keys.toList(), _activeId);
     // 路数下降 → 对**剩余各路恢复更高档位**（docs/16 §10）：只在新路建立时

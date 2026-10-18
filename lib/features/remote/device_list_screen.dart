@@ -123,26 +123,31 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   }
 
   Future<void> _remove(PairedEndpoint e) async {
-    final yes = await showDialog<bool>(
+    final action = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('删除这台设备？'),
         content: Text('将移除「${e.displayName}」的配对信息，并立即终止它名下的'
-            '在途作业（指令组 / 通话）。重新连接需要再次扫码配对。\n\n'
-            '⚠️ 撤销强度说明（P1-01）：所有控制端共用同一个配对码；'
-            '若该码曾被泄露，仅删除设备不足以阻止伪造发送方。'
-            '需要彻底失效时，请到「扫码配对」页使用「重置配对码」。'),
+            '在途作业（指令组 / 通话）。\n\n'
+            '「删除」= 解除配对并把它加入撤销名单（它再发配对请求会被拒）。\n'
+            '「删除并重置配对码」= 额外轮换本机配对码：旧码派生的密钥全部失效，'
+            '**其它已配对设备也需要重新扫码**。仅在怀疑配对码泄露时使用。'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
+              onPressed: () => Navigator.pop(ctx),
               child: const Text('取消')),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () => Navigator.pop(ctx, 'remove'),
               child: const Text('删除')),
+          FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(ctx).colorScheme.error),
+              onPressed: () => Navigator.pop(ctx, 'revoke'),
+              child: const Text('删除并重置配对码')),
         ],
       ),
     );
-    if (yes != true) return;
+    if (action == null) return;
     final store = await _store();
     await store.removePaired(e.deviceId);
     // P1：撤销授权只删列表**不够**（`RemoteStore.removePaired` 自己的注释也在
@@ -150,10 +155,21 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     // **再**清掉它名下已经在跑的在途作业（指令组 / 通话）——
     // 顺序不能反：反了就会出现"在途已停，但窗口期内它又下发了一条新命令"。
     await RcEndpointService.instance.onPeerRevoked(e.deviceId);
+    var rotated = false;
+    if (action == 'revoke') {
+      // BUG-110：轮换本机配对码 —— 这是**唯一**能让旧码派生的密钥真正失效的
+      // 手段（共享码模型下，只删列表拦不住伪造 `from` 的旁路）。
+      // 轮换会清空撤销名单（新码即新的授权基线）。
+      final next = await store.rotatePairingCode();
+      RcEndpointService.instance.rotateOwnPairingCode(next);
+      rotated = true;
+    }
     await _load();
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('已删除「${e.displayName}」')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(rotated
+            ? '已删除「${e.displayName}」并重置配对码（其它设备需重新扫码）'
+            : '已删除「${e.displayName}」')));
   }
 
   // ---------------- 设备组（Q6.B：建组 / 删组 / 组内群发 Ping） ----------------

@@ -317,7 +317,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   // 宁可少震一次，也不可失控 —— 与补执行限流 catchUpLimit 同一哲学。
   await vibrate.recoverAfterRestart();
 
-  var guardEnabled = prefs.getBool('guard_enabled') ?? false;
+  var guardEnabled = prefs.getBool(PrefsKeys.guardEnabled) ?? false;
   StreamSubscription<SoundEvent>? guardSub;
   /// 守卫**采流异常**的订阅（见 [SoundGuardService.errors]）。
   ///
@@ -1319,7 +1319,13 @@ Future<void> _engineBody(ServiceInstance service) async {
       // 惰性 → 若所有计划都在下面的"过期丢弃"分支被跳过，则一次平台读取都不会发生。
       final env = RoundConditionEnv(read: readConditionEnv);
       for (final o in due) {
-        if (now.difference(o.fireAt) > const Duration(minutes: 10)) {
+        // BUG-094：过期判据必须用**逐条实时时刻**，不能复用轮首 `now`。
+        // 本轮前几条若是长动作（录音取证 / 声景 / TTS，可达分钟级），
+        // 后面的条目按轮首算就会把「其实已经迟到 10 分钟以上」的计划放行补响
+        // （用户感知为「半夜突然响一条早就该丢的计划」）。
+        // 与 `conditionFailedIn` 的实时 `now` 口径保持一致（condition_env.dart）。
+        final tickNow = DateTime.now();
+        if (tickNow.difference(o.fireAt) > const Duration(minutes: 10)) {
           await occs.markStatus(o.id, OccurrenceStatus.skipped);
           await logs.append(
               source: 'schedule',
@@ -1388,9 +1394,18 @@ Future<void> _engineBody(ServiceInstance service) async {
             occurrenceId: o.id);
         // P1-07：终态由**真实执行结果**决定（缺失音源/TTS 超时/录音失败
         // 现在会如实落 failed，不再因 helper 返回 void 而被记成成功）。
+        //
+        // BUG-093：`skipped` 必须落 **skipped**，不能并进 done。
+        // 旧写法 `ok = outcome.ok`（= status != failed）把 skipped 归入成功，
+        // 而同一循环里「暂停/条件不满足/概率未命中」三条跳过路径都如实落
+        // skipped ⇒ 两条同类语义分叉。连带后果：`lastDoneFor`（声音入口冷却
+        // 基准）把**根本没发生**的执行算成 done ⇒ 冷却被凭空激活，
+        // 后续真该响的声音事件被压掉。
         final ok = outcome.ok;
-        await occs.markStatus(
-            o.id, ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+        final terminal = outcome.isSkipped
+            ? OccurrenceStatus.skipped
+            : (ok ? OccurrenceStatus.done : OccurrenceStatus.failed);
+        await occs.markStatus(o.id, terminal);
         // 夜间独立豁免审计（v1.9，docs/20 §8.2 约束 2）：**不得静默生效**。
         // 读的是**计划条目上持久化的标记**（而非任务当前配置）——
         // 任务配置可能在计划生成后被改掉，标记才代表"这条计划当时为何被放行"。
@@ -1706,7 +1721,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   });
   service.on('guard').listen((m) async {
     guardEnabled = (m?['enabled'] as bool?) ?? false;
-    await prefs.setBool('guard_enabled', guardEnabled);
+    await prefs.setBool(PrefsKeys.guardEnabled, guardEnabled);
     if (guardEnabled) {
       final profiles =
           await db.db.query('sound_profiles', where: 'enabled = 1', limit: 1);
@@ -1803,7 +1818,7 @@ Future<void> _engineBody(ServiceInstance service) async {
     //（违反 Android 11+ while-in-use），必然失败并报错 —— 停止方向走安全侧，
     // 守卫须由用户在前台显式重新开启（届时会重新申请通行证）。
     guardEnabled = false;
-    await prefs.setBool('guard_enabled', false);
+    await prefs.setBool(PrefsKeys.guardEnabled, false);
     try {
       await native.invokeMethod('stopMicService');
     } on Object catch (e) {

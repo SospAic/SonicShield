@@ -353,11 +353,11 @@ void main() {
       expect(log.map((c) => c.method), contains('requestNotificationsPermission'));
     });
 
-    test('NS04 createServiceChannel：四个渠道一个不少', () async {
+    test('NS04 createServiceChannel：五个渠道一个不少（BUG-145 增 calls）', () async {
       log.clear();
       await NotificationService.instance.createServiceChannel();
       final methods = log.map((c) => c.method).where((m) => m == 'createNotificationChannel').toList();
-      expect(methods, hasLength(4));
+      expect(methods, hasLength(5));
       final ids = log
           .where((c) => c.method == 'createNotificationChannel')
           .map((c) => (c.arguments as Map)['id'] as String)
@@ -367,6 +367,9 @@ void main() {
         NotificationChannels.events,
         NotificationChannels.guard,
         NotificationChannels.evidence,
+        // BUG-145：来电必须有独立渠道 —— 与执行日志共用渠道会被用户静音掉，
+        // 那就是"后台来电完全没反应"的根因。
+        NotificationChannels.calls,
       ]);
     });
 

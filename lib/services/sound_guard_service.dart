@@ -190,7 +190,17 @@ class SoundGuardService {
         peak = -120.0;
       }
     }, onError: (Object e) {
-      _running = false;
+      // BUG-131：采流出错时**原生录音器必须一并收掉**。
+      //
+      // 旧实现只置 `_running = false` 再广播错误 —— `record` 插件的原生会话
+      // （麦克风句柄 / 前台服务通道）留在原地：麦克风指示灯继续亮、系统麦克风
+      // 被本应用长期占用；部分机型在旧会话未释放时 `startStream` 直接失败
+      // ⇒ 表现为"守卫关了再也开不起来"，而 UI 只会说"引擎无响应"。
+      //
+      // `stop()` 的第一句就是同步落 `_running = false`，且自带"取消订阅 →
+      // 有界停止录音器"的分层保证，从 `onError` 里调用它是安全的
+      // （在 onError 内取消自身订阅是 Dart 允许的操作）。
+      unawaited(stop());
       if (!_errors.isClosed) _errors.add(e);
     });
     return const GuardStartResult.ok();

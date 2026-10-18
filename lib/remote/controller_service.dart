@@ -219,6 +219,13 @@ class RcControllerService {
   Future<void> _pttSendChain = Future<void>.value();
   bool _pttAbort = false;
 
+  /// 录音流中途的错误说明（BUG-120）。
+  ///
+  /// 旧实现 `onError: (_) {}` 把流错误完全吞掉：此后不再有分片、UI 毫无感知，
+  /// 直到用户松手才补一帧 `last`，界面上看起来像"正常发送了一条空语音"。
+  /// 记下来，由 `pttStopStream` 的结果如实回报。
+  String? _pttStreamError;
+
   /// 是否正在进行流式对讲（录音流已建立）。
   bool get pttStreaming => _pttSub != null;
 
@@ -241,13 +248,23 @@ class RcControllerService {
     _pttVoiceId = const Uuid().v4();
     _pttSeq = 0;
     _pttAbort = false;
+    // 新会话从干净状态开始：上一轮若异常收场（未走 stop/cancel），残留的
+    // 中断说明不能算到这一轮头上。
+    _pttStreamError = null;
     _pttChunker = AdtsChunker(minBytes: pttChunkBytes);
     _pttStopwatch
       ..reset()
       ..start();
     _pttSendChain = Future<void>.value();
-    _pttSub = stream.listen(_onPttChunk,
-        onError: (Object _) {}, cancelOnError: false);
+    _pttSub = stream.listen(_onPttChunk, onError: (Object e) {
+      // BUG-120：流错误必须**留痕**，由 `pttStopStream` 如实回报，不能静默吞掉。
+      //
+      // ⚠️ 这里**不**补终止帧、也不自动收尾：`_pttSeq == 0` 时端点根本没有
+      // 会话，补一帧 `last=true` 会被端点判成"缺少 audioB64"而误报失败
+      // （与 `pttCancelStream` 的 `if (_pttSeq > 0)` 同一裁决）。收尾交给
+      // 用户松手那一次 `pttStopStream`，那里才知道有没有分片在路上。
+      _pttStreamError = '$e';
+    }, cancelOnError: false);
     return true;
   }
 
@@ -294,14 +311,24 @@ class RcControllerService {
     }
     final tail = _pttChunker?.flush();
     final hadAudio = _pttSeq > 0 || (tail != null && tail.isNotEmpty);
-    _enqueuePttChunk(tail ?? Uint8List(0), last: true);
-    await _pttSendChain;
+    final err = _pttStreamError;
+    // BUG-120：中断且**一帧都没发出**时不补终止帧 —— 端点没有会话，
+    // 补帧只会被它判成"缺少 audioB64"而多一条假失败。已有分片在路上时
+    // 仍然必须补（否则端点会话悬挂，等不到末片就不回执、不释放）。
+    if (err == null || hadAudio) {
+      _enqueuePttChunk(tail ?? Uint8List(0), last: true);
+      await _pttSendChain;
+    }
     _resetPttStreamState();
+    _pttStreamError = null;
     return PttSendResult(
         hadAudio,
-        hadAudio
-            ? '已发送（${(durMs / 1000).toStringAsFixed(1)}s）'
-            : '未录到音频');
+        err != null
+            // BUG-120：录音器中途故障要如实告诉用户，而不是伪装成"未录到音频"。
+            ? '录音中断：$err'
+            : (hadAudio
+                ? '已发送（${(durMs / 1000).toStringAsFixed(1)}s）'
+                : '未录到音频'));
   }
 
   /// 松开前取消（滑出按钮区）：立即停录，并补一帧**终止帧**让端点收尾。
@@ -327,6 +354,9 @@ class RcControllerService {
       _enqueuePttChunk(Uint8List(0), last: true);
       await _pttSendChain;
     }
+    // 取消是**用户主动放弃**：上一轮可能残留的中断说明必须一并清掉，
+    // 否则下一轮 `pttStopStream` 会把旧错误当成本轮结果回报。
+    _pttStreamError = null;
     _resetPttStreamState();
   }
 

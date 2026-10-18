@@ -49,9 +49,19 @@ class TaskRepository {
   /// 外键级联不会被误触发，历史完整保留。
   Future<void> upsert(Task t) async {
     final row = _row(t);
-    final n =
-        await _db.db.update('tasks', row, where: 'id = ?', whereArgs: [t.id]);
-    if (n == 0) await _db.db.insert('tasks', row);
+    // BUG-147：UPDATE → INSERT 必须在**同一事务**里。
+    //
+    // 两条独立语句之间存在一个可观测的中间态：更新落空（行还不存在）之后、
+    // 插入执行之前若进程被杀，或者另一条写路径（引擎物化 / 远程 `task.upsert`）
+    // 在同一个 id 上抢先插入，就会出现"更新没命中、插入又冲突"——
+    // 前者让任务保存后**凭空消失**，后者抛 `UNIQUE constraint failed`。
+    // 单事务同时消除半写与竞态；`noResult` 语义不变（先 UPDATE 后 INSERT，
+    // **全程无 DELETE**，不触发 `occurrences` 的级联，见上方 P2-02）。
+    await _db.db.transaction((txn) async {
+      final n =
+          await txn.update('tasks', row, where: 'id = ?', whereArgs: [t.id]);
+      if (n == 0) await txn.insert('tasks', row);
+    });
   }
 
   /// **批量**写入（单事务 / **单次平台通道往返**）。
@@ -96,6 +106,53 @@ class TaskRepository {
 
   Future<void> delete(String id) =>
       _db.db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+
+  /// 从所有任务的 `asset_ids` 里摘掉 [assetId]（BUG-148），返回被改写的任务数。
+  ///
+  /// ## 为什么必须做
+  /// 音源被删除后，任务的 `asset_ids` 仍指向它 —— `BackgroundEngine.pickAssetFor`
+  /// 按 id 查 `audio_assets` 查不到行 ⇒ 触发时**无声失败**，只写一条
+  /// "无可用音源"。用户看到的是"这个任务突然不响了"，完全联想不到是自己删了音源。
+  ///
+  /// 摘引用后任务退化成两种都能理解的状态：还有别的音源 → 从剩下的里挑；
+  /// 一个都不剩 → `assetIds` 为空（引擎按"库内全部音源"随机，见 `pickAssetFor`）。
+  ///
+  /// ⚠️ 用 Dart 侧过滤而不是 SQL `json_remove`：sqflite 绑定的 SQLite 版本
+  /// 在 Android/iOS/桌面三端不一致，JSON1 扩展不保证存在。
+  Future<int> removeAssetRef(String assetId) async {
+    if (assetId.isEmpty) return 0;
+    final rows = await _db.db.query('tasks', columns: ['id', 'asset_ids']);
+    final batch = _db.db.batch();
+    var n = 0;
+    for (final r in rows) {
+      final ids = _decodeAssetIdsColumn(r['asset_ids']);
+      if (!ids.contains(assetId)) continue;
+      batch.update(
+        'tasks',
+        {'asset_ids': jsonEncode(ids.where((x) => x != assetId).toList())},
+        where: 'id = ?',
+        whereArgs: [r['id']],
+      );
+      n++;
+    }
+    if (n == 0) return 0;
+    await batch.commit(noResult: true);
+    return n;
+  }
+
+  /// `asset_ids` 列的反解（兼容 DB 里的 JSON 字符串与内存 List）。
+  static List<String> _decodeAssetIdsColumn(Object? v) {
+    if (v is List) return v.whereType<String>().toList();
+    if (v is String && v.isNotEmpty) {
+      try {
+        final j = jsonDecode(v);
+        if (j is List) return j.whereType<String>().toList();
+      } on Object {
+        // 坏数据：当成"没有引用"，不影响其它任务。
+      }
+    }
+    return <String>[];
+  }
 
   // ---- 反击计划（v2.0）----
   //

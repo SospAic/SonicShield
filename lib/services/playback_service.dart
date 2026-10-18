@@ -178,8 +178,7 @@ class PlaybackService {
       if (_stopRequested) {
         // 收到停止：**立刻静音**（不做淡出 —— 用户要的就是停），并把结果
         // 如实标成失败。报成功会让控制端以为"这段声音已经正常播完了"。
-        await player.stop();
-        await player.setLoopMode(LoopMode.off);
+        await _hardStop(player);
         return PlayResult(
             ok: false,
             playedMs: sw.elapsedMilliseconds,
@@ -188,14 +187,40 @@ class PlaybackService {
       if (fadeOutMs > 0) {
         await _fadeOut(player, fadeOutMs);
       }
-      await player.stop();
-      await player.setLoopMode(LoopMode.off);
+      await _hardStop(player);
       return PlayResult(ok: true, playedMs: sw.elapsedMilliseconds);
     } catch (e) {
+      // BUG-122：失败路径**也必须让声音停下来**。
+      //
+      // 旧写法直接 `return PlayResult(ok:false)`，播放器与 `LoopMode.one`
+      // 原封不动。一旦异常发生在 `setLoopMode(one)` + `play()` **之后**
+      // （`_waitPlayWindow` / `_fadeOut` 抛错、平台通道抖动、音频会话被抢），
+      // 这段短音效会**无限循环**下去；而 `finally` 已把实例从 `_playing`
+      // 摘掉 ⇒ 连「停止指令组」的 `stopAllPlaying()` 都拿不到它，只能等用户
+      // 手动杀应用。失败可以，失控不行。
+      await _hardStop(player);
       return PlayResult(
           ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
     } finally {
       _playing.remove(this);
+    }
+  }
+
+  /// 兜底静音：停播 + 复位循环模式，两步各自吞异常。
+  ///
+  /// 两步都要做 —— 只 `stop()` 不关 `LoopMode.one` 时，下一次 `play()` 若复用
+  /// 同一个 [_player]（`_player ??=`）会**带着上一次的循环模式起播**；反过来
+  /// 只关循环不停播则是"还在响"。任何一步失败都不得阻断另一步。
+  Future<void> _hardStop(AudioPlayer player) async {
+    try {
+      await player.stop();
+    } on Object {
+      // 停不掉也要继续关循环模式：状态自愈。
+    }
+    try {
+      await player.setLoopMode(LoopMode.off);
+    } on Object {
+      // 忽略：下一次 setFilePath 会重建音源。
     }
   }
 

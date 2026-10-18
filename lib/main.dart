@@ -29,7 +29,17 @@ Future<void> main() async {
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   // 创建通知渠道（必须在启动前台服务之前——flutter_background_service
   // 指定自定义 channel id 时不会自动创建，缺失会导致 FGS 崩溃）。
-  await NotificationService.instance.createServiceChannel();
+  //
+  // BUG-108：这是 `runApp` 之前**唯一**没有包 try/catch 的 await（同文件
+  // 下方远程/后台两处都有降级注释）。插件在非 Android 平台或初始化异常时
+  // 会直接抛出 ⇒ `runApp` 永不执行 ⇒ 整屏白屏且无法自救。
+  // 渠道创建失败最坏是通知不可用，不该有能力拖死主应用。
+  try {
+    await NotificationService.instance.createServiceChannel();
+  } on Object catch (e) {
+    // ignore: avoid_print
+    print('[sonic_shield] notification channel failed (降级启动): $e');
+  }
   // 远程指令组的「终止执行」通知按钮回调（docs/14 §5）。
   RcScriptExecutor.registerStopHandler(NotificationService.instance.plugin, () {
     RcScriptExecutor.instance.stop();
@@ -64,7 +74,12 @@ Future<void> main() async {
     // ignore: avoid_print
     print('[sonic_shield] background service init failed (降级启动): $e');
   }
-  await NotificationService.instance.ensure();
+  try {
+    await NotificationService.instance.ensure();
+  } on Object catch (e) {
+    // ignore: avoid_print
+    print('[sonic_shield] notification init failed (降级启动): $e');
+  }
   runApp(const ProviderScope(child: SonicShieldApp()));
 }
 

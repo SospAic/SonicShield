@@ -44,6 +44,9 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
   /// 是否处于批量选择态。
   bool _selectionMode = false;
 
+  /// 新建入口的 in-flight 门闩（BUG-106）：防双击把编辑器压两层。
+  bool _opening = false;
+
   /// 已勾选的任务 id 集合。
   final Set<String> _selected = <String>{};
 
@@ -199,6 +202,12 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       // 失败必须可见：库可能只改了一半，重排也可能没跟上 —— 回读库让界面
       // 与服务真实状态一致，并把原因如实告诉用户（不许静默）。
       invalidateTaskDerivedCaches(ref);
+      // BUG-151：**失败也要退出选择态**。旧实现只在成功路径调 `_exitSelection()`，
+      // 失败后界面仍停在"已选 N 项"，而其中一部分可能已经落库成功
+      // （逐条 `setEnabled` 的中途失败）—— 用户再点一次"启用"会把已成功的
+      // 再写一遍，或对着已删除的 id 反复失败。退出选择态是"把控制权还给用户、
+      // 让界面重新对齐真实状态"的唯一一致做法。
+      _exitSelection();
       _snack('批量$what失败：$e');
     }
   }
@@ -237,6 +246,9 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
       _snack('已删除 ${ids.length} 个任务');
     } on Object catch (e) {
       invalidateTaskDerivedCaches(ref);
+      // BUG-151：同 `_batchSetEnabled` —— 失败也要退出选择态（部分任务可能
+      // 已被删除，继续持有它们的 id 只会让下一次操作对着幽灵任务失败）。
+      _exitSelection();
       _snack('批量删除失败：$e');
     }
   }
@@ -337,9 +349,18 @@ class _TaskListScreenState extends ConsumerState<TaskListScreen> {
           : FloatingActionButton.extended(
               icon: const Icon(Icons.add),
               label: const Text('新建任务'),
+              // BUG-106：防连点。`context.push` 是异步的，双击会在返回栈里
+              // 压两层编辑器；第二层保存时覆盖第一层的结果（且第一层 pop
+              // 回来看到的是旧快照）。门闩在 await 之前同步置位。
               onPressed: () async {
-                await context.push('/tasks/new');
-                invalidateTaskDerivedCaches(ref);
+                if (_opening) return;
+                _opening = true;
+                try {
+                  await context.push('/tasks/new');
+                  invalidateTaskDerivedCaches(ref);
+                } finally {
+                  _opening = false;
+                }
               },
             ),
       body: tasks.when(

@@ -446,6 +446,26 @@ void main() {
       expect(await prefInt('quiet_end'), 9);
       expect(await prefInt('quiet_start'), 20, reason: '开始时段不应被动到');
     }, timeout: perTest);
+
+    testWidgets('SET-03c 库里是越界的历史值 → 必须显示得出来，且不被悄悄改写',
+        (tester) async {
+      // BUG-107：`DropdownButton` 要求 `value` 必须能在 items 里找到，否则
+      // **直接断言崩**（整页白屏）。历史/导入值可能落在允许区间之外
+      // （早期版本允许 20/21，结束小时同理）。修法是把当前值补进候选项 ——
+      // 既显示得出来，也不在"只是进页面看看"时改写库里的值。
+      SharedPreferences.setMockInitialValues({
+        'quiet_start': 21, // 低于合规下限 22
+        'quiet_end': 11, // 高于上限 9
+      });
+      await pumpSettings(tester);
+
+      expect(find.text('开始：21:00'), findsOneWidget,
+          reason: '越界的开始时刻必须如实显示（显示默认值 = 骗用户）');
+      expect(find.text('结束：11:00'), findsOneWidget);
+      expect(await prefInt('quiet_start'), 21,
+          reason: '进页面不得改写库里的值（静默数据变更）');
+      expect(await prefInt('quiet_end'), 11);
+    }, timeout: perTest);
   });
 
   // ─────────────────── SET-05 夜间独立豁免（v1.9，docs/20 §8） ───────────────────
@@ -602,6 +622,65 @@ void main() {
       // 方法名拼错 = 静默返回 null，用户以为跳转了、其实什么都没发生。
       expect(nativeCalls.where((c) => c.method == 'openExactAlarmSettings').length,
           1);
+    }, timeout: perTest);
+
+    testWidgets('SET-04e 闹钟特权通道开关：落库 alarmClockChannel 并触发重排',
+        (tester) async {
+      // 关掉它 = 锁屏后的定时触发从「Doze 中准时」降级为「可能被推迟到维护窗口」。
+      // 静默不落库的话，用户以为开了、实际每次重启都回到默认值。
+      SharedPreferences.setMockInitialValues({'alarm_clock_channel': true});
+      settingsTab = 1; // 「保活与备份」TAB
+      var replanned = 0;
+      BackgroundServiceManager.replanHook = () async => replanned++;
+      await pumpSettings(tester);
+
+      expect(find.text('闹钟特权通道（Doze 准时唤醒）'), findsOneWidget);
+      // 🔴 `_AlarmChannelTile` 首次 build 时 `_loaded == false`，渲染的是**占位
+      // ListTile**（不是 SwitchListTile）——必须等 `SharedPreferences.getInstance()`
+      // 回来的那一帧，否则 `widgetWithText(SwitchListTile, …)` 一个都找不到。
+      await waitFor(tester,
+          () => find
+              .widgetWithText(SwitchListTile, '闹钟特权通道（Doze 准时唤醒）')
+              .evaluate()
+              .isNotEmpty,
+          reason: '占位 ListTile 必须换成 SwitchListTile 才可点');
+      await tester.tap(find.widgetWithText(
+          SwitchListTile, '闹钟特权通道（Doze 准时唤醒）'));
+      await waitFor(tester,
+          () => find.textContaining('已关闭：锁屏后的触发可能被系统推迟').evaluate().isNotEmpty,
+          reason: '关掉后副标题必须如实说明代价');
+
+      expect(await prefBool('alarm_clock_channel'), isFalse);
+      expect(replanned, greaterThanOrEqualTo(1),
+          reason: '改通道后必须让引擎重排 —— 否则原生侧仍按旧通道排闹钟，'
+              '用户改了个寂寞');
+    }, timeout: perTest);
+
+    testWidgets('SET-04f App Standby 桶受限（rare）→ 必须显式告警并给出出口',
+        (tester) async {
+      // docs/59 缺口2：rare/restricted 时后台任务会被大幅推迟，而 app 内无法
+      // 自提权 —— 只能显式告警 + 给一个可执行的去处。读不到（unknown）时
+      // 一律不显示，不拿猜测骚扰用户。
+      SharedPreferences.setMockInitialValues({});
+      settingsTab = 1;
+      messenger().setMockMethodCallHandler(kNative, (call) async {
+        nativeCalls.add(call);
+        if (call.method == 'standbyBucket') return 'rare';
+        return null;
+      });
+      await pumpSettings(tester);
+
+      await waitFor(tester,
+          () => find.text('系统省电策略正在限制本应用').evaluate().isNotEmpty,
+          reason: '桶受限必须告警，否则用户只会看到"定时任务怎么不响"');
+      expect(find.textContaining('去「电池与自启动」把本应用放行后生效'), findsOneWidget);
+      // 「去设置」必须真的打到 OEM 自启动页，不能是个空按钮。
+      await tester.tap(find.widgetWithText(TextButton, '去设置'));
+      await waitFor(
+        tester,
+        () => nativeCalls.any((c) => c.method == 'openOemAutostart'),
+        reason: '告警给了出口就必须真跳转',
+      );
     }, timeout: perTest);
 
     testWidgets(

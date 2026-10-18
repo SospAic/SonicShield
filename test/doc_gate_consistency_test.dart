@@ -311,11 +311,17 @@ const String kGlobalLabel = r'全局|对外诚实数字';
 ///   ⇒ 已覆盖行 **1 → 50**。
 /// 合计：分母 **803**（663 + 70 + 70），已覆盖 **58**（8 + 50 + 0）。
 /// 实测依据：第八十六轮门禁 `_pt/lcov_r86b.info`（逐文件 LF/LH 独立复算）。
-const int kDeviceExemptLines = 663 + 70 + 70;
+/// ⚠️ 第八十七轮（2026-10-18）：按权威 `coverage/lcov.info` 实测校正 ——
+/// 本轮 BUG-093（`finalStatusFromResult` 纯判据化）等修复让三个豁免文件的
+/// LF 各自微涨：`background_engine.dart` **663 → 664**、`main.dart` **70 → 72**、
+/// `neural_tts.dart` **70 → 74**（已覆盖 **50 → 53**，见 `_pt/gate87e.txt` 报告段）。
+/// 合计：分母 **803 → 810**（664 + 72 + 74），已覆盖 **58 → 61**（8 + 0 + 53）。
+/// 实测依据：第八十七轮全量门禁（`coverage/lcov.info` 逐文件复算）。
+const int kDeviceExemptLines = 664 + 72 + 74;
 
 /// 设备层豁免面**已覆盖**行（`background_engine.dart` 8 + `main.dart` 0 +
-/// `neural_tts.dart` 50 ⇒ 58）。
-const int kDeviceExemptCovered = 58;
+/// `neural_tts.dart` 53 ⇒ 61）。
+const int kDeviceExemptCovered = 61;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
@@ -494,7 +500,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 655 + 70 + 70，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 664 + 72 + 74，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1123,7 +1129,7 @@ void main() {
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 655 + 70 + 70，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 664 + 72 + 74，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
           reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/655）');
     });

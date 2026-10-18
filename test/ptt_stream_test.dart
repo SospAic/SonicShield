@@ -299,7 +299,10 @@ void main() {
       expect(captured, isEmpty, reason: '流错误不得被误当成音频发出去');
       final r = await svc.pttStopStream();
       expect(r.ok, isFalse, reason: '一帧未产出必须如实报告，不能假成功');
-      expect(r.message, '未录到音频');
+      // BUG-120：中断原因必须说出来。旧实现把 `onError` 吞成空闭包，
+      // 松手时只会得到"未录到音频" —— 用户以为是没说话，实际是录音通道挂了。
+      expect(r.message, contains('录音中断'),
+          reason: '录音器中途故障必须如实回报原因，不能伪装成"未录到音频"');
       expect(svc.pttStreaming, isFalse);
       await ctrl.close();
     });

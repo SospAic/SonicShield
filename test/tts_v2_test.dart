@@ -562,15 +562,37 @@ void main() {
       expect(buildOnlineTtsClient(endpoint: '   ', apiKey: 'k'), isNull);
     });
 
-    test('BOTC-02 ws/wss → EdgeTtsClient（免 Key）', () {
+    test('BOTC-02 wss → EdgeTtsClient（免 Key）；公网明文 ws 拒装（BUG-132）', () {
       expect(
         buildOnlineTtsClient(
             endpoint: 'wss://edge.example/v1', apiKey: ''),
         isA<EdgeTtsClient>(),
       );
       expect(
-        buildOnlineTtsClient(endpoint: 'WS://edge.example/v1', apiKey: ''),
+        buildOnlineTtsClient(endpoint: 'WSS://edge.example/v1', apiKey: ''),
         isA<EdgeTtsClient>(),
+        reason: '协议名大小写不敏感',
+      );
+      // BUG-132：公网明文端点会把合成文本暴露在同一网段；一律拒装
+      // （调用方拿不到客户端 = "未配置"，不会发出明文请求）。
+      expect(
+        buildOnlineTtsClient(endpoint: 'WS://edge.example/v1', apiKey: ''),
+        isNull,
+        reason: '公网 ws:// 明文 → 拒绝',
+      );
+      expect(
+        buildOnlineTtsClient(endpoint: 'http://r.tts.example/v1', apiKey: 'k'),
+        isNull,
+        reason: '公网 http:// 明文会把 Azure Key 暴露出去 → 拒绝',
+      );
+      // 本机 / 局域网自建服务仍然允许明文（真实用法，且不出公网）。
+      expect(
+        buildOnlineTtsClient(endpoint: 'ws://127.0.0.1:8080/v1', apiKey: ''),
+        isA<EdgeTtsClient>(),
+      );
+      expect(
+        buildOnlineTtsClient(endpoint: 'http://192.168.0.9:5000/v1', apiKey: 'k'),
+        isA<OnlineTtsClient>(),
       );
     });
 

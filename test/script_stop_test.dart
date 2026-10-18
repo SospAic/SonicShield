@@ -274,10 +274,14 @@ void main() {
   group('端点接线锁（源码契约）：终止必须真的能停掉录音', () {
     final src = File('lib/remote/endpoint_service.dart').readAsStringSync();
 
+    // BUG-121 把一次脚本执行拆成「预占段 `_runScript`」+「实跑段
+    // `_runClaimedScript`」。锁的语义范围是"一次执行"，故按源码顺序拼接。
+    String execScope() =>
+        methodBody(src, 'Future<void> _runScript(') +
+        methodBody(src, 'Future<void> _runClaimedScript(');
 
     test('T10 record 调用点把终止令牌传进 _recordEvidence', () {
-      final runScript = methodBody(src, 'Future<void> _runScript(');
-      final runner = methodBody(runScript, 'Future<void> runner(RcStep step)');
+      final runner = methodBody(execScope(), 'Future<void> runner(RcStep step)');
       final recordCase = runner.indexOf('case RcStepKind.record:');
       expect(recordCase, greaterThanOrEqualTo(0));
       expect(runner.substring(recordCase), contains('cancel: cancel'),

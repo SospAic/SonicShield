@@ -425,5 +425,56 @@ void main() {
       expect(rows.first['message'], contains('不支持振幅控制'));
       h.session.dispose();
     });
+
+    test('VS-18 同 id 重入：旧会话的账必须结清并如实记账（BUG-126）', () async {
+      // 重试 / 重新物化后再次触发 / 远程连按两次都会走到这里。旧实现是
+      // **直接覆盖** `_active[occurrenceId]`：旧会话的起始时刻、已下发片数、
+      // 审计归属全部丢失，而 `stopFor(id)` 从此只能停到新会话。
+      final h = build();
+      expect(
+        await h.session.start(
+          occurrenceId: 'o-dup',
+          taskId: 't1',
+          action: continuous,
+          durationMs: 60000,
+          amplitude: 0.5,
+          source: 'test',
+        ),
+        isTrue,
+      );
+      h.advance(const Duration(seconds: 19));
+      await h.session.pump();
+      expect(h.sent.length, greaterThanOrEqualTo(2), reason: '先让旧会话真的下发过几片');
+
+      // 同 id 再来一次（换了任务与时长）。
+      expect(
+        await h.session.start(
+          occurrenceId: 'o-dup',
+          taskId: 't2',
+          action: const ContinuousVibrateAction(
+              durationSecMin: 30, durationSecMax: 30, amplitudeMin: 0.4, amplitudeMax: 0.4),
+          durationMs: 30000,
+          amplitude: 0.4,
+          source: 'test',
+        ),
+        isTrue,
+      );
+
+      final rows = await logs.recent();
+      final takeover = rows
+          .where((r) =>
+              (r['message'] as String? ?? '').contains('被同 id 的新会话接管'))
+          .toList();
+      expect(takeover, hasLength(1),
+          reason: '旧会话静默消失 ⇒ 起始时刻/已下发片数/审计归属全部丢失，'
+              '用户看到的是"这次振动没有记录"');
+      expect(takeover.single['status'], 'skipped');
+      // `recent()` 返回的是**原始行**，键是列名（`task_id`），不是 Dart 侧驼峰。
+      expect(takeover.single['task_id'], 't1',
+          reason: '结算必须记在**旧**会话的任务名下，不能算到接管者头上');
+      // 活跃表里只该有接管后的那一个会话。
+      expect(h.session.activeCount, 1);
+      h.session.dispose();
+    });
   });
 }

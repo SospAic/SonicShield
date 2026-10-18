@@ -240,7 +240,12 @@ class EdgeTtsClient implements TtsSynthClient {
           _requestId, OnlineTtsClient.buildSsml(clipped, voiceName)));
       final audio = BytesBuilder();
       var turnEnded = false;
+      // BUG-132：`stream.timeout()` 只约束**相邻两帧的间隔**，对端只要每 14 秒
+      // 滴一帧，就能把一次合成拖到任意长 —— 而合成是在调度链路里被同步等待的
+      // （`ttsHandler`），拖住它就是整轮 tick 被拖住。这里补一个**绝对截止时刻**。
+      final deadline = DateTime.now().add(timeout);
       await for (final frame in socket.stream.timeout(timeout)) {
+        if (DateTime.now().isAfter(deadline)) break; // 保持 turnEnded=false → null
         if (frame is String) {
           if (frame.contains('Path:turn.end')) {
             turnEnded = true;
@@ -309,12 +314,49 @@ class EdgeTtsClient implements TtsSynthClient {
   }
 }
 
+/// 端点是否**允许明文传输**（BUG-132）。
+///
+/// `http://` / `ws://` 会把两样东西暴露给同一网段上的任何人：
+/// - REST 通路的 `Ocp-Apim-Subscription-Key` —— 用户自己的 Azure 密钥，明文
+///   header 一抓即得（这是**密钥泄露**，不是理论风险）；
+/// - 合成文本本身 —— 可能是取证喊话内容、联系人姓名、日程。
+///
+/// 判据：`https` / `wss` 一律允许；明文协议**只**允许回环与 RFC1918 私有地址
+/// （本机 / 家庭局域网自建服务是真实用法，公网明文没有任何正当理由）。
+bool isSecureTtsEndpoint(String endpoint) {
+  final uri = Uri.tryParse(endpoint.trim());
+  if (uri == null || uri.host.isEmpty) return false;
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme == 'https' || scheme == 'wss') return true;
+  if (scheme != 'http' && scheme != 'ws') return false;
+  return _isLocalHost(uri.host);
+}
+
+/// 回环 / 私有网段判定（[isSecureTtsEndpoint] 专用）。
+bool _isLocalHost(String host) {
+  final h = host.toLowerCase();
+  if (h == 'localhost' || h == '127.0.0.1' || h == '::1' || h == '[::1]') {
+    return true;
+  }
+  final parts = h.split('.');
+  if (parts.length != 4) return false;
+  final a = int.tryParse(parts[0]);
+  final b = int.tryParse(parts[1]);
+  if (a == null || b == null) return false;
+  if (a == 127) return true; // 回环
+  if (a == 10) return true; // 10/8
+  if (a == 192 && b == 168) return true; // 192.168/16
+  if (a == 172 && b >= 16 && b <= 31) return true; // 172.16/12
+  return false;
+}
+
 /// 按端点协议装配在线语音客户端（**唯一的"选通路"决策点**）。
 ///
 /// - 端点空 → `null`（未配置，调用方直接返回 `false`，不发任何请求）；
-/// - `ws://` / `wss://` → [EdgeTtsClient]（免 Key，出厂默认走这条）；
+/// - `ws(s)://` → [EdgeTtsClient]（免 Key，出厂默认走这条）；
 /// - `http(s)://` → [OnlineTtsClient]（Azure 兼容 REST，端点与 Key 都必须有，
-///   否则 `null`）。
+///   否则 `null`）；
+/// - **公网明文端点 → `null`**（[isSecureTtsEndpoint]，BUG-132）。
 TtsSynthClient? buildOnlineTtsClient({
   required String endpoint,
   required String apiKey,
@@ -323,6 +365,9 @@ TtsSynthClient? buildOnlineTtsClient({
 }) {
   final ep = endpoint.trim();
   if (ep.isEmpty) return null;
+  // BUG-132：公网明文端点一律拒装 —— 调用方拿不到客户端就等于"未配置"，
+  // 于是不会发出携带 Key / 文本的明文请求。
+  if (!isSecureTtsEndpoint(ep)) return null;
   final lower = ep.toLowerCase();
   if (lower.startsWith('ws://') || lower.startsWith('wss://')) {
     return EdgeTtsClient(

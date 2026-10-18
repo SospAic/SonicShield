@@ -242,6 +242,17 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   Task? _editing;
   bool _loaded = false;
 
+  /// 保存 in-flight 门闩（BUG-100）：防连点造成重复 upsert 与重复 `pop()`
+  /// （第二次 pop 会把任务列表页一起弹掉）。
+  bool _saving = false;
+
+  /// 条件时段「结束落在次日」（BUG-102）。
+  ///
+  /// 旧实现保存时用 `end <= start` **重新推导**，而等值窗口（如 22:00–22:00）
+  /// 原本可能是 `false`（表示"这一分钟"），一保存就被改成跨午夜 ⇒ 行为翻转。
+  /// 改为**回填原值**，只在用户真正改动时段时才按新值重算。
+  bool _condWinNextDay = false;
+
   @override
   void initState() {
     super.initState();
@@ -317,6 +328,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       if (mounted) setState(() => _loaded = true);
       return;
     }
+    // BUG-101：await 之后必须判 mounted —— 否则用户在数据库返回前退出
+    // 本页，`setState` 会在已 dispose 的 State 上调用（抛
+    // "setState() called after dispose()"）。同函数 `t == null` 分支早有检查，
+    // 这一支是漏网的孪生。
+    if (!mounted) return;
     setState(() {
       _editing = t;
       _nameCtrl.text = t.name;
@@ -347,6 +363,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _condMinBattery = c.minBatteryPct;
         _condWinStart = c.windowStartMin;
         _condWinEnd = c.windowEndMin;
+        // BUG-102：跨午夜标志必须原样带回（见字段注释）。
+        _condWinNextDay = c.windowEndNextDay;
         _condWifi = c.requireWifi;
         _condSkipCall = c.skipInCall;
         _condProbability = c.probabilityPct ?? 100;
@@ -380,8 +398,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _maxGapMin = tr.maxGap.inMinutes;
         _startDate = tr.dateRange.start;
         _endDate = tr.dateRange.end;
+        // BUG-098：`activeStart` / `activeEnd` / `maxPerDay` 编辑器没有控件，
+        // 但**必须在保存时原样带回**（见 `_buildTask` 的同名分支）。
+        // 这里只做回读展示用途之外的兜底：不覆盖任何用户可见控件。
       } else if (tr is SoundTrigger) {
-        _recordSec = tr.cooldownSec;
+        // BUG-098b：旧代码把 `tr.cooldownSec` 赋给 `_recordSec`（录音取证时长）
+        // —— 跨字段污染：打开声音触发任务、把动作切成「录音取证」再保存，
+        // 录音时长就变成触发冷却值（默认 120s）。此处不再写 `_recordSec`；
+        // `SoundTrigger` 的四个字段在 `_buildTask` 里原样带回。
       }
       final a = t.action;
       if (a is PlayAudioAction) {
@@ -699,7 +723,11 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                           value: h * 60,
                           child: Text('${h.toString().padLeft(2, '0')}:00')),
                   ],
-                  onChanged: (v) => setState(() => _condWinStart = v),
+                  onChanged: (v) => setState(() {
+                        _condWinStart = v;
+                        // 用户改了时段 ⇒ 跨午夜标志按新值重算（BUG-102）。
+                        _condWinNextDay = (_condWinEnd ?? 0) <= (v ?? 0);
+                      }),
                 ),
               ),
               const SizedBox(width: 4),
@@ -716,7 +744,10 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                           child: Text(
                               '${h % 24 == 0 ? '24' : (h).toString().padLeft(2, '0')}:00')),
                   ],
-                  onChanged: (v) => setState(() => _condWinEnd = v),
+                  onChanged: (v) => setState(() {
+                        _condWinEnd = v;
+                        _condWinNextDay = (v ?? 0) <= (_condWinStart ?? 0);
+                      }),
                 ),
               ),
             ],
@@ -1516,10 +1547,23 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   }
 
   /// 保存：远程模式走调用方注入的通道，本机模式写本地仓储并续算计划。
+  ///
+  /// BUG-100：加 in-flight 门闩。旧实现没有防护，连点「保存任务」时：
+  /// ① 两次 `upsert` 竞态；② 第一次 `pop()` 之后第二次又 `pop()` ——
+  /// 把**任务列表页**也弹掉（路由回退越层）。门闩在第一个 await 之前同步置位。
   Future<void> _save() async {
+    if (_saving) return;
     final task = _buildTask();
     if (task == null) return;
+    _saving = true;
+    try {
+      await _saveInner(task);
+    } finally {
+      _saving = false;
+    }
+  }
 
+  Future<void> _saveInner(Task task) async {
     final remote = widget.remoteTarget;
     if (remote != null) {
       final ok = await remote.save(task);
@@ -1575,16 +1619,29 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         }
         trigger = FixedOnceTrigger(at: at);
       case TriggerType.dailyAt:
+        // BUG-098：`dateRange`（生效区间）编辑器无控件，但**必须原样带回** ——
+        // 否则「打开编辑器再保存」把带区间的每日任务变成长期有效，
+        // 用户感知为「我设的结束日期自己没了」。
         trigger = DailyTrigger(
-            time: TimeSpec(hour: _time.hour, minute: _time.minute));
+          time: TimeSpec(hour: _time.hour, minute: _time.minute),
+          dateRange: switch (_editing?.trigger) {
+            final DailyTrigger t => t.dateRange,
+            _ => null,
+          },
+        );
       case TriggerType.weeklyAt:
         if (_weekdays.isEmpty) {
           if (mounted) _toast(context, '请至少选择一个星期');
           return null;
         }
         trigger = WeeklyTrigger(
-            weekdays: _weekdays,
-            time: TimeSpec(hour: _time.hour, minute: _time.minute));
+          weekdays: _weekdays,
+          time: TimeSpec(hour: _time.hour, minute: _time.minute),
+          dateRange: switch (_editing?.trigger) {
+            final WeeklyTrigger t => t.dateRange,
+            _ => null,
+          },
+        );
       case TriggerType.randomWindow:
         trigger = RandomWindowTrigger(
           dateRange: DateRange(start: _startDate, end: _endDate),
@@ -1596,18 +1653,52 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           windowEndNextDay: _winEndNextDay,
         );
       case TriggerType.randomInterval:
+        // BUG-098：`activeStart/activeEnd/maxPerDay` 编辑器无控件（本机恒用默认
+        // 00:00–23:59 / 8 次），但远程/导入来的任务可能带自定义值 ——
+        // 不回带就会在「打开编辑器再保存」时被悄悄重置。
+        final prev = switch (_editing?.trigger) {
+          final RandomIntervalTrigger t => t,
+          _ => null,
+        };
         trigger = RandomIntervalTrigger(
           dateRange: DateRange(start: _startDate, end: _endDate),
           minGap: Duration(minutes: _minGapMin),
           maxGap: Duration(minutes: _maxGapMin.clamp(_minGapMin + 1, 1440)),
+          activeStart: prev?.activeStart ?? const TimeSpec(hour: 0, minute: 0),
+          activeEnd: prev?.activeEnd ?? const TimeSpec(hour: 23, minute: 59),
+          maxPerDay: prev?.maxPerDay ?? 8,
         );
       case TriggerType.soundTriggered:
-        trigger = const SoundTrigger();
+        // BUG-098：阈值 / 最短持续 / 冷却 / 仅充电时 四个字段编辑器都没有控件
+        // （阈值在「守卫」页按设备配），必须原样带回；否则保存一次就把
+        // 用户调好的灵敏度重置成默认值。
+        final snd = switch (_editing?.trigger) {
+          final SoundTrigger t => t,
+          _ => null,
+        };
+        trigger = snd == null
+            ? const SoundTrigger()
+            : SoundTrigger(
+                thresholdDb: snd.thresholdDb,
+                minDurationMs: snd.minDurationMs,
+                cooldownSec: snd.cooldownSec,
+                onlyWhileCharging: snd.onlyWhileCharging,
+              );
     }
 
     ActionConfig action;
     switch (_actionKind) {
       case ActionKindChoice.play:
+        // ⚠️ **保存期不拦空音源池**（第八十七轮裁决，推翻本轮初版做法）。
+        //
+        // 空音源池是**运行时**条件，不是配置错误：用户完全可以"先建任务、
+        // 后导入音源"（新装机的必经顺序），而引擎侧已有诚实的失败路径
+        // （`pickAssetFor` 查不到 → 写 `无可用音源` 的 failed 审计）。
+        // 保存期拦截会让这条正常流程直接不可用，且与既有行为锁
+        // （`bs_gap_closure_test` BS-03 / `task_editor_deep_test` TEI-F1..F9）
+        // 冲突 —— 那些用例要验证的正是"保存是否真的落库 / 失败是否可见"。
+        // 真需要提示时，界面已在音源选择区就地提示（见 `_assetIds.isEmpty`
+        // 的 inline hint），不占用保存路径。
         action = PlayAudioAction(
           volumeMin: _volMin,
           volumeMax: _volMax,
@@ -1637,6 +1728,13 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         // 0 个会在 `pick()` 里越界）。
         if (_setItems.length + _setPreserved.length < 2) {
           if (mounted) _toast(context, '随机指令集至少需要 2 个候选动作');
+          return null;
+        }
+        // BUG-099b：上限 12 同样要在构造前拦下 —— `ActionSetAction` 的 assert
+        // 在 async `_save()` 里抛会变成未处理 Future 错误（debug 红屏、
+        // release 剥离 assert 后落库违约数据），与 BUG-067 同形。
+        if (_setItems.length + _setPreserved.length > 12) {
+          if (mounted) _toast(context, '随机指令集最多 12 个候选动作');
           return null;
         }
         action = ActionSetAction(candidates: [
@@ -1717,6 +1815,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       case ActionKindChoice.notify:
         action = NotifyAction(title: '声盾 · 触发', body: _nameCtrl.text);
       case ActionKindChoice.composite:
+        // 同 `play`：复合动作的主音也是播放，但空音源池同样**不在保存期拦**。
         action = CompositeAction(
           primary: PlayAudioAction(
             volumeMin: _volMin,
@@ -1769,7 +1868,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               minBatteryPct: _condMinBattery,
               windowStartMin: _condWinStart,
               windowEndMin: _condWinEnd,
-              windowEndNextDay: (_condWinEnd ?? 0) <= (_condWinStart ?? 0),
+              windowEndNextDay: _condWinNextDay,
               requireWifi: _condWifi,
               skipInCall: _condSkipCall,
               probabilityPct: _condProbability >= 100 ? null : _condProbability,

@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../services/notification_service.dart';
 import 'endpoint_service.dart';
 import 'call_lifecycle.dart';
 import 'call_media_profile.dart';
@@ -310,6 +311,23 @@ class CallService {
       if (!_remoteStateCtrl.isClosed) _remoteStateCtrl.add(s);
       if (remoteStateStopsWaiting(s)) _cancelWaitTimer();
       if (remoteStateEndsCall(s)) {
+        // BUG-141：**没有在途通话时不得收尾**。`callId` 缺省（null）的信令
+        // 会穿过上面的"不是本次通话"判定落到这里，而 `_teardown` 在 idle 态
+        // 仍会完整跑一遍收尾（关免提 / 清 pc / 广播 ended）—— 表现为
+        // "根本没在通话，却突然收到一条已结束"。
+        //
+        // 但也**不能**把镜像写成 `ended` 就不管：镜像会永久停在"已结束"，
+        // 下一次通话开始前 UI 一直显示上一通的残影（CS-11 锁住这一点）。
+        // 故 idle 态走"静默归位"：镜像回 unknown、记下原因，**不广播**
+        // （没有通话可结束，广播只会造出假事件）。
+        if (!inCall) {
+          _remoteState = RemoteCallState.unknown;
+          if (!_remoteStateCtrl.isClosed) {
+            _remoteStateCtrl.add(RemoteCallState.unknown);
+          }
+          _endReason = CallEndReason.remoteEnded;
+          return;
+        }
         unawaited(_teardown(reason: CallEndReason.remoteEnded));
       }
       return;
@@ -528,6 +546,32 @@ class CallService {
   /// [acceptPending]。**去掉这个参数是为了让那条错误接线不再可能**。
   Future<bool> onIncomingCall(Map<String, dynamic> payload, PairedEndpoint peer,
       RemoteStore store) async {
+    // ---- BUG-139：`callId` 是不可信输入 ----
+    //
+    // 旧写法 `payload['callId'] as String`：对端（或旧版本）漏字段/发数字时
+    // 直接抛 `TypeError`，而本方法在事件链里被 `unawaited` 调用 ⇒ 变成
+    // **未处理的异步错误**，用户侧表现为"来电没响、也没报错"。
+    // 没有 callId 就无法归路（也发不出对应的 end），但**不能静默**：
+    // 回一条 `call.end{reason:invalid}`，让主叫立刻收场而不是干等 45 秒。
+    final rawId = payload['callId'];
+    if (rawId is! String || rawId.isEmpty) {
+      await _sendCallMsg(
+          RcCmd.callEnd, {'callId': null, 'reason': 'invalid'}, peer, store);
+      return false;
+    }
+
+    // ---- BUG-140：**重复投递的 invite 绝不能回 busy** ----
+    //
+    // 同一通电话的 invite 可能重发（控制端 outbox 补发 / 网络抖动重投）。
+    // 旧逻辑不看 callId，直接走 `calleeActionFor(inCall: true)` ⇒ 回
+    // `call.end{busy}` —— 而对端收到 end 就把**这一通**挂掉了：
+    // "重复的邀请把正在振铃/已接通的通话打死"。
+    if (rawId == _callId) {
+      // 已经在处理同一通：振铃中视为幂等成功（不重复振铃、不重复计时）；
+      // 已接通则忽略（answer 早已发出，重发只会造成状态回退）。
+      return _phase == CallPhase.ringing || inCall;
+    }
+
     // 决策走纯函数（宿主机可断言）。⚠️ 它保证「开关关闭 ⇒ 绝不自动接通」。
     final action = calleeActionFor(
       autoAnswer: await autoAnswerEnabled(),
@@ -535,14 +579,17 @@ class CallService {
     );
     if (action == CalleeAction.rejectBusy) {
       // 占线：直接回 end，主叫立刻得到反馈。
-      await _sendCallMsg(RcCmd.callEnd,
-          {'callId': payload['callId'], 'reason': 'busy'}, peer, store);
+      await _sendCallMsg(
+          RcCmd.callEnd, {'callId': rawId, 'reason': 'busy'}, peer, store);
       return false;
     }
     _isCaller = false;
     _peer = peer;
-    _callId = payload['callId'] as String;
-    _video = payload['video'] as bool? ?? true;
+    _callId = rawId;
+    // BUG-117：缺省必须是**音频**（false），不能是视频。
+    // 旧默认 true ⇒ 老版本控制器 / 漏字段的报文会让被叫直接开摄像头，
+    // 默认值落在更敏感的一侧。显式 true 才开视频。
+    _video = payload['video'] is bool ? payload['video'] as bool : false;
     // docs/61 §5 P2：会话类型（缺省 `'call'` ⇒ 向后兼容旧端）。
     _screen = payload['kind'] == 'screen';
     // 新会话起点：候选缓存必须是空的（`_createPc` 要等到用户点「接听」
@@ -568,6 +615,14 @@ class CallService {
     // 把 invite 存下来 —— 用户是**稍后**才点「接听」的，那一刻拿不到 SDP；
     // 不存就只能退回"收到 invite 就立刻接通"的老路，而那正是本 BUG。
     _pendingInvite = Map<String, dynamic>.from(payload);
+    // BUG-145：**后台/锁屏时也必须有来电提醒**。振铃浮层是应用内 UI，
+    // App 不在前台时根本不渲染 ⇒ 旧实现下"后台来电"完全静默，
+    // 对端等到 45 秒报"对方无应答"，而本机使用者全程没被通知过。
+    // 这里发一条独立渠道的高优先级通知（含全屏意图），收尾时统一取消。
+    unawaited(NotificationService.instance.showIncomingCall(
+      title: '声盾 · 来电',
+      body: '${_peer?.name ?? '已配对设备'} 请求${_video ? '视频' : '语音'}通话',
+    ));
     // 振铃超时：到点由**端点侧**发出 `RcEvt.callMissed`，主叫据此结束等待 ——
     // "没人接"这件事不该由主叫单方面猜（BUG-050）。
     _startWaitTimer(isCaller: false);
@@ -826,10 +881,18 @@ class CallService {
   Future<void> _setSpeakerphone(bool on) async {
     try {
       await Helper.setSpeakerphoneOn(on);
+      _speakerOn = on;
     } on Object {
       // 平台不支持 → 忽略。
     }
   }
+
+  /// 本端是否**主动**开过免提（BUG-142）。
+  ///
+  /// 收尾时只归位自己开过的那次：旧实现无条件 `setSpeakerphoneOn(false)`，
+  /// 于是「屏幕共享会话」（`_ensureMedia(screen: true)` 压根没开过免提）
+  /// 结束时也会改一次通话音频路由；用户侧表现为"挂断后应用的声音突然变小声"。
+  bool _speakerOn = false;
 
   Future<void> _createPc() async {
     // ⚠️ 只复位"远端描述"标记，**绝不能**在这里清候选缓存：
@@ -978,12 +1041,16 @@ class CallService {
     _cancelWaitTimer();
     _cancelConnectTimer();
     _answered = false;
+    // BUG-145：来电通知是 `ongoing`（只能由应用自己取消）—— 接听/拒接/超时
+    // 任何一条收尾路径都要收起它，否则通知栏会永远挂着一条"来电"。
+    unawaited(NotificationService.instance.cancelIncomingCall());
     // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
     // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。
     _pendingCandidates.clear();
     _remoteDescSet = false;
-    // 免提归位：不关掉的话，通话结束后整个应用的媒体播放仍走扬声器。
-    await _setSpeakerphone(false);
+    // 免提归位：**只关本端自己开过的那次**（BUG-142，见 [_speakerOn]）。
+    // 不关的话，通话结束后整个应用的媒体播放仍走扬声器。
+    if (_speakerOn) await _setSpeakerphone(false);
     try {
       await _pc?.close();
       await _pc?.dispose();

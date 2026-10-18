@@ -370,7 +370,14 @@ class AssistJoinClient {
     // 控制端**不计**解密失败：本端没有"被暴力猜测"的语义，
     // 且端点在未接入前根本不会往该主题发东西（垃圾报文只可能是噪声）。
     if (msg == null) return;
-    _rememberSeen(msg.id);
+    // BUG-119：`decode(seenIds: _seen)` 只是**只读查重**，与这里的写入之间
+    // 隔着一次异步解密 ⇒ 并发的同 ID 报文可以双双通过（QoS1 重投 + nonce 随机
+    // ⇒ 密文字节不同，密文级去重挡不住）⇒ 业务命令可能被执行两次。
+    // 改用与端点同款的**原子预占**：查重与写入在同一同步段完成。
+    if (!RcCodec.reserveInboundId(
+        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+      return; // 重复投递：不得执行任何副作用
+    }
 
     switch (msg.type) {
       case RcAssistCmd.accept:
@@ -471,12 +478,6 @@ class AssistJoinClient {
         _ => reason.isEmpty ? '端点拒绝了接入请求' : '端点拒绝：$reason',
       };
 
-  void _rememberSeen(String id) {
-    if (id.isEmpty) return;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _seen[id] = now;
-    _seen.removeWhere((_, t) => now - t > 10 * 60 * 1000);
-  }
 
   void _rememberWire(String wire) {
     _seenWires.add(wire);
