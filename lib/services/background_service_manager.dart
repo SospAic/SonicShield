@@ -27,6 +27,26 @@ class BackgroundServiceManager {
   Stream<EngineState> get state => _stateOverride ?? _stateCtrl.stream;
   EngineState? _last;
   EngineState? get last => _last;
+
+  /// `init()` 失败的原因（成功时为 null）。
+  ///
+  /// 🔴 R89：`main.dart` 对 `init()` 做了降级 try/catch（避免白屏，BUG-108 同源
+  /// 纪律），但降级后**没有任何人知道后台服务其实没配好** —— 此时
+  /// `startService()` 必然无效或抛错，而 UI 只看到「开关弹回、零提示」，
+  /// 用户完全无从判断是权限、电池优化还是服务本身坏了。
+  /// 这里把原因留住，由守护页开关失败时原样转达。
+  String? _initError;
+  String? get initError => _initError;
+
+  /// 最近一次 [start] 失败的真实原因（成功时清空）。
+  ///
+  /// 与 [guardError] 同源纪律：**要失败，但不要静默失败**。
+  /// 旧实现 `start()` 只回 `bool`，而 `_svc.startService()` 在原生侧拒绝
+  /// （Android 14+ 前台服务类型限制 / 厂商后台限制）时**抛 `PlatformException`**，
+  /// 异常一路穿透到 `onChanged` 的 async 闭包 → 变成未捕获异步错误：
+  /// 开关弹回、零提示，用户感知就是「点了完全没反应」。
+  String? _startError;
+  String? get startError => _startError;
   // 测试缝：注入 `last` 以驱动依赖它的 UI（下一触发倒计时 / 守卫态渲染）；
   // 生产代码不设置，走真实 `_last`。
   @visibleForTesting
@@ -40,6 +60,19 @@ class BackgroundServiceManager {
   var _runSeq = 0;
 
   Future<void> init() async {
+    try {
+      await _initInner();
+      _initError = null;
+    } on Object catch (e) {
+      // 记住原因（守护页开关失败时原样转达），再交回 `main.dart` 的降级
+      // catch —— 它只 print、不阻断 runApp（远程/后台两处同纪律）。
+      _initError = '$e';
+      rethrow;
+    }
+  }
+
+  /// [init] 的实际装配体（异常由 [init] 统一收口成 [initError]）。
+  Future<void> _initInner() async {
     await _svc.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: engineEntryPoint,
@@ -112,11 +145,68 @@ class BackgroundServiceManager {
     if (hook != null) return hook();
     // P1-02 服务边界准入：合规同意是引擎启动的**唯一准入层**，任何调用方
     //（不只首页开关）都不得绕过。未同意 → 拒绝启动（返回 false，调用方提示）。
-    if (!await isComplianceAccepted()) return false;
-    final ok = await _svc.startService();
-    await Future<void>.delayed(const Duration(milliseconds: 800));
-    return ok;
+    if (!await isComplianceAccepted()) {
+      _startError = '未同意《合规使用须知》';
+      return false;
+    }
+    // R89：初始化失败的引擎**不可能**起来。旧实现在这里继续调
+    // `startService()`，原生侧要么无回执（永久挂起）要么抛错，两者都
+    // 只表现为「开关弹回、零提示」。直接给出可行动的原因。
+    final initErr = _initError;
+    if (initErr != null) {
+      _startError = '后台服务未初始化：$initErr';
+      return false;
+    }
+    final call = startServiceHook ?? _svc.startService;
+    try {
+      // 🔴 R89：**必须带超时**。`startService()` 是 MethodChannel 调用，
+      // 原生侧若因前台服务被拒（Android 14+ 类型限制 / 厂商后台限制）而不
+      // 回执，`await` 会**永久挂起** —— 用户看到的是「点了完全没反应」，
+      // 连失败提示都出不来（不是异常，是永远不返回）。
+      final ok = await call().timeout(startServiceTimeout);
+      await Future<void>.delayed(const Duration(milliseconds: 800));
+      if (ok) {
+        _startError = null;
+      } else {
+        _startError = '前台服务未接受启动请求（startService 返回 false）';
+      }
+      return ok;
+    } on TimeoutException {
+      _startError = '前台服务 12 秒无回执（可能被系统或厂商后台策略拦截）';
+      return false;
+    } on Object catch (e) {
+      // 原生侧明确拒绝（如 ForegroundServiceStartNotAllowedException）会以
+      // PlatformException 形式抛出 —— 原样转达，不再让它穿透成未捕获异步
+      // 错误（那正是「开关弹回 + 零提示」的形状，与 BUG-061 同源）。
+      _startError = '前台服务启动被拒：$e';
+      return false;
+    }
   }
+
+  /// 测试缝：替换真实的 `_svc.startService()`（只用于验证 [start] 的失败分类）。
+  ///
+  /// 与 [startHook] 的区别：[startHook] 短路**整个** `start()`（现有 widget
+  /// 测试用），本钩子只替换最内层平台调用，于是「超时 / 抛异常 / 返回 false」
+  /// 三条失败路径都能在宿主里真实触发并断言。
+  @visibleForTesting
+  static Future<bool> Function()? startServiceHook;
+
+  /// 启动等待窗口（生产 12 秒）。测试置短值即可真实触发超时分支，
+  /// 不必真等 12 秒。
+  @visibleForTesting
+  static Duration startServiceTimeout = const Duration(seconds: 12);
+
+  /// 测试缝：注入 / 清除 [initError]。
+  ///
+  /// 宿主测试里 `init()` **必然失败**（`_svc.configure()` 在非 Android/iOS
+  /// 直接抛 `UnsupportedError`），所以无法用它制造"初始化成功"或"指定原因"
+  /// 的状态，只能直接注入。
+  @visibleForTesting
+  static set initErrorForTest(String? v) => instance._initError = v;
+
+  /// 测试缝：注入 / 清除 [startError]（单例跨用例复用，必须显式复位）。
+  @visibleForTesting
+  static set startErrorForTest(String? v) => instance._startError = v;
 
   /// 测试缝（与 [invokeHook] 同形）：widget 测试中 `_svc.startService()` 会
   /// 触碰 `FlutterBackgroundService` 平台实例，非 Android/iOS 直接抛
@@ -124,7 +214,43 @@ class BackgroundServiceManager {
   @visibleForTesting
   static Future<bool> Function()? startHook;
 
-  Future<void> stop() => _invoke('stop');
+  /// 关闭引擎。
+  ///
+  /// 🔴 R89：旧实现就是一句 `_invoke('stop')`（fire-and-forget）。引擎**还活着**
+  /// 时它会回投 `running:false`（BUG-B 已修），但引擎**已经死了**的时候
+  /// （被系统杀 / 崩溃 / 厂商后台清理）——`invoke` 发向一个不存在的服务，
+  /// 没有任何人回投，而 `_last` 是主 isolate 里的静态缓存 ⇒ 开关永远卡在
+  /// 「守护已开启」，用户再点也关不掉，感知就是「点了没反应」。
+  ///
+  /// 停止方向一律走**安全侧**：`invoke` 之后**立即**本地置 `running:false`。
+  ///
+  /// 为什么不等引擎确认再改：`state` 流在测试里可能被注入成**单订阅流**
+  /// （`Stream.value`），二次 `listen` 会抛 `Bad state: Stream has already been
+  /// listened to`；而且等待窗口在 widget 测试里会留下 pending timer。
+  /// 乐观更新是安全的 —— 引擎若还活着，它收到 `stop` 后回投的
+  /// `running:false` 会经 `_svc.on('state')` **覆盖**这里的兜底值（含真实
+  /// `pendingCount`），两者方向一致，不存在"UI 说关了、引擎还在跑"的持久分叉。
+  Future<void> stop() async {
+    await _invoke('stop');
+    // 本来就没在跑：没有陈旧状态需要纠正，保持原样（含 pendingCount /
+    // nextFireAt —— 它们对"已关闭"的页面仍有参考价值）。
+    if (_last?.running != true) return;
+    final prev = _last;
+    _last = EngineState(
+      running: false,
+      pendingCount: prev?.pendingCount ?? 0,
+      // 引擎已停 ⇒ 下一触发与闹钟降级诊断都不再成立，一并清掉；
+      // 留着会让首页继续显示一个不存在的倒计时。
+      nextFireAt: null,
+      lastAction: prev?.lastAction,
+      // 引擎已停 ⇒ 守卫必然不在跑（引擎侧 `stop` 会 `guard.stop()`），
+      // 幽灵守卫态会让守卫页开关显示为"开"。
+      guardActive: false,
+      guardError: null,
+      alarmDiag: null,
+    );
+    _stateCtrl.add(_last!);
+  }
 
   /// 测试缝（v1.8）：widget 测试中后台服务未初始化，`invoke(...)` 会**抛**。
   ///

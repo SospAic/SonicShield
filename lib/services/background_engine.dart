@@ -168,22 +168,110 @@ String? soundscapeTrackPath({
 /// runZonedGuarded：引擎隔离内任何未捕获异步异常（如插件注册告警、
 /// 单次 DB 抖动）只记录不致命——此前 isolate 会静默死亡，导致
 /// Timer 通道A 停摆（BUG-011 根因，docs/12 §5）。
+///
+/// 引擎启动链步骤落盘（R89 遗迹，固化为常驻诊断）。
+///
+/// 为什么用文件而不是 `print` / `service.invoke`：
+/// ① 后台 isolate 的 `print` 在部分设备上进不了 logcat（R89 真机实证：
+///    模拟器上引擎侧 print 完全不可见），而"引擎静默死亡 → 开关零提示"
+///    恰恰是最需要留痕的故障形态；
+/// ② `service.invoke` 通道本身曾是待查嫌疑（v3–v7 探针的 dbg 标记从未
+///    到达主 isolate），必须有一条**不经过它**的独立取证通道。
+/// `Directory.systemTemp` 同步可写、无插件依赖；失败绝不阻断启动。
+/// 最后落盘的那一行即死点定位。
+void _diagStep(String step) {
+  try {
+    final f = File('${Directory.systemTemp.path}/r89_engine_diag.txt');
+    f.writeAsStringSync('${DateTime.now().toIso8601String()} $step\n',
+        mode: FileMode.append, flush: true);
+  } on Object {
+    // 诊断写失败不影响主流程。
+  }
+}
+
 @pragma('vm:entry-point')
 Future<void> engineEntryPoint(ServiceInstance service) async {
-  await runZonedGuarded(() => _engineBody(service), (e, stack) {
-    // 引擎自愈日志：异常不终止 isolate，下一轮 tick 自动恢复。
-    // ignore: avoid_print
-    print('[sonic_shield][engine] unhandled: $e');
+  // 第一件事就是留痕（同步文件写、无插件依赖）：后续任何一步挂掉，
+  // 最后落盘的那一行就是死点。
+  _diagStep('m0-entry');
+  await runZonedGuarded(() async {
+    try {
+      DartPluginRegistrant.ensureInitialized();
+      _diagStep('m1-registrant');
+    } on Object catch (e) {
+      _diagStep('m1-ERR:$e');
+      rethrow;
+    }
+    await _engineBody(service);
+  }, (e, stack) {
+    _diagStep('m-2-unhandled:$e');
+    // 🔴 R89：**启动期失败绝不能静默**。
+    //
+    // 现场形态（1.9.6+29 用户报障「点守护总开关 → 开关不动、零提示」）：
+    // `mgr.start()` 早已向调用方返回 **true**（原生 FGS 确实起来了），
+    // 而引擎 Dart 侧在启动序列中途死亡 ⇒ 没有任何 state 回投 ⇒ 首页
+    // 开关只认回投状态，永远停在"关"，用户感知就是"点了完全没反应"。
+    //
+    // 三层收口（仅启动期，`_engineBootstrapDone` 之前的失败才做）：
+    // ① 回投 `running:false`：开关如实落"关"，不假装在跑；
+    // ② `stopSelf()`：撤掉已空转的前台服务 —— 否则原生侧
+    //    "Service already running" 会让用户下一次点击永远空转，
+    //    永远等不到一次**全新的**启动；
+    // ③ 真实原因进日志（logcat 可见），不吞。
+    if (!_engineBootstrapDone) {
+      try {
+        service.invoke('state', <String, Object?>{'running': false});
+      } on Object {
+        // 回投失败不改变主判据。
+      }
+      try {
+        unawaited(service.stopSelf());
+      } on Object {
+        // 停机失败不改变主判据。
+      }
+      // ignore: avoid_print
+      print('[sonic_shield][engine] 启动失败（引擎已退出）：$e\n$stack');
+    } else {
+      // 运行期晚发错误：tick 各步骤已有 stepGuarded 逐层兜底，
+      // 这里只留痕，不再推翻一个已经注册完毕的引擎。
+      // ignore: avoid_print
+      print('[sonic_shield][engine] unhandled: $e');
+    }
   });
 }
 
+/// R89：引擎 bootstrap 是否已完成（handler 注册 + 首次广播结束）。
+///
+/// zone 处理器据此区分「启动期失败」（必须收口：广播停机 + 撤 FGS，见
+/// [engineEntryPoint]）与「运行期晚发错误」（stepGuarded 已兜底，只留痕）。
+bool _engineBootstrapDone = false;
+
 Future<void> _engineBody(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
+  _diagStep('m1-registrant');
 
-  final db = await AppDatabase.open();
+  // 🔴 R89：数据库打开失败**不许杀死引擎**。
+  //
+  // 双引擎（主 UI + 后台服务）并发打开同一新库时，sqflite 的 onCreate
+  // 只判 `user_version == 0`、不判表存在性 —— 败者连接会撞上胜者刚提交
+  // 的 `CREATE TABLE` 抛 `DatabaseException(table tasks already exists)`
+  // （R89 真机实证，详见 `AppDatabase._onCreate` 的注记）。幂等建表
+  // （IF NOT EXISTS）已经消掉主因；这里再给**一次有界重试**兜底：
+  // 败者重试时胜者的版本号已提交，第二次打开会直接跳过 onCreate。
+  AppDatabase db;
+  try {
+    db = await AppDatabase.open();
+  } on Object catch (e) {
+    _diagStep('m2-db-open-ERR:$e');
+    // ignore: avoid_print
+    print('[sonic_shield][engine] 数据库打开失败，500ms 后重试一次：$e');
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    db = await AppDatabase.open();
+  }
   final tasksRepo = TaskRepository(db);
   final occs = OccurrenceRepository(db);
   final logs = LogRepository(db);
+  _diagStep('m2-db-open');
 
   // P2-10：保留策略维护（docs/07 §4「数据生命周期」）。两个 `purgeOlderThan`
   // 此前只有定义、无生产调用入口 —— 长期运行会让日志与历史计划只增不减。
@@ -215,11 +303,13 @@ Future<void> _engineBody(ServiceInstance service) async {
     }
   }
 
+  _diagStep('m3-retention');
   final playback = PlaybackService();
   final guard = SoundGuardService();
   const native = MethodChannel(Channels.method);
   final battery = Battery();
   final prefs = await SharedPreferences.getInstance();
+  _diagStep('m4-prefs');
 
   /// 跨 isolate 的**设置同步**（BUG-082，2026-10-17）：读设置前把 prefs 重新拉一遍。
   ///
@@ -284,6 +374,7 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   // 启动即应用（与设置页持久化的 power_mode 一致；看门狗唤醒重启后同样生效）。
   await applyPowerMode(prefs.getString(PrefsKeys.powerMode) ?? 'balanced');
+  _diagStep('m5-powerMode');
 
   /// 实时随机动态反击（v2.0 阶段 D）。
   ///
@@ -316,6 +407,7 @@ Future<void> _engineBody(ServiceInstance service) async {
   // S2（docs/20 §7.2）：每次服务启动**一律停止**残留振动，绝不续发。
   // 宁可少震一次，也不可失控 —— 与补执行限流 catchUpLimit 同一哲学。
   await vibrate.recoverAfterRestart();
+  _diagStep('m6-vibrate');
 
   var guardEnabled = prefs.getBool(PrefsKeys.guardEnabled) ?? false;
   StreamSubscription<SoundEvent>? guardSub;
@@ -1801,51 +1893,84 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   });
   service.on('stop').listen((_) async {
-    guardDelayTimer?.cancel();
-    guardDelayTimer = null;
-    await stopReactiveCounter();
-    await guardSub?.cancel();
-    guardSub = null;
-    await guardErrSub?.cancel();
-    guardErrSub = null;
-    await guard.stop();
-    await playback.stop();
-    // P2-15：**对称撤下**麦克风前台服务通行证。`MicGuardService` 是独立
-    // sticky service，而 Dashboard 关闭引擎走的是 `mgr.stop()` —— 若只停
-    // Dart 层守卫，原生 FGS 与常驻通知会残留（dumpsys 可见），与"引擎已关"
-    // 的界面语义不一致。同时清掉 `guard_enabled`：通行证已被撤，若还持久化
-    // "下次自启守卫"，下次引擎启动会在**没有前台通行证**的情况下尝试采音
-    //（违反 Android 11+ while-in-use），必然失败并报错 —— 停止方向走安全侧，
-    // 守卫须由用户在前台显式重新开启（届时会重新申请通行证）。
-    guardEnabled = false;
-    await prefs.setBool(PrefsKeys.guardEnabled, false);
+    // 🔴 R89：停机清理链必须整体收口在 try/finally 里。
+    //
+    // 现场（1.9.6+29 真机实证，R89 探针 v9）：清理链中任意一步抛错
+    // （如库瞬时不可用 → `broadcast(running:false)` 抛
+    // `DatabaseException(database_closed 2)`）⇒ **`stopSelf()` 永远执行
+    // 不到** ⇒ 原生 `BackgroundService.isRunning` 保持 true ⇒ 用户下一次
+    // 点开关时原生 `runService()` 早退「Service already running」：
+    // `startService()` 照样返回 true，但**不会有任何新引擎被拉起**，也再
+    // 没有状态回投 ⇒ 开关永久假死（"点了完全没反应"），直到进程被杀。
+    //
+    // 纪律：停止方向走安全侧 —— FGS **必须**撤下来，清理尽力而为。
     try {
-      await native.invokeMethod('stopMicService');
+      guardDelayTimer?.cancel();
+      guardDelayTimer = null;
+      await stopReactiveCounter();
+      await guardSub?.cancel();
+      guardSub = null;
+      await guardErrSub?.cancel();
+      guardErrSub = null;
+      await guard.stop();
+      await playback.stop();
+      // P2-15：**对称撤下**麦克风前台服务通行证。`MicGuardService` 是独立
+      // sticky service，而 Dashboard 关闭引擎走的是 `mgr.stop()` —— 若只停
+      // Dart 层守卫，原生 FGS 与常驻通知会残留（dumpsys 可见），与"引擎已关"
+      // 的界面语义不一致。同时清掉 `guard_enabled`：通行证已被撤，若还持久化
+      // "下次自启守卫"，下次引擎启动会在**没有前台通行证**的情况下尝试采音
+      //（违反 Android 11+ while-in-use），必然失败并报错 —— 停止方向走安全侧，
+      // 守卫须由用户在前台显式重新开启（届时会重新申请通行证）。
+      guardEnabled = false;
+      await prefs.setBool(PrefsKeys.guardEnabled, false);
+      try {
+        await native.invokeMethod('stopMicService');
+      } on Object catch (e) {
+        await logs.append(
+            source: 'guard',
+            action: 'micService',
+            status: 'failed',
+            message: '停止麦克风前台服务失败（可能残留守卫通知）：$e');
+      }
+      // P1-03：**对称撤销**原生精确闹钟。旧实现只停 Dart 层守卫/播放器就
+      // `stopSelf()`，AlarmManager 里排定的闹钟仍在 ⇒ 到点由
+      // `AlarmWatchdogReceiver` 重新拉起前台服务并执行到期任务 ——
+      // 用户以为"已关闭"，系统却再次运行。这里与 start/replan 的排布路径对称清理，
+      // 并由看门狗接收器在拉起前再校验启用态/代次（双保险）。
+      await clearAllAlarms();
+      // v1.9.1：释放性能优先档的常驻唤醒锁 —— **对称**撤下，不把"持续耗电"这个
+      // 副作用留给"已停止"状态（否则用户关了引擎，CPU 仍被本应用钉住不放）。
+      await applyPowerMode('balanced');
+      // ⚠️ **必须在 `stopSelf()` 之前回投 `running:false`**。
+      // 旧实现从不回投停止状态，且 `broadcast()` 把 `running` 写死成 `true` ⇒
+      // UI 的 `isRunning` 永远停在 true（引擎已经死了，再没人能广播），
+      // 表现为"引擎开关**开了关不掉**"（真机 MI MAX 2 / API 25，BUG-B）。
+      await broadcast(running: false);
+      // `invoke` 只是把消息交给平台通道：给它一次事件循环的机会送出去，
+      // 再杀自己。不加这一句，最后一条状态可能随 isolate 一起消失。
+      await Future<void>.delayed(const Duration(milliseconds: 150));
     } on Object catch (e) {
-      await logs.append(
-          source: 'guard',
-          action: 'micService',
-          status: 'failed',
-          message: '停止麦克风前台服务失败（可能残留守卫通知）：$e');
+      // 清理/回投失败：如实留痕 + 兜底回投一次停机状态，但**不阻断
+      // finally 里的 stopSelf()**（那才是真正的安全侧动作）。
+      _diagStep('stop-cleanup-ERR:$e');
+      // ignore: avoid_print
+      print('[sonic_shield][engine] 停机清理失败（仍会撤下前台服务）：$e');
+      try {
+        service.invoke('state', <String, Object?>{'running': false});
+      } on Object {
+        // 回投失败不改变主判据（UI 侧 mgr.stop() 已有乐观置假兜底）。
+      }
+    } finally {
+      // 无论如何都要撤掉前台服务：原生 isRunning 不复位 ⇒ 引擎永远无法
+      // 二次启动（见上注）。stopSelf 幂等，已停时无害。
+      try {
+        await service.stopSelf();
+      } on Object catch (e) {
+        _diagStep('stop-self-ERR:$e');
+        // ignore: avoid_print
+        print('[sonic_shield][engine] stopSelf 失败：$e');
+      }
     }
-    // P1-03：**对称撤销**原生精确闹钟。旧实现只停 Dart 层守卫/播放器就
-    // `stopSelf()`，AlarmManager 里排定的闹钟仍在 ⇒ 到点由
-    // `AlarmWatchdogReceiver` 重新拉起前台服务并执行到期任务 ——
-    // 用户以为"已关闭"，系统却再次运行。这里与 start/replan 的排布路径对称清理，
-    // 并由看门狗接收器在拉起前再校验启用态/代次（双保险）。
-    await clearAllAlarms();
-    // v1.9.1：释放性能优先档的常驻唤醒锁 —— **对称**撤下，不把"持续耗电"这个
-    // 副作用留给"已停止"状态（否则用户关了引擎，CPU 仍被本应用钉住不放）。
-    await applyPowerMode('balanced');
-    // ⚠️ **必须在 `stopSelf()` 之前回投 `running:false`**。
-    // 旧实现从不回投停止状态，且 `broadcast()` 把 `running` 写死成 `true` ⇒
-    // UI 的 `isRunning` 永远停在 true（引擎已经死了，再没人能广播），
-    // 表现为"引擎开关**开了关不掉**"（真机 MI MAX 2 / API 25，BUG-B）。
-    await broadcast(running: false);
-    // `invoke` 只是把消息交给平台通道：给它一次事件循环的机会送出去，
-    // 再杀自己。不加这一句，最后一条状态可能随 isolate 一起消失。
-    await Future<void>.delayed(const Duration(milliseconds: 150));
-    await service.stopSelf();
   });
 
   /// 远程 `vibrate.stop`（v1.9，docs/20 §11.2）：停止**全部**进行中的振动。
@@ -2028,27 +2153,45 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   // ==================== 通道A：引擎主循环 ====================
 
+  _diagStep('m7-handlers-registered');
   Timer.periodic(SchedulerConfig.engineTick, (_) {
     unawaited(stepGuarded('executeDue(tick)', executeDue));
     unawaited(() async {
-      // 先**续算反击计划**（幂等；未启用时只读一次 prefs 即返回），再重算任务级计划。
-      // 顺序不可颠倒：续排只写 `tasks`，计划条目由下面的 `replan` 的
-      // `occs.reconcile` 生成（`extendCounterPlan` 内部已带一次 `replan`，
-      // 故续排成功后 `pending` 变大、下面这次 `replan` 会被阈值自然跳过 —— 不重复劳动）。
-      await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
-      // 计划续算判据（BUG-086 修复，2026-10-18）：
-      // 旧写法是 `pendingCountAfter(now) < planExtendThreshold.inHours` ——
-      // 拿**条数**和**小时**比大小，任务一多条数恒 ≥ 12 ⇒ 续算永不触发
-      // ⇒ 未来计划视界只耗不补，夜间时段没有任何 plan entry ⇒ 用户开不开
-      // 「夜间豁免主开关」表现完全一样（真机实证：pending alarm 0 条）。
-      // 改判「覆盖末端」：最晚 pending 的触发时间已缩进阈值之内（或一条
-      // 都没有）才续算。稳态约 36h 一次全量重算，其余 tick 只付一次
-      // MAX(fire_at) 聚合查询。
-      final nowTick = DateTime.now();
-      final coverEnd = await occs.latestPendingFireAt(nowTick);
-      if (planNeedsExtend(coverEnd,
-          now: nowTick, threshold: SchedulerConfig.planExtendThreshold)) {
-        await stepGuarded('replan(tick)', replan);
+      // 🔴 R89：整条续算链统一兜底。旧写法只有 extendCounterPlan / replan
+      // 被 stepGuarded 包住，中间的 `latestPendingFireAt`（聚合查询）是裸
+      // `await` —— 它一抛（库瞬时不可用等），异常直接逃进 zone handler，
+      // 且**同 tick 的 replan 被静默跳过**：未来计划视界只耗不补，
+      // 表现是"任务到点不出声"且界面无任何解释。
+      try {
+        // 先**续算反击计划**（幂等；未启用时只读一次 prefs 即返回），再重算任务级计划。
+        // 顺序不可颠倒：续排只写 `tasks`，计划条目由下面的 `replan` 的
+        // `occs.reconcile` 生成（`extendCounterPlan` 内部已带一次 `replan`，
+        // 故续排成功后 `pending` 变大、下面这次 `replan` 会被阈值自然跳过 —— 不重复劳动）。
+        await stepGuarded('extendCounterPlan(tick)', extendCounterPlan);
+        // 计划续算判据（BUG-086 修复，2026-10-18）：
+        // 旧写法是 `pendingCountAfter(now) < planExtendThreshold.inHours` ——
+        // 拿**条数**和**小时**比大小，任务一多条数恒 ≥ 12 ⇒ 续算永不触发
+        // ⇒ 未来计划视界只耗不补，夜间时段没有任何 plan entry ⇒ 用户开不开
+        // 「夜间豁免主开关」表现完全一样（真机实证：pending alarm 0 条）。
+        // 改判「覆盖末端」：最晚 pending 的触发时间已缩进阈值之内（或一条
+        // 都没有）才续算。稳态约 36h 一次全量重算，其余 tick 只付一次
+        // MAX(fire_at) 聚合查询。
+        final nowTick = DateTime.now();
+        final coverEnd = await occs.latestPendingFireAt(nowTick);
+        if (planNeedsExtend(coverEnd,
+            now: nowTick, threshold: SchedulerConfig.planExtendThreshold)) {
+          await stepGuarded('replan(tick)', replan);
+        }
+      } on Object catch (e) {
+        // 兜底：留痕 + 审计，绝不放异常逃出本闭包（zone handler 只记录，
+        // 且本 tick 的续算已注定不完整，下个 tick 会自然补上）。
+        await stepGuarded('extendChain(tick)', () async {
+          await logs.append(
+              source: 'schedule',
+              action: 'extendChain(tick)',
+              status: 'failed',
+              message: '$e');
+        });
       }
     }());
   });
@@ -2080,6 +2223,9 @@ Future<void> _engineBody(ServiceInstance service) async {
     service.invoke('guard', {'enabled': true}); // 守卫自恢复
   }
   await broadcast();
+  // bootstrap 完成：此后 zone 里的晚发错误只留痕，不再走「启动失败收口」
+  // （广播停机 + 撤 FGS）—— 那会误杀一个已注册完毕的引擎。
+  _engineBootstrapDone = true;
 }
 
 /// 远程「立即执行」的标称执行参数（音量/时长）。

@@ -170,43 +170,72 @@ class _EngineCard extends ConsumerWidget {
         value: running,
         onChanged: (v) async {
           final mgr = BackgroundServiceManager.instance;
-          if (v) {
-            // P1-02：合规同意是引擎启动的**唯一准入闸**。此前开启分支从不读
-            // `isComplianceAccepted()`，用户点"不同意"后仍能 `shouldRun=true`
-            // 并 `mgr.start()` —— 合规门不是有效准入闸。未同意则弹出须知，
-            // 拒签一律不启动。
-            final accepted = await ensureComplianceAccepted(context);
-            if (!accepted) {
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('需先阅读并同意《合规使用须知》才能开启守护')));
+          // 🔴 R89：整条链路必须包 try/catch。
+          //
+          // 守卫开关早在 BUG-061 就立了规矩（`toggleGuard` 把任何异常都变成
+          // `GuardToggleFailure.unexpected` + 可见文案），但**引擎总开关一直
+          // 没有**：`requestAllPermissions` / `setServiceShouldRun` /
+          // `startService` 任何一步抛错，都会穿透 async 闭包变成未捕获异步
+          // 错误 —— 开关弹回、零提示，用户感知就是「点了完全没反应」。
+          // 现在任何异常都必须变成一句看得见、可行动的原因。
+          try {
+            if (v) {
+              // P1-02：合规同意是引擎启动的**唯一准入闸**。此前开启分支从不读
+              // `isComplianceAccepted()`，用户点"不同意"后仍能 `shouldRun=true`
+              // 并 `mgr.start()` —— 合规门不是有效准入闸。未同意则弹出须知，
+              // 拒签一律不启动。
+              final accepted = await ensureComplianceAccepted(context);
+              if (!accepted) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      content: Text('需先阅读并同意《合规使用须知》才能开启守护')));
+                }
+                return;
               }
-              return;
+              final perms = await requestAllPermissions(ref);
+              // P2-16：通知被拒**不再静默** —— 后台提醒/找回通知/执行结果提示会
+              // 全部消失，必须让用户知道"哪儿坏了、怎么修"，否则只会当成功能故障。
+              if (perms.notificationDenied && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content:
+                        Text('通知权限未授予：后台提醒、设备找回通知与执行结果提示'
+                            '将不会出现。可在「系统设置 → 应用 → 声盾 → 通知」中重新开启')));
+              }
+              await NativeBridge.setServiceShouldRun(true);
+              // ⚠️ `start()` 的返回值**必须看**：后台服务启动失败时
+              // `_svc.startService()` 返回 false 且不抛，旧实现直接忽略它 ——
+              // 用户看到的是"开关弹回、零提示"（与守卫开关 BUG-061 同形）。
+              //
+              // 🔴 R89：失败原因不再只报一句「后台服务未响应」。`start()` 现在
+              // 会区分「初始化失败 / 12 秒无回执 / 原生拒绝 / 返回 false」四类，
+              // 原因经 `startError` 原样转达 —— 否则用户永远不知道该去开
+              // 自启动、关电池优化，还是前台服务真被系统禁了。
+              final ok = await mgr.start();
+              if (!ok && context.mounted) {
+                final why = mgr.startError;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(why == null || why.isEmpty
+                      ? '守护启动失败：后台服务未响应'
+                          '（请检查电池优化白名单与厂商自启动设置）'
+                      : '守护启动失败：$why'),
+                  duration: const Duration(seconds: 8),
+                ));
+              }
+            } else {
+              await NativeBridge.setServiceShouldRun(false);
+              await mgr.stop();
             }
-            final perms = await requestAllPermissions(ref);
-            // P2-16：通知被拒**不再静默** —— 后台提醒/找回通知/执行结果提示会
-            // 全部消失，必须让用户知道"哪儿坏了、怎么修"，否则只会当成功能故障。
-            if (perms.notificationDenied && context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content:
-                      Text('通知权限未授予：后台提醒、设备找回通知与执行结果提示'
-                          '将不会出现。可在「系统设置 → 应用 → 声盾 → 通知」中重新开启')));
+            if (context.mounted) ref.invalidate(engineStateProvider);
+          } on Object catch (e) {
+            // 兜底：任何未预期异常都要变成用户看得见的原因 ——
+            // 绝不允许它穿透 `onChanged` 造成「开关弹回 + 零提示」。
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('守护开关操作失败：$e'),
+                duration: const Duration(seconds: 8),
+              ));
             }
-            await NativeBridge.setServiceShouldRun(true);
-            // ⚠️ `start()` 的返回值**必须看**：后台服务启动失败时
-            // `_svc.startService()` 返回 false 且不抛，旧实现直接忽略它 ——
-            // 用户看到的是"开关弹回、零提示"（与守卫开关 BUG-061 同形）。
-            final ok = await mgr.start();
-            if (!ok && context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text('守护启动失败：后台服务未响应'
-                      '（请检查电池优化白名单与厂商自启动设置）')));
-            }
-          } else {
-            await NativeBridge.setServiceShouldRun(false);
-            await mgr.stop();
           }
-          if (context.mounted) ref.invalidate(engineStateProvider);
         },
       ),
     );
