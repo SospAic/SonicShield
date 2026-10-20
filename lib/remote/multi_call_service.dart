@@ -276,10 +276,24 @@ class MultiCallService {
   /// 返回 false 表示**没能发出** invite（缺本地媒体 / 建 PC 失败 / 端点离线）。
   /// 注意：返回 true 只代表 invite 已发出，不代表已连通 —— 连通看
   /// [MultiCallSession.phase]。
+  /// 多路并发的**全局上限**（R90-12）。
+  ///
+  /// 旧实现只有"同设备不重复"与"单路通话互斥"两个守卫，**没有路上限** ——
+  /// 配对 10 台即可建 10 条 `RTCPeerConnection`（每路独立编解码）。低端机上
+  /// "too many video streams simultaneously" 是常见卡顿/摄像头争用根因
+  /// （本文件 :91 的注释早已承认风险，却从未落为上限）。
+  /// 4 路 = 单屏 2×2 的可用上限，也是中端机的编解码预算。
+  static const int maxConcurrentSessions = 4;
+
+  /// 当前是否已达并发上限（供 UI 给出可执行提示）。
+  bool get atCapacity => _sessions.length >= maxConcurrentSessions;
+
   Future<bool> connect(PairedEndpoint peer, RemoteStore store,
       {bool video = true}) async {
     final deviceId = peer.deviceId;
     if (_sessions.containsKey(deviceId)) return false; // 已有一路
+    // R90-12：全局路上限（先于取媒体判断 —— 达到上限时不应再申请摄像头）。
+    if (atCapacity) return false;
     // BUG-137：单会话通话（含来电/屏幕共享）正在进行时**不得**再起多路。
     // 两个服务各自 `getUserMedia` 会争同一台摄像头：后到的那个直接失败，
     // 或者更糟 —— 抢走前一个的相机句柄，让**正在进行的通话黑屏**。

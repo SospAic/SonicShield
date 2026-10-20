@@ -43,6 +43,7 @@ class RetentionMaintenance {
     DateTime Function()? now,
     this.logRetentionDays = 90,
     this.occurrenceRetentionDays = 7,
+    this.onError,
   }) : now = now ?? DateTime.now;
 
   final LogRepository logs;
@@ -56,15 +57,34 @@ class RetentionMaintenance {
 
   final DateTime Function() now;
 
+  /// 单步失败的上报口（R90-23）。默认 null = 只吞不报（宿主测试/无日志场景）。
+  ///
+  /// 旧实现两步 purge 裸串行：`exec_logs` 清理一抛，`occurrences` 清理就
+  /// **永远不执行**（长期运行后历史计划只增不减）。现在两步互相隔离，
+  /// 失败经本回调留痕（引擎侧注入写 `exec_logs` 的闭包）。
+  final void Function(Object error)? onError;
+
   /// 执行一次维护。**幂等**：重复调用只会把已删的再判一次为 0。
+  ///
+  /// 两步**各自 try/catch**（R90-23）：任何一步失败都不得阻断另一步。
   Future<RetentionOutcome> run() async {
     final t = now();
-    final logsRemoved = await logs.purgeOlderThan(
-      t.subtract(Duration(days: logRetentionDays)),
-    );
-    final occurrencesRemoved = await occurrences.purgeOlderThan(
-      t.subtract(Duration(days: occurrenceRetentionDays)),
-    );
+    var logsRemoved = 0;
+    var occurrencesRemoved = 0;
+    try {
+      logsRemoved = await logs.purgeOlderThan(
+        t.subtract(Duration(days: logRetentionDays)),
+      );
+    } on Object catch (e) {
+      onError?.call(e);
+    }
+    try {
+      occurrencesRemoved = await occurrences.purgeOlderThan(
+        t.subtract(Duration(days: occurrenceRetentionDays)),
+      );
+    } on Object catch (e) {
+      onError?.call(e);
+    }
     return RetentionOutcome(
       logsRemoved: logsRemoved,
       occurrencesRemoved: occurrencesRemoved,

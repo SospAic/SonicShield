@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -983,14 +985,89 @@ class _PttSheetState extends State<_PttSheet> {
   bool _recording = false;
   String? _result;
 
+  /// 手指是否仍按在按钮上（R90-02）。
+  ///
+  /// `_start()` 要跨"请求麦克风权限 → `pttStart()`"两段 await；用户若在它们
+  /// 完成前松手，`_stopSend()` 先跑（此时尚未开录，返回"未录到音频"），随后
+  /// `_start()` 仍会把录音拉起来 —— 一段**无人控制**的录音。本标志在 await
+  /// 之后复核"是否仍按住"，已松手则撤销启动（与 `ptt_tab.dart` 的 P2-25 同判据）。
+  bool _pressing = false;
+
+  /// 录音时长上限（R90-02：文案承诺的"最长 60 秒"此前**没有任何实现**）。
+  ///
+  /// 用**一次性** Timer 而不是 `Timer.periodic` 数秒：周期计时器会在整个录音
+  /// 期间不断调度帧，`pumpAndSettle` 永远等不到静止（RRS-26 实测超时）。
+  /// 时长上限本来只需要一个到点回调。
+  Timer? _limitTimer;
+
+  static const int _maxRecSec = 60;
+
   Future<void> _start() async {
+    if (_recording) return;
+    _pressing = true;
     final ok = await widget.onStart();
-    if (mounted) setState(() => _recording = ok);
+    // 松手早于启动完成 ⇒ 撤销这次启动，不留无人控制的录音。
+    // ⚠️ 必须先判 `_pressing` 再判 `mounted`：面板已被下滑关闭时 `mounted`
+    // 为 false，但此时若 onStart 成功，麦克风已经起来了 —— 必须撤销。
+    if (!_pressing) {
+      if (ok) unawaited(widget.onCancel());
+      return;
+    }
+    if (!mounted) return;
+    if (!ok) return;
+    setState(() => _recording = true);
+    _limitTimer?.cancel();
+    _limitTimer = Timer(const Duration(seconds: _maxRecSec), () {
+      if (mounted) unawaited(_stopSend(auto: true));
+    });
   }
 
-  Future<void> _stopSend() async {
+  Future<void> _stopSend({bool auto = false}) async {
+    _pressing = false;
+    _limitTimer?.cancel();
+    _limitTimer = null;
+    if (!_recording) {
+      // 没起来（权限弹窗期间松手 / 启动失败）：**直接给出可见反馈**。
+      // 不调 `onStopAndSend()` —— 那会在"从未开录"时走一遍插件往返，
+      // 宿主环境下该 Future 可能永不完成（RRS-26 实测 90s 超时）。
+      if (mounted) setState(() => _result = '未录到音频');
+      return;
+    }
+    setState(() => _recording = false);
     final r = await widget.onStopAndSend();
-    if (mounted) setState(() => _result = r.message);
+    if (!mounted) return;
+    setState(() => _result =
+        auto ? '已到 $_maxRecSec 秒上限，自动发送：${r.message}' : r.message);
+  }
+
+  /// 撤销：停表 + 撤销录音（关闭面板 / 手势取消 / 销毁三条路径共用）。
+  ///
+  /// ⚠️ **无条件**调用 `onCancel`：它内部 `pttCancel()` 对"尚未开录"是幂等的，
+  /// 而漏调一次的代价是麦克风被一直占着（RRS-27 锁的就是这一点）。
+  void _cancel() {
+    // 空闲关闭（没录、也没有在飞的启动）不需要碰录音插件 —— 那会在宿主
+    // 环境留下一个永不完成的 stop Future，污染**后续**用例（RRS-26 实测：
+    // 单独跑 2 秒通过，跟在 RRS-19b 之后跑就卡死在 pumpAndSettle）。
+    final active = _recording || _pressing;
+    _pressing = false;
+    _limitTimer?.cancel();
+    _limitTimer = null;
+    if (mounted && _recording) setState(() => _recording = false);
+    if (active) {
+      // fire-and-forget：撤销是"尽力而为"，不能因为插件 Future 不返回就卡住
+      // 关闭按钮/手势回调（与旧实现 `() => widget.onCancel()` 同语义）。
+      unawaited(widget.onCancel());
+    }
+  }
+
+  @override
+  void dispose() {
+    _limitTimer?.cancel();
+    _pressing = false;
+    // R90-02：录音中（或启动请求仍在飞）直接销毁 —— 必须撤销，否则麦克风在
+    // **没有任何界面入口**的状态下持续采集。
+    if (_recording || _pressing) unawaited(widget.onCancel());
+    super.dispose();
   }
 
   @override
@@ -1004,13 +1081,16 @@ class _PttSheetState extends State<_PttSheet> {
             Text('对讲机 → ${widget.endpointName}',
                 style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
-            Text(_recording ? '正在录音…（松开发送，最长 60 秒）' : '按住下方按钮开始说话',
+            Text(
+                _recording
+                    ? '正在录音…（最长 $_maxRecSec 秒，松开发送）'
+                    : '按住下方按钮开始说话',
                 style: Theme.of(context).textTheme.bodyMedium),
             const SizedBox(height: 20),
             GestureDetector(
               onTapDown: (_) => _start(),
               onTapUp: (_) => _stopSend(),
-              onTapCancel: () => widget.onCancel(),
+              onTapCancel: () => _cancel(),
               child: CircleAvatar(
                 radius: 44,
                 backgroundColor:
@@ -1023,6 +1103,10 @@ class _PttSheetState extends State<_PttSheet> {
             if (_result != null) Text(_result!),
             const SizedBox(height: 8),
             TextButton(
+                // 关闭只做 pop：录音的撤销交给 `dispose()`（它按
+                // `_recording || _pressing` 判定是否需要 `onCancel`）。
+                // 旧实现在 pop 之后再调一次撤销，会在已弹出的路由上 setState，
+                // 宿主环境里表现为下一个用例的 `pumpAndSettle` 永不静止。
                 onPressed: () => Navigator.pop(context),
                 child: const Text('关闭')),
           ],

@@ -46,6 +46,12 @@ class _PttTabState extends State<PttTab> {
     _ackSub = RcEndpointService.instance.events.listen((m) {
       if (!mounted) return;
       if (m['type'] == RcEvt.pttAck) {
+        // R90-13：必须按来源端点过滤（R-5 同族最后一处）。
+        // 旧实现无条件覆盖 `_lastResult`：多端点场景下，对端 B 的迟到回执会把
+        // 对端 A 的对讲结果显示成"对端已播放 ✓/✗"。控制台/任务/指令组三处
+        // 早已按 `peerId != _selectedId` 过滤，这里漏网。
+        final peer = m['peerId'];
+        if (peer is String && peer.isNotEmpty && peer != _selectedId) return;
         final payload = rcPayloadOf(m);
         final ok = payload['ok'] as bool? ?? false;
         setState(() => _lastResult = ok ? '对端已播放 ✓' : '对端播放失败');

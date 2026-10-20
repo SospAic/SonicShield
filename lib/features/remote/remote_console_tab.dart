@@ -831,7 +831,20 @@ class _RemoteConsoleTabState extends ConsumerState<RemoteConsoleTab> {
               DropdownMenuItem(value: e.deviceId, child: Text(e.name)),
           ],
           onChanged: (v) async {
-            setState(() => _selectedId = v ?? '');
+            // R90 体验项：**换端点必须清空上一台的回执**。
+            // 旧实现只改 `_selectedId`，`_lastStatus/_lastDevice/...` 仍是上一台
+            // 的数据 —— 切换瞬间会出现"看着 A 的名字、看着 B 的待执行条数"，
+            // 与 R-5 想消除的形态同源。
+            setState(() {
+              _selectedId = v ?? '';
+              _lastStatus = null;
+              _lastDevice = null;
+              _lastPingAt = null;
+              _lastLocation = null;
+              _lastLogs = null;
+              _lastAssets = null;
+              _lastPresets = null;
+            });
             // 持久化到全局选择：换页/重启后仍是这台（"快速连接"的另一端）。
             final prefs = await SharedPreferences.getInstance();
             await RemoteStore(prefs).setSelectedEndpoint(v ?? '');

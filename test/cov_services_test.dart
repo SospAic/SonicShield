@@ -373,13 +373,16 @@ void main() {
       ]);
     });
 
-    test('NS05 showEvent：id 取 title.hashCode 的非负掩码，payload 原样透传', () async {
+    test('NS05 showEvent：id 按事件唯一（不再是 title.hashCode），payload 原样透传', () async {
       log.clear();
       await NotificationService.instance
           .showEvent(title: '执行事件A', body: '任务完成', payload: 'task-1');
       final call = log.singleWhere((c) => c.method == 'show');
       final args = call.arguments as Map;
-      expect(args['id'], '执行事件A'.hashCode & 0x7fffffff);
+      // R90-18：同标题的两条事件必须拿到**不同** id（否则通知互相覆盖）。
+      expect(args['id'], isA<int>());
+      expect(args['id'], isNot('执行事件A'.hashCode & 0x7fffffff),
+          reason: '事件型通知不得按标题去重');
       expect(args['title'], '执行事件A');
       expect(args['body'], '任务完成');
       expect(args['payload'], 'task-1');

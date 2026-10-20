@@ -16,6 +16,26 @@ import '../../core/theme.dart';
 /// 视频通话与对讲并入本页而非独立底部 TAB：两者都是「与某个已配对端点
 /// 建立实时会话」，与遥控共享同一份配对表与在线状态，放在一起可复用
 /// 设备选择上下文，也让底部导航保持在 5 项。
+/// 同一路由的导航去重（R90 体验项）。
+///
+/// 旧实现四个 AppBar 图标与页内文字入口都直接 `context.push`，连点即在导航栈
+/// 叠多层相同页面（返回要逐层退出）。800ms 内对**同一路由**只放行一次；
+/// 不同路由互不影响（用户确实可能连续打开两个不同页面）。
+String? _lastPushedRoute;
+DateTime? _lastPushedAt;
+
+void _pushOnce(BuildContext context, String route) {
+  final now = DateTime.now();
+  if (_lastPushedRoute == route &&
+      _lastPushedAt != null &&
+      now.difference(_lastPushedAt!) < const Duration(milliseconds: 800)) {
+    return;
+  }
+  _lastPushedRoute = route;
+  _lastPushedAt = now;
+  context.push(route);
+}
+
 class RemoteSection extends StatelessWidget {
   const RemoteSection({super.key, this.initialIndex = 0});
 
@@ -30,22 +50,22 @@ class RemoteSection extends StatelessWidget {
         IconButton(
           icon: const Icon(Icons.support_agent),
           tooltip: '临时协助会话（本机被协助 · 临时码）',
-          onPressed: () => context.push('/remote/assist'),
+          onPressed: () => _pushOnce(context, '/remote/assist'),
         ),
         IconButton(
           icon: const Icon(Icons.login),
           tooltip: '接入协助会话（输入临时码 + 密码）',
-          onPressed: () => context.push('/remote/assist/join'),
+          onPressed: () => _pushOnce(context, '/remote/assist/join'),
         ),
         IconButton(
           icon: const Icon(Icons.qr_code_scanner),
           tooltip: '扫码配对',
-          onPressed: () => context.push('/remote/pair-qr'),
+          onPressed: () => _pushOnce(context, '/remote/pair-qr'),
         ),
         IconButton(
           icon: const Icon(Icons.tune),
           tooltip: '模块开关 · 身份 · 代理 · 配对管理',
-          onPressed: () => context.push('/remote/settings'),
+          onPressed: () => _pushOnce(context, '/remote/settings'),
         ),
       ],
       tabs: [
@@ -107,7 +127,7 @@ class _DevicesTab extends StatelessWidget {
                 title: const Text('临时协助会话（生成临时码）'),
                 subtitle: const Text('让信任的人在 10 分钟内临时接入本机，权限默认全关'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => context.push('/remote/assist'),
+                onTap: () => _pushOnce(context, '/remote/assist'),
               ),
               const Divider(height: 1),
               ListTile(
@@ -118,7 +138,7 @@ class _DevicesTab extends StatelessWidget {
                 title: const Text('接入协助会话'),
                 subtitle: const Text('输入对方屏幕上的临时码 + 访问密码，协助对方设备'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => context.push('/remote/assist/join'),
+                onTap: () => _pushOnce(context, '/remote/assist/join'),
               ),
             ],
           ),
@@ -148,7 +168,7 @@ class RemoteCallEntry extends StatelessWidget {
             title: const Text('发起视频 / 语音通话'),
             subtitle: const Text('WebRTC P2P · DTLS-SRTP 加密 · 支持自动接通（家人守护场景）'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push('/remote/call'),
+            onTap: () => _pushOnce(context, '/remote/call'),
           ),
         ),
         const SizedBox(height: 8),
@@ -161,7 +181,7 @@ class RemoteCallEntry extends StatelessWidget {
             title: const Text('多设备视频同连'),
             subtitle: const Text('同时保持多路视频 · 点窗口切换目标 · 切换时不断开'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push('/remote/multi-video'),
+            onTap: () => _pushOnce(context, '/remote/multi-video'),
           ),
         ),
         const SizedBox(height: 8),
@@ -174,7 +194,7 @@ class RemoteCallEntry extends StatelessWidget {
             title: const Text('对讲机'),
             subtitle: const Text('按住说话 · 端到端加密 · 端点自动播放并回执'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push('/remote/ptt'),
+            onTap: () => _pushOnce(context, '/remote/ptt'),
           ),
         ),
         const SizedBox(height: 12),

@@ -201,6 +201,16 @@ class RcScriptExecutor {
     _halt = null;
     final cancel = _cancel = RcCancel();
 
+    // 🔴 R90-10（2026-10-19）：整段执行体必须收口在 try/finally 里。
+    //
+    // 旧实现把 `_current = null` 放在正常路径末尾（:288）。而执行体里有两次
+    // **未保护**的 `_notify(...)`（起始通知 / 每步通知）—— 平台通道不可用时
+    // （本文件 :274-286 的注释自认这是真实场景）它们会抛，异常从 `run()` 逃出
+    // ⇒ `_current` 永不为 null ⇒ `isRunning` 恒真 ⇒ 之后**所有** `script.run`
+    // 在开头被 `return false` 拒绝（端点回"已有指令组在执行"），直到进程重启。
+    // 一次通知失败把整条指令组通道永久焊死，属"静默失败"的最坏形态。
+    try {
+
     await _notify(
       title: '声盾 · 远程指令组',
       body: '${script.fromName} · ${_fmt(script.sentAt)}\n'
@@ -285,9 +295,12 @@ class RcScriptExecutor {
       })); // 弹窗/通知随之消失
     });
 
-    _current = null;
-    _cancel = null;
     return !aborted;
+    } finally {
+      // 无条件复位：任何异常都不得让 `isRunning` 永远为真。
+      _current = null;
+      _cancel = null;
+    }
   }
 
   /// 终止当前执行（通知按钮 / script.stop 命令）。

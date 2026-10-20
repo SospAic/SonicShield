@@ -182,6 +182,18 @@ String? soundscapeTrackPath({
 void _diagStep(String step) {
   try {
     final f = File('${Directory.systemTemp.path}/r89_engine_diag.txt');
+    // R90-24：**有界轮转**。引擎每次启动都会写几行，长期运行（每天启停数次）
+    // 会让这个诊断文件无限增长。超过 256KB 就滚到 `.1`（只保留一代）——
+    // 诊断只需要"最近一次启动/死亡"，历史没有保留价值。
+    try {
+      if (f.existsSync() && f.lengthSync() > 256 * 1024) {
+        final bak = File('${f.path}.1');
+        if (bak.existsSync()) bak.deleteSync();
+        f.renameSync(bak.path);
+      }
+    } on Object {
+      // 轮转失败不影响写入（继续追加即可）。
+    }
     f.writeAsStringSync('${DateTime.now().toIso8601String()} $step\n',
         mode: FileMode.append, flush: true);
   } on Object {
@@ -280,7 +292,17 @@ Future<void> _engineBody(ServiceInstance service) async {
   // 维护不是核心执行路径 —— 失败只留一条审计，**绝不阻断引擎启动**。
   try {
     final removed =
-        await RetentionMaintenance(logs: logs, occurrences: occs).run();
+        await RetentionMaintenance(
+          logs: logs,
+          occurrences: occs,
+          // R90-23：单步清理失败必须留痕（否则历史计划只增不减且无人知道）。
+          onError: (e) => unawaited(logs.append(
+            source: 'maintenance',
+            action: 'retention',
+            status: 'failed',
+            message: '保留策略清理单步失败（另一步不受影响）：$e',
+          )),
+        ).run();
     if (removed.total > 0) {
       await logs.append(
         source: 'maintenance',
@@ -421,13 +443,15 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   /// `executeDue` 的重入守卫（A2-P0-2；与 `VibrateSession._pumping` 同形）。
   ///
-  /// 为什么要它：通道A 有**两个同源可叠加**的触发点 ——
-  /// `Timer.periodic(engineTick)`（`background_engine.dart:1136`）与
-  /// `service.on('tick')`（`:941`），而 `executeDue` 内的 `runAction` 可长时间
+  /// 为什么要它：通道A 的 15s `Timer.periodic` 与**原生闹钟唤醒的第二份服务**
+  /// 会并发进入 `executeDue`，而 `executeDue` 内的 `runAction` 可长时间
   /// 阻塞（播放 / 录音 / TTS，最长 1800s）。没有守卫时，15s 的 tick 会在上一轮
   /// `runAction` 尚未返回时**再起一份** `executeDue`，而 `due()` 只筛
   /// `status='pending'` —— 那条计划尚未落终态，于是被**并发取出执行两次**
   /// （双响 / 重复录音 / 播放器互踩）。
+  ///
+  /// （R90-20：旧注释还声称 `service.on('tick')` 是第二个同源触发点 —— 那条
+  /// 监听全仓无生产者，已删除；真正的第二触发点是原生闹钟唤醒的新服务实例。）
   ///
   /// ⚠️ 只做「`if (flag) return; flag = true; try { … } finally { flag = false; }`」
   /// 这件事：不在本修复里改 tick 间隔、不改 `runAction` 超时、不动任何执行语义。
@@ -439,6 +463,38 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 续算整段挡掉（`replan` 负责续算计划视界），可能出现计划迟迟不续算。
   /// 两条路径各自持锁即可消除各自的重入，且互不干扰（详见 F2 报告）。
   bool replanning = false;
+
+  /// 🔴 R90-06（2026-10-19）：**停机中**闸门。
+  ///
+  /// 现场形状：stop 清理链里有多段 `await`（守卫停止 2s 超时、写库、两次
+  /// `broadcast`、末尾 150ms 延迟），期间 15s 的 `Timer.periodic` **仍在跑**：
+  /// ① `clearAllAlarms()` 之后被并发 `replan → pushExactAlarms` 重排闹钟；
+  /// ② `broadcast(running:false)` 之后被 tick 内的 `broadcast()` 覆盖 ⇒ UI
+  ///    开关卡在"已开启"；③ `playback.stop()` 之后被并发 `executeDue` 重新起播
+  ///    ⇒ 用户停了引擎仍在出声。
+  ///
+  /// 本闸门在 stop 处理器**第一条语句**同步置位（Dart 单线程，同步置位对
+  /// 同 isolate 的一切重入原子），tick / executeDue / replan / pushExactAlarms
+  /// 全部先查。**不在 `stopSelf` 前复位**：引擎即将退出，任何新工作都没有意义。
+  bool stopping = false;
+
+  /// 已上报过解析失败的任务行 id（R90-09 去重）。
+  ///
+  /// 一行坏数据会被每一次 `listAll`（每 15s tick 至少一次）重新撞到；
+  /// 每个 id 只落一条日志，避免把 exec_logs 刷爆。
+  final Set<String> badTaskRowsReported = <String>{};
+
+  /// 单行解析失败的上报口（R90-09）。
+  void reportBadTaskRow(String id, Object error) {
+    if (id.isEmpty || !badTaskRowsReported.add(id)) return;
+    unawaited(logs.append(
+      source: 'db',
+      action: 'taskRow',
+      status: 'failed',
+      taskId: id,
+      message: '任务行解析失败，已跳过该行（其余任务不受影响）：$error',
+    ));
+  }
 
   /// `replan` 重入时的**补跑登记**（BUG-087 修复，2026-10-18）。
   ///
@@ -1037,7 +1093,7 @@ Future<void> _engineBody(ServiceInstance service) async {
         );
         return vStarted
             ? const ExecutionOutcome.success()
-            : const ExecutionOutcome.failed('振动未启动（见审计）');
+            : const ExecutionOutcome.failed('振动未启动（原生拒绝或动作类型不支持）');
       case final CompositeAction c:
         return runSingle(task, c.primary, volume, durationMs, source,
             occurrenceId: occurrenceId);
@@ -1121,6 +1177,9 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 原生排布失败时会**逐条回退**并在回执 error 中写明降级 ——
   /// 本方法把降级原因如实汇进 `alarmDiag`，不静默。
   Future<void> pushExactAlarms(List<int> times) async {
+    // R90-06：停机清理链已经 `clearAllAlarms()` 之后，并发 tick 的 replan
+    // 不得再把闹钟排回去（否则"已关闭"的引擎到点又被看门狗拉起）。
+    if (stopping) return;
     final useAlarmClock =
         prefs.getBool(PrefsKeys.alarmClockChannel) ?? true;
     try {
@@ -1181,6 +1240,8 @@ Future<void> _engineBody(ServiceInstance service) async {
   ///
   /// 重入守卫（A2-P0-2）：见 [replanning] 的说明。
   Future<void> replan() async {
+    // R90-06：停机中不再接受任何新的续算（见 [stopping]）。
+    if (stopping) return;
     // 与 executeDue 的守卫同形；同样在任何 await 之前同步置位。
     if (replanning) {
       // BUG-087 修复（2026-10-18）：不再丢弃本次触发，登记为"待补跑"，
@@ -1199,7 +1260,8 @@ Future<void> _engineBody(ServiceInstance service) async {
         // 本 isolate 里全是旧值（详见 [syncPrefs]）。
         await syncPrefs();
         final now = DateTime.now();
-        final all = await tasksRepo.listAll(enabledOnly: true);
+        final all = await tasksRepo.listAll(
+            enabledOnly: true, onRowError: reportBadTaskRow);
         // 免打扰窗口（v1.9，修复 BUG-070）：**必须读用户设置**。
         // 此前这里恒用 `ScheduleEngine()` 的默认 22:00–07:00 —— 用户把窗口调窄后
         // 界面回显变了、落库也变了，**执行行为一点没变**（一条断掉的链路）。
@@ -1355,6 +1417,12 @@ Future<void> _engineBody(ServiceInstance service) async {
   ///   已执行的历史任务原样保留（与 `replace: true` 的整族重建相反）；
   /// - 未启用 / 尚无计划本体 ⇒ 直接返回，不算失败；
   /// - 任何异常只写一条审计，**绝不阻断**引擎主流程（与 [replan] 同一条纪律）。
+  /// 上一条已落盘的反击计划续算失败原因（R90-14 去重）。
+  ///
+  /// `refreshIfNeeded` 每 tick 都会被调用；同一条失败原因只落一次日志，
+  /// 避免 15s 一条把 exec_logs 刷爆（那等于用噪声淹掉真正的失败）。
+  String? lastCounterFailMsg;
+
   Future<void> extendCounterPlan() async {
     // 设置同步（BUG-082）：`CounterPlanStore` 的键（计划本体 / 启用位 /
     // 节假日覆盖表）由 UI isolate 写入 ⇒ 不 reload 就永远读到旧表，
@@ -1372,11 +1440,29 @@ Future<void> _engineBody(ServiceInstance service) async {
     );
     final r = await svc.refreshIfNeeded();
     if (r.taskCount > 0) {
+      lastCounterFailMsg = null; // 恢复正常：下一次失败重新可见
       await logs.append(
         source: 'schedule',
         action: 'counterExtend',
         status: 'success',
         message: '反击计划自动续算：${r.message}',
+      );
+    } else if (!r.ok && r.message != lastCounterFailMsg) {
+      // 🔴 R90-14（2026-10-19）：**失败**不得静默。
+      //
+      // 旧写法只在 `taskCount > 0` 时写日志 ⇒ 计划已启用但点名音效本机没有、
+      // 导入失败等情形下，`refreshIfNeeded` 每 tick 都返回 `fail(...)`，而
+      // 日志里**一条原因都没有** —— 用户看到"反击计划已启用"却永远不排期。
+      //
+      // ⚠️ 只记 `!r.ok`：`ok + taskCount==0` 是**正常**的"无需续算"（有界计划 /
+      // 已排到 horizon 之外），每 15s 记一条会把 exec_logs 刷爆 —— 那反而是
+      // 用另一种方式淹掉真正需要被看见的失败。
+      lastCounterFailMsg = r.message;
+      await logs.append(
+        source: 'schedule',
+        action: 'counterExtend',
+        status: 'failed',
+        message: '反击计划未续算：${r.message}',
       );
     }
   }
@@ -1385,6 +1471,8 @@ Future<void> _engineBody(ServiceInstance service) async {
   ///
   /// 重入守卫（A2-P0-2）：见 [executing] 的说明。
   Future<void> executeDue() async {
+    // R90-06：停机中不再取新计划（已在执行中的那一条会自然收尾）。
+    if (stopping) return;
     // 必须在**任何 await 之前**同步置位 —— Dart 单线程，同步置位对同 isolate
     // 的一切重入是原子的（这是守卫成立的前提，不是风格）。
     if (executing) {
@@ -1530,7 +1618,8 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   /// 执行一次守卫计划（立即路径与延时路径**共用**，避免两条实现漂移）。
   Future<void> runGuardPlan(GuardPlan plan, DateTime at) async {
-    final all = await tasksRepo.listAll(enabledOnly: true);
+    final all = await tasksRepo.listAll(
+            enabledOnly: true, onRowError: reportBadTaskRow);
     // 计划里的 id 可能已被删除/停用：**跳过并留痕**，不拿别的任务顶上
     // （与 BUG-059「点名了就必须满足」同一判据）。
     final byId = {for (final t in all) t.id: t};
@@ -1555,9 +1644,18 @@ Future<void> _engineBody(ServiceInstance service) async {
           id: occId,
           taskId: t.id,
           fireAt: at,
-          status: outcome.isFailure
-              ? OccurrenceStatus.failed
-              : OccurrenceStatus.done,
+          // 🔴 R90-04（2026-10-19）：三态映射必须与 `executeDue` 对齐。
+          //
+          // 旧写法 `outcome.isFailure ? failed : done` 把 **skipped 并进 done**：
+          // 固定节奏振动在"无振动器 / 原生未确认"时返回
+          // `ExecutionOutcome.skipped(...)`（见 runSingle 的振动分支），落库却
+          // 成了 done ⇒ `lastDoneFor` 非空 ⇒ 后续**真实**声音事件在冷却期内被
+          // 压掉。`executeDue` 早已按 BUG-093 修成三态，这里是漏改的孪生路径。
+          status: outcome.isSkipped
+              ? OccurrenceStatus.skipped
+              : (outcome.ok
+                  ? OccurrenceStatus.done
+                  : OccurrenceStatus.failed),
         ),
       ]);
     }
@@ -1570,7 +1668,8 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// **候选子集 / N 选一随机 / 延时执行**；动作内容仍完全由任务自己的动作层
   /// （`assetIds` 多音频随机、`ActionSetAction` 多动作加权随机、概率门）决定。
   Future<void> onSoundEvent(DateTime at, double peakDb) async {
-    final all = await tasksRepo.listAll(enabledOnly: true);
+    final all = await tasksRepo.listAll(
+            enabledOnly: true, onRowError: reportBadTaskRow);
     // 本轮环境快照：本次声音事件会遍历**所有**声音触发任务，
     // 同样只读一次平台状态（与 executeDue 同理）。
     final env = RoundConditionEnv(read: readConditionEnv);
@@ -1803,7 +1902,13 @@ Future<void> _engineBody(ServiceInstance service) async {
   }
 
   service.on('replan').listen((_) => unawaited(replan()));
-  service.on('tick').listen((_) => unawaited(executeDue()));
+  // 🔴 R90-20（2026-10-19）：删除 `service.on('tick')` 死登记。
+  //
+  // 全仓（`lib/**` + `android/**`）**没有任何 `invoke('tick')` 生产者** ——
+  // 通道A 的唯一触发点是下方 15s 的 `Timer.periodic`。旧代码同时注册了这条
+  // 监听并在 [executing] 的注释里声称"两个同源可叠加的触发点"，会让后续维护者
+  // 误判触发源数量（并误以为原生侧还会推 tick）。真正需要防的是 tick 与
+  // 原生闹钟唤醒的第二份服务并发，那一层由 [executing] + 数据库乐观置状态兜住。
   // 电源模式热切换（v1.9.1）：设置页改档 → 引擎即时应用副作用（常驻唤醒锁）。
   // 与 `reactive` 同为"UI 改设置 → 引擎即时响应"，无需重启引擎。
   service.on('powerMode').listen((m) async {
@@ -1893,6 +1998,8 @@ Future<void> _engineBody(ServiceInstance service) async {
     await broadcast();
   });
   service.on('stop').listen((_) async {
+    // R90-06：**第一条语句**同步置位停机闸门（在任何 await 之前）。
+    stopping = true;
     // 🔴 R89：停机清理链必须整体收口在 try/finally 里。
     //
     // 现场（1.9.6+29 真机实证，R89 探针 v9）：清理链中任意一步抛错
@@ -1914,6 +2021,16 @@ Future<void> _engineBody(ServiceInstance service) async {
       guardErrSub = null;
       await guard.stop();
       await playback.stop();
+      // R90-19：停机时释放引擎独占的播放器句柄。
+      //
+      // 旧实现只 `stop()` 不 `dispose()` —— `AudioPlayer`（ExoPlayer）原生句柄
+      // 要等 isolate 销毁才释放，反复启停会累积。`PlaybackService` 是
+      // **本引擎闭包内**的实例（不是全局单例），此处释放安全。
+      //
+      // 神经 TTS（`_neuralTts`）是**进程级单例**、跨引擎重启复用，故**不在此
+      // dispose** —— 释放它会强制下一次引擎启动重新加载模型（数百毫秒且可能
+      // 失败），得不偿失；它的生命周期跟随进程，由系统回收。
+      await playback.dispose();
       // P2-15：**对称撤下**麦克风前台服务通行证。`MicGuardService` 是独立
       // sticky service，而 Dashboard 关闭引擎走的是 `mgr.stop()` —— 若只停
       // Dart 层守卫，原生 FGS 与常驻通知会残留（dumpsys 可见），与"引擎已关"
@@ -2026,59 +2143,61 @@ Future<void> _engineBody(ServiceInstance service) async {
       final task = await tasksRepo.get(taskId);
       if (task == null) {
         message = '任务不存在';
+        // R90-21：与相邻失败分支一致 —— 本机必须留痕。`rcRunResult` 只回给
+        // 发送端一次，本机日志没痕迹的话，"远程点了一下没反应"事后无法排查。
+        await logs.append(
+            source: 'remote',
+            action: 'runNow',
+            status: 'skipped',
+            taskId: taskId,
+            message: '远程立即执行：任务不存在（$taskId）');
       } else {
-        // 单任务路径：只评估一个任务，读一次即可（无需 RoundConditionEnv）。
-        final condFail = conditionFailedIn(task, await readConditionEnv());
-        if (condFail != null) {
-          message = '条件不满足：$condFail';
-          await logs.append(
-              source: 'remote',
-              action: 'runNow',
-              status: 'skipped',
+        // 🔴 R90-03（2026-10-19）：**必须复用 [admitExecution]**。
+        //
+        // 旧实现在这里内联了"条件 → 概率"两道门，漏掉了 `admitExecution` 的
+        // 第一道闸 —— `pausedAt(now)`（节假日自动暂停 / 全局执行总开关）。
+        // 后果：`runMasterMode=off` 或法定休息日暂停窗口内，远程 `task.runNow`
+        // 仍会播放/播报/振动，全局刹车对远程路径静默失效；而 `admitExecution`
+        // 的文档明写"供声音与远程立即执行两个入口复用"—— 注释与实现直接矛盾。
+        final denied =
+            await admitExecution(task, await readConditionEnv(), 'remote');
+        if (denied != null) {
+          // 原因已由 admitExecution 写入审计（runPause / condition /
+          // probability，均 status=skipped）；这里补一条"未执行"的计划条目，
+          // 保持"计划即审计"语义。
+          message = denied;
+          await occs.commitAll([
+            PlannedOccurrence(
+              id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
               taskId: task.id,
-              message: condFail);
+              fireAt: DateTime.now(),
+              status: OccurrenceStatus.skipped,
+            ),
+          ]);
         } else {
-          // P1-07：远程立即执行也必须过**概率门**（此前只有定时入口有）——
-          // 否则"设了 30% 概率"对远程点击毫无约束。
-          final gateFail = probabilityGateMissed(task);
-          if (gateFail != null) {
-            message = '概率未命中：$gateFail';
-            await logs.append(
-                source: 'remote',
-                action: 'probability',
-                status: 'skipped',
-                taskId: task.id,
-                message: gateFail);
-            await occs.commitAll([
-              PlannedOccurrence(
-                id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
-                taskId: task.id,
-                fireAt: DateTime.now(),
-                status: OccurrenceStatus.skipped,
-              ),
-            ]);
-          } else {
-            // 物化期的音量/时长由调度器确定；远程立即执行取动作区间中点，
-            // 保持"计划即审计"语义（volume/duration 落库到 occurrence）。
-            final (vol, dur) = _nominalParams(task);
-            final outcome = await runAction(task, vol, dur, 'remote');
-            // P1-07：回执区分真实成败（缺音源/TTS 超时不再回"已执行"）。
-            ok = outcome.ok;
-            message = ok ? '已执行' : (outcome.reason ?? '执行失败');
-            await occs.commitAll([
-              PlannedOccurrence(
-                id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
-                taskId: task.id,
-                fireAt: DateTime.now(),
-                status: outcome.isFailure
-                    ? OccurrenceStatus.failed
-                    : OccurrenceStatus.done,
-                volume: vol,
-                durationMs: dur,
-              ),
-            ]);
-            lastAction = '${task.name} · 远程立即执行';
-          }
+          // 物化期的音量/时长由调度器确定；远程立即执行取动作区间中点，
+          // 保持"计划即审计"语义（volume/duration 落库到 occurrence）。
+          final (vol, dur) = _nominalParams(task);
+          final outcome = await runAction(task, vol, dur, 'remote');
+          // P1-07：回执区分真实成败（缺音源/TTS 超时不再回"已执行"）。
+          ok = outcome.ok;
+          message = ok ? '已执行' : (outcome.reason ?? '执行失败');
+          await occs.commitAll([
+            PlannedOccurrence(
+              id: '${task.id}@remote@${DateTime.now().millisecondsSinceEpoch}',
+              taskId: task.id,
+              fireAt: DateTime.now(),
+              // R90-04 同族：三态如实落库（skipped 不得并进 done）。
+              status: outcome.isSkipped
+                  ? OccurrenceStatus.skipped
+                  : (outcome.ok
+                      ? OccurrenceStatus.done
+                      : OccurrenceStatus.failed),
+              volume: vol,
+              durationMs: dur,
+            ),
+          ]);
+          lastAction = '${task.name} · 远程立即执行';
         }
       }
     } on Object catch (e) {
@@ -2136,7 +2255,22 @@ Future<void> _engineBody(ServiceInstance service) async {
           amplitude: plan?.baseAmplitude ?? 0,
           source: 'remote-script',
         );
-        message = ok ? '已执行' : '被跳过或原生拒绝（见审计）';
+        if (ok) {
+          message = '已执行';
+        } else {
+          // R90-22：回执承诺了"见审计"，就必须真的有一条。
+          // `vibrate.start` 的 default 分支（非 v1.9 振动动作）不写任何审计，
+          // 旧文案会让排障者按图索骥落空。
+          await logs.append(
+            source: 'remote',
+            action: 'vibrate.step',
+            status: 'skipped',
+            taskId: 'remote-script',
+            message: '振动步骤未执行（动作类型不支持或原生拒绝，'
+                'occurrenceId=$occurrenceId）',
+          );
+          message = '被跳过或原生拒绝（已记入执行日志）';
+        }
       }
     } on Object catch (e) {
       message = e.toString();
@@ -2155,6 +2289,8 @@ Future<void> _engineBody(ServiceInstance service) async {
 
   _diagStep('m7-handlers-registered');
   Timer.periodic(SchedulerConfig.engineTick, (_) {
+    // R90-06：停机中整轮跳过（executeDue / 续算 / 重排闹钟都不得再起）。
+    if (stopping) return;
     unawaited(stepGuarded('executeDue(tick)', executeDue));
     unawaited(() async {
       // 🔴 R89：整条续算链统一兜底。旧写法只有 extendCounterPlan / replan

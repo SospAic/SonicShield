@@ -52,6 +52,20 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
   /// 待决回执：cmdId → 结果（`_sendAwait` 用）。
   final _acks = <String, Completer<bool>>{};
 
+  /// 已超时销账的命令 id（R90 体验项：迟到回执不得再报"✓ 端点已执行"）。
+  ///
+  /// `_sendAwait` 超时后把 id 记到这里；`rc.ack` 到达时先查这张表 ——
+  /// 否则超时已告知"端点未确认"，几秒后又弹一条无主语、且与前一条**矛盾**的
+  /// "✓ 端点已执行"。表只保留最近 32 条，防止无限增长。
+  final _expiredAcks = <String>{};
+
+  void _rememberExpired(String id) {
+    _expiredAcks.add(id);
+    while (_expiredAcks.length > 32) {
+      _expiredAcks.remove(_expiredAcks.first);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -139,6 +153,13 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
         unawaited(refresh());
       case RcEvt.ack:
         final forId = payload['for'] as String? ?? '';
+        // R90 体验项：迟到回执单独提示，不冒充"刚刚那次已执行"。
+        if (forId.isNotEmpty && _expiredAcks.remove(forId)) {
+          _snack(payload['ok'] == true
+              ? '（迟到的回执：端点其实已执行）'
+              : '（迟到的回执：端点未执行）');
+          return;
+        }
         final pending = forId.isEmpty ? null : _acks.remove(forId);
         final ok = payload['ok'] == true;
         if (pending != null) {
@@ -211,6 +232,7 @@ class _RemoteTasksTabState extends ConsumerState<RemoteTasksTab> {
       return await completer.future.timeout(timeout);
     } on TimeoutException {
       _acks.remove(msg.id);
+      _rememberExpired(msg.id);
       return false;
     }
   }

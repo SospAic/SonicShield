@@ -21,6 +21,7 @@ import 'package:sonic_shield/core/constants.dart';
 import 'package:sonic_shield/core/providers.dart';
 import 'package:sonic_shield/core/router.dart';
 import 'package:sonic_shield/core/theme.dart';
+import 'package:sonic_shield/core/utils/endpoint_security.dart';
 import 'package:sonic_shield/core/utils/random.dart';
 import 'package:sonic_shield/core/widgets/section_scaffold.dart';
 import 'package:sonic_shield/data/db/app_database.dart';

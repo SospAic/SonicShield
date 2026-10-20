@@ -213,6 +213,10 @@ class AssistJoinClient {
     final transport = _transport;
     if (transport == null) return _fail('远程模块未开启，无法接入');
 
+    // R90-16：整段接入流程必须收口 —— 任何未预期异常都要变成**可见失败**
+    // 并复位 `opening`（`busy` 由 `phase == opening` 推导，不复位则两个输入框
+    // 与按钮全部禁用、错误区不显示，用户只能杀页面）。
+    try {
     _topic = await RcAssist.topicFor(c, p);
     _ctlKey = await RcAssist.ctlKey(c, p);
     _epKey = await RcAssist.epKey(c, p);
@@ -254,6 +258,10 @@ class AssistJoinClient {
       return _fail('接入超时：请确认临时码与访问密码正确，且端点仍显示"等待接入"');
     }
     return false; // 已被端点 reject（错误原因已由 onWire 写入）
+    } on Object catch (e) {
+      // R90-16：见上方 try 的注记。
+      return _fail('接入失败：$e');
+    }
   }
 
   /// 结束本地会话（不通知端点时为 [silent]；主动挂断应传 false）。

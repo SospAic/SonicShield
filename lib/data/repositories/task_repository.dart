@@ -12,13 +12,37 @@ class TaskRepository {
 
   final AppDatabase _db;
 
-  Future<List<Task>> listAll({bool enabledOnly = false}) async {
+  /// 列出全部任务。
+  ///
+  /// ## 🔴 R90-09（2026-10-19）：**单行损坏不得拖垮整表**
+  ///
+  /// `Task.fromRow` 里有裸 `values.byName`、`jsonDecode`、`TriggerConfig.fromJson`
+  /// （未知 kind 直接 `throw ArgumentError`）。旧实现 `rows.map(Task.fromRow)`
+  /// 让**任意一行**坏数据（旧版本写入的新 kind / 手工改库 / 写坏 JSON）把整个
+  /// 查询炸掉 ⇒ 引擎 tick、声音事件、任务列表页**同时不可用**，用户只看到
+  /// "列表空了 / 任务不响"，日志里什么都没有。
+  ///
+  /// 现在逐行兜底：坏行跳过并回调 [onRowError]（调用方负责留痕），其余行照常返回。
+  /// **不静默**：跳过多少行由调用方决定怎么报。
+  Future<List<Task>> listAll({
+    bool enabledOnly = false,
+    void Function(String id, Object error)? onRowError,
+  }) async {
     final rows = await _db.db.query(
       'tasks',
       where: enabledOnly ? 'enabled = 1' : null,
       orderBy: 'priority DESC, created_at DESC',
     );
-    return rows.map(Task.fromRow).toList();
+    final out = <Task>[];
+    for (final r in rows) {
+      try {
+        out.add(Task.fromRow(r));
+      } on Object catch (e) {
+        final rawId = r['id'];
+        onRowError?.call(rawId is String ? rawId : '', e);
+      }
+    }
+    return out;
   }
 
   Future<Task?> get(String id) async {
@@ -241,12 +265,23 @@ class AssetRepository {
         path: r['path'] as String,
         durationMs: r['duration_ms'] as int? ?? 0,
         sizeBytes: r['size_bytes'] as int? ?? 0,
-        tags: (r['tags'] == null || (r['tags'] as String).isEmpty)
-            ? const []
-            : (jsonDecode(r['tags'] as String) as List).cast<String>(),
+        // R90-26：坏 tags 不得让整张音源表抛错（旧实现裸 `jsonDecode`）。
+        tags: _decodeTags(r['tags']),
         weight: (r['weight'] as num?)?.toDouble() ?? 1.0,
         createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
       );
+
+  /// `tags` 列的反解（R90-26）：坏 JSON / 非字符串数组 → 空列表，不影响其它行。
+  static List<String> _decodeTags(Object? v) {
+    if (v is! String || v.isEmpty) return const [];
+    try {
+      final j = jsonDecode(v);
+      if (j is List) return j.whereType<String>().toList();
+    } on Object {
+      // 坏数据：当成"没有标签"。
+    }
+    return const [];
+  }
 }
 
 class AudioAsset {

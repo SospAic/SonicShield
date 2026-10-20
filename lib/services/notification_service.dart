@@ -154,6 +154,13 @@ class NotificationService {
     }
   }
 
+  /// 事件通知的**唯一** id 序列（R90-18）。
+  ///
+  /// 旧实现用 `title.hashCode` 作 id：同标题的两条取证通知会互相覆盖
+  /// （短时间连续两条"声盾 · 取证完成"，通知栏只剩最后一条）。事件型通知
+  /// 的语义是"每条都要看见"，id 必须按**事件**唯一，而不是按标题去重。
+  static int _eventSeq = 0;
+
   Future<void> showEvent({
     required String title,
     required String body,
@@ -170,8 +177,9 @@ class NotificationService {
       ),
       iOS: DarwinNotificationDetails(),
     );
-    await _plugin.show(title.hashCode & 0x7fffffff, title, body, details,
-        payload: payload);
+    // 0x7000 起递增，避开其它通道的固定 id（0x600D / 0x5C81 等）。
+    final id = 0x7000 + (_eventSeq++ % 0x0FFFF);
+    await _plugin.show(id, title, body, details, payload: payload);
   }
 
   Future<void> showGuardAlert(String body) async {

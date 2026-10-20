@@ -65,6 +65,14 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
   /// 挡不住这行原生调用（表现为退出投屏页后偶发崩溃/黑屏）。
   StreamSubscription<MediaStream?>? _remoteSub;
 
+  /// `rc.inputAck` 订阅（R90-11）。
+  ///
+  /// 旧实现从不消费回执：端点无障碍未开 / 会话已停 / 注入失败时，本页只把
+  /// `_last` 置成"（等待回执…）"然后**再也不更新** —— 远程控制失败在观看页
+  /// 完全不可见（`rc.inputAck` 的唯一消费者在另一路由的控制台上，而它被本页
+  /// 盖住）。与 BUG-029 同族。
+  StreamSubscription<Map<String, dynamic>>? _ackSub;
+
   Future<void> _boot() async {
     await _remote.initialize();
     if (!mounted) return;
@@ -85,36 +93,58 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
         _last = s != null ? '已收到画面' : '画面已中断';
       });
     });
+    // R90-11：按 `castId` + 来源端点双重过滤消费注入回执。
+    _ackSub = RcEndpointService.instance.events.listen((m) {
+      if (!mounted) return;
+      if (m['type'] != RcEvt.inputAck) return;
+      final peer = m['peerId'];
+      if (peer is String &&
+          peer.isNotEmpty &&
+          peer != widget.endpoint.deviceId) {
+        return;
+      }
+      final p = rcPayloadOf(m);
+      if ((p['castId'] as String?) != widget.castId) return;
+      final ok = p['ok'] as bool? ?? false;
+      final why = (p['message'] as String?)?.trim();
+      setState(() => _last = ok
+          ? '已执行'
+          : '未执行：${(why == null || why.isEmpty) ? '端点拒绝或会话已停' : why}');
+    });
   }
 
   @override
   void dispose() {
     _remoteSub?.cancel();
     _remoteSub = null;
+    _ackSub?.cancel();
+    _ackSub = null;
     _remote.dispose();
     super.dispose();
   }
 
-  Future<void> _send(String type, Map<String, dynamic> payload) async {
+  /// 下发一条注入命令；返回是否**已投递**（false = 端点离线 / 通道未就绪）。
+  Future<bool> _send(String type, Map<String, dynamic> payload) async {
     final store = RemoteStore(await SharedPreferences.getInstance());
-    await RcEndpointService.instance
+    return RcEndpointService.instance
         .sendTo(widget.endpoint, RcMessage.now(type, payload), store);
   }
 
   double _nx(double dx, double w) => w <= 0 ? 0 : (dx / w).clamp(0.0, 1.0);
 
-  void _tap(Offset p, Size box) {
+  Future<void> _tap(Offset p, Size box) async {
     final x = _nx(p.dx, box.width);
     final y = _nx(p.dy, box.height);
-    _send(RcCmd.inputTap, {'castId': widget.castId, 'x': x, 'y': y});
-    if (mounted) {
-      setState(() => _last =
-          'tap ${x.toStringAsFixed(3)}, ${y.toStringAsFixed(3)}（等待回执…）');
-    }
+    final sent =
+        await _send(RcCmd.inputTap, {'castId': widget.castId, 'x': x, 'y': y});
+    if (!mounted) return;
+    setState(() => _last = sent
+        ? 'tap ${x.toStringAsFixed(3)}, ${y.toStringAsFixed(3)}（等待回执…）'
+        : '未发出：端点离线或通道未就绪');
   }
 
-  void _swipe(Offset a, Offset b, Size box) {
-    _send(RcCmd.inputSwipe, {
+  Future<void> _swipe(Offset a, Offset b, Size box) async {
+    final sent = await _send(RcCmd.inputSwipe, {
       'castId': widget.castId,
       'x1': _nx(a.dx, box.width),
       'y1': _nx(a.dy, box.height),
@@ -122,7 +152,9 @@ class _ScreenViewerScreenState extends ConsumerState<ScreenViewerScreen> {
       'y2': _nx(b.dy, box.height),
       'durationMs': 220,
     });
-    if (mounted) setState(() => _last = 'swipe（等待回执…）');
+    if (!mounted) return;
+    setState(() =>
+        _last = sent ? 'swipe（等待回执…）' : '未发出：端点离线或通道未就绪');
   }
 
   Future<void> _stop() async {

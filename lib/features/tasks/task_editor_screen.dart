@@ -552,9 +552,28 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           ..._actionInputs(context),
           const SizedBox(height: 16),
           if (widget.remoteTarget == null) ...[
-            _section(context, '夜间独立豁免'),
-            _quietExemptTile(),
-            const SizedBox(height: 16),
+            // 🔴 R90-05（2026-10-19）：**声音触发任务不显示免打扰豁免控件**。
+            //
+            // 声音任务由 `onSoundEvent` 实时驱动，`ScheduleEngine.materialize`
+            // 对 `SoundTrigger` 直接返回空计划 ⇒ 它**从不经过** `_applyQuiet`。
+            // 旧界面仍对所有触发器类型渲染"夜间独立豁免"三选一，用户设了
+            // 也不会生效 —— 界面在说谎（与 BUG-070 同族）。
+            //
+            // 语义决策：守卫**必须**在夜间也能响应（那正是它存在的时段），
+            // 因此不把免打扰接进声音入口，而是把死控件换成说明。
+            if (_type == TriggerType.soundTriggered) ...[
+              _section(context, '夜间独立豁免'),
+              const Text(
+                '声音触发任务由声音事件实时驱动，不进入时间计划，因此不受免打扰时段约束'
+                '（守卫必须在夜间也能响应）。此处无需设置。',
+                style: AppText.bodySmall,
+              ),
+              const SizedBox(height: 16),
+            ] else ...[
+              _section(context, '夜间独立豁免'),
+              _quietExemptTile(),
+              const SizedBox(height: 16),
+            ],
             _section(context, '全局执行总开关 · 强制例外'),
             _forceRunTile(),
           ],

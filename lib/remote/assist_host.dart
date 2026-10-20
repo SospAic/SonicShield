@@ -253,13 +253,26 @@ class RcAssistHost {
     final s = _session;
     final k = _keys;
     if (s == null || k == null || s.phase != AssistPhase.active) return false;
+    // 🔴 R90-17（2026-10-19）：先发布、**成功后才改本地**。
+    //
+    // 旧实现 `s.perms = perms` 在前、`_publish` 在后且无 try/catch ⇒ 发布
+    // 失败时本机已显示"已放行"、控制端按钮仍灰着（或反之），两端状态静默
+    // 不一致；异常还会变成未处理异步错误（UI 侧 `grant()` 的 Future 被丢弃）。
+    final prev = s.perms;
+    try {
+      await _publish(
+          k.epKey,
+          RcMessage.now(RcAssistCmd.perm, {
+            'sessionId': s.sessionId,
+            'perms': perms.toJson(),
+          }));
+    } on Object catch (e) {
+      s.perms = prev;
+      await audit?.call('assist.perm', 'failed', '发布失败，已回退：$e');
+      _emit();
+      return false;
+    }
     s.perms = perms;
-    await _publish(
-        k.epKey,
-        RcMessage.now(RcAssistCmd.perm, {
-          'sessionId': s.sessionId,
-          'perms': perms.toJson(),
-        }));
     await audit?.call('assist.perm', 'success', _permSummary(perms));
     _emit();
     return true;

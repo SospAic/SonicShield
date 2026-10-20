@@ -34,9 +34,19 @@ class _ScriptBuilderScreenState extends ConsumerState<ScriptBuilderScreen> {
     _load();
   }
 
+  @override
+  void dispose() {
+    // R90-25：页面级控制器必须释放（同文件三处对话框控制器均已正确移交，
+    // 唯独这个屏幕级 `_nameCtrl` 漏了）。
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final store = RemoteStore(prefs);
+    // R90-15：await 之后必须复核 mounted（同目录其余 8 处 `_load()` 都有）。
+    if (!mounted) return;
     setState(() {
       _endpoint = store
           .paired()

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/utils/endpoint_security.dart';
 import '../data/repositories/api_config_store.dart';
 import '../domain/models/counter_plan.dart';
 import '../domain/models/counter_plan_params.dart';
@@ -111,6 +112,19 @@ class DeepSeekService {
   Future<(String?, String?, (int, int))> _chat(
       List<Map<String, String>> messages) async {
     try {
+      // 🔴 R90-08（2026-10-19）：**公网明文端点一律拒发**。
+      //
+      // BUG-132 为在线语音建过同构判据（`isSecureTtsEndpoint`），但 DeepSeek
+      // 通路没有这条闸：用户把基址填成 `http://…` 时，`Authorization: Bearer`
+      // 与提示词（含 ttsTexts）会明文上网。判据已收敛到
+      // `core/utils/endpoint_security.dart`，两条通路共用。
+      if (!isSecureEndpoint(_config.chatCompletionsUrl)) {
+        return (
+          null,
+          '端点不安全：公网明文 http 会泄露 API Key，请改用 https（本机/局域网可用 http）',
+          (0, 0),
+        );
+      }
       // BUG-109：必须有总超时。旧实现裸 await `post` —— 网络挂起时
       // `generatePlan` **永不返回**：设置页没有 loading 态、用户连点会
       // 并发发起多次请求，最后全挂在那里。与 `HolidayUpdateService`

@@ -42,10 +42,21 @@ class ApiConfigStore {
 
   /// 内置默认 Key：编译期可用 `--dart-define=DEEPSEEK_API_KEY=...` 覆盖。
   ///
-  /// 这里只是**出厂默认**，不是写死的唯一来源 —— 见类文档。
+  /// ## 🔴 R90-01（2026-10-19）：默认值**必须为空**
+  ///
+  /// 旧实现在 `defaultValue` 里写了一个**真实形态的 `sk-` 凭据**。后果不是
+  /// "理论风险"：任何拿到仓库或反编译 APK 的人都能提取它调用付费接口；而且
+  /// [apiKey] 的"从未配置 → 回落默认值"语义让**用户显式清空 Key 也停用不了**
+  /// 这笔内置额度（清空只写一个空串到 prefs，`containsKey` 为真时才返回空串，
+  /// 但"从未配置"这一分支永远拿得到内置 Key）。
+  ///
+  /// 现在默认空串 ⇒ `hasApiKey == false` ⇒ `DeepSeekService.generatePlan`
+  /// 走既有的"未配置 DeepSeek API Key（请在「语音与接口」中填写）"分支，
+  /// 失败可见且可执行。需要出厂内置时由构建方显式传
+  /// `--dart-define=DEEPSEEK_API_KEY=...`，凭据不进版本库。
   static const String _builtInApiKey = String.fromEnvironment(
     'DEEPSEEK_API_KEY',
-    defaultValue: 'sk-6c623340b8804850b3e6fe68452aeeac',
+    defaultValue: '',
   );
 
   /// 从未配置时使用的 DeepSeek Key（内置默认，可被 `--dart-define` 覆盖）。

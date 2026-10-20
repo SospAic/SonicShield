@@ -99,10 +99,12 @@ class _MultiVideoScreenState extends State<MultiVideoScreen> {
     final ok = await _svc.connect(picked, store);
     if (!mounted) return;
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('「${picked.displayName}」连接失败（端点离线或无法获取麦克风/摄像头）')),
-      );
+      // R90-12：上限与"离线/取不到媒体"必须给出**不同**的可执行提示。
+      final msg = _svc.atCapacity
+          ? '已达多路并发上限（${MultiCallService.maxConcurrentSessions} 路），请先断开一路'
+          : '「${picked.displayName}」连接失败（端点离线或无法获取麦克风/摄像头）';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 

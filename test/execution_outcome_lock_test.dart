@@ -166,8 +166,10 @@ String? judgeProbabilityAllEntries(String src) {
     return '定时入口 executeDue 概率门丢失';
   }
   final rn = _win(src, "service.on('runNow')", 4200);
-  if (!rn.contains('probabilityGateMissed(')) {
-    return '远程立即执行 runNow 未包含概率门';
+  // R91（R90-03）：runNow 改为复用统一裁决 —— 概率门由 `admitExecution` 提供，
+  // 同时补上了它此前缺失的 `pausedAt`（节假日暂停）闸。
+  if (!rn.contains('admitExecution(')) {
+    return '远程立即执行 runNow 未走统一裁决（暂停/条件/概率门缺席）';
   }
   return null;
 }
@@ -186,8 +188,14 @@ String? judgeActionFailPropagation(String src) {
 
 String? judgeGuardPlanOutcome(String src) {
   final gp = _win(src, 'Future<void> runGuardPlan(', 2200);
-  if (!gp.contains('outcome.isFailure')) {
-    return 'runGuardPlan 未按 outcome.isFailure 决定终态（仍会无条件记成功）';
+  // R91（R90-04）：三态映射，与 executeDue 对齐。
+  // 旧判据只要求区分 failed/done —— 那正是"skipped 被并进 done"的形状
+  //（BUG-093 的孪生），现在必须显式区分 skipped。
+  if (!gp.contains('outcome.isSkipped')) {
+    return 'runGuardPlan 未区分 skipped（skipped 会被并进 done，凭空激活冷却）';
+  }
+  if (!gp.contains('OccurrenceStatus.skipped')) {
+    return 'runGuardPlan 不会落 skipped';
   }
   if (!gp.contains('OccurrenceStatus.failed')) return 'runGuardPlan 不会落 failed';
   if (!gp.contains('OccurrenceStatus.done')) return 'runGuardPlan 不会落 done';

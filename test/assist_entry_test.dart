@@ -25,8 +25,9 @@ void main() {
   });
 
   test('AE-02 文字入口指向与 AppBar 快捷图标相同的路由', () {
-    expect(src, contains("context.push('/remote/assist')"));
-    expect(src, contains("context.push('/remote/assist/join')"));
+    // R91 体验项：导航改为 `_pushOnce(context, route)`（800ms 同路由去重）。
+    expect(src, contains("_pushOnce(context, '/remote/assist')"));
+    expect(src, contains("_pushOnce(context, '/remote/assist/join')"));
     // AppBar 图标作为快捷方式保留。
     expect(src, contains('Icons.support_agent'));
     expect(src, contains('Icons.login'));

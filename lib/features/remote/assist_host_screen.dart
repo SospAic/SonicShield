@@ -224,7 +224,16 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
                   title: Text(e.value),
                   subtitle: _permHint(e.key),
                   value: s.perms.flag(e.key),
-                  onChanged: (v) => _host.grant(s.perms.withFlag(e.key, v)),
+                  // R90-17：必须 await 并消费返回值 —— 发布失败时开关会回退，
+                  // 用户需要看到"没改成"而不是默默弹回。
+                  onChanged: (v) async {
+                    final ok =
+                        await _host.grant(s.perms.withFlag(e.key, v));
+                    if (!context.mounted || ok) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('权限未生效：通知控制端失败，请检查连接后重试')),
+                    );
+                  },
                 ),
               const Padding(
                 padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, AppSpacing.lg),

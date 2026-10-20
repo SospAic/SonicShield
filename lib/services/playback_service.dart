@@ -58,7 +58,32 @@ class PlaybackService {
           ? AndroidAudioFocusGainType.gain
           : AndroidAudioFocusGainType.gainTransientMayDuck;
 
+  /// 最近一次 solo 播放使用的播放器（[dispose] 兜底）。
+  ///
+  /// R90-07（2026-10-19）：**不再是复用句柄** —— `play()` 每次新建一个播放器，
+  /// 并发路径（定时任务 / 声音守卫 / 远程立即执行）各持各的，互不打断。
+  /// 本字段只保留"最后一次"的引用，供 [dispose] 释放；在飞的那几个由各自
+  /// 的 `finally` 释放。
   AudioPlayer? _player;
+
+  /// 所有**在飞**的 solo 播放器（R90-07 并发隔离）。
+  final Set<AudioPlayer> _soloPlayers = <AudioPlayer>{};
+
+  /// 在飞 solo 播放的**引用计数**。
+  ///
+  /// [_playing] 是 `Set<PlaybackService>`（实例级），并发两路播放时若第一路
+  /// 结束时无条件 `remove(this)`，第二路就再也停不下来（"停止指令组"拿不到
+  /// 本实例）。与 [_pttStreams] 同一处置：只有最后一个结束才摘登记。
+  int _activePlays = 0;
+
+  /// 停止**代次**（R90-07）：[stop] 递增；每个 `play()` 记住启动时的代次，
+  /// 代次变了即"这次播放已被要求停止"，如实报失败。
+  ///
+  /// 为什么不用单个 bool：旧实现 `_stopRequested = false` 写在 `play()` 开头，
+  /// 于是**后一次播放会把前一次尚未察觉的停止请求清掉**（前一次继续出声到窗口
+  /// 结束，还记 success）；反过来 `stop()` 置 true 又会误伤**之后**才启动的
+  /// 那次播放。代次把"停止"绑定到"启动时的那一代"，两个方向都正确。
+  int _stopGen = 0;
 
   /// 声景多轨播放器登记（P2-08）。
   ///
@@ -77,10 +102,6 @@ class PlaybackService {
   int _pttStreams = 0;
 
   bool _mixStopped = false;
-
-  /// [stop] 已被请求；正在 [_waitPlayWindow] 里等待的 [play] 据此**提前收尾，
-  /// 并把结果如实标成失败**（不是"播完了"）。
-  bool _stopRequested = false;
 
   /// **正在播放**的实例登记表。
   ///
@@ -139,9 +160,12 @@ class PlaybackService {
     int rampUpMs = 0, // 渐强唤醒：音量 5%→目标 线性爬升
     bool loopFill = false, // 短音效循环填充到目标时长
   }) async {
-    final player = _player ??= AudioPlayer();
-    _stopRequested = false; // 上一次 stop() 不得影响这一次播放
+    final player = AudioPlayer();
+    _player = player;
+    _soloPlayers.add(player);
+    _activePlays++;
     _playing.add(this);
+    final gen = _stopGen;
     final sw = Stopwatch()..start();
     try {
       // 1) 申请音频会话/焦点：alarm 通道在 Android 上映射 USAGE_ALARM，
@@ -173,9 +197,9 @@ class PlaybackService {
               ? maxDurationMs
               : fileMs);
       if (target > 0) {
-        await _waitPlayWindow(Duration(milliseconds: target));
+        await _waitPlayWindow(Duration(milliseconds: target), gen);
       }
-      if (_stopRequested) {
+      if (gen != _stopGen) {
         // 收到停止：**立刻静音**（不做淡出 —— 用户要的就是停），并把结果
         // 如实标成失败。报成功会让控制端以为"这段声音已经正常播完了"。
         await _hardStop(player);
@@ -202,15 +226,29 @@ class PlaybackService {
       return PlayResult(
           ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
     } finally {
-      _playing.remove(this);
+      _soloPlayers.remove(player);
+      // R90-07：每路播放器独立释放 —— 共享句柄时"后一次 setFilePath 打断前一次"
+      // 与"前一次的 _hardStop 静音后一次"都会发生，且两边都记 success。
+      try {
+        await player.dispose();
+      } on Object {
+        // 释放失败不影响已完成的播放语义。
+      }
+      // 引用计数归零才摘登记（并发两路时第一路结束不得让第二路失联）。
+      _activePlays--;
+      if (_activePlays <= 0) {
+        _activePlays = 0;
+        _playing.remove(this);
+      }
     }
   }
 
   /// 兜底静音：停播 + 复位循环模式，两步各自吞异常。
   ///
-  /// 两步都要做 —— 只 `stop()` 不关 `LoopMode.one` 时，下一次 `play()` 若复用
-  /// 同一个 [_player]（`_player ??=`）会**带着上一次的循环模式起播**；反过来
-  /// 只关循环不停播则是"还在响"。任何一步失败都不得阻断另一步。
+  /// 两步都要做 —— 只 `stop()` 不关 `LoopMode.one` 时，**同一个播放器**若还被
+  /// 复用会带着上一次的循环模式起播；反过来只关循环不停播则是"还在响"。
+  /// （R90-07 起 `play()` 每次新建播放器，复用风险已消除；本方法仍按
+  /// "每一步都不得阻断下一步"的纪律保留。）任何一步失败都不得阻断另一步。
   Future<void> _hardStop(AudioPlayer player) async {
     try {
       await player.stop();
@@ -224,17 +262,17 @@ class PlaybackService {
     }
   }
 
-  /// 等待播放窗口；期间收到 [stop]（[_stopRequested]）立即返回。
+  /// 等待播放窗口；期间若 [stop] 把代次推进（[gen] != [_stopGen]）立即返回。
   ///
   /// 50ms 一轮 ⇒ 终止的延迟上界 = 一个 tick，CPU 代价可忽略
   /// （对照 `playSoundscape` 的 250ms 轮询）。
   /// 旧实现是裸 `await Future.delayed(maxDurationMs)`：`stop()` 只是把播放器
   /// 停了，等待方仍要傻等到时长耗尽才返回 —— 端点因此"点了停却继续出声"。
-  Future<void> _waitPlayWindow(Duration total) async {
+  Future<void> _waitPlayWindow(Duration total, int gen) async {
     const tick = Duration(milliseconds: 50);
     var left = total;
     while (left > Duration.zero) {
-      if (_stopRequested) return;
+      if (gen != _stopGen) return;
       final step = left < tick ? left : tick;
       await Future<void>.delayed(step);
       left -= step;
@@ -245,18 +283,28 @@ class PlaybackService {
   void stopSoundscape() => _mixStopped = true;
 
   Future<void> stop() async {
-    // ⚠️ **先落标志再停播放器**：正在 [_waitPlayWindow] 里等待的 play() 会在
+    // ⚠️ **先推代次再停播放器**：正在 [_waitPlayWindow] 里等待的 play() 会在
     // 下一个 tick 退出并如实报失败。顺序在这里是语义不是风格 —— 只停播放器
     // 而不通知等待方，play() 仍会等满 maxDurationMs（远程「停止指令组」
     // 在端点侧"点了停却继续出声"的根因之一）。
-    _stopRequested = true;
+    //
+    // R90-07：代次（而非 bool）保证"停"只作用于**本次 stop 之前**启动的播放，
+    // 不会误伤之后才启动的那一路。
+    _stopGen++;
     // P2-08：`stop()` 是"端点静音"的统一出口（`stopAllPlaying` 也只调它）。
-    // 除了主 [_player]，还必须打断声景混音 —— 否则声景几轨会继续出声到窗口到点。
+    // 除了 solo 播放器，还必须打断声景混音 —— 否则声景几轨会继续出声到窗口到点。
     _mixStopped = true;
+    for (final p in List<AudioPlayer>.of(_soloPlayers)) {
+      try {
+        await p.stop();
+      } on Object {
+        // 忽略停止异常：状态自愈。
+      }
+    }
     try {
       await _player?.stop();
     } on Object {
-      // 忽略停止异常：状态自愈。
+      // 兼容旧字段（通常已在 _soloPlayers 内，重复 stop 是幂等的）。
     }
     for (final p in List<AudioPlayer>.of(_mixPlayers)) {
       try {

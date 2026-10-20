@@ -467,7 +467,10 @@ class _FakeTasks implements TaskRepository {
   }
 
   @override
-  Future<List<Task>> listAll({bool enabledOnly = false}) async => const [];
+  Future<List<Task>> listAll({
+    bool enabledOnly = false,
+    void Function(String id, Object error)? onRowError,
+  }) async => const [];
 
   @override
   Future<Task?> get(String id) async => null;

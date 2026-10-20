@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../core/utils/endpoint_security.dart';
+
 /// 在线语音合成的**最小客户端契约**（v2.0 起两条通路共用）。
 ///
 /// 两条通路：
@@ -323,32 +325,7 @@ class EdgeTtsClient implements TtsSynthClient {
 ///
 /// 判据：`https` / `wss` 一律允许；明文协议**只**允许回环与 RFC1918 私有地址
 /// （本机 / 家庭局域网自建服务是真实用法，公网明文没有任何正当理由）。
-bool isSecureTtsEndpoint(String endpoint) {
-  final uri = Uri.tryParse(endpoint.trim());
-  if (uri == null || uri.host.isEmpty) return false;
-  final scheme = uri.scheme.toLowerCase();
-  if (scheme == 'https' || scheme == 'wss') return true;
-  if (scheme != 'http' && scheme != 'ws') return false;
-  return _isLocalHost(uri.host);
-}
-
-/// 回环 / 私有网段判定（[isSecureTtsEndpoint] 专用）。
-bool _isLocalHost(String host) {
-  final h = host.toLowerCase();
-  if (h == 'localhost' || h == '127.0.0.1' || h == '::1' || h == '[::1]') {
-    return true;
-  }
-  final parts = h.split('.');
-  if (parts.length != 4) return false;
-  final a = int.tryParse(parts[0]);
-  final b = int.tryParse(parts[1]);
-  if (a == null || b == null) return false;
-  if (a == 127) return true; // 回环
-  if (a == 10) return true; // 10/8
-  if (a == 192 && b == 168) return true; // 192.168/16
-  if (a == 172 && b >= 16 && b <= 31) return true; // 172.16/12
-  return false;
-}
+bool isSecureTtsEndpoint(String endpoint) => isSecureEndpoint(endpoint);
 
 /// 按端点协议装配在线语音客户端（**唯一的"选通路"决策点**）。
 ///

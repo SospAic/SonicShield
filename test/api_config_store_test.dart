@@ -22,9 +22,11 @@ void main() {
       final s = await fresh();
       expect(s.baseUrl, ApiConfigStore.defaultBaseUrl);
       expect(s.model, ApiConfigStore.defaultModel);
-      expect(s.apiKey, ApiConfigStore.defaultApiKey);
-      expect(s.hasApiKey, isTrue,
-          reason: '出厂即内置默认 Key（开箱可用；可编译期 --dart-define 或运行期改写）');
+      // R90-01 / R91：出厂**不再内置任何真实 Key** —— 默认空串，
+      // `hasApiKey == false`，由 UI 引导用户填写（或构建期 --dart-define 注入）。
+      expect(s.apiKey, isEmpty);
+      expect(s.hasApiKey, isFalse,
+          reason: '真实凭据不得随仓库分发；未配置时必须如实报告"没有 Key"');
       expect(s.chatCompletionsUrl,
           '${ApiConfigStore.defaultBaseUrl}/chat/completions');
     });
@@ -106,9 +108,9 @@ void main() {
 
       expect(s.baseUrl, ApiConfigStore.defaultBaseUrl);
       expect(s.model, ApiConfigStore.defaultModel);
-      expect(s.apiKey, ApiConfigStore.defaultApiKey,
-          reason: '清除后 Key 回到内置默认（而非留空）');
-      expect(s.hasApiKey, isTrue);
+      expect(s.apiKey, isEmpty,
+          reason: '清除后 Key 回到"未配置"（不再有内置默认 Key 可回落）');
+      expect(s.hasApiKey, isFalse);
       expect(s.ttsEndpoint, ApiConfigStore.defaultTtsEndpoint,
           reason: '清除后在线语音回到内置默认端点');
       expect(s.onlineTtsConfigured, isTrue,
@@ -131,8 +133,8 @@ void main() {
 
     test('AC-08 内置默认可改写、可停用（"默认"不等于"写死"）', () async {
       final s = await fresh();
-      expect(ApiConfigStore.defaultApiKey, isNotEmpty,
-          reason: '出厂默认必须非空（开箱可用）');
+      expect(ApiConfigStore.defaultApiKey, isEmpty,
+          reason: 'R90-01：出厂默认必须为空（凭据不进版本库）');
 
       await s.setApiKey('sk-mine');
       expect(s.apiKey, 'sk-mine', reason: '运行期改写优先于内置默认');
