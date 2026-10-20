@@ -23,7 +23,7 @@ class AppMeta {
   /// 🔴 第八十四轮用户基线：**禁止** `alpha+N` 之类预发布后缀表述；
   /// 版本号一律为纯 `x.y.z`，且**每轮迭代至少 +0.0.1**（不得同号复用）。
   /// 迭代日期改由 [buildDate] 承载（见 [displayVersion]）。
-  static const String version = '1.9.8';
+  static const String version = '1.9.9';
 
   /// 与 pubspec.yaml 的 `+N` **构建号**同步（第七十七轮基线新增）。
   ///
@@ -35,7 +35,7 @@ class AppMeta {
   /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
   /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
   /// 并锁死界面不得再出现写死的版本号。
-  static const String buildNumber = '31';
+  static const String buildNumber = '32';
 
   /// 迭代日期（年月日），每次迭代随版本信息一起更新。
   ///

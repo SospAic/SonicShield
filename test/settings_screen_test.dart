@@ -1153,6 +1153,42 @@ void main() {
       expect(find.text('未启用（该时段不反击）'), findsNWidgets(2));
     }, timeout: perTest);
 
+    testWidgets('SET-07e 夜间已启用但未授权 ⇒ 横幅 + 一键开启', (tester) async {
+      // R92（用户报障"晚10点到早7点无论改什么都不生成"）：夜间时段受
+      // 22:00–07:00 合规免打扰窗口约束，而「夜间独立豁免」主开关默认关 ⇒
+      // 夜间条目整条跳过。界面必须**把这件事说出来**，并给一键授权。
+      SharedPreferences.setMockInitialValues({
+        'counter_plan_json': jsonEncode(CounterPlan.defaults().toJson()),
+        'counter_plan_enabled': true,
+        // 主开关缺省 = false（未授权夜间豁免）
+      });
+      await pumpSettings(tester);
+      await switchTab(tester, 3);
+      expect(find.text('夜间时段当前不会生成任何动作'), findsOneWidget,
+          reason: '夜间时段有启用却不会生成，必须显式告知');
+      expect(find.widgetWithText(TextButton, '开启夜间豁免'), findsOneWidget,
+          reason: '要能一键授权，而不是让用户自己去设置页翻');
+      expect(find.textContaining('需开启「夜间独立豁免」主开关'), findsWidgets,
+          reason: '四个时段行里，夜间那一行也要写明约束');
+    }, timeout: perTest);
+
+    testWidgets('SET-07e2 已授权夜间豁免 ⇒ 不再报警，时段回到只展示区间',
+        (tester) async {
+      final plan = CounterPlan.defaults(); // workdayNight 默认启用
+      SharedPreferences.setMockInitialValues({
+        'counter_plan_json': jsonEncode(plan.toJson()),
+        'counter_plan_enabled': true,
+        'quiet_exempt_master': true,
+      });
+      await pumpSettings(tester);
+      await switchTab(tester, 3);
+      expect(find.text('夜间时段当前不会生成任何动作'), findsNothing,
+          reason: '已授权就不该再报警');
+      expect(find.widgetWithText(TextButton, '开启夜间豁免'), findsNothing);
+      expect(find.text(describeWindow(plan.workdayNight)), findsOneWidget,
+          reason: '已授权后夜间行应如白天一样只展示区间');
+    }, timeout: perTest);
+
     // ───── 以下为 v2.0 新增代码（语音与接口 / 反击计划）的补测 ─────
 
     /// 合法计划 JSON（与 `deepseek_service_test.goodPlanJson()` 同源）。
@@ -1478,9 +1514,14 @@ void main() {
       await tester.pump();
       expect(find.text('动作间隔（秒）：300s – 1800s'), findsOneWidget);
 
-      // 2) 遵循免打扰开关。
-      final quiet = find.widgetWithText(SwitchListTile, '遵循免打扰时段');
-      tester.widget<SwitchListTile>(quiet).onChanged!(false);
+      // 2) R92：死设置「遵循免打扰时段」已从参数对话框移除（自 v79 起就不
+      //    映射任何行为）。改成断言**依赖说明**在界面上 —— 免打扰的真实判据
+      //    只有「夜间独立豁免」主开关，必须写在用户能看见的地方。
+      expect(
+        find.textContaining('由「夜间独立豁免」'),
+        findsWidgets,
+        reason: '免打扰判据必须写在界面上，而不是留一个不生效的开关',
+      );
       await tester.pump();
 
       // 3) 工作日两段（默认开）→ 驱动其音量/时长/次数三条滑块。

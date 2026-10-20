@@ -612,9 +612,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 反击计划区块：状态 + 四时段区间 + 五个操作。
   List<Widget> _planWidgets(BuildContext context) {
     final p = _plan;
+    // R92：**夜间时段是否被合规护栏吞掉**（用户报障"晚10点到早7点无论改什么
+    // 都不生成动作"的真相）。物化出来的反击任务硬编码 `quietPolicy: skip`
+    // （fail-safe），而 `_applyQuiet` 在免打扰窗口内、且任务级豁免为 null 时
+    // 取主开关 `allowQuietExempt`（默认 false）⇒ **夜间条目整条丢弃**。
+    // 两个"夜间"开关因此看起来有用、实际无效 —— 必须把依赖摆到台面上。
+    final bool planNightOn = p != null &&
+        (p.windowFor(DayKind.workday, isNight: true).enabled ||
+            p.windowFor(DayKind.restday, isNight: true).enabled);
+    final bool paramsNightOn =
+        _planParams.windowFor(DayKind.workday, isNight: true).enabled ||
+            _planParams.windowFor(DayKind.restday, isNight: true).enabled;
+    final bool nightOn = p == null ? paramsNightOn : planNightOn;
+    final bool nightBlocked = nightOn && !_quietExemptMaster;
     final out = <Widget>[
       Text('反击计划', style: Theme.of(context).textTheme.titleMedium),
       const SizedBox(height: 4),
+      if (nightBlocked) ...[
+        Card(
+          margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+          color: Theme.of(context).colorScheme.errorContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Icon(Icons.nightlight_round,
+                      color: Theme.of(context).colorScheme.error),
+                  const SizedBox(width: AppSpacing.xs),
+                  const Expanded(
+                    child: Text('夜间时段当前不会生成任何动作',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ]),
+                const SizedBox(height: AppSpacing.xs),
+                const Text(
+                  '你启用了夜间时段，但 22:00–07:00 是合规免打扰窗口，而'
+                  '「夜间独立豁免」主开关未开启 —— 命中该窗口的动作会被整条跳过'
+                  '（这正是"改了任何设置都不生成"的原因）。\n\n'
+                  '开启主开关后，上方启用的夜间时段才会真正排出动作，'
+                  '并且每次夜间执行都会写入日志。',
+                  style: AppText.bodySmall,
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    key: const ValueKey<String>('plan_enable_night_exempt'),
+                    icon: const Icon(Icons.lock_open),
+                    label: const Text('开启夜间豁免'),
+                    onPressed: () => _toggleQuietExempt(true),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+      ],
       ListTile(
         leading: const Icon(Icons.security),
         title: Text(p == null ? '当前计划：未配置' : '当前计划：${p.name}'),
@@ -632,12 +688,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ('休息日·白天', p.windowFor(DayKind.restday, isNight: false)),
         ('休息日·夜间', p.windowFor(DayKind.restday, isNight: true)),
       ]) {
+        final isNightRow = e.$1.contains('夜间');
+        final String sub = !e.$2.enabled
+            ? '未启用（该时段不反击）'
+            : (isNightRow && !_quietExemptMaster
+                ? '${describeWindow(e.$2)}\n⚠️ 免打扰时段（22:00–07:00）内不会生成，'
+                    '需开启「夜间独立豁免」主开关'
+                : describeWindow(e.$2));
         out.add(ListTile(
           dense: true,
           contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
           title: Text(e.$1),
-          subtitle:
-              Text(e.$2.enabled ? describeWindow(e.$2) : '未启用（该时段不反击）'),
+          subtitle: Text(sub),
+          isThreeLine: isNightRow && e.$2.enabled && !_quietExemptMaster,
         ));
       }
     }
@@ -1341,13 +1404,19 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
                     )),
                 fmt: (v) => '${v.round()}s',
               ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                title: const Text('遵循免打扰时段'),
-                value: _p.respectQuietHours,
-                onChanged: (v) =>
-                    setState(() => _p = _p.copyWith(respectQuietHours: v)),
+              // R92：删掉「遵循免打扰时段」开关 —— 它自 v79 起**不再映射**
+              // 任何行为（`respectQuietHours` 只为远程配置/导入导出兼容而保留，
+              // 见 counter_plan_materializer.dart:260-262 的注释）。留着它就是
+              // 一条死设置，正是"无论改什么都不生成"体感的来源之一。
+              //
+              // 免打扰的真实判据只有一条：**夜间独立豁免主开关**（默认关）。
+              const Padding(
+                padding: EdgeInsets.only(bottom: AppSpacing.xs),
+                child: Text(
+                  '免打扰时段（默认 22:00–07:00）内是否放行，由「夜间独立豁免」'
+                  '主开关决定；关闭时夜间时段不会生成动作。',
+                  style: AppText.bodySmall,
+                ),
               ),
               _section('工作日'),
               _window('工作日·白天', _p.workdayDay,
@@ -1359,6 +1428,19 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
                   (w) => _p.copyWith(restdayDay: w)),
               _window('休息日·夜间', _p.restdayNight,
                   (w) => _p.copyWith(restdayNight: w)),
+              const Divider(height: AppSpacing.lg),
+              Row(children: [
+                Icon(Icons.nightlight_round,
+                    size: 18, color: Theme.of(context).colorScheme.error),
+                const SizedBox(width: AppSpacing.xs),
+                const Expanded(
+                  child: Text(
+                    '两个「夜间」开关只在开启「夜间独立豁免」主开关后生效；'
+                    '否则命中 22:00–07:00 的动作会被整条跳过。',
+                    style: AppText.bodySmall,
+                  ),
+                ),
+              ]),
             ],
           ),
         ),
