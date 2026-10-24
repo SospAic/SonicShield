@@ -51,17 +51,33 @@ void main() {
   /// PBKDF2 组（三条用例做同一份 KDF 工作量）。
   final kdfGroup = code(groupBody(src, 'GT-灰盒 · 加密备份'));
 
-  /// 该组里所有 `lessThanOrEqualTo(<arg>)` 的实参。
-  List<String> budgetsIn(String body) => RegExp(r'lessThanOrEqualTo\(([^)]*)\)')
-      .allMatches(body)
-      .map((m) => m.group(1)!.trim())
-      .toList();
+  /// 该组里所有 `_expectGuarded(<caseId>, <bench>, <budget>)` 调用的**条数**。
+  ///
+  /// R94 / QUA-02 起，三条用例不再各写一遍 `expect(bestMs,
+  /// lessThanOrEqualTo(budget))`，而是统一走共用助手 `_expectGuarded`
+  /// （预热 + min-of-N + 负载定性 + reason 带实测值，全部收敛在一处）。
+  /// 锁随之改成按**新形状**扫描 —— 判据一条都没放松，反而更严：
+  /// 组内出现绕过助手的内联 `lessThanOrEqualTo` 会被 PB-03 抓到。
+  int guardedCalls(String body) =>
+      RegExp(r'_expectGuarded\s*\(').allMatches(body).length;
+
+  /// 该组里所有 `_expectGuarded(...)` 的**预算实参**（第三个位置参数）。
+  List<String> budgetsIn(String body) => RegExp(r'_expectGuarded\s*\(\s*'
+            r'[^,]+,\s*' // caseId
+            r'[^,]+,\s*' // GuardedBench
+            r'([^,)]+)') // budgetMs
+        .allMatches(body)
+        .map((m) => m.group(1)!.trim())
+        .toList();
 
   test('PB-01 同组内"同一份工作量"的用例必须共用**同一个**预算', () {
     final budgets = budgetsIn(kdfGroup);
+    expect(guardedCalls(kdfGroup), 3,
+        reason: 'PBKDF2 组应有 3 条走 `_expectGuarded` 的耗时断言'
+            '（加密 / 解密 / 错密码解密），实得 ${guardedCalls(kdfGroup)} 条 —— '
+            '用例被改名或删除后本锁会失去覆盖');
     expect(budgets.length, 3,
-        reason: 'PBKDF2 组应有 3 条耗时断言（加密 / 解密 / 错密码解密），'
-            '实得 ${budgets.length} 条 —— 用例被改名或删除后本锁会失去覆盖');
+        reason: '预算实参应能解析出 3 个，实得 ${budgets.length} 个');
     expect(budgets.toSet().length, 1,
         reason: '三条用例做的是**同一份 KDF 工作量**（120k 次 PBKDF2），'
             '预算却出现了 ${budgets.toSet()} —— 预算不一致必然有人是拍脑袋定的，'
@@ -79,15 +95,40 @@ void main() {
         reason: '找不到 `const kdfBudgetMs` 的声明');
   });
 
+  /// `_expectGuarded` 助手自身的函数体（从定义处取到 `void main()` 之前）。
+  ///
+  /// 为什么要单独取它：PB-03 的判据已经从"每条用例的 reason 里手插值实测值"
+  /// 变成"共用助手必须插值实测值"。取不到助手体 ⇒ 锁失去锚点 ⇒ 判红，
+  /// 不许"没找到就放行"。
+  final helperBody = code(() {
+    final i = src.indexOf('void _expectGuarded(');
+    if (i < 0) return '';
+    final j = src.indexOf('void main()', i);
+    return src.substring(i, j < 0 ? src.length : j);
+  }());
+
   test('PB-03 红灯必须自带实测值（否则又要靠"阈值置 0"取证）', () {
-    // 本轮为了拿到真实耗时，不得不把三个阈值临时改成 0 逼出 Actual ——
-    // 那是有效但昂贵的手法。断言里直接插值实测值，红灯时一眼就能看到数字。
-    final withActual = RegExp(r'实测 \$\{sw\.elapsedMilliseconds\}ms')
-        .allMatches(kdfGroup)
-        .length;
-    expect(withActual, 3,
-        reason: '只有 $withActual 条断言在 reason 里带上了实测耗时；'
-            '应为 3 —— 性能红灯必须先能读到数字，再谈怀疑阈值还是怀疑代码');
+    // 早期做法是在**每条** reason 里手插值 `实测 ${sw.elapsedMilliseconds}ms`；
+    // R94 / QUA-02 收敛到共用助手后，改判三件事（合起来等价且更严）：
+    //   ① 三条用例**都走了** `_expectGuarded`（PB-01 已锁 3 条）；
+    //   ② 助手自己的 reason 里**插值了实测最优值与预算**；
+    //   ③ 组内**没有**绕过助手的内联 `lessThanOrEqualTo` —— 否则那条用例
+    //      就既拿不到 min-of-N 也拿不到实测值，正是本条要防的形状。
+    expect(helperBody.contains('void _expectGuarded('), isTrue,
+        reason: '在 performance_v2_test.dart 里找不到 `_expectGuarded` 的定义 '
+            '—— PB-03 失去锚点，必须判红');
+    expect(helperBody.contains(r'${b.bestMs'), isTrue,
+        reason: '`_expectGuarded` 的 reason 必须插值实测最优值'
+            '（形如 `\${\$b.bestMs}` 的插值）—— 否则性能红灯读不到数字，'
+            '只能再把阈值临时置 0 去逼 Actual');
+    expect(helperBody.contains(r'${budgetMs}'), isTrue,
+        reason: '`_expectGuarded` 的 reason 必须同时给出预算'
+            '（形如 `\${\$budgetMs}` 的插值）—— '
+            '否则看到实测值也不知道余量还有多少');
+    final inline = RegExp(r'lessThanOrEqualTo\s*\(').allMatches(kdfGroup).length;
+    expect(inline, 0,
+        reason: '组内还有 $inline 处内联 `lessThanOrEqualTo` —— '
+            '绕过共用助手就拿不到 min-of-N 与实测值（PB-03 的原始形状）');
   });
 
   test('PB-04 预算不得低于实测基线 × 3（本组基线 ≈1.1s）', () {

@@ -9,6 +9,7 @@ import '../domain/models/action.dart';
 import 'background_engine.dart';
 import 'native_bridge.dart';
 import 'permission_flow.dart';
+import 'power_service.dart';
 
 /// UI 侧对后台服务的封装：启动/停止、开关守卫、订阅引擎状态。
 class BackgroundServiceManager {
@@ -315,7 +316,21 @@ class BackgroundServiceManager {
   /// 守卫没跑时只落 prefs、不装配。
   Future<void> setReactiveCounter(bool enabled) =>
       _invoke('reactive', {'enabled': enabled});
-  Future<void> setPowerMode(String mode) => _invoke('powerMode', {'mode': mode});
+  /// 切换电源模式（设置页保存后调用）。
+  ///
+  /// NAT-07：电源模式同时决定**原生**唤醒锁分级策略（performance 常驻 /
+  /// balanced·saver 按需+显式释放），故先直连同步原生，再转交引擎。
+  /// 两步都不能省：只 invoke 引擎 ⇒ 引擎没起来时原生策略停在上一档
+  /// （唤醒锁是进程级资源，与引擎运行与否无关）；只同步原生 ⇒ 引擎内的
+  /// 电源模式行为（如暂停随机类任务）不生效。
+  Future<void> setPowerMode(String mode) async {
+    final parsed = PowerMode.values.firstWhere(
+      (m) => m.name == mode,
+      orElse: () => PowerMode.balanced,
+    );
+    await syncNativeWakeLockPolicy(parsed);
+    await _invoke('powerMode', {'mode': mode});
+  }
 
   /// 远程 `vibrate.stop`（v1.9）：停止全部进行中的振动。
   ///

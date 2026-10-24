@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../remote/endpoint_service.dart';
 import '../../remote/protocol.dart';
 import '../../remote/remote_store.dart';
+import '../../services/native_bridge.dart';
 import '../../core/theme.dart';
 
 /// 扫码配对（v1.5）：
@@ -192,11 +193,24 @@ class _PairQrScreenState extends ConsumerState<PairQrScreen> {
   @override
   void initState() {
     super.initState();
+    // ---- R94 / REM-02：本页禁截屏 ----
+    //
+    // 页面同时显示**本机配对码**（= 本机长期主密钥，8 位 ≈40 bit）与二维码。
+    // 允许截屏/录屏等于把钥匙交给任何能拿到那张图的人（相册同步、截图分享、
+    // 远程协助软件的画面采集）。`FLAG_SECURE` 由原生层设置，同时阻止
+    // 截屏与「最近任务」缩略图 —— 后者是更常被忽略的泄露面。
+    //
+    // 失败（宿主测试 / 平台不支持）不影响页面功能：这是**纵深防御**，
+    // 不是可用性前提，因此不 await、不报错。
+    unawaited(NativeBridge.setSecureFlag(on: true));
     _load();
   }
 
   @override
   void dispose() {
+    // 必须复位：`FLAG_SECURE` 是 **Activity 级**标志，不清除会让整个 App
+    // 在此后一直无法截屏（用户会以为"应用坏了"，且排查成本极高）。
+    unawaited(NativeBridge.setSecureFlag(on: false));
     _stopScan();
     super.dispose();
   }

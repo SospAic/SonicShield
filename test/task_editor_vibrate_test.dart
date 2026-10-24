@@ -408,13 +408,16 @@ void main() {
     await tester.pump();
     expect(find.text('渐强（秒，0=关闭）：1'), findsOneWidget);
 
-    // 勿扰开关：默认开 → 关掉后文案必须**明说会穿透勿扰**。
-    expect(switchValue(tester, '遵循系统勿扰'), isTrue);
-    await tester.tap(find.widgetWithText(SwitchListTile, '遵循系统勿扰'));
-    await tester.pump();
+    // R93：勿扰开关**默认关**（= USAGE_ALARM，等价用户自设的闹钟）。
+    // 旧默认 true 会让整条振动在系统静音/勿扰时被吞，而回执仍写 success ——
+    // 用户报障"手机震动不好使"的真因（静默失败）。
+    // 打开后文案必须**明说要跟随勿扰（可能不震）**。
     expect(switchValue(tester, '遵循系统勿扰'), isFalse);
     expect(switchSubtitle(tester, '遵循系统勿扰'), contains('穿透系统勿扰'),
-        reason: '关掉安全开关必须写明后果，不能只是状态变了');
+        reason: '默认态必须让用户知道：现在是穿透勿扰的');
+    await tester.tap(find.widgetWithText(SwitchListTile, '遵循系统勿扰'));
+    await tester.pump();
+    expect(switchValue(tester, '遵循系统勿扰'), isTrue);
   }, timeout: perTest);
 
   testWidgets('TEV-07 持续振动：三条区间滑条 + 四个步进器 + 勿扰开关',
@@ -447,9 +450,11 @@ void main() {
     await tester.pump();
     expect(find.text('渐弱（秒）：1'), findsOneWidget);
 
+    // R93：默认关（穿透勿扰）；点一次 → 开（跟随勿扰）。
+    expect(switchValue(tester, '遵循系统勿扰'), isFalse);
     await tester.tap(find.widgetWithText(SwitchListTile, '遵循系统勿扰'));
     await tester.pump();
-    expect(switchValue(tester, '遵循系统勿扰'), isFalse);
+    expect(switchValue(tester, '遵循系统勿扰'), isTrue);
   }, timeout: perTest);
 
   // ══════════════════════════════════════════════════════════════════════

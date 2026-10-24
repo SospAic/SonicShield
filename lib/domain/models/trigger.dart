@@ -104,14 +104,37 @@ sealed class TriggerConfig {
 class FixedOnceTrigger extends TriggerConfig {
   const FixedOnceTrigger({required this.at});
 
-  final DateTime at; // 本地时间
+  final DateTime at; // 瞬时（本地 DateTime，但语义是"绝对时刻"）
 
+  /// 反解：**带偏移/带 Z 的字符串按瞬时解释并转本地；无偏移的老字符串按本地墙钟**。
+  ///
+  /// ## DAT-10：为什么必须区分两种形态
+  /// 旧实现 `toIso8601String()` 对本地 `DateTime` **不带偏移**（`2026-11-01T08:00:00.000`），
+  /// 而 `DateTime.parse` 在**读回时**用当时的本地时区解释它。于是用户换时区后，
+  /// "固定一次 08:00"会**平移**（+8 区写入、+9 区读出 ⇒ 实际 23:00Z 前一天），
+  /// 与"固定一次"的直觉相反；而已落库的 occurrence 是 epoch（绝对时刻）不平移 ——
+  /// 两者混用导致"改时区后第一次响的时刻取决于有没有触发 replan"。
+  ///
+  /// 新写入统一带 `Z`（见 [toJson]），读侧因此可以**按字符串形态分派**：
+  /// - 有 `Z` 或 `±HH:MM` 偏移 → 是瞬时，`parse` 后 `toLocal()`；
+  /// - 无偏移 → 是**老数据**（墙钟语义），保持 `parse` 的本地解释，
+  ///   与升级前行为一致（不做一次性迁移：老数据的墙钟意图本身就是"本地 8 点"）。
   factory FixedOnceTrigger.fromJson(Map<String, dynamic> j) =>
-      FixedOnceTrigger(at: DateTime.parse(j['at'] as String));
+      FixedOnceTrigger(at: _parseWallOrInstant(j['at'] as String));
 
   @override
   Map<String, dynamic> toJson() =>
-      {'kind': 'fixedOnce', 'at': at.toIso8601String()};
+      // 写 UTC 瞬时（带 Z）：跨时区/夏令时都不再漂移。
+      {'kind': 'fixedOnce', 'at': at.toUtc().toIso8601String()};
+
+  /// 见 [FixedOnceTrigger.fromJson] 的说明。
+  static DateTime _parseWallOrInstant(String s) {
+    final hasZone = s.endsWith('Z') ||
+        s.endsWith('z') ||
+        RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(s);
+    final d = DateTime.parse(s);
+    return hasZone ? d.toLocal() : d;
+  }
 }
 
 class DailyTrigger extends TriggerConfig {

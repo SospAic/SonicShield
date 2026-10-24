@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -57,12 +58,17 @@ Future<void> main() async {
   CallService.instance.attach(RcEndpointService.instance.events);
   // 远程端点：注入执行能力 + 按启用状态自恢复（见下方说明）。
   //
-  // 韧性（BUG-026 教训）：这里是 `runApp` **之前**的 await 链，任何一处
-  // 抛出都会让 `runApp` 永不执行 —— 表现为整屏白屏，用户完全无法自救
+  // 韧性（BUG-026 教训）：`runApp` 之前的 await 链任何一处抛出都会让
+  // `runApp` 永不执行 —— 表现为整屏白屏，用户完全无法自救
   // （远程模块是可选的附加能力，不该有能力让主应用起不来）。
-  // 因此逐步隔离：远程装配失败只降级该模块，不阻断启动。
+  //
+  // ARCH-04：这里只做**同步的 handler 注入**（纯内存装配，不触网）；
+  // 真正可能长时间阻塞的 `start()`（内部 `await client.connect()`，
+  // mqtt_client 默认 5s 超时）移到 `runApp` 之后的
+  // [_startRemoteEndpointAfterFirstFrame] —— 首帧不再被可选模块的
+  // 网络可达性阻塞（broker 不可达时最多白屏约 5s 的形状就此消除）。
   try {
-    await _wireRemoteEndpoint();
+    _wireRemoteEndpointHandlers();
   } on Object catch (e) {
     // ignore: avoid_print
     print('[sonic_shield] remote wiring failed (降级启动): $e');
@@ -81,9 +87,17 @@ Future<void> main() async {
     print('[sonic_shield] notification init failed (降级启动): $e');
   }
   runApp(const ProviderScope(child: SonicShieldApp()));
+  // ARCH-04：首帧之后再在后台启动远程模块（fire-and-forget）。
+  // 失败只影响远程功能（回执/指令/PTT/通话信令），不影响主应用。
+  unawaited(_startRemoteEndpointAfterFirstFrame());
 }
 
-/// 远程端点启动装配（v1.6.1）。
+/// 远程端点的**执行能力注入**（同步装配，不触网）。
+///
+/// 从 `_wireRemoteEndpoint` 拆出（ARCH-04）：注入必须在 `runApp` 之前完成
+/// —— 首帧之后随时可能有远程事件 / PTT 帧 / `rc.call` 进来，handler 为空
+/// 等于静默空转（只写审计、不出声，正是 BUG-015 的形状）。
+/// 注入本身是纯内存操作（闭包与级联赋值），没有任何 await。
 ///
 /// 修复两个此前从未被端到端验证暴露的缺陷：
 /// 1. **执行能力未注入（BUG-015）**：`playHandler`/`ttsHandler`/
@@ -92,23 +106,29 @@ Future<void> main() async {
 ///    与引擎侧 `runSingle` 使用同一套 PlaybackService / NativeBridge。
 /// 2. **无自恢复（BUG-017）**：远程模块启用状态持久化在 `rc_enabled`，
 ///    但此前仅由「远程遥控」页的开关触发 `start()`，应用重启后端点
-///    长期离线（收不到命令、无法自动接通）。此处按状态自动拉起。
-Future<void> _wireRemoteEndpoint() async {
+///    长期离线（收不到命令、无法自动接通）。启动按状态自动拉起
+///    （见 `_startRemoteEndpointAfterFirstFrame`）。
+void _wireRemoteEndpointHandlers() {
   final playback = PlaybackService();
-  final prefs = await SharedPreferences.getInstance();
-  final apiCfg = ApiConfigStore(prefs);
 
   // v2.0：语音播报统一走 `TtsService` —— 按音色 id 决定用**系统 TTS**（离线）
   // 还是**在线语音**（含东北话，需配置 Key）。两条路都在这里装配成闭包，
   // 于是"选哪条路、失败报什么"的决策留在可测的 `tts_service.dart`，
   // 本文件只承担平台胶水（FlutterTts 实例 / 临时文件 / 播放器 / 神经引擎）。
   // 神经引擎为长生命周期单例：首次 speak 才把模型资产落到私有目录并构造原生句柄。
+  //
+  // ARCH-04：`speakOnline` 里的 prefs 延迟到**调用时**取（`getInstance()`
+  // 命中进程内缓存，开销可忽略）—— 注入阶段因此不需要 await，
+  // 首帧不被 SharedPreferences 的平台往返阻塞。
   final neuralTts = NeuralTtsEngine();
   final tts = TtsService(
     speakSystem: _speakSystemTts,
     speakNeural: neuralTts.speak,
-    speakOnline: (text, volume, voiceName) =>
-        _speakOnlineTts(text, volume, voiceName, apiCfg, playback),
+    speakOnline: (text, volume, voiceName) async {
+      final prefs = await SharedPreferences.getInstance();
+      return _speakOnlineTts(
+          text, volume, voiceName, ApiConfigStore(prefs), playback);
+    },
   );
 
   RcEndpointService.instance
@@ -150,10 +170,29 @@ Future<void> _wireRemoteEndpoint() async {
     }) =>
         BackgroundServiceManager.instance
             .runVibrateStep(action: action, occurrenceId: occurrenceId));
+}
 
-  final store = RemoteStore(prefs);
-  if (store.enabled && store.deviceId.isNotEmpty) {
-    await RcEndpointService.instance.start(store, await AppDatabase.open());
+/// 远程端点的**启动**（`runApp` 之后的后台任务，ARCH-04）。
+///
+/// 读启用状态并按状态自恢复（BUG-017）：`rc_enabled` + `deviceId` 齐全才
+/// `start()`。`start()` 内部 `await _connect()` → `client.connect()`
+/// （mqtt_client 默认 5s 超时）—— broker 不可达 / DNS 慢 / TLS 卡住时
+/// 最多耗时约 5s。这正是**不能**放在 `runApp` 之前的原因（ARCH-04：
+/// 可选模块不应有能力推迟首帧）。
+///
+/// 失败只降级远程功能：`_connect` 内部 catch 后 `_scheduleReconnect`，
+/// 运行期重连在事件循环里异步进行；本函数的 try/catch 兜住的是
+/// "连 store 都没读成"这类装配期异常。
+Future<void> _startRemoteEndpointAfterFirstFrame() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final store = RemoteStore(prefs);
+    if (store.enabled && store.deviceId.isNotEmpty) {
+      await RcEndpointService.instance.start(store, await AppDatabase.open());
+    }
+  } on Object catch (e) {
+    // ignore: avoid_print
+    print('[sonic_shield] remote start failed (降级启动): $e');
   }
 }
 

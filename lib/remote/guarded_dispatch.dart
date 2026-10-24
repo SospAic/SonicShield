@@ -66,15 +66,48 @@ final class GuardedOutcome {
       : 'GuardedOutcome.failed($reason, auditOk=$auditOk)';
 }
 
-/// 把异常压成**给控制端看的**一行可读原因。
+/// 异常文本的**脱敏**规则（R94 / REM-13）。
+///
+/// ## 为什么必须脱敏
+///
+/// `rc.ack.data` 里的原因会发给**任何**已配对控制端，协助会话下还会发给
+/// **未配对**的接入方。而原始异常常带：
+/// - 本机绝对路径（`/data/user/0/<pkg>/app_flutter/evidence_rc_*.m4a`）；
+/// - SQL 片段 / 表名列名（sqflite 的 `DatabaseException`）；
+/// - 平台通道的方法名与参数；
+/// - `FormatException` 里出错位置的原文片段。
+///
+/// 这些对"该怎么修"没有帮助（那是审计日志的事），却把本机内部结构
+/// 交给了一个不可信信道。
+///
+/// ## 判据
+///
+/// 1. Unix / Windows 绝对路径 → `<路径>`；
+/// 2. SQL 关键字起的整句 → `<SQL>`；
+/// 3. 十六进制大整数（常见于指针/句柄）→ `<hex>`；
+/// 4. 余下压成一行、截断到 [maxLen]。
+final RegExp _reAbsPath =
+    RegExp(r'(?:[A-Za-z]:\\[^\s"]+|/[\w.\-]+(?:/[\w.\-]+)+)');
+final RegExp _reSql = RegExp(
+    r'\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b[^;]*',
+    caseSensitive: false);
+final RegExp _reHex = RegExp(r'0x[0-9a-fA-F]{4,}');
+
+/// 把异常压成**给控制端看的**一行可读原因（已脱敏）。
 ///
 /// 三条硬约束：
 /// 1. **压成一行**（换行会破坏日志与回执的可读性）；
 /// 2. **截断**（栈与本地路径对使用者没有意义，且对端是不可信信道）；
 /// 3. **空消息兜底**为运行时类型名（`Exception()` 的 `toString()` 可能为空）。
+///
+/// R94 / REM-13：在第 2 条之前插入**脱敏**（见文件内正则注释）。
 String describeFailure(Object error, {int maxLen = 160}) {
   var s = error.toString().replaceAll('\n', ' ').replaceAll('\r', ' ').trim();
   if (s.isEmpty) s = error.runtimeType.toString();
+  s = s
+      .replaceAll(_reAbsPath, '<路径>')
+      .replaceAll(_reSql, '<SQL>')
+      .replaceAll(_reHex, '<hex>');
   return s.length <= maxLen ? s : '${s.substring(0, maxLen)}…';
 }
 

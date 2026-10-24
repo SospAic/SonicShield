@@ -102,6 +102,14 @@ class AssistJoinClient {
   List<int>? _ctlKey;
   List<int>? _epKey;
 
+  /// 本轮接入用的凭据（**仅内存、不落盘**）。
+  ///
+  /// 存在的唯一目的是让 [leave] 能调用 `RcAssist.forget(code, password)`
+  /// 把 `RcAssist` 静态缓存里的派生物显式丢掉 —— 否则会话结束后主密钥还会
+  /// 在进程里留存到缓存被挤满为止。随实例释放，`leave` 时即清空。
+  String _code = '';
+  String _password = '';
+
   AssistPhase _phase = AssistPhase.closed;
   String _sessionId = '';
   String _epName = '';
@@ -207,8 +215,10 @@ class AssistJoinClient {
       return _fail('临时码应为 9 位数字');
     }
     if (!RcAssist.isValidPassword(p)) {
-      return _fail('访问密码应为 8 位（字母表内字符，不含 I/L/O/U/0/1）');
+      return _fail('访问密码应为 12 位（字母表内字符，不含 I/L/O/U/0/1）');
     }
+    _code = c;
+    _password = p;
 
     final transport = _transport;
     if (transport == null) return _fail('远程模块未开启，无法接入');
@@ -289,6 +299,13 @@ class AssistJoinClient {
     _topic = '';
     _ctlKey = null;
     _epKey = null;
+    // 会话结束 ⇒ 丢掉这组凭据的全部派生物（主密钥 / 会合主题），
+    // 不让密钥材料在 `RcAssist` 的静态缓存里无限期留存。
+    if (_code.isNotEmpty && _password.isNotEmpty) {
+      RcAssist.forget(_code, _password);
+    }
+    _code = '';
+    _password = '';
     _sessionId = '';
     _epName = '';
     _perms = AssistPerms.none;

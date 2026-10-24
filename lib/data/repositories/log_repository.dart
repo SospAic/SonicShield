@@ -107,8 +107,29 @@ class LogRepository {
     return (r.first['c'] as int?) ?? 0;
   }
 
-  Future<int> purgeOlderThan(DateTime t) => _db.db.delete('exec_logs',
-      where: 'created_at < ?', whereArgs: [t.millisecondsSinceEpoch]);
+  /// 清理历史日志（保留 N 天），**分批**删除（DAT-11）。
+  ///
+  /// 与 `OccurrenceRepository.purgeOlderThan` 同一理由：无 `LIMIT` 的大删除
+  /// 会一次持写锁数秒，对端（UI 保存 / 引擎 tick）在 `busy_timeout=5000`
+  /// 内拿不到锁就抛 `database is locked`。`exec_logs` 是**增长最快**的表
+  /// （每次执行、每次跳过都写），首次清理时往往已积累数万行。
+  ///
+  /// `DELETE ... WHERE rowid IN (SELECT rowid ... LIMIT ?)` 循环，每批独立提交；
+  /// 上界 `created_at < t` 固定，删的过程中新写入的日志不会被误删。
+  Future<int> purgeOlderThan(DateTime t, {int batchLimit = 500}) async {
+    if (batchLimit <= 0) return 0;
+    final cutoff = t.millisecondsSinceEpoch;
+    var total = 0;
+    while (true) {
+      final n = await _db.db.rawDelete(
+        'DELETE FROM exec_logs WHERE rowid IN ('
+        'SELECT rowid FROM exec_logs WHERE created_at < ? LIMIT ?)',
+        [cutoff, batchLimit],
+      );
+      total += n;
+      if (n < batchLimit) return total;
+    }
+  }
 }
 
 /// 统计聚合（v2.0 看板）。

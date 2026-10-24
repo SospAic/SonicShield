@@ -14,7 +14,7 @@ import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
 import 'package:sonic_shield/domain/models/task.dart';
 import 'package:sonic_shield/domain/models/trigger.dart';
-import 'package:sonic_shield/features/guard/guard_orchestration.dart';
+import 'package:sonic_shield/domain/scheduling/guard_orchestration.dart';
 import 'package:sonic_shield/features/guard/guard_screen.dart';
 import 'package:sonic_shield/services/background_engine.dart';
 import 'package:sonic_shield/services/background_service_manager.dart';

@@ -225,6 +225,10 @@ class RcAssistHost {
     _session = null;
     _emit();
 
+    // 会话结束 ⇒ 丢掉这组凭据的全部派生物（主密钥 / 会合主题），不让密钥
+    // 材料在 `RcAssist` 的静态缓存里无限期留存。
+    RcAssist.forget(s.code, s.password);
+
     try {
       await _transport?.unsubscribe(s.topic);
     } on Object {
@@ -369,6 +373,30 @@ class RcAssistHost {
     } else {
       await _onBusiness(s, msg);
     }
+  }
+
+  /// 会合命名空间里出现的**陌生主题**报文（R94 / REM-04）。
+  ///
+  /// ## 为什么必须计数
+  ///
+  /// 旧实现只在"报文到达**本会话**主题"时计失败 —— 而**猜错密码**的表现
+  /// 恰恰是**主题算错**，报文永远到不了本会话 ⇒ 5 次锁定对在线猜测毫无作用。
+  ///
+  /// ## 为什么只认"形状正确 + 密文形状正确"
+  ///
+  /// 把 `assist/#` 下**任意**报文都计数，等于给任何人一个 5 条消息锁死会话的
+  /// 按钮（跨设备的噪声也会误伤）。因此要求：
+  /// 1. 主题形状合法（`assist/<16 hex>`）—— 攻击者确实算出了一个候选主题；
+  /// 2. 报文是合法线格式 —— 不是随机字节。
+  /// 这两条同时成立，才等价于"有人在用错误凭据试接入"。
+  Future<void> onUnknownWire(String topic, String wire) async {
+    final s = _session;
+    if (s == null) return;
+    // 会话已建立：别的主题属于别人，与本会话无关（不能因此锁掉正常会话）。
+    if (s.phase == AssistPhase.active || s.phase == AssistPhase.closed) return;
+    if (!RcAssist.isAssistTopic(topic)) return;
+    if (!looksLikeRcWire(wire)) return;
+    await _onHandshakeFailure(s, '陌生会合主题上的握手报文');
   }
 
   /// 业务命令：会话必须已激活，且逐条过权限门控（C5 默认拒绝）。

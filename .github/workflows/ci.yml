@@ -12,12 +12,51 @@ on:
 # 由本地 `scripts/gates.sh` 门禁承担，省 Actions 计费）。本文件只负责一件事：
 # 产出**可分发/可侧载的构建产物**。
 #
+# 2026-10-24（第九十三轮，QUA-04 用户裁决：折中方案）：在"只构建"之上**恢复一个
+# 秒级契约锁 job**（`analyze-test`）—— 全量功能层/压测层/覆盖率 ratchet 仍留在本地
+# `scripts/gates.sh`（分钟级、且要 sqlite3 原生库），CI 只跑 `flutter analyze` +
+# 治理层契约锁（文档一致性 DGC/BAS/BRL/MCL/CCL/RCL/SSL + 门禁两条入口一致性 GEC +
+# 覆盖率哨兵自洽 + 源码文本锁工具自检）。理由：治理层锁是秒级的，且它们防的
+# 「自述过期」类漂移只在 push 到远端后才不可逆 —— 值得在 CI 拦一道。
+#
 # 2026-10-11（第八十二轮合并收口）：恢复 `android-build`（release APK）。
 #  * 理由：本仓交付目标是「所有系统的 release」，Android 侧必须出**签名 APK**；
 #    远程 2026-10-10 的 `1d8db2e` 把 android-build 一并裁掉了，与交付目标冲突。
 #  * 保留 iOS 未签名 IPA（macOS runner 是 Windows 侧唯一能编 iOS 的环境）。
-#  * analyze-test / emulator-test 仍保持在本地 gates.sh（不恢复，避免重复计费）。
+#  * 全量测试 / 模拟器集成测试 / 覆盖率 ratchet 仍保持在本地 gates.sh（不恢复，
+#    避免重复计费；秒级治理锁除外，见上方 2026-10-24 注）。
 jobs:
+  # ---- analyze + 秒级契约锁（QUA-04：只跑治理层锁，分钟级套件留给本地 gates.sh）----
+  analyze-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.3
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: flutter analyze
+        run: flutter analyze
+
+      # 秒级契约锁（实测各文件 1~3 秒，全组合计 < 30s）：
+      #   doc_gate_consistency_test      文档一致性：DGC/BAS/BRL/MCL/CCL/RCL/SSL
+      #   gate_entrypoint_consistency_test  gates.sh 与 gates.ps1 两条入口同源（GEC）
+      #   coverage_sentinel_test         覆盖率哨兵自洽（防"lib 文件无 SF: 记录"）
+      #   support_source_text_test       源码契约锁公共工具自检（STX，含反面样本）
+      # ⚠️ 这里**刻意不**跑：全量功能层 / `--tags perf` 压测层 / 覆盖率 ratchet
+      # （`--min-covered=`）—— 分钟级且依赖本地 sqlite3 原生库，归本地 gates.sh。
+      - name: 秒级契约锁
+        run: |
+          flutter test test/doc_gate_consistency_test.dart \
+                      test/gate_entrypoint_consistency_test.dart \
+                      test/coverage_sentinel_test.dart \
+                      test/support_source_text_test.dart
+
   # ---- Android：签名 release APK ----
   android-build:
     runs-on: ubuntu-latest

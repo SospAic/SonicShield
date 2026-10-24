@@ -81,13 +81,24 @@ class RcMessage {
     );
   }
 
+  /// 构造一条"此刻"的消息。
+  ///
+  /// [from] 在 v3（每控制端密钥）之后**不再参与鉴权** —— 身份由"用哪把
+  /// peerKey 解开"决定（见 [RcCodec.decodeWithCandidates]）。但 v1/v2 的
+  /// 旧配对仍然靠它反查配对表，且探针/工具必须显式填写（REM-01：空 `from`
+  /// 一律被端点拒收，不再有"未标识发送方"这一合法形态）。
+  /// [from] 是**第二个可选位置参数**而不是命名参数：Dart 不允许同一函数
+  /// 同时声明可选位置参数（`[...]`）与命名参数（`{...}`），而全仓 155 处
+  /// 既有调用都按 `now(type, payload)` 的位置形式书写，改成命名参数会连带
+  /// 改动所有调用点（含测试夹具），收益远小于风险。
   static RcMessage now(String type,
-          [Map<String, dynamic> payload = const {}]) =>
+          [Map<String, dynamic> payload = const {}, String from = '']) =>
       RcMessage(
         id: _randomId(),
         ts: DateTime.now().millisecondsSinceEpoch,
         type: type,
         payload: payload,
+        from: from,
       );
 
   static String _randomId() {
@@ -133,6 +144,18 @@ abstract final class RcCmd {
   ///   （协助对端**未配对**，不得借它把自己变成已配对设备）。
   ///
   /// 回执：`rc.ack {ok, for, data}`。
+  ///
+  /// ## R94 迁移限制（REM-03 的剩余一半，刻意保留）
+  ///
+  /// v3 之后端点**不再需要**控制端的全局配对码：出站回执用 ack 下发的
+  /// `pk` 加密。但本命令的 payload **仍然携带 `code`**，因为对端可能是不支持
+  /// v3 的旧版本 —— 它的回执密钥只认 `deriveKey(code, '{ctrlId}|evt')`，
+  /// 不发码就永远收不到回执（表现为"配对成功、之后毫无回音"）。
+  ///
+  /// 因此"每个配对过的端点都掌握控制端全局码"这一横向泄露面**尚未关闭**：
+  /// 真正的关闭条件是"所有端点都升级到 v3 且 ack 里带 pk"，届时可以按
+  /// `pk` 是否存在决定是否省略 `code`（需要一份最低版本协商）。
+  /// 本轮**不做**：在混合版本网络里省略 code 会直接打断旧端点。
   static const pairRequest = 'pair.request';
 
   // ⚠️ 回执载荷以**端点实现**为准（`RcEndpointService` 的对应 case）；
@@ -142,6 +165,17 @@ abstract final class RcCmd {
       'status.get'; // → rc.status {engine, pendingCount, nextFireAt, version}
   static const soundPlay =
       'sound.play'; // {preset|assetId|category, volume, durationSec, loop}
+
+  /// 停止端点**全部**进行中的远程播放：{} → rc.ack {ok}。
+  ///
+  /// 为什么必须与 [soundPlay] 成对（REM-07 / ARCH-03）：远程发起的持续出声
+  /// 必须有对应的远程停止通道，否则 `sound.play{loop:true}` 就是一条
+  /// "无法远程叫停"的骚扰面 —— 与「持续振动不设硬上限，但任何时刻都能停」
+  /// 的既定纪律不对称。`script.stop` 只作用于指令组执行器，管不到独立播放。
+  ///
+  /// 与 [vibrateStop] 同属「停」类命令：**先于限流放行**（见 `isStopCommand`），
+  /// 否则窗口被刷满时连"叫停"都发不进来。
+  static const soundStop = 'sound.stop';
   static const taskList = 'task.list'; // → tasks [...]
   static const taskToggle = 'task.toggle'; // {taskId, enabled}
   static const taskSkipNext = 'task.skipNext'; // {taskId}
@@ -433,20 +467,59 @@ final class RcCodec {
     return sk.extractBytes();
   }
 
-  /// 加密：AES-256-GCM，AAD = topic（v1 简化：防跨主题移植密文）。
+  /// v3 报文标记：密文 blob 顶层出现 `v:3` 即表示"用每控制端 peerKey 加密"。
+  ///
+  /// 为什么用**新增字段**而不是改信封版本：信封 `v` 是协议语义版本（v1 恒定），
+  /// 而这里要区分的是**密钥来源**（共享配对码 vs 每控制端密钥）。旧报文没有
+  /// 该字段 ⇒ 逐字节保持 v1/v2 原样（兼容铁律：已配对设备升级后不得失联）。
+  static const int blobVersionPeerKey = 3;
+
+  /// 由每控制端 32 字节 `peerKey` 派生消息密钥（v3）。
+  ///
+  /// [context] 与 v1/v2 同形（`{接收方ID}|cmd` / `{接收方ID}|evt`）——
+  /// 双方各自用"接收方身份"算同一个串，因此两端独立派生即可对上。
+  ///
+  /// 与 [deriveKey] 的区别：这里 **不做 PBKDF2**。peerKey 本身就是 32 字节
+  /// CSPRNG 输出（256 bit），没有任何"人类可猜"的成分，慢哈希只会白烧 CPU
+  /// —— 那正是 REM-05 的 DoS 面。
+  static Future<List<int>> derivePeerKey(List<int> peerKey, String context) async {
+    final sk = await _alg.deriveKey(
+      secretKey: SecretKey(peerKey),
+      nonce: utf8.encode('sonicshield-rc-v3|$context'),
+      info: utf8.encode('sonicshield'),
+    );
+    return sk.extractBytes();
+  }
+
+  /// 生成 32 字节每控制端随机密钥（端点配对成功时生成，随 ack 下发）。
+  static List<int> newPeerKey() =>
+      List.generate(32, (_) => Random.secure().nextInt(256));
+
+  /// 加密：AES-256-GCM，AAD = topic（防跨主题移植密文）。
+  ///
+  /// [peerKey] 非空 ⇒ 走 **v3**：密钥由 `HKDF(peerKey, '{接收方ID}|方向')`
+  /// 派生，报文带 `v:3` 标记；此时入参 [key] 只作占位（调用方通常直接传
+  /// 同一把 peerKey 或空列表）。
   static Future<String> encode(
     RcMessage msg,
     List<int> key,
-    String topic,
-  ) async {
+    String topic, {
+    List<int>? peerKey,
+    String peerContext = '',
+  }) async {
+    final useKey =
+        peerKey == null ? key : await derivePeerKey(peerKey, peerContext);
     final nonce = _aes.newNonce();
     final box = await _aes.encrypt(
       utf8.encode(jsonEncode(msg.toJson())),
-      secretKey: SecretKey(key),
+      secretKey: SecretKey(useKey),
       nonce: nonce,
       aad: utf8.encode(topic),
     );
-    final blob = <String, String>{
+    final blob = <String, dynamic>{
+      // ⚠️ 只在 v3 写版本位：旧报文必须逐字节保持原样，否则"升级后
+      // 旧端点解不开新控制端的命令"（兼容铁律的反面）。
+      if (peerKey != null) 'v': blobVersionPeerKey,
       'n': base64Encode(nonce),
       'c': base64Encode(box.cipherText),
       'm': base64Encode(box.mac.bytes),
@@ -455,21 +528,82 @@ final class RcCodec {
   }
 
   /// 解密；时间窗与去重校验由 [seenIds]/[maxSkewMs] 承担。
+  ///
+  /// [candidateKeys] 非空且报文是 v3 时，**逐个试解**候选 peerKey：
+  /// 命中即身份（调用方据此把 `msg.from` 换成可信的 deviceId）。
+  /// 空列表 ⇒ 只走 [key] 的 v1/v2 路径（旧配对 / 引导报文）。
   static Future<RcMessage?> decode(
     String wire,
     List<int> key,
     String topic, {
     Map<String, int> seenIds = const {},
     int maxSkewMs = 90000,
+    List<List<int>> candidateKeys = const [],
+    String peerContext = '',
+  }) async {
+    final hit = await decodeWithCandidates(
+      wire,
+      topic,
+      candidateKeys: candidateKeys,
+      peerContext: peerContext,
+      fallbackKey: key,
+      seenIds: seenIds,
+      maxSkewMs: maxSkewMs,
+    );
+    return hit?.message;
+  }
+
+  /// 带**身份信息**的解密（v3 专用）：返回命中的候选下标 + 消息。
+  ///
+  /// 为什么需要下标：v3 的鉴权判据是"用哪把 peerKey 解开"，调用方必须知道
+  /// 命中哪一台控制端，才能把不可信的 `msg.from` 替换成**密码学证明过的**
+  /// deviceId（REM-01 根治的关键一步）。
+  ///
+  /// 解码优先级（老板裁决，三种都保留）：
+  /// **v3（逐个试候选 peerKey）→ v2（带盐）→ v1（无盐）**。
+  /// v3 报文若没有任何候选能解开，**直接失败**——绝不回落到共享配对码，
+  /// 否则"删掉 peerKey"就又能被旧密钥打开了（撤销失效）。
+  static Future<RcPeerDecodeHit?> decodeWithCandidates(
+    String wire,
+    String topic, {
+    List<List<int>> candidateKeys = const [],
+    String peerContext = '',
+    List<int>? fallbackKey,
+    Map<String, int> seenIds = const {},
+    int maxSkewMs = 90000,
   }) async {
     try {
-      final blob = (jsonDecode(utf8.decode(base64Decode(wire))) as Map)
-          .cast<String, String>();
+      final raw = jsonDecode(utf8.decode(base64Decode(wire)));
+      if (raw is! Map) return null;
+      final blob = raw.cast<String, dynamic>();
+      final version = (blob['v'] as num?)?.toInt() ?? 1;
       final box = SecretBox(
-        base64Decode(blob['c']!),
-        nonce: base64Decode(blob['n']!),
-        mac: Mac(base64Decode(blob['m']!)),
+        base64Decode(blob['c'] as String),
+        nonce: base64Decode(blob['n'] as String),
+        mac: Mac(base64Decode(blob['m'] as String)),
       );
+      if (version >= blobVersionPeerKey) {
+        for (var i = 0; i < candidateKeys.length; i++) {
+          final k = await derivePeerKey(candidateKeys[i], peerContext);
+          final msg = await _open(box, k, topic, seenIds, maxSkewMs);
+          if (msg != null) return RcPeerDecodeHit(i, msg);
+        }
+        return null;
+      }
+      final k = fallbackKey;
+      if (k == null) return null;
+      final msg = await _open(box, k, topic, seenIds, maxSkewMs);
+      // -1 = 旧路径（共享配对码），身份只能靠信封自报的 `from`。
+      return msg == null ? null : RcPeerDecodeHit(-1, msg);
+    } on Object {
+      return null; // 解密失败（密钥不符/篡改）→ 静默丢弃
+    }
+  }
+
+  /// 解封一个已解析好的 SecretBox，并做信封/时间窗/去重校验。
+  static Future<RcMessage?> _open(SecretBox box, List<int> key, String topic,
+      Map<String, int> seenIds, int maxSkewMs) async {
+    try {
       final clear = await _aes.decrypt(
         box,
         secretKey: SecretKey(key),
@@ -484,7 +618,7 @@ final class RcCodec {
       if (seenIds.containsKey(msg.id)) return null;
       return msg;
     } on Object {
-      return null; // 解密失败（密钥不符/篡改）→ 静默丢弃
+      return null;
     }
   }
 
@@ -553,6 +687,77 @@ final class RcCodec {
   static String generateDeviceId() =>
       List.generate(16, (_) => '0123456789abcdef'[Random.secure().nextInt(16)])
           .join();
+}
+
+/// v3 解密的命中结果：命中的候选下标 + 消息本体。
+///
+/// [candidateIndex] 为 `-1` 表示走的是 v1/v2 旧路径（共享配对码），
+/// 此时**没有**密码学身份 —— 调用方仍须按信封自报的 `from` 查配对表。
+final class RcPeerDecodeHit {
+  const RcPeerDecodeHit(this.candidateIndex, this.message);
+
+  final int candidateIndex;
+  final RcMessage message;
+}
+
+/// 入站去重表的**可持久化**版本（REM-15）。
+///
+/// ## 为什么不能只用内存 Map
+///
+/// 旧实现 `final _seen = <String, int>{}` 是纯内存：攻击者抓到一条密文 →
+/// 等目标进程被杀/重启 → 在原始 `ts` 的 ±90s 窗口内重放 → 时间窗通过、
+/// 去重表为空 ⇒ **同一条命令执行两次**（`sound.play` / `vibrate.start` /
+/// `script.run` / `call.invite` 都不是幂等的）。
+///
+/// 本类把"查重 + 预占 + 窗口裁剪"收进一个**同步段**（与
+/// [RcCodec.reserveInboundId] 同语义），并把表暴露成可序列化的快照，
+/// 由调用方在启动时恢复、在变更后节流落盘。刻意不依赖 Flutter/prefs，
+/// 因此"重启后同 id 仍被拒"可以在宿主机上直接断言。
+class InboundSeenTable {
+  InboundSeenTable({
+    this.windowMs = 10 * 60 * 1000,
+    Map<String, int>? initial,
+    int? nowMs,
+  }) {
+    restore(initial, nowMs: nowMs);
+  }
+
+  /// 去重窗口：与 [RcCodec.reserveInboundId] 默认值一致（10 分钟）。
+  ///
+  /// 远大于 ±90s 时间窗是刻意的：窗口内任何时刻重放都必须被挡，
+  /// 而"进程重启"正是把内存表清空的那一下。
+  final int windowMs;
+
+  final Map<String, int> _seen = <String, int>{};
+
+  int get length => _seen.length;
+
+  bool contains(String id) => _seen.containsKey(id);
+
+  /// 可落盘的快照（拷贝，调用方修改不影响本表）。
+  Map<String, int> snapshot() => Map<String, int>.of(_seen);
+
+  /// 从落盘快照恢复；顺带裁掉已出窗的条目（长时间未启动时表会很大）。
+  void restore(Map<String, int>? data, {int? nowMs}) {
+    _seen.clear();
+    if (data == null || data.isEmpty) return;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    data.forEach((id, ts) {
+      if (id.isEmpty) return;
+      if (now - ts <= windowMs) _seen[id] = ts;
+    });
+  }
+
+  /// 首次见到返回 true（已预占）；重复返回 false（**不得执行副作用**）。
+  ///
+  /// 与 [RcCodec.reserveInboundId] 逐条同语义，只是多了一层"可快照"。
+  bool reserve(String id, int nowMs) {
+    if (id.isEmpty) return true;
+    if (_seen.containsKey(id)) return false;
+    _seen[id] = nowMs;
+    _seen.removeWhere((_, t) => nowMs - t > windowMs);
+    return true;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -713,6 +918,31 @@ class RcDeliveryLedger {
 abstract final class PairQrProtocol {
   static const prefix = 'sonicshield://pair/';
 
+  /// `deviceId` 的**字符集白名单**（REM-06）。
+  ///
+  /// ## 为什么必须校验字符集，而不只是长度
+  ///
+  /// `deviceId` 会被直接拼进 MQTT 主题（`sonicshield/v1/{id}/cmd|evt`）：
+  /// - `+` / `#` 是 MQTT 通配符 —— `subscribe` 时变成"订阅别人的全部流量"
+  ///   （噪声、CPU、元数据泄露），`publish` 时多数 broker 直接断开客户端；
+  /// - `/` 会改变主题层级，让消息落到完全不同的命名空间。
+  ///
+  /// 旧实现只查 `length == 16`，于是 `"+/+/+/+/+/+/+/+a"`（16 字符）能通过，
+  /// 而手输路径另有一份更严的 `_hex16` —— 两条路径判据不一致，正是
+  /// 本项目反复出现的漂移形态。现在收敛成**唯一的**判据，扫码/手输/入站
+  /// `pair.request` 三处共用。
+  ///
+  /// ⚠️ 长度仍锁 16：字符集只回答"允许哪些字符"，不回答"多长才算一个 ID"。
+  /// 放宽到 4..64 会让"截断/拼错的 ID"也通过，等于把判据从"格式"降级为
+  /// "看起来像"。两者**同时**成立才算合法。
+  static final RegExp _deviceIdCharset = RegExp(r'^[A-Za-z0-9_-]{4,64}$');
+
+  /// `deviceId` 是否合法（长度 16 且字符集在白名单内）。
+  static bool isValidDeviceId(String id) {
+    final t = id.trim();
+    return t.length == 16 && _deviceIdCharset.hasMatch(t);
+  }
+
   /// 解析对端配对二维码；格式不符（ID/码长度、前缀）返回 null。
   ///
   /// ⚠️ **BUG-075（第四十轮修）**：`deviceId` 与 `code` **都必须归一化到小写**。
@@ -732,7 +962,106 @@ abstract final class PairQrProtocol {
     final id = parts[0].toLowerCase();
     final name = Uri.decodeComponent(parts[1]);
     final code = parts[2].replaceAll('-', '').toUpperCase();
-    if (id.length != 16 || code.length != 8) return null;
+    // REM-06：长度 + 字符集双重判据（唯一真源 [isValidDeviceId]）。
+    if (!isValidDeviceId(id) || code.length != 8) return null;
     return (deviceId: id, name: name, code: code);
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// R94 / REM-05：入站线格式的**廉价前置门**（判据与接线分离）
+// ══════════════════════════════════════════════════════════════════════
+//
+// ## 为什么必须有它
+//
+// cmd 主题是**公开可发布**的（公共 broker 无 ACL），而端点对每条报文都要
+// 按候选盐跑一遍 `deriveKey` —— 有盐的候选是 **PBKDF2-120k**。于是任意人
+// 只要知道 deviceId，就能用垃圾报文让目标机每收一条卡 50–200ms（N 台已配对
+// 控制端就是 N 倍）。业务限流发生在解密**之后**，对此完全无效。
+//
+// 这里在**任何**密钥派生之前做三件廉价的事：
+// 1. 长度上下界（过短的报文不可能是合法信封）；
+// 2. JSON 粗解析（必须是 `{n,c,m}` 三个非空字符串）—— 纯字符串操作，
+//    微秒级，比一次 PBKDF2 便宜四个数量级；
+// 3. 每源滑动窗口限速 —— 阈值刻意**远高于**正常峰值（流式对讲约 2 条/秒），
+//    只挡"明显不是人"的速率。
+//
+// 判据与接线分离：本段不依赖 Flutter，宿主可直接断言"垃圾报文不进 PBKDF2"。
+
+/// 合法线格式的**最短**长度（字节）。
+///
+/// 一条最小的信封 = base64(JSON{n,c,m})：12 字节 nonce + 16 字节 tag +
+/// 至少几十字节密文，再经 base64 膨胀 4/3 ⇒ 48 是**宽松下界**。
+/// 取宽松值是因为这里只负责"排除明显垃圾"，误杀合法报文才是真正的事故。
+const int rcWireMinLen = 48;
+
+/// 单条线格式的字节上限（4 MiB）。MQTT 公共 broker 通常 1 MiB 封顶，
+/// 这里留足余量只为**拦住明显畸形的巨串**（不是业务上限）。
+const int rcWireMaxLen = 4 * 1024 * 1024;
+
+/// 粗解析：这串**看起来像**一条 [RcCodec] 密文吗？
+///
+/// 只做形状判断，**不**验签、不验版本 —— 目的是"便宜地排除垃圾"，
+/// 不是"认证"。通过它但解不开的报文，仍走原有失败路径（审计 + 丢弃）。
+bool looksLikeRcWire(String wire) {
+  if (wire.length < rcWireMinLen || wire.length > rcWireMaxLen) return false;
+  // 合法线格式是 base64(JSON)，首字符必然是 `e`（`eyJ...`）。这一步挡掉
+  // 绝大多数随机字节，且完全不做解码。
+  if (!wire.startsWith('e')) return false;
+  try {
+    final raw = jsonDecode(utf8.decode(base64Decode(wire)));
+    if (raw is! Map) return false;
+    final n = raw['n'];
+    final c = raw['c'];
+    final m = raw['m'];
+    return n is String &&
+        c is String &&
+        m is String &&
+        n.isNotEmpty &&
+        c.isNotEmpty &&
+        m.isNotEmpty;
+  } on Object {
+    return false;
+  }
+}
+
+/// 每源滑动窗口限速（REM-05 的第三道廉价门）。
+///
+/// "源"在这里是**主题**：cmd 主题只有一个，但同一台设备还会处理 evt /
+/// assist 主题，按主题分桶可以避免"一个主题的洪水把另一个主题的额度吃光"。
+/// ⚠️ MQTT 层拿不到可信发送方身份，因此这里**不是**"按人限流" ——
+/// 它只回答"这个主题此刻的到达速率像不像人"，不承担任何鉴权。
+class RcWireGate {
+  RcWireGate({
+    this.windowMs = 10000,
+    this.maxPerWindow = 100,
+    this.maxSources = 32,
+  });
+
+  final int windowMs;
+  final int maxPerWindow;
+
+  /// 源（主题）数量上限：主题里带 deviceId，理论上可被枚举撑爆内存。
+  final int maxSources;
+
+  final Map<String, List<int>> _ts = <String, List<int>>{};
+
+  /// 该源此刻是否允许继续（true = 放行并记账）。
+  ///
+  /// 被拒的报文**不记账**：否则持续洪水会把窗口一直往后推，形成"越拒越久"
+  /// 的惩罚螺旋（与 `rateLimitFor` 同一考量）。
+  bool allow(String source, int nowMs) {
+    final list = _ts.putIfAbsent(source, () => <int>[]);
+    list.removeWhere((t) => nowMs - t > windowMs);
+    if (list.length >= maxPerWindow) return false;
+    list.add(nowMs);
+    if (_ts.length > maxSources) {
+      // 只清理空桶：有流量的源不会被误删（误删等于给它重置额度）。
+      _ts.removeWhere((_, v) => v.isEmpty);
+    }
+    return true;
+  }
+
+  /// 当前跟踪的源数量（诊断/测试用）。
+  int get sourceCount => _ts.length;
 }

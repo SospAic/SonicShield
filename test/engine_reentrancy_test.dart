@@ -32,6 +32,11 @@ void main() {
 
   final dueBody = withoutLineComments(functionBlock(engine, 'Future<void> executeDue()'));
   final replanBody = withoutLineComments(functionBlock(engine, 'Future<void> replan()'));
+  // R94：批次循环体搬到了顶层 `executeBatch`（判定与执行解耦，SCH-01）。
+  // 「先取走再执行」这条不变量现在落在**批次骨架**里，所以锁也必须跟着搬 ——
+  // 否则锁还在检查一个已经不存在的循环体，变成永远判红的假锁。
+  final batchBody =
+      withoutLineComments(functionBodyBlock(engine, 'Future<void> executeBatch({'));
 
   // 反击计划续算接线 + 节假日更新解耦（同一批修正，见文件末尾 CEXT 组）。
   final planSvc =
@@ -76,13 +81,36 @@ void main() {
               '同 isolate 的重入原子生效。若先 await 再置位，并发仍能穿过窗口。');
     });
 
-    test('REENT-04 runAction 之前先乐观置状态，且终态仍由结果决定', () {
-      expect(claimsBeforeRunAction(dueBody), isTrue,
-          reason: '`runAction` 之前必须先把该 occurrence 取走（乐观置状态），'
-              '使并发（跨 isolate / 守卫失效）的第二次 `due()` 必然取不到它。');
+    test('REENT-04 执行前必须先取走（CAS 抢占），终态仍由结果决定', () {
+      // R94：判据分成两半 ——
+      // ① 批次骨架里「claim 在 runAction 之前」；
+      // ② executeDue 真的把 CAS（pending → running）接上（否则 claim 是空转）。
+      expect(claimsBeforeRunAction(batchBody), isTrue,
+          reason: '`executeBatch` 必须在 `runAction` 之前先把该 occurrence 取走'
+              '（CAS `pending → running`），使并发（跨连接 / 守卫失效）的第二次 '
+              '`due()` 必然取不到它。');
+      expect(wiredCasClaim(engine), isTrue,
+          reason: '`executeDue` 没有把 CAS 抢占接上：'
+              '`claim: (o) => occs.markStatus(o.id, OccurrenceStatus.running, '
+              'from: {OccurrenceStatus.pending})` 是跨连接防线的唯一入口。');
       expect(finalStatusFromResult(dueBody), isTrue,
           reason: '正向语义不得改变：最终状态仍必须由 `runAction` 的返回值决定'
-              '（`ok ? done : failed`）。这是「不改正向语义」的锁。');
+              '（`skipped / done / failed` 三态）。这是「不改正向语义」的锁。');
+    });
+
+    test('REENT-07 executeDue 必须把批次交给 executeBatch（不是留一段死代码）', () {
+      expect(dueBody.contains('executeBatch('), isTrue,
+          reason: '抽出的批次骨架必须**被真正调用**：否则 SCH-01 的'
+              '「判定与执行解耦」只存在于一个没人用的函数里。');
+      expect(dueBody.contains('batchStart: now'), isTrue,
+          reason: '批次陈旧判定必须用批次开始时刻（`batchStart`），'
+              '不能退回逐条实时 `DateTime.now()`。');
+    });
+
+    test('REENT-08 executeBatch 每轮开头复检停机（SCH-07）', () {
+      expect(batchBody.contains('if (isStopping()) break;'), isTrue,
+          reason: '停机后不得继续起新动作：循环首行必须复检，'
+              '否则"关了引擎还在响/还在录"（SCH-07）。');
     });
 
     test('REENT-05 replan 也有同形守卫（同源可叠加的另一条路径）', () {
@@ -455,17 +483,38 @@ bool resetsInFinallyOnly(String body, String flag) {
 }
 
 /// 形态：`occs.markStatus(o.id, OccurrenceStatus.failed);` 之后才是 `runAction(`。
-bool claimsBeforeRunAction(String body) => RegExp(
-      r'occs\.markStatus\(\s*o\.id\s*,\s*OccurrenceStatus\.failed\s*\)\s*;'
-      r'[\s\S]*?await\s+runAction\(',
-    ).hasMatch(body);
+///
+/// 两种合法形状：
+/// - **旧（R94 前）**：乐观置 `failed` 当占用标记；
+/// - **新（R94 / SCH-04）**：`claim?.call(o)` 走 CAS（`pending → running`）。
+/// 锁的是**顺序**（先取走、后执行），不是某个具体状态值 —— 状态值由
+/// `wiredCasClaim` 单独锁住。
+bool claimsBeforeRunAction(String body) {
+  final legacy = RegExp(
+    r'occs\.markStatus\(\s*o\.id\s*,\s*OccurrenceStatus\.failed\s*\)\s*;'
+    r'[\s\S]*?await\s+runAction\(',
+  ).hasMatch(body);
+  final cas = RegExp(
+    r'claim\?\.call\(\s*o\s*\)[\s\S]*?await\s+runAction\(',
+  ).hasMatch(body);
+  return legacy || cas;
+}
+
+/// 形态：`executeDue` 把 CAS 抢占接上了（`running` + `from: {pending}`）。
+bool wiredCasClaim(String src) {
+  final body = withoutLineComments(functionBlock(src, 'Future<void> executeDue()'));
+  return RegExp(
+    r'OccurrenceStatus\.running[\s\S]{0,80}?from:\s*\{\s*'
+    r'OccurrenceStatus\.pending\s*\}',
+  ).hasMatch(body);
+}
 
 /// 终态由 `runAction` 的结果决定。两种合法形状：
 ///
 /// ① 内联（旧）：`await occs.markStatus(o.id, ok ? done : failed)`；
 /// ② 变量（BUG-093 起）：`skipped` 必须单独落成 `skipped`，不能并进 done，
 ///    于是先算 `final terminal = outcome.isSkipped ? skipped : (ok ? done : failed)`，
-///    再 `await occs.markStatus(o.id, terminal)`。
+///    再 `await occs.markStatus(o.id, terminal, from: …)`（R94 起带 CAS 条件）。
 ///
 /// 锁的是**语义**（终态由执行结果派生），不是某一种写法。
 bool finalStatusFromResult(String body) {
@@ -479,8 +528,10 @@ bool finalStatusFromResult(String body) {
     r':\s*\(?\s*ok\s*\?\s*OccurrenceStatus\.done\s*:\s*'
     r'OccurrenceStatus\.failed\s*\)?',
   ).hasMatch(body);
+  // R94：`markStatus(o.id, terminal, from: {...})` 多了 CAS 参数，
+  // 匹配 `terminal` 之后**允许**继续有参数（否则锁会逼着人删掉 CAS）。
   final written = RegExp(
-    r'await\s+occs\.markStatus\(\s*o\.id\s*,\s*terminal\s*\)',
+    r'await\s+occs\.markStatus\(\s*o\.id\s*,\s*terminal\b',
   ).hasMatch(body);
   return derived && written;
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 import '../domain/models/vibrate_caps.dart';
@@ -13,11 +15,27 @@ import '../domain/scheduling/vibrate_resolve.dart';
 /// - isIgnoringBatteryOptimizations / requestIgnoreBatteryOptimizations。
 /// - openOemAutostart：跳转主流厂商的自启动/电池白名单页。
 /// - setServiceShouldRun：开机自启标志（BootReceiver 读取）。
-/// - setPersistentWakeLock：性能优先档的常驻唤醒锁（锁屏/Doze 不冻结 CPU）。
+/// - setPersistentWakeLock / setPowerMode / releaseWakeLock：唤醒锁
+///   （NAT-07 分级：performance 常驻，balanced/saver 按需+显式释放）。
+/// - isMicServiceRunning / stopMicGuardService：麦克风 FGS 通行证的
+///   探测与撤下（NAT-03 / NAT-11）。
+/// - setSecureFlag：Activity FLAG_SECURE（F1 QR 页禁截屏）。
+/// - getOrCreateDeviceSecret：设备秘密 base64（F1 REM-10 落盘加密）。
 class NativeBridge {
   NativeBridge._();
 
   static const MethodChannel _ch = MethodChannel(ChannelsMethod.channel);
+
+  /// 最近一次通道调用的**原生错误**（NAT-13；成功 / 无实现时为 null）。
+  ///
+  /// 为什么需要它：`_invoke` 的契约是"读不到 ⇒ null ⇒ 调用方如实降级"
+  /// （BUG-125），但把 `PlatformException`（原生明确报错）与
+  /// `MissingPluginException`（平台没这个通道）**一律折叠成 null** 会让审计
+  /// 把"权限被拒 / 契约违例"误报成"平台未实现"—— 排障方向整个错。
+  /// 这里保留最近一次错误的**种类与信息**，诊断类调用方
+  /// （如 [setExactAlarms] → [AlarmScheduleResult.nativeError]）据此区分
+  /// "真不支持"与"原生失败"。
+  static Object? lastNativeError;
 
   /// 统一的通道调用出口。
   ///
@@ -32,16 +50,25 @@ class NativeBridge {
   /// 都在 tick 的关键路径上，异常逃出去就**整轮 tick 中断**，表现为
   /// "某天起所有任务都不触发了"，而审计里一条记录都没有。
   ///
-  /// `_invoke` 的契约本来就是"读不到 ⇒ null ⇒ 调用方如实降级"，把
+  /// `_invoke` 的契约本来就是“读不到 ⇒ null ⇒ 调用方如实降级”，把
   /// `TypeError` 也归到 null 是同一条语义，不是新加一层静默。
+  ///
+  /// ## NAT-13：错误种类保留在 [lastNativeError]
+  /// 每次调用先清空、失败时记录：调用方随后读到的一定是**本次**调用的
+  /// 错误（而不是更早某次调用的残留）。
   static Future<T?> _invoke<T>(String method,
       [Map<String, dynamic>? args]) async {
+    lastNativeError = null;
     try {
       return await _ch.invokeMethod<T>(method, args);
-    } on PlatformException {
-      // 桌面/测试/未实现平台上静默降级；日志由调用方记录。
+    } on PlatformException catch (e) {
+      // 原生明确报错（SecurityException / IllegalStateException …）：
+      // 保留种类与信息，仍按契约返回 null（不炸 tick）。
+      lastNativeError = e;
       return null;
-    } on MissingPluginException {
+    } on MissingPluginException catch (e) {
+      // 平台没有这个通道（iOS 未实现 / 桌面）—— 这才是"真不支持"。
+      lastNativeError = e;
       return null;
     } on Object {
       // 类型不匹配（TypeError）/ 通道被销毁等：同样归为"读不到"。
@@ -65,11 +92,24 @@ class NativeBridge {
       'times': epochMs,
       'useAlarmClock': useAlarmClock,
     });
-    return AlarmScheduleResult.fromRaw(r, expected: epochMs.length);
+    // NAT-13：把本次通道错误的**种类**一起交给解析器 ——
+    // PlatformException（原生明确报错）≠ MissingPluginException（平台无此通道），
+    // 前者必须记 failed + 异常类型名，后者才是 unsupported。
+    return AlarmScheduleResult.fromRaw(r,
+        expected: epochMs.length, nativeError: lastNativeError);
   }
 
   static Future<void> clearAlarms() => _invoke<Object?>('clearAlarms');
 
+  /// Android 12+ `SCHEDULE_EXACT_ALARM` 特殊权限是否已授予。
+  ///
+  /// ## iOS 语义（NAT-12）
+  /// iOS **没有** Android 的「闹钟和提醒」特殊权限概念 —— 该检查在 iOS 上
+  /// 不适用。iOS 侧桥（HapticBridge）对本方法返回 **true**（"本平台不适用
+  /// 该检查"），于是 Dashboard 不会渲染"精确闹钟权限未开启"这条**永远修不了**
+  /// 的告警（旧实现 iOS 恒 false ⇒ 永久误报）。Android 语义不变：
+  /// true = 已授予 / API<31 恒可授权；false = 未授予（可跳系统设置恢复）；
+  /// 桥不可用（桌面/测试）仍折叠为 false。
   static Future<bool> exactAlarmSupported() async {
     final r = await _invoke<bool>('exactAlarmSupported');
     return r ?? false;
@@ -92,10 +132,18 @@ class NativeBridge {
 
   /// 「性能优先」极致保活档：持有 / 释放**常驻** `PARTIAL_WAKE_LOCK`。
   ///
+  /// ## NAT-07（老板裁决：分级跟随 powerMode）
+  /// - `performance`：本方法 acquire 的锁**常驻**，直到
+  ///   `setPersistentWakeLock(false)` 或切档释放；
+  /// - `balanced` / `saver`：引擎**按需** acquire（仍走本方法），但必须在
+  ///   任务结束时调 [releaseWakeLock] 显式释放 —— 这两档常驻持锁是
+  ///   **策略禁止**的（"平衡/省电模式不持锁"的产品承诺）。切档到这两档时
+  ///   上一档留下的常驻锁会被原生**立即释放**（策略在切档点强制执行）。
+  ///
   /// 由引擎按电源模式调用（performance ⇒ 持锁，其余 ⇒ 释放）。持锁期间锁屏 /
   /// Doze 也不会冻结 CPU，通道 A（应用内 Dart Timer）可像前台一样准点触发 ——
   /// 这是"锁屏后功能全部失效"（仅通道 B 生效）的**可选**兜底方案。
-  /// **代价是持续耗电**，故仅当用户显式选「性能优先」时才持有。
+  /// **代价是持续耗电**，故仅当用户显式选「性能优先」时才常驻持有。
   ///
   /// 返回 true = 当前处于持锁状态（桥不可用 / 非 Android 返回 false）。
   static Future<bool> setPersistentWakeLock(bool enabled) async {
@@ -103,12 +151,37 @@ class NativeBridge {
     return r ?? false;
   }
 
+  /// NAT-07：把电源模式同步给原生唤醒锁分级策略。
+  ///
+  /// `performance` / `balanced` / `saver` 三档语义见 [setPersistentWakeLock]。
+  /// 由 `power_service.syncNativeWakeLockPolicy` 在用户切档时调用
+  /// （`BackgroundServiceManager.setPowerMode` 是唯一漏斗）。
+  ///
+  /// 为什么必须**直连原生**而不只 invoke 引擎：唤醒锁是**进程级**资源
+  /// （插件 companion 单例），与后台引擎是否在跑无关 —— 引擎没起来时
+  /// invoke 无人接收，策略会停在上一档。
+  static Future<void> setPowerMode(String mode) =>
+      _invoke<Object?>('setPowerMode', {'mode': mode});
+
+  /// NAT-07：balanced/saver 档"按需 acquire、任务结束显式释放"的释放出口。
+  ///
+  /// // F2 调用点：`background_engine.dart` 在任务执行结束 / 停机时调用
+  /// // （performance 档请走 setPersistentWakeLock(false) 的正规路径）。
+  /// 幂等：未持锁时调用也无副作用。桥不可用 / 非 Android 静默降级
+  /// （释放失败的最坏后果由下一次切档的强制释放兜底）。
+  static Future<void> releaseWakeLock() => _invoke<Object?>('releaseWakeLock');
+
   /// 本应用当前 **App Standby Bucket**（docs/59 缺口2）。
   ///
   /// 取值：`active` / `working_set` / `frequent` / `rare` / `restricted` /
-  /// `unknown`。**`unknown` = 无法判定**（API<28 / 未授予使用情况访问权 /
-  /// 桥不可用），不是"某种确定状态"——与 [isOnWifi] 的 null 语义同先例
-  /// （BUG-041）：不能把读不到当成 rare 弹警告，也不能当成 active 装没事。
+  /// `unknown` / `unauthorized` / `unsupported`。
+  /// - `unknown` = **无法判定**（服务缺失 / 平台异常）—— 不是"某种确定状态"，
+  ///   与 [isOnWifi] 的 null 语义同先例（BUG-041）；
+  /// - `unauthorized` = **未授予使用情况访问权**（NAT-14：`PACKAGE_USAGE_STATS`
+  ///   已从清单移除，本产品不提供该授权入口 —— 显式降级，不再用 unknown
+  ///   掩盖"永远读不到"）；
+  /// - `unsupported` = API<28，平台没有这个语义；
+  /// - 桥不可用（桌面 / iOS）也回落到 `unknown`。
   static Future<String> appStandbyBucket() async {
     final r = await _invoke<String>('standbyBucket');
     return r ?? 'unknown';
@@ -170,6 +243,35 @@ class NativeBridge {
   static Future<void> startMicService() => _invoke<Object?>('startMicService');
 
   static Future<void> stopMicService() => _invoke<Object?>('stopMicService');
+
+  /// NAT-11：远程/本地关闭守卫时**必须**调用 —— 撤下 `MicGuardService`
+  /// （microphone 型 FGS 通行证）与其常驻通知。
+  ///
+  /// **契约（调用方 = F1 `endpoint_service` 的远程关守卫路径）**：
+  /// 任何"关闭守卫"的入口都必须成对撤下通行证 —— 本地开关（guard_toggle）、
+  /// 远程 `guard.set{enabled:false}`（F1）、引擎停机（background_engine）
+  /// 三条路径一致。漏掉的后果：常驻通知"正在监听声音事件"残留，与
+  /// "守卫已关"矛盾（隐私感知问题），且麦克风通行证被长期占用（耗电）。
+  ///
+  /// 与 [stopMicService] 是同一原生动作（幂等）：本方法是跨包契约名，
+  /// 旧名保留给既有调用方（guard_toggle / background_engine）。
+  static Future<void> stopMicGuardService() =>
+      _invoke<Object?>('stopMicGuardService');
+
+  /// NAT-03：麦克风采集中台（MicGuardService）是否**真的**在运行。
+  ///
+  /// **F2 调用点**（`background_engine.dart` 引擎 bootstrap 自恢复守卫前）：
+  /// 守卫自恢复必须先确认 microphone 型 FGS 通行证存活。Android 11+
+  /// while-in-use 语义下，后台（无 microphone FGS）`AudioRecord` **不抛异常
+  /// 但只回静音** —— 直接自恢复会采到全静音，而 UI 仍报"守卫运行中"
+  /// （核心安全能力静默失效，本项目最忌讳的形态）。拿不到通行证 ⇒
+  /// **不启动采音**，如实置 `guardError` 并回投 `guardActive:false`。
+  ///
+  /// 返回 false = 通行证不在 / 探测失败（fail-closed：不可静默采音）。
+  static Future<bool> isMicServiceRunning() async {
+    final r = await _invoke<bool>('isMicServiceRunning');
+    return r ?? false;
+  }
 
   /// 震动（毫秒节奏数组，遵循 Android Vibrator 语义：交替的
   /// 静止/震动时长，首元素为起始静止时长）。无震动能力平台静默降级。
@@ -238,12 +340,30 @@ class NativeBridge {
   /// 原生侧执行：点亮屏幕 → 高优先级全屏通知横幅显示 [message] →
   /// 媒体音量置最大并播放约 3 秒提示音（响铃振动沿用既有动作另行下发）。
   ///
-  /// 返回 false = 平台拒绝或桥不可用（**调用方必须留痕**，不得静默）——
-  /// 与 [setVolume] 的 ack 语义一致。
+  /// ## NAT-10：通知被拒 ⇒ 假成功红线
+  /// 原生回执已改为结构化 Map（`{ok, screen, notification, sound, reason}`）：
+  /// Android 13+ 用户拒绝 `POST_NOTIFICATIONS` 时 `notify()` 是**静默
+  /// no-op**，旧实现照样回 true —— 远程收到"找回告警已展示"而通知栏
+  /// 什么都没有。现在通知权限未授予时整体 `ok=false` 并带原因。
+  /// 本方法仍按 **bool** 消费（`map['ok']`，兼容旧版原生的裸 bool 回执），
+  /// 最近一次的失败原因留在 [lastAlertReason] 供诊断。
+  ///
+  /// 返回 false = 通知被拦截 / 平台拒绝 / 桥不可用（**调用方必须留痕**，
+  /// 不得静默）—— 与 [setVolume] 的 ack 语义一致。
   static Future<bool> alert({required String message}) async {
-    final r = await _invoke<bool>('alert', {'message': message});
-    return r ?? false;
+    final r = await _invoke<Object>('alert', {'message': message});
+    if (r is Map) {
+      final ok = r['ok'] == true;
+      lastAlertReason = ok ? null : (r['reason'] as String?);
+      return ok;
+    }
+    // 旧版原生回执是裸 bool：按原样解析（升级路径兼容）。
+    lastAlertReason = null;
+    return r == true;
   }
+
+  /// 最近一次 [alert] 的降级原因（成功 / 未调用时为 null；NAT-10 诊断用）。
+  static String? lastAlertReason;
 
   // ---------------- 远程桌面级控制（docs/61 P0，看 + 控） ----------------
   //
@@ -292,8 +412,14 @@ class NativeBridge {
 
   /// 抓**一帧**屏幕，返回 JPEG 的 base64（docs/24 阶段1 / docs/61 P1）。
   ///
-  /// 复用已授权的 MediaProjection（**不重复弹窗**）。未在投屏 / 未授权 / 超时
-  /// ⇒ `null`（**如实失败**，调用方必须回 `rc.ack{ok:false}`，不得静默）。
+  /// 复用已授权的 MediaProjection（**不重复弹窗**；R94 起抓帧模型为
+  /// "一次 VirtualDisplay、多次读帧"，见原生侧 ScreenCastService）。
+  ///
+  /// ## 失败回执（NAT-01/13）
+  /// 未在投屏 / 未授权 ⇒ 原生回 `CAST_NOT_ACTIVE` 错误；抓帧本身失败
+  /// （契约违例 / 授权丢失 / 超时）⇒ `CAPTURE_FAILED` 且**带异常类型名**。
+  /// 两者都经 [_invoke] 折叠为 null（**如实失败**，调用方必须回
+  /// `rc.ack{ok:false}`，不得静默）；异常种类保留在 [lastNativeError]。
   static Future<String?> screenCaptureOnce({int timeoutMs = 5000}) async {
     return await _invoke<String>('screenCaptureOnce', {'timeoutMs': timeoutMs});
   }
@@ -305,19 +431,55 @@ class NativeBridge {
   /// `resultCode` + `data` 只能在 `onActivityResult` 里拿到 —— 这是 Android 的
   /// 硬约束（docs/61 §1「授权不可绕过」）。返回 true = 用户同意且服务已启动；
   /// false = 拒绝 / 取消 / 桥不可用。
+  ///
+  /// ## NAT-09：双侧超时
+  /// 原生侧 60s 无结果回 `CAST_TIMEOUT` error、`startActivityForResult`
+  /// 抛错回 `CAST_START_FAILED`、Activity 销毁回 `CAST_CANCELLED` ——
+  /// 在途状态**恰好清空一次**，一次异常不会把后续请求永久打成"用户拒绝"。
+  /// Dart 侧再兜底 70s 超时（略大于原生，正常情况下先收到原生 error）。
   static Future<bool> screenCastStart() async {
     try {
-      final r = await _screenCastCh.invokeMethod<bool>('screenCastStart');
+      final r = await _screenCastCh
+          .invokeMethod<bool>('screenCastStart')
+          .timeout(const Duration(seconds: 70));
       return r ?? false;
     } on PlatformException {
       return false;
     } on MissingPluginException {
+      return false;
+    } on TimeoutException {
+      // 双侧超时都没兜住（极端情况）：按"未受理"收口，不挂调用方。
       return false;
     } on Object {
       // 同 [_invoke]：类型不匹配也归为"未受理"，不得让异常逃到调用栈顶。
       return false;
     }
   }
+
+  /// F1 调用点（QR 页）：设置 / 清除 Activity 的 `FLAG_SECURE`
+  /// （禁截屏、禁录屏、最近任务缩略图打码）。配对二维码页进入时
+  /// `on: true`，退出时 `on: false`。
+  ///
+  /// 只在 **UI 引擎**可用（有 Activity）；后台引擎 / 桌面 / iOS 返回 false
+  /// （桥未实现 ⇒ null ⇒ false，调用方据此降级，不假装生效）。
+  static Future<bool> setSecureFlag({required bool on}) async {
+    final r = await _invoke<bool>('setSecureFlag', {'on': on});
+    return r ?? false;
+  }
+
+  /// F1 调用点（REM-10）：取**设备秘密**（base64），供落盘加密使用。
+  ///
+  /// Android：Keystore AES-256-GCM 封存的 32 字节 CSPRNG 秘密 ——
+  /// 首次生成后**稳定**（prefs 里只有密文，私钥材料不出 TEE），随应用
+  /// 卸载 / 清除数据一并失效；Keystore 不可用时降级为设备指纹派生
+  /// （ANDROID_ID + Build 信息 SHA-256，**安全性折扣**：无硬件保护、
+  /// 同输入可复现，仅兜底 —— 详见原生侧注释）。
+  ///
+  /// 返回 null = 取不到（iOS / 桌面桥未实现，或两条路径都失败）——
+  /// 调用方必须按"没有设备密钥"降级，**不得**把 null 当空串去加密
+  /// （那等于没加密）。
+  static Future<String?> getOrCreateDeviceSecret() =>
+      _invoke<String>('getOrCreateDeviceSecret');
 
   /// 投屏授权通道（Activity 承载，区别于插件的主方法通道）。
   static const MethodChannel _screenCastCh =
@@ -342,6 +504,7 @@ class AlarmScheduleResult {
     required this.denied,
     required this.unsupported,
     this.error,
+    this.nativeError,
   });
 
   /// 期望排布的条数。
@@ -359,9 +522,19 @@ class AlarmScheduleResult {
   /// 逐条排布时的原生异常信息（无异常为 null）。
   final String? error;
 
-  /// 是否发生降级（权限被拒 / 平台不支持 / 部分排布 / 排布异常）。
+  /// NAT-13：原生**明确报错**的类型化信息（`code: message`，无错为 null）。
+  ///
+  /// 与 [unsupported] 互斥的失败维度：`PlatformException`
+  /// （SecurityException / IllegalStateException …）= 原生失败了，
+  /// **不是**"平台没这功能"；`MissingPluginException` 才是真不支持。
+  /// 旧实现把两者一律折叠成 unsupported ⇒ 审计写"本平台未实现精确闹钟"，
+  /// 用户按提示也修不好（真实原因是权限/系统拒绝）。
+  final String? nativeError;
+
+  /// 是否发生降级（权限被拒 / 平台不支持 / 部分排布 / 排布异常 / 原生报错）。
   bool get degraded =>
-      denied || unsupported || error != null || scheduled < expected;
+      denied || unsupported || error != null || nativeError != null ||
+      scheduled < expected;
 
   bool get ok => !degraded;
 
@@ -370,6 +543,7 @@ class AlarmScheduleResult {
     if (denied) return '精确闹钟权限未授予：进程被杀后不保证准点唤醒，可在系统设置中恢复';
     if (unsupported) return '本平台不支持精确闹钟：仅进程存活时可执行';
     if (error != null) return '精确闹钟排布异常：$error';
+    if (nativeError != null) return '精确闹钟排布被原生拒绝：$nativeError';
     if (scheduled < expected) {
       return '精确闹钟仅排布 $scheduled/$expected：部分计划在进程被杀后不保证触发';
     }
@@ -380,8 +554,13 @@ class AlarmScheduleResult {
   ///
   /// - `Map`：新版原生结构化字段；
   /// - `num`：**旧版原生**返回的"成功条数"，按兼容解析（不被误判为权限拒绝）；
-  /// - 其他/`null`：平台未回执 → 归为 `unsupported` 降级。
-  static AlarmScheduleResult fromRaw(Object? raw, {required int expected}) {
+  /// - 其他/`null`：平台未回执 —— 此时看 [nativeError]（NAT-13）：
+  ///   `PlatformException`（原生明确报错）记 failed 并带出错误码；
+  ///   `code == 'UNSUPPORTED'`（Kotlin 侧 UnsupportedOperationException）
+  ///   记 unsupported；`MissingPluginException`（通道未实现）才是
+  ///   "平台不支持"；两者都无才归 unsupported。
+  static AlarmScheduleResult fromRaw(Object? raw,
+      {required int expected, Object? nativeError}) {
     if (raw is Map) {
       return AlarmScheduleResult(
         expected: (raw['expected'] as num?)?.toInt() ?? expected,
@@ -397,6 +576,17 @@ class AlarmScheduleResult {
         scheduled: raw.toInt(),
         denied: false,
         unsupported: false,
+      );
+    }
+    if (nativeError is PlatformException) {
+      final unsupported = nativeError.code == 'UNSUPPORTED';
+      return AlarmScheduleResult(
+        expected: expected,
+        scheduled: 0,
+        denied: false,
+        unsupported: unsupported,
+        nativeError:
+            unsupported ? null : '${nativeError.code}: ${nativeError.message}',
       );
     }
     return AlarmScheduleResult(

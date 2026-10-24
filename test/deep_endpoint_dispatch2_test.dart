@@ -311,7 +311,15 @@ void main() {
       svc.locationFix = () async => pos(31.2304, 121.4737);
       await svc.debugDispatch(cmd(RcCmd.locationGet), peer);
       expect(await hasLog(action: 'location', status: 'success'), isTrue);
-      expect(await hasLog(contains: '31.2304'), isTrue);
+      // R94 / REM-14：审计只记 3 位小数（约 110 米精度）—— 完整坐标是
+      // "这个人此刻在哪"的明文，长期留在本机 DB 并会随日志导出/备份外流。
+      // 旧断言锁的是 4 位小数完整精度，该隐私收紧后不再成立（回执 payload
+      // 仍是完整精度，控制端导航不受影响）。'31.2304' 含 '31.230' 子串，
+      // 故两条断言合起来才精确钉死"是舍入过的 3 位、不是完整精度"。
+      expect(await hasLog(contains: '31.230'), isTrue,
+          reason: 'success 审计必须带约 110 米精度的坐标（REM-14 后为 3 位小数）');
+      expect(await hasLog(contains: '31.2304'), isFalse,
+          reason: 'REM-14：完整精度坐标不得落审计，否则定位隐私红线失守');
     });
   });
 

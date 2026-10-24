@@ -125,13 +125,20 @@ void main() {
           reason: '握手本身必须畅通：配对码无轮换入口时，重新配对是唯一恢复路径');
     });
 
-    test('UR-06 未标识发送方（from 空）放行 —— 已知缺口，锁住行为', () {
+    test('UR-06 未标识发送方（from 空）**拒绝** —— R94 收紧（P0-001 / REM-01）', () {
       const empty = <PairedEndpoint>[];
       final verdict = admitFrom(empty, '', RcCmd.ping);
-      expect(verdict, RcAdmission.allowUnidentified,
-          reason: 'tool/rc_probe.dart 探针不填 from；拒它会打断该工具。'
-              '这是本判据的**已知缺口**（伪造 from 可绕过），'
-              '已在 decideRcAdmission 文档与 F4 报告里诚实标注');
+      expect(verdict, RcAdmission.rejectUnidentified);
+      expect(verdict.allowed, isFalse,
+          reason: '旧实现此处放行（allowUnidentified），等于「我不知道你是谁，'
+              '但我允许你做任何事」—— 持有配对码者把 from 留空即可绕过 '
+              'rejectUnpaired / rejectRevoked，撤销授权形同虚设');
+
+      // 反面样本（证明判据非恒假）：同一命令、同一空配对表，只要发送方
+      // **标识了自己且确实在表里**，就必须放行。
+      final paired = [endpointOf('d' * 16)];
+      expect(admitFrom(paired, 'd' * 16, RcCmd.ping), RcAdmission.allowPaired,
+          reason: '非恒真样本：拒空 from 不等于拒一切');
     });
 
     test('UR-07 从未配对且已标识发送方 → 同样拒绝（不止"删过"）', () {

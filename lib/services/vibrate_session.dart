@@ -29,6 +29,26 @@
 /// | S2 | 重启**绝不续发** | [recoverAfterRestart]：启动一律停止 + 审计 |
 /// | S3 | 任何时刻都能停 | [stopAll] / [stopFor] + 远程 `vibrate.stop` |
 /// | S4 | 低电量自动降级 | [start] 前的电量闸 + [_pump] 中的在跑检查 |
+///
+/// ## 动态系统状态：**现读，不随能力缓存**（NAT-05）
+///
+/// 响铃模式/勿扰是实时状态（用户随时会切），而能力（振动器/振幅/包络）
+/// 进程内不变。旧实现把两者塞进同一个 `_capsCache` 永久复用 ⇒ 引擎启动时
+/// 是"正常"、用户后来开了勿扰，审计仍写"正常"（漏告警），或反向假告警。
+/// 现在拆成两条路：
+/// - [capabilities]：只缓存**静态能力**（[VibrateCaps.staticOnly] 投影）；
+/// - [environment]：每次执行前现读动态状态，≤[environmentTtl] TTL 合并
+///   "一次触发内的多次查询"，超时必须重查（状态可能已经变了）。
+///
+/// ## 按响铃状态选振动 USAGE_*（NAT-06）
+///
+/// 系统静音/勿扰会**整条吞掉** `USAGE_NOTIFICATION` 振动，而
+/// `vibrator.vibrate()` 仍返回成功。所以用法选择与回执必须分开处理：
+/// - 用法选择见 [vibrateUsageFor]（正常→NOTIFICATION/ALARM、振动→RINGTONE、
+///   静音→ALARM 才可能震）；
+/// - **回执如实**：静音/勿扰且动作跟随勿扰（NOTIFICATION 用法）时，系统
+///   必然吞掉 ⇒ 不下发、不记 `success`，记 `failed` + 原因并返回 false
+///   （"不能震"绝不伪装成"震过了"）。
 library;
 
 import 'dart:async';
@@ -92,6 +112,56 @@ class _ActiveVibrate {
   int chunks = 0;
 }
 
+/// 振动 `USAGE_*` 选择（NAT-06）。
+///
+/// 桥接层（Kotlin `vibrationAttributes`）只有 `USAGE_ALARM` /
+/// `USAGE_NOTIFICATION` 两档，由 [vibrateAlarmUsageFor] 折叠；本枚举保留
+/// 三档策略语义 —— 将来 F4 给 `vibrateCommand` 扩 usage 参数时，只需改
+/// 那一处映射，策略判定不用动。
+enum VibrateUsage {
+  /// `USAGE_NOTIFICATION`：跟随勿扰；静音/勿扰下整条被系统吞掉。
+  notification,
+
+  /// `USAGE_RINGTONE`：来电/提醒级；设备处于"振动"响铃态时语义最贴合。
+  ringtone,
+
+  /// `USAGE_ALARM`：用户必须感知级；穿透静音与勿扰（合规口径同音频
+  /// `AudioChannel.alarm`，UI 必须显式提示）。
+  alarm,
+}
+
+/// 按响铃状态 + 动作意图选择振动 USAGE（NAT-06，纯函数便于单测锁定）。
+///
+/// | 响铃状态 | respectDnd=true | respectDnd=false |
+/// |---|---|---|
+/// | 正常(2) | NOTIFICATION | ALARM |
+/// | 振动(1) | NOTIFICATION（该态下通知用法本就震，无需升档） | RINGTONE |
+/// | 静音(0) | NOTIFICATION（会被吞 ⇒ 由回执层如实报未送达） | ALARM |
+/// | 读不到(-1) | NOTIFICATION | ALARM |
+///
+/// ⚠️ `respectDnd=true` 时**永远不得**升档：远程入站强制 true（对端不得
+/// 绕过本机勿扰，docs/08 合规红线），而 RINGTONE/ALARM 会穿透勿扰。
+VibrateUsage vibrateUsageFor({
+  required int ringerMode,
+  required bool respectDnd,
+}) {
+  if (respectDnd) return VibrateUsage.notification;
+  // 本机自排动作 = 用户自己设的"闹钟"：按响铃状态选最可能真震的用法。
+  return switch (ringerMode) {
+    RingerMode.silent => VibrateUsage.alarm,
+    RingerMode.vibrate => VibrateUsage.ringtone,
+    _ => VibrateUsage.alarm,
+  };
+}
+
+/// [VibrateUsage] → 桥接层的 `useAlarmUsage` 布尔（NAT-06）。
+///
+/// RINGTONE 就近映射为 alarm：桥（Kotlin `vibrationAttributes`）只有两档，
+/// 而 RINGTONE 与 ALARM 同属"用户必须感知"级别、在各响铃态下都不被吞。
+/// 真正的三档用法要等 F4 扩 `vibrateCommand` 的 usage 参数 —— 映射与
+/// 限制都写在明处，不静默降级。
+bool vibrateAlarmUsageFor(VibrateUsage usage) => usage != VibrateUsage.notification;
+
 /// 振动会话管理器（单例式使用，但构造函数公开以便测试注入）。
 class VibrateSession {
   VibrateSession({
@@ -130,6 +200,17 @@ class VibrateSession {
   /// 活跃振动表的持久化键（**只用于 S2 的"上次没停干净"检测**）。
   static const kvKeyActive = 'vibrate_active';
 
+  /// 动态环境状态（响铃模式/勿扰）的缓存 TTL（NAT-05）。
+  ///
+  /// 为什么必须有 TTL 而不是"每次都查"或"永远缓存"：
+  /// - 永远缓存 = NAT-05 原缺陷（用户切了勿扰，审计长期看不到）；
+  /// - 每次都查 = 一次 `start()` 里 capabilities/environment 两次通道
+  ///   调用，且 `_pump` 的每个 tick 都会重查（3s 一次，纯浪费）。
+  /// 2s 的取舍：远小于任何用户可感知的动作间隔（任务触发、远程指令），
+  /// 又把"一次执行过程中的多次查询"合并成一次；超时后**必须**重查，
+  /// 因为状态随时会变。
+  static const Duration environmentTtl = Duration(seconds: 2);
+
   final LogRepository logs;
   final VibrateCapsProbe capsProbe;
   final VibrateSender send;
@@ -144,8 +225,15 @@ class VibrateSession {
   Timer? _ticker;
   bool _pumping = false;
 
-  /// 能力缓存（一次探测，进程内复用；失败不缓存以便重试）。
+  /// 静态能力缓存（NAT-05：只缓存 [VibrateCaps.staticOnly] 投影，
+  /// 失败不缓存以便重试）。
   VibrateCaps? _capsCache;
+
+  /// 动态环境状态缓存（NAT-05：TTL 见 [environmentTtl]）。
+  ///
+  /// 记录类型而不是 `VibrateCaps`：这里只放"从回执里摘出来的动态字段"，
+  /// 与静态能力缓存彻底分离，从结构上杜绝再次混存。
+  ({int ringerMode, bool? dndActive, DateTime at})? _envCache;
 
   int get activeCount => _active.length;
   bool get isActive => _active.isNotEmpty;
@@ -153,14 +241,51 @@ class VibrateSession {
   /// 当前活跃振动的 occurrenceId 快照（UI「停止振动」按钮用）。
   List<String> get activeIds => _active.keys.toList(growable: false);
 
+  /// 静态能力（可缓存）。返回值**不含**动态系统状态（NAT-05）：
+  /// `ringerMode` 恒为 [RingerMode.unknown]、`dndActive` 恒为 null。
+  ///
+  /// 需要完整视图（能力 + 当前响铃/勿扰）的调用方应自行拼接
+  /// [VibrateCaps.withEnvironment]（本类的 [start] 即这么做）。
   Future<VibrateCaps> capabilities() async {
     final c = _capsCache;
     if (c != null) return c;
     final fresh = await capsProbe();
+    // 顺带记录动态状态：让同一次 start() 不必二次探测通道。
+    _noteEnvironment(fresh);
     // ⚠️ 只在"桥确实答复了"时缓存：`unknown` 表示读不到，
     // 读不到就不缓存，下次再试（否则一次抖动会永久降级）。
-    if (fresh.platform != 'unknown') _capsCache = fresh;
-    return fresh;
+    // 缓存的必须是 staticOnly 投影 —— 把 ringerMode/dndActive 带进缓存
+    // 就是 NAT-05 的根因（动态状态被当成永久事实）。
+    if (fresh.platform != 'unknown') _capsCache = fresh.staticOnly;
+    return fresh.staticOnly;
+  }
+
+  /// 动态系统状态（响铃模式/勿扰）**现读**（NAT-05）。
+  ///
+  /// ≤[environmentTtl] 内复用上次结果；超时必须重新探测 —— 用户在这点
+  /// 时间里完全可能切了静音/勿扰，而旧值会让审计写出相反结论。
+  Future<({int ringerMode, bool? dndActive})> environment() async {
+    final e = _envCache;
+    final t = now();
+    if (e != null && t.difference(e.at) < environmentTtl) {
+      return (ringerMode: e.ringerMode, dndActive: e.dndActive);
+    }
+    final fresh = await capsProbe();
+    return _noteEnvironment(fresh, at: t);
+  }
+
+  /// 把一次探测回执里的动态字段摘进环境缓存，返回摘出的值。
+  ({int ringerMode, bool? dndActive}) _noteEnvironment(
+    VibrateCaps fresh, {
+    DateTime? at,
+  }) {
+    final env = (ringerMode: fresh.ringerMode, dndActive: fresh.dndActive);
+    _envCache = (
+      ringerMode: env.ringerMode,
+      dndActive: env.dndActive,
+      at: at ?? now(),
+    );
+    return env;
   }
 
   // ------------------------------------------------------------ 启动
@@ -177,8 +302,24 @@ class VibrateSession {
     required double amplitude,
     required String source,
   }) async {
-    final caps = await capabilities();
+    // NAT-05：静态能力走缓存，动态状态现读，两者拼成这一次执行的完整视图。
+    final staticCaps = await capabilities();
+    final env = await environment();
+    final caps = staticCaps.withEnvironment(
+      ringerMode: env.ringerMode,
+      dndActive: env.dndActive,
+    );
     final degradations = vibrateDegradations(caps, action);
+    final followDnd = _respectDnd(action);
+    // R93 + NAT-02：系统状态是"调用成功却没震"的唯一解释来源 —— 必须进
+    // 同一条审计行。判据（NAT-02 修正后）：静音(0) 或 勿扰；振动(1)与
+    // 正常(2)都不算被吞（旧判据把这两态当成被吞、放过了静音，整体反向）。
+    final swallowed = caps.notificationsMuted && followDnd;
+    if (swallowed) {
+      degradations.add('系统${caps.dndActive == true ? '勿扰' : caps.ringerLabel}中，'
+          '且本动作跟随勿扰（USAGE_NOTIFICATION）⇒ 振动极可能被系统静默吞掉'
+          '（原生回执仍是 success，本层不采信）');
+    }
 
     if (!caps.hasVibrator) {
       await _log(
@@ -206,7 +347,36 @@ class VibrateSession {
       return false;
     }
 
-    final useAlarm = !_respectDnd(action);
+    // ---- NAT-06：不能震就不震，绝不再记 success ----
+    //
+    // 静音/勿扰 + 跟随勿扰（USAGE_NOTIFICATION）⇒ 系统**必然**吞掉整条
+    // 振动，而原生 `vibrator.vibrate()` 照样回 true。旧实现照发照记
+    // success，用户什么都没感觉到（R93 用户报障"手机震动不好使"的根因）。
+    // 现在：识别出这个状态就**不下发**，审计记 failed + 原因，返回 false。
+    if (swallowed) {
+      await _log(
+        source: source,
+        action: action.kind,
+        status: 'failed',
+        taskId: taskId,
+        occurrenceId: occurrenceId,
+        volume: amplitude,
+        durationMs: durationMs,
+        message: [
+          '设备${caps.dndActive == true ? '勿扰' : '静音'}，振动可能不触发：'
+              '本动作跟随勿扰（USAGE_NOTIFICATION）会被系统吞掉，未下发、不记 success',
+          ...degradations,
+        ].join('；'),
+      );
+      return false;
+    }
+
+    // NAT-06：按响铃状态选 USAGE_*（策略与 wire 映射分离，见函数注释）。
+    final usage = vibrateUsageFor(
+      ringerMode: env.ringerMode,
+      respectDnd: followDnd,
+    );
+    final useAlarm = vibrateAlarmUsageFor(usage);
     final rng = Random(stringSeedOf(occurrenceId, action));
 
     switch (action) {

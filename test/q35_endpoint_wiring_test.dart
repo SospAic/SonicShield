@@ -57,12 +57,16 @@ String deriveCallText(String src, int start) {
   return '';
 }
 
-/// Q1.B：**每一个** `RcCodec.deriveKey(` 调用点都必须同时满足三条：
+/// Q1.B：**每一个** `RcCodec.deriveKey(` 调用点都必须同时满足：
 /// 1. 显式传 `salt:`（漏传 = 退化成 v1 无盐派生，与带盐对端静默失配）；
 /// 2. 不得写死 `salt: null`（零盐 / 默认盐，任务书明令禁止）；
-/// 3. 实参内或附近（±窗口）必须出现 `saltFor(` —— 盐的**唯一来源**。
+/// 3. 实参内或附近（±窗口）必须出现 `saltFor(` —— 盐的**唯一来源**；
+/// 4. 盐以**形参**透传时（派生被抽成缓存助手，如 R94/REM-05 的 `_cmdKey`），
+///    `saltFor` 只出现在助手的**调用方**：改为传递校验 —— 该助手的每个
+///    `await <助手>(` 调用点附近都必须有 `saltFor(`。否则"提取方法"这类
+///    无害重构会让窗口检查假红，逼人把助手内联回去（那反而更糟）。
 ///
-/// ⚠️ 第 3 条是字符级粗筛：对"两段相距很远"的样本窗口会整段覆盖，单独用
+/// ⚠️ 第 3、4 条是字符级粗筛：对"两段相距很远"的样本窗口会整段覆盖，单独用
 /// 会**恒真**。所以第 1、2 条是**逐调用**的硬判据（反例 Q1-08 正是靠
 /// "第二个调用点没写 `salt:`" 判红的 —— 短样本里窗口检查会给假通过）。
 bool allDeriveSitesNearSalt(String src) {
@@ -72,12 +76,41 @@ bool allDeriveSitesNearSalt(String src) {
     final call = deriveCallText(src, m.start);
     if (!call.contains('salt:')) return false;
     if (call.contains('salt: null')) return false;
+    if (call.contains('saltFor(')) continue;
     final lo = (m.start - 600).clamp(0, src.length);
     final hi = (m.end + 400).clamp(0, src.length);
-    if (!call.contains('saltFor(') &&
-        !src.substring(lo, hi).contains('saltFor(')) {
-      return false;
-    }
+    if (src.substring(lo, hi).contains('saltFor(')) continue;
+    // 第 4 条：盐由形参透传 ⇒ 校验助手自身的调用点都带 saltFor 来源。
+    if (!_helperCallersNearSalt(src, m.start)) return false;
+  }
+  return true;
+}
+
+/// 包含 [offset] 的方法名（向上找最近的方法声明头）；找不到返回 null。
+String? _enclosingMethod(String src, int offset) {
+  final header = RegExp(r'(?:Future<[^;(]*>|void|bool|int|String)\s+(\w+)\s*\(');
+  String? name;
+  for (final m in header.allMatches(src)) {
+    if (m.start >= offset) break;
+    name = m.group(1);
+  }
+  return name;
+}
+
+/// 助手的每个 `await <name>(` 调用点附近（±窗口）是否都有 `saltFor(`。
+///
+/// 只数 `await` 调用点：方法声明头（`Future<...> name(`）不是调用，
+/// 否则声明自身会因窗口里没有 saltFor 而误判。找不到助手或没有任何调用点
+/// 时返回 false（失败关闭：验不了来源就不放行）。
+bool _helperCallersNearSalt(String src, int offset) {
+  final name = _enclosingMethod(src, offset);
+  if (name == null) return false;
+  final callers = RegExp('await\\s+$name\\(').allMatches(src).toList();
+  if (callers.isEmpty) return false;
+  for (final c in callers) {
+    final lo = (c.start - 600).clamp(0, src.length);
+    final hi = (c.end + 400).clamp(0, src.length);
+    if (!src.substring(lo, hi).contains('saltFor(')) return false;
   }
   return true;
 }
@@ -232,21 +265,27 @@ Future<void> _connect() async {
           reason: '任一条链路退化成无盐派生，就会与带盐的对端静默失配');
       // 逐点复核盐来源（避免"窗口碰巧够到隔壁"）。
       expect(code.contains("RcCodec.deriveKey(ownCode, '\$ownId|cmd', salt: salt)"),
-          isTrue, reason: 'cmd 接收（_handleRaw）：候选试解，候选里有 saltFor');
+          isTrue,
+          reason: 'cmd 接收（_handleRaw 经 _cmdKey 缓存助手派生）：候选里有 saltFor');
       expect(code.contains("RcCodec.deriveKey(ownCode, '\$ownId|evt', salt: salt)"),
           isTrue, reason: 'evt 接收（_handlePeerEvent）');
       expect(
           code.contains("'\${peer.deviceId}|evt', salt: salt)"),
           isTrue,
           reason: '发送回执（_send）：按对端 deviceId 取盐');
-      expect('saltFor(endpoint.deviceId)'.allMatches(code).length, 2,
-          reason: 'sendTo 与 flushOutbox 两处都必须带 endpoint.deviceId 的盐');
+      // REM-01 v3 重构后 sendTo 的本地变量改名 target（`fresh ?? endpoint`），
+      // flushOutbox 仍叫 endpoint —— 两处都必须按**对端 deviceId** 取盐，
+      // 否则补发密文与在线路径密钥不一致，接收端一律解不开（BUG-053 同族）。
+      expect('saltFor(target.deviceId)'.allMatches(code).length, 1,
+          reason: 'sendTo：按对端 deviceId 取盐（无存盐 → null → v1）');
+      expect('saltFor(endpoint.deviceId)'.allMatches(code).length, 1,
+          reason: 'flushOutbox：与 sendTo 同一份盐，变量名不同但语义同一');
     });
 
     test('Q1-06 deriveKey 调用点恰为 5 个（新增未加盐的调用点会判红）', () {
       expect('RcCodec.deriveKey('.allMatches(code).length, 5,
-          reason: 'Q1 报告的 5 个调用点：_handleRaw / _handlePeerEvent / _send / '
-              'sendTo / flushOutbox');
+          reason: 'Q1 报告的 5 个调用点：_cmdKey（缓存助手，_handleRaw 经它派生）'
+              '/ _handlePeerEvent / _send / sendTo / flushOutbox');
     });
 
     test('Q1-07 反例：无盐调用样本必须判红（证明窗口检查非恒真）', () {
@@ -282,6 +321,19 @@ Future<void> c() async {
 ''';
       expect(allDeriveSitesNearSalt(zeroSalt), isFalse,
           reason: '写死 `salt: null` = 零盐/默认盐，任务书明令禁止');
+
+      // 形参透传（提取方法）也不是免检牌：助手被**无 saltFor 来源**的实参
+      // 调用时，传递校验必须判红 —— 证明第 4 条分支不是恒真。
+      const helperConstSalt = r'''
+Future<List<int>> helper(String code, List<int>? salt) async {
+  return await RcCodec.deriveKey(code, 'x|cmd', salt: salt);
+}
+Future<void> caller() async {
+  final k = await helper('code', const [1, 2, 3]);
+}
+''';
+      expect(allDeriveSitesNearSalt(helperConstSalt), isFalse,
+          reason: '助手的调用点窗口里没有 saltFor ⇒ 盐来源不可证，必须判红');
     });
 
     test('Q1-09 两个接收链路都保留了 null 候选（v1 兜底不得被删）', () {

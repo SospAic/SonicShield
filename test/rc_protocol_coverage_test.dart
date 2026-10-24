@@ -324,4 +324,82 @@ void main() {
 
     expect(stale, isEmpty, reason: '这些缺口其实已经接上了，请从登记表删除并更新 docs/17：$stale');
   });
+
+  // ---------------- DOC-22：docs/22 §0 计数与实现一致（QUA-12） ----------------
+  //
+  // 三向覆盖锁只保"链路三向"，**没有任何一处维护"当前命令总数"** ——
+  // docs/22 §0 的 27+6=33 自 2026-09-24 起腐烂，第九十三轮审计实测
+  // **文档 33 vs 实现 41**（QUA-12，P3）。本组把 §0 的计数与源码实测绑死。
+  //
+  // 为什么锁 §0 而不是表 A 行数：表 A 是**叙述性**清单（逐命令载荷/可用性），
+  // 行数会随"合并叙述"变化；§0 的计数是文档自己声明"可由 awk 当场复算"的
+  // 硬数字，且它是全清单唯一在维护的总数锚点。
+  //
+  // 反向陈旧断言同款纪律：文档计数改错必须判红（DOC-22r），否则恒真。
+  group('DOC-22 · docs/22 §0 计数与实现一致（QUA-12：曾文档 33 vs 实现 41）', () {
+    // markdown 不是代码，**不剥注释**（`<!-- -->` 里可能出现说明文字）；
+    // 判据全部锚定在表格行 / bash 块的形状上，散文提及的数字不会误命中。
+    final docs22 = File('docs/22-远程命令全量清单.md').readAsStringSync();
+
+    /// §0 表里 `| \`RcCmd\` … | **41** |` 声称的计数。
+    int? claimedInTable(String label) {
+      final m = RegExp('\\|\\s*`$label`[^|]*\\|\\s*\\*\\*(\\d+)\\*\\*')
+          .firstMatch(docs22);
+      return m == null ? null : int.tryParse(m.group(1)!);
+    }
+
+    /// bash 复算块里以 [anchor] 开头那行的 `# → N` 声称的计数。
+    int? claimedInAwk(String anchor) {
+      final m =
+          RegExp('${RegExp.escape(anchor)}[^\\n]*# . (\\d+)').firstMatch(docs22);
+      return m == null ? null : int.tryParse(m.group(1)!);
+    }
+
+    /// §1 / §1.2 标题里 `（N 条）` 声称的计数。
+    int? claimedInHeader(String headerPrefix) {
+      final m = RegExp('${RegExp.escape(headerPrefix)}（(\\d+) 条')
+          .firstMatch(docs22);
+      return m == null ? null : int.tryParse(m.group(1)!);
+    }
+
+    final actualCmds = cmds.length;
+    final actualEvts = evts.length;
+    final actualCases = RegExp(r'case RcCmd\.').allMatches(endpoint).length;
+
+    test('DOC-22a ★ §0 表格声称的 RcCmd/RcEvt 计数 == 源码实测', () {
+      expect(claimedInTable('RcCmd'), actualCmds,
+          reason: 'docs/22 §0 的 RcCmd 计数与 protocol.dart 实测不一致'
+              '（QUA-12 的形状：文档 33 vs 实现 41）。加/减命令必须同步回刷文档');
+      expect(claimedInTable('RcEvt'), actualEvts,
+          reason: 'docs/22 §0 的 RcEvt 计数与 protocol.dart 实测不一致');
+    });
+
+    test('DOC-22b ★ bash 复算块的三个期望值 == 源码实测', () {
+      expect(claimedInAwk('abstract final class RcCmd'), actualCmds,
+          reason: 'awk 复算块里 RcCmd 的期望值与实测不一致');
+      expect(claimedInAwk('abstract final class RcEvt'), actualEvts,
+          reason: 'awk 复算块里 RcEvt 的期望值与实测不一致');
+      expect(claimedInAwk('grep -c "case RcCmd'), actualCases,
+          reason: 'awk 复算块里 `case RcCmd.` 的期望值与 endpoint_service 实测不一致');
+    });
+
+    test('DOC-22c ★ §1 / §1.2 标题的条数与 §0 一致', () {
+      expect(claimedInHeader('## 1. 表 A · 命令全量清单'), actualCmds,
+          reason: '§1 标题条数与实测命令数不一致（表 A 扩行后忘了改标题）');
+      expect(claimedInHeader('### 1.2 事件 / 回执清单'), actualEvts,
+          reason: '§1.2 标题条数与实测事件数不一致');
+    });
+
+    test('DOC-22r 反例：把文档计数改错一位必须判红（判据非恒真）', () {
+      final bad = docs22.replaceFirstMapped(
+          RegExp(r'(\| `RcCmd`[^|]*\| \*\*)(\d+)(\*\*)'),
+          (m) => '${m.group(1)}${int.parse(m.group(2)!) - 1}${m.group(3)}');
+      expect(bad, isNot(docs22), reason: '样本构造失败：没改到文档文本');
+      final m = RegExp(r'\| `RcCmd`[^|]*\| \*\*(\d+)\*\*').firstMatch(bad);
+      expect(int.parse(m!.group(1)!), actualCmds - 1,
+          reason: '样本里的计数应正好比实测小 1');
+      expect(claimedInTable('RcCmd'), actualCmds,
+          reason: '真源文档的计数必须仍等于实测（否则上面两条反例失去意义）');
+    });
+  });
 }

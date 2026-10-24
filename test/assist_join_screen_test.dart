@@ -74,6 +74,18 @@ void main() {
     await tester.pump();
   }
 
+  /// 真实异步区里生成端点会话。
+  ///
+  /// 派生跑在后台隔离区（`RcAssist.offThread`），其完成事件是**真实**事件
+  /// 循环的分发；`testWidgets` 默认在 FakeAsync 区里，只驱动微任务与假时钟，
+  /// 真实事件不会被投递 ⇒ 直接 `await host.start()` 会永久挂起。
+  Future<AssistSession> open(WidgetTester tester,
+          {Duration ttl = RcAssist.defaultTtl}) async {
+    // `runAsync<T>` 的返回类型是 `Future<T?>` —— 这里 T 已知非空。
+    final s = await tester.runAsync(() => host.start(ttl: ttl));
+    return s!;
+  }
+
   /// 在真实异步区完成一次真实握手，然后回到假时钟渲染。
   Future<void> handshake(WidgetTester tester, AssistSession s) async {
     await tester.runAsync(() async {
@@ -98,7 +110,7 @@ void main() {
 
       expect(find.text('接入协助会话'), findsOneWidget);
       expect(find.text('临时码（9 位数字）'), findsOneWidget);
-      expect(find.text('访问密码（8 位）'), findsOneWidget);
+      expect(find.text('访问密码（12 位）'), findsOneWidget);
       expect(find.widgetWithText(FilledButton, '接入'), findsOneWidget);
       expect(find.textContaining('访问密码才是真正的共享秘密'), findsOneWidget);
       // 未接入时不应出现控制台元素
@@ -121,7 +133,7 @@ void main() {
     });
 
     testWidgets('JW-03 接入成功后切到控制台：标题含端点名、横幅含会话 ID 与倒计时', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -138,7 +150,7 @@ void main() {
 
   testWidgets('JW-04 接入进行中（busy）→ 显示"正在接入…"+转圈，且输入框禁用',
       (tester) async {
-    final s = await host.start();
+    final s = await open(tester);
     await mount(tester);
 
     // 让 hello 石沉大海：端点侧不作答 ⇒ 客户端停在 opening（`busy == true`）。
@@ -179,7 +191,7 @@ void main() {
 
   group('JW 控制台权限灰化', () {
     testWidgets('JW-10 默认全拒：只读可点，作用于设备的按钮全部灰化', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -224,7 +236,7 @@ void main() {
     });
 
     testWidgets('JW-11 端点放行后灰化立即刷新（BUG-030）', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -254,7 +266,7 @@ void main() {
     });
 
     testWidgets('JW-12 端点收回权限后灰化立即回退', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -286,7 +298,7 @@ void main() {
     });
 
     testWidgets('JW-13 挂断后回到表单，且客户端已清理', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -304,7 +316,7 @@ void main() {
     });
 
     testWidgets('JW-14 端点终止 → 页面自动退回表单并给出原因', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
       expect(find.text('设备快照与动作'), findsOneWidget);
@@ -322,7 +334,7 @@ void main() {
     });
 
     testWidgets('JW-15 控制台提供 script.stop 入口（BUG-020 剩余项）', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -356,7 +368,7 @@ void main() {
   group('JW 任务 Tab 说明', () {
     testWidgets('JW-30 协助会话下「任务」Tab 显式说明不可用（避免误以为设备丢了）',
         (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -375,7 +387,7 @@ void main() {
 
   group('JW 会话审计面板', () {
     testWidgets('JW-20 审计面板可打开，并展示命令与端点拒绝原因', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 
@@ -404,7 +416,7 @@ void main() {
     });
 
     testWidgets('JW-21 无记录时审计面板给出空态提示', (tester) async {
-      final s = await host.start();
+      final s = await open(tester);
       await mount(tester);
       await handshake(tester, s);
 

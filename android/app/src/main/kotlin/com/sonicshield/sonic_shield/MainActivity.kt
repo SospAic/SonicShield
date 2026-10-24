@@ -6,6 +6,8 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -64,8 +66,24 @@ class MainActivity : FlutterActivity() {
 
     // ==================== 远程桌面级控制（docs/61 P0）====================
 
-    /** 投屏授权在途的 Dart 回调（同一时刻只允许一次授权弹窗）。 */
+    /**
+     * 投屏授权在途的 Dart 回调（同一时刻只允许一次授权弹窗）。
+     *
+     * NAT-09（R94）：旧实现在 `startActivityForResult` 前后**没有任何兜底** ——
+     * ① 该调用抛异常（设备策略禁用投屏 / 缺少 MEDIA_PROJECTION_SERVICE）时
+     * [pendingCastResult] **永不复位**，此后每次请求都命中"已有一次在途"
+     * ⇒ 永久 false，还被记成"用户拒绝投屏授权"（用户根本没看到弹窗）；
+     * ② 授权弹窗期间 Activity 被回收（分屏 / 多窗口 / "不保留活动"）时
+     * `onActivityResult` 永不到达 ⇒ Dart 侧 Future 永不完成。
+     * 现在：60s 硬超时 + startActivityForResult try/catch + onDestroy 清理，
+     * 三条路径都保证 `pendingCastResult` **恰好清空一次**并给出可区分的
+     * 错误码（CAST_TIMEOUT / CAST_START_FAILED / CAST_CANCELLED）。
+     */
     private var pendingCastResult: MethodChannel.Result? = null
+
+    /** 超时兜底 Runnable（onActivityResult / 异常路径需摘除）。 */
+    private var castTimeoutRunnable: Runnable? = null
+    private val castHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -95,13 +113,52 @@ class MainActivity : FlutterActivity() {
         val mpm =
             getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         pendingCastResult = result
-        @Suppress("DEPRECATION")
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE)
+        // NAT-09①：60s 硬超时。授权弹窗可能永远不回来（Activity 被回收），
+        // 结果不得永挂 —— 超时后由这里回 error，Dart 侧 screenCastStart
+        // 收到 PlatformException 走"未受理"分支（与拒绝同归 false，
+        // 但**不占用**后续请求：在途状态已清空）。
+        val timeout = Runnable {
+            val r = pendingCastResult ?: return@Runnable
+            pendingCastResult = null
+            castTimeoutRunnable = null
+            r.error(
+                "CAST_TIMEOUT",
+                "投屏授权 60 秒未完成（弹窗被取消或界面被回收）",
+                null,
+            )
+        }
+        castTimeoutRunnable = timeout
+        castHandler.postDelayed(timeout, CAST_TIMEOUT_MS)
+        // NAT-09②：startActivityForResult 本身可能抛（设备策略禁用投屏等）。
+        // 异常路径同样必须清空在途状态并回 error，否则 pendingCastResult 永挂。
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE)
+        } catch (e: Exception) {
+            cancelCastTimeout()
+            val r = pendingCastResult
+            pendingCastResult = null
+            Log.w(TAG, "screenCastStart: startActivityForResult failed", e)
+            r?.error(
+                "CAST_START_FAILED",
+                "${e.javaClass.simpleName}: ${e.message}",
+                null,
+            )
+        }
+    }
+
+    /** 摘除超时兜底（结果已由其它路径回投时调用）。 */
+    private fun cancelCastTimeout() {
+        castTimeoutRunnable?.let { castHandler.removeCallbacks(it) }
+        castTimeoutRunnable = null
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == REQ_SCREEN_CAPTURE) {
+            // NAT-09③：恰好清空一次（含摘除超时兜底，防止晚到的 success
+            // 与超时 error 双回投）。
+            cancelCastTimeout()
             val r = pendingCastResult
             pendingCastResult = null
             val ok = resultCode == Activity.RESULT_OK && data != null
@@ -124,8 +181,26 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
     }
 
+    override fun onDestroy() {
+        // NAT-09④：Activity 被销毁时若还有在途授权 ⇒ 回 error 并清空，
+        // 不让 Dart 侧 Future 永挂（"不保留活动"场景）。
+        cancelCastTimeout()
+        val r = pendingCastResult
+        pendingCastResult = null
+        r?.error("CAST_CANCELLED", "投屏授权前界面已被销毁", null)
+        super.onDestroy()
+    }
+
     companion object {
         private const val CAST_CHANNEL = "sonic_shield/screencast"
         private const val REQ_SCREEN_CAPTURE = 0x5C01
+        private const val TAG = "SonicShield"
+
+        /**
+         * 投屏授权超时（NAT-09）。取 60s：系统授权弹窗本身没有时间上限，
+         * 但用户 + 界面回收的所有病态路径都远小于此值；Dart 侧另设 70s
+         * 兜底（见 `NativeBridge.screenCastStart`），原生先超时先行回 error。
+         */
+        private const val CAST_TIMEOUT_MS = 60_000L
     }
 }

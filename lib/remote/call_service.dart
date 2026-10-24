@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show ValueNotifier, visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -71,6 +71,9 @@ class CallService {
   /// 顺序为 UDP 优先、TCP 兜底 —— 与腾讯 TRTC / Stream 的推荐一致。
   static Future<List<Map<String, dynamic>>> iceServers() async {
     final store = RemoteStore(await SharedPreferences.getInstance());
+    // R94 / REM-10：TURN 凭据是加密落盘的，读之前必须等加密器就绪，
+    // 否则会拿到空串 → 中继配置"看起来填了却不生效"。
+    await store.ensureSecretsLoaded();
     final turn = <Map<String, dynamic>>[];
     if (store.turnConfigured) {
       // 凭据两条通道共用；无账号密码时不塞空字段（部分服务器不接受空凭据）。
@@ -189,6 +192,13 @@ class CallService {
   String? get peerDeviceId => _peer?.deviceId;
 
   bool get inCall => _phase != CallPhase.idle && _phase != CallPhase.ended;
+
+  /// 本次通话是否有**可见指示**（R94 / REM-08，合规不可省）。
+  ///
+  /// 语义很窄：`true` = 本端已经为这通电话显示过常驻通知（含自动接通）。
+  /// 它存在的理由是让"自动接通"这条路径**可断言**：没有可见指示就不许静默
+  /// 开麦/开摄像头 —— 通知权限被关时 `onIncomingCall` 会**退回振铃**。
+  final ValueNotifier<bool> visibleIndicator = ValueNotifier<bool>(false);
 
   /// 测试缝（与 `BackgroundServiceManager.stateForTest` / `lastForTest` 同形）：
   /// 把会话相位推到指定值，并像生产一样广播到 [phase]。
@@ -573,10 +583,24 @@ class CallService {
     }
 
     // 决策走纯函数（宿主机可断言）。⚠️ 它保证「开关关闭 ⇒ 绝不自动接通」。
-    final action = calleeActionFor(
+    var action = calleeActionFor(
       autoAnswer: await autoAnswerEnabled(),
       inCall: inCall,
     );
+    // ---- R94 / REM-08：自动接通前先拿到**可见指示** ----
+    //
+    // 「用户开过自动接通」是**一次性授权策略**，不等于"每一通都可以无感知"。
+    // 常驻通知发不出去（通知权限被关 / 渠道被停）时**降级为振铃**：
+    // 宁可让用户手动点一次接听，也不能静默打开麦克风与摄像头。
+    if (action == CalleeAction.autoAccept) {
+      final shown = await NotificationService.instance.showOngoingCall(
+        title: '声盾 · 通话中（自动接通）',
+        body: '${peer.name} 正在与你${payload['video'] == true ? '视频' : '语音'}通话 · '
+            '可在应用内挂断',
+      );
+      visibleIndicator.value = shown;
+      if (!shown) action = CalleeAction.ringUser;
+    }
     if (action == CalleeAction.rejectBusy) {
       // 占线：直接回 end，主叫立刻得到反馈。
       await _sendCallMsg(
@@ -817,7 +841,22 @@ class CallService {
   /// [payload] 是 `call.end` 的业务字段；`reason` 决定给用户看哪句话
   /// （`busy` → '对方正在通话中'、`rejected` → '对方已拒接'，其余中性）。
   /// 未知/缺失 reason 一律中性，**不猜**（见 [endReasonFromSignal]）。
+  ///
+  /// ## R94 / REM-11：必须校验会话归属
+  ///
+  /// 旧实现完全不看 `callId`：一台设备被多个控制端配对时，**任意**已配对
+  /// 控制端发一条 `call.end`（甚至不带 callId）就能挂断别人的通话，而且
+  /// `call.end` 属"停类"、绕过限流 —— 可以反复打断。这里与 [onAnswer] /
+  /// [onCandidate] 同口径：带了 callId 且不是本次的 ⇒ 直接忽略。
+  ///
+  /// 为什么允许"不带 callId"：旧控制端的 `call.end` 可能漏字段，而"没人接"
+  /// 时它需要一条能收场的信号。这条路径仍受准入（已配对）+ 会话存在性约束，
+  /// 风险低于"带着错误 callId 却生效"（那才是真正的越权干扰）。
   Future<void> onRemoteEnd([Map<String, dynamic>? payload]) async {
+    final id = payload?['callId'];
+    if (id is String && id.isNotEmpty && id != _callId) {
+      return; // 不是本次通话的结束信令 —— 不得影响当前通话
+    }
     await _teardown(reason: endReasonFromSignal(payload?['reason'] as Object?));
   }
 
@@ -1044,6 +1083,10 @@ class CallService {
     // BUG-145：来电通知是 `ongoing`（只能由应用自己取消）—— 接听/拒接/超时
     // 任何一条收尾路径都要收起它，否则通知栏会永远挂着一条"来电"。
     unawaited(NotificationService.instance.cancelIncomingCall());
+    // R94 / REM-08：自动接通产生的「通话中」常驻通知同理必须收起，
+    // 并复位可见指示（下一通要重新判定，不能沿用上一通的结论）。
+    unawaited(NotificationService.instance.cancelOngoingCall());
+    visibleIndicator.value = false;
     // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
     // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。
     _pendingCandidates.clear();

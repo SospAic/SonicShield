@@ -30,6 +30,7 @@ import '../services/background_service_manager.dart';
 import '../services/counter_plan_service.dart';
 import '../services/native_bridge.dart';
 import '../services/notification_service.dart';
+import '../services/playback_service.dart';
 import '../services/ptt_stream_sink.dart';
 import '../services/run_master_service.dart';
 import 'call_lifecycle.dart';
@@ -38,6 +39,7 @@ import 'assist.dart';
 import 'assist_host.dart';
 import 'assist_join.dart';
 import 'guarded_dispatch.dart';
+import 'inbound_seen_store.dart';
 import 'kdf_salt_store.dart';
 import 'node_catalog.dart';
 import 'protocol.dart';
@@ -68,6 +70,14 @@ class RcEndpointService {
   RemoteStore? _store;
   AppDatabase? _db;
   bool _running = false;
+
+  /// 入站去重表（R94 / REM-15）：`start()` 时载入、变更后节流落盘。
+  ///
+  /// 为空时（宿主测试的 `debugHandleRaw` 等未走 `start()` 的路径）回落到
+  /// 纯内存表 —— 语义不变，只是少了"重启后仍记得"这一层。
+  InboundSeenStore? _seenStore;
+
+  /// 纯内存兜底去重表（[_seenStore] 未装配时使用）。
   final _seen = <String, int>{};
   Timer? _hb;
 
@@ -101,6 +111,36 @@ class RcEndpointService {
   /// 纯内存、不落库 —— 被拒的命令也不记入（否则每次拒绝都会把窗口往后推，
   /// 形成"越拒越久"的惩罚螺旋）。
   final Map<String, List<int>> _cmdTs = <String, List<int>>{};
+
+  /// 入站线格式的廉价前置门（R94 / REM-05）：在任何密钥派生之前挡掉垃圾洪水。
+  final RcWireGate _wireGate = RcWireGate();
+
+  /// 命令密钥派生**缓存**（R94 / REM-05）。
+  ///
+  /// ## 为什么必须缓存
+  ///
+  /// 候选盐循环里每一条报文都要跑一次 `deriveKey` —— 有盐时那是
+  /// **PBKDF2-120k**。而同一个 `(配对码, 本机ID, 盐)` 派生出的密钥**恒定不变**，
+  /// 每条消息重算是纯浪费：正常流量（流式对讲 2 条/秒）就已经把主 isolate
+  /// 压得够呛，更不用说被洪水放大。
+  ///
+  /// 键里带 `ownCode` ⇒ 轮换配对码后旧条目自然**失配**（不需要显式清空，
+  /// 也就没有"忘了清缓存导致改了码还用旧密钥"的窗口）；容量上限保证有界。
+  final Map<String, List<int>> _cmdKeyCache = <String, List<int>>{};
+
+  /// 缓存条目上限（远超"已配对控制端数 × 盐版本数"，触顶即整体清空）。
+  static const int _maxCmdKeyCache = 16;
+
+  /// 取（或派生并缓存）命令方向的消息密钥。
+  Future<List<int>> _cmdKey(String ownCode, String ownId, List<int>? salt) async {
+    final k = '$ownCode|$ownId|${salt == null ? '' : base64Encode(salt)}';
+    final hit = _cmdKeyCache[k];
+    if (hit != null) return hit;
+    final v = await RcCodec.deriveKey(ownCode, '$ownId|cmd', salt: salt);
+    if (_cmdKeyCache.length >= _maxCmdKeyCache) _cmdKeyCache.clear();
+    _cmdKeyCache[k] = v;
+    return v;
+  }
 
   /// 当前在途**指令组**的发起方 deviceId（P1 撤销清场用）。null = 无在途。
   ///
@@ -167,6 +207,25 @@ class RcEndpointService {
       await store.saveSalt(deviceId, salt);
     } on Object {
       // 对端下发的 Base64 非法：不写坏值，也不打断配对结果（配对本身已成功）。
+    }
+  }
+
+  /// 落盘对端随配对 ack 下发的**每控制端密钥**（v3，R94）。
+  ///
+  /// 与 [_savePeerSalt] 同一纪律：缺字段 / 长度不符 / Base64 坏值 ⇒
+  /// **保持现状**（继续走 v2/v1 旧路径），绝不写入半截密钥。
+  /// 写坏一把 key 的后果比"没有 key"严重得多：出站会用错密钥加密，
+  /// 对端一律解不开，而回执又是"已发送"（静默失联）。
+  Future<void> _savePeerKey(String deviceId, Object? rawB64) async {
+    final store = _store;
+    if (store == null || deviceId.isEmpty) return;
+    if (rawB64 is! String || rawB64.isEmpty) return;
+    try {
+      final key = base64Decode(rawB64);
+      if (key.length != 32) return;
+      await store.setPeerKey(deviceId, key);
+    } on Object {
+      // 非法 Base64：不写坏值，也不打断配对结果。
     }
   }
 
@@ -405,8 +464,14 @@ class RcEndpointService {
     _store = store;
     _db = db;
     // Q1.B：装配每设备盐存储（注入过就沿用 —— 宿主测试的 seam）。
-    _saltStore ??= KdfSaltStore(await SharedPreferences.getInstance());
+    final prefs = await SharedPreferences.getInstance();
+    _saltStore ??= KdfSaltStore(prefs);
+    // R94 / REM-15：去重表落盘 → 启动时恢复（进程重启后 10 分钟内的重放仍被挡）。
+    _seenStore = InboundSeenStore(prefs)..load();
     // 接收侧密钥依赖本机配对码（发送方用它加密），必须在连接前就绪。
+    // R94 / REM-10：先等凭据加密器就绪 —— 否则 `pairingCode` 会把密文当成
+    // 空串，`ensurePairingCode` 于是生成一把新码，全部已配对设备瞬间失联。
+    await store.ensureSecretsLoaded();
     _ownCode = await store.ensurePairingCode();
     _wireAssist(store, db);
     _wireCall();
@@ -487,6 +552,13 @@ class RcEndpointService {
     await AssistJoinClient.instance.leave(silent: true);
     _client?.disconnect();
     _client = null;
+    // R94 / REM-15：停止前把去重表落盘，否则"停用再启用"就等于把表清空
+    // （窗口内的重放又能通过一次）。
+    try {
+      await _seenStore?.flush();
+    } on Object {
+      // 落盘失败不阻断停止（内存表已失效，最坏情况是重启后漏挡一次）。
+    }
   }
 
   /// 配对被撤销后的**在途作业清场**（P1，A3 §2「撤销」的另一半）。
@@ -515,6 +587,17 @@ class RcEndpointService {
   /// 幂等：可被重复调用（两处解除配对入口都会调）。
   Future<void> onPeerRevoked(String deviceId) async {
     if (deviceId.isEmpty) return;
+
+    // R94 / REM-01：兜底再删一次该控制端的 peerKey。
+    //
+    // 正常路径由 `RemoteStore.removePaired` 删除（它是撤销的唯一真源）；
+    // 这里再做一次是**幂等防御**：本方法也可能被"对端撤销"等其它入口调用，
+    // 漏删一把钥匙的后果是"撤销了但旧密文仍能解开"，代价远大于一次多余的写。
+    try {
+      await _store?.peerKeys.remove(deviceId);
+    } on Object {
+      // 存储不可用：撤销名单仍然生效（准入层照旧拒绝），不阻断清场。
+    }
 
     // BUG-116：解除配对后必须**退订**该端点的 `evt` 主题。
     // `refreshSubscriptions` 只增不退 —— 单侧删除配对（对端未删）时，
@@ -682,8 +765,10 @@ class RcEndpointService {
         try {
           await _handleRaw(topic, text);
         } on Object catch (e) {
-          // ignore: avoid_print
-          print('[sonic_shield][remote] inbound dropped: $e');
+          // R94 / REM-13：debugPrint（release 下被裁剪）+ 脱敏，不再把
+          // 原始异常（含本地路径 / SQL 片段）直接写进 logcat。
+          debugPrint('[sonic_shield][remote] inbound dropped: '
+              '${describeFailure(e)}');
         }
       }
     });
@@ -835,6 +920,14 @@ class RcEndpointService {
         await RcAssistHost.instance.onWire(wire);
       } else if (AssistJoinClient.instance.topic == topic) {
         await AssistJoinClient.instance.onWire(wire);
+      } else {
+        // ---- R94 / REM-04：`assist/#` 下的**未识别报文**也要计入失败 ----
+        //
+        // 旧实现直接 return：而"猜错密码"恰恰表现为**主题算错** ⇒ 报文永远
+        // 到不了真实会话主题 ⇒ 5 次锁定形同虚设（它只防"知道密码、故意灌垃圾"）。
+        // 现在把"本机正在等待接入时，会合命名空间里出现的任何陌生报文"
+        // 都算作一次握手失败，达到上限即作废整场会话（失败关闭，只减权限）。
+        await RcAssistHost.instance.onUnknownWire(topic, wire);
       }
       return;
     }
@@ -844,12 +937,75 @@ class RcEndpointService {
     final ownCode = _ownCode;
     if (ownId.isEmpty || ownCode.isEmpty) return;
 
+    // ---- R94 / REM-05：先过**廉价前置门**，再谈密钥派生 ----
+    //
+    // 这里在 PBKDF2 之前花几微秒排除垃圾：cmd 主题公开可发布，没有这道门
+    // 时任意人发一条垃圾就让本机卡 50–200ms（见 `looksLikeRcWire` 注释）。
+    //
+    // 两道门都**静默丢弃**（不写审计）：审计本身是磁盘写入 + 限频表操作，
+    // 洪水下会变成第二个放大面；真正"密钥不匹配"的报文仍走下面的审计路径。
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // ---- LWT 明文离线哨兵必须先于廉价门放行 ----
+    //
+    // 哨兵是 broker 代发的**明文** JSON（`{"type":"rc.offline",...}`），
+    // 形状上必然过不了 [looksLikeRcWire]（它要求 base64 密文形状）。R94/REM-05
+    // 加这道门时只看了 `_handlePeerEvent` **内侧**的门，漏了本处外侧这道：
+    // 哨兵在这里被记成 decode.fail 后 return ⇒ 对端掉线后 UI 永远显示
+    // "在线"（静默故障）。`_handlePeerEvent` 顶部有其专属识别路径，这里
+    // 只负责把 evt 主题上的哨兵送到那里。
+    if (topic.endsWith('/evt') && _isPlainOfflineSentinel(wire)) {
+      await _handlePeerEvent(topic, wire, ownId, ownCode);
+      return;
+    }
+
+    if (!looksLikeRcWire(wire)) {
+      await _auditDecodeFail(topic);
+      return;
+    }
+    if (!_wireGate.allow(topic, nowMs)) return;
+
     if (topic.endsWith('/evt')) {
       await _handlePeerEvent(topic, wire, ownId, ownCode);
       return;
     }
 
-    // ---- Q1.B：命令主题的解密盐候选 ----
+    // ---- v3（R94 / REM-01）：先用**每控制端密钥**试解，命中即身份 ----
+    //
+    // 候选顺序 = 配对表顺序；命中下标回到 deviceId 就是**密码学证明过的**
+    // 发送方身份，优先于信封自报的 `msg.from`（后者在密文之内、可被持有
+    // 共享配对码的人写成任意值）。
+    //
+    // ⚠️ v3 报文若一把都解不开，`decodeWithCandidates` 直接返回 null，
+    // **绝不**回落到共享配对码 —— 否则删掉 peerKey 之后旧密钥又能打开，
+    // 撤销就白做了（见 protocol.dart 的 v3 分支）。
+    final peerKeyOwners = <String>[];
+    final peerKeys = <List<int>>[];
+    for (final p in store.paired()) {
+      final k = store.peerKeys.keyFor(p.deviceId);
+      if (k != null) {
+        peerKeys.add(k);
+        peerKeyOwners.add(p.deviceId);
+      }
+    }
+    RcMessage? decoded;
+    String? cryptoPeerId;
+    if (peerKeys.isNotEmpty) {
+      final hit = await RcCodec.decodeWithCandidates(
+        wire,
+        topic,
+        candidateKeys: peerKeys,
+        peerContext: '$ownId|cmd',
+      );
+      if (hit != null) {
+        decoded = hit.message;
+        if (hit.candidateIndex >= 0 &&
+            hit.candidateIndex < peerKeyOwners.length) {
+          cryptoPeerId = peerKeyOwners[hit.candidateIndex];
+        }
+      }
+    }
+    // ---- v2/v1 旧路径（无 peerKey 的旧配对 / 引导报文）----
     //
     // 盐按**对端 deviceId** 存储（端点侧在 `_handlePairRequest` 里按控制端
     // deviceId 落盘），而命令主题 `{本机ID}/cmd` **不含发送方 ID** ——
@@ -859,22 +1015,24 @@ class RcEndpointService {
     // 存盐」作为候选逐一试解。AES-GCM 带认证，试错不会产生任何副作用。
     // 首项恒为 null ⇒ 全无存盐时与今天**逐字节等价**（兼容铁律）。
     //
-    // ⚠️ **去重不在这里做**（P1-17）：`decode` 只读 seen set 判断重复，而它到
-    // 调用方的预占之间隔着 `await` ⇒ 并发重投会双通过。改由下方 [`reserveInboundId`]
-    // 在解密成功后用**一个同步段**完成"查重 + 预占"，先于准入/限流/副作用。
-    final salts = <List<int>?>[null];
-    for (final p in store.paired()) {
-      final s = _saltStore?.saltFor(p.deviceId);
-      if (s != null) salts.add(s);
+    // ⚠️ 去重不在这里做（P1-17）：`decode` 只读 seen set 判断重复，而它到
+    // 调用方的预占之间隔着 `await` ⇒ 并发重投会双通过。改由下方
+    // [`reserveInboundId`] 在解密成功后用**一个同步段**完成"查重 + 预占"，
+    // 先于准入/限流/副作用。
+    if (decoded == null) {
+      final salts = <List<int>?>[null];
+      for (final p in store.paired()) {
+        final s = _saltStore?.saltFor(p.deviceId);
+        if (s != null) salts.add(s);
+      }
+      for (final salt in salts) {
+        final key = await _cmdKey(ownCode, ownId, salt);
+        decoded = await RcCodec.decode(wire, key, topic);
+        if (decoded != null) break;
+      }
     }
-    RcMessage? decoded;
-    for (final salt in salts) {
-      final key = await RcCodec.deriveKey(ownCode, '$ownId|cmd', salt: salt);
-      decoded = await RcCodec.decode(wire, key, topic);
-      if (decoded != null) break;
-    }
-    final msg = decoded;
-    if (msg == null) {
+    final raw = decoded;
+    if (raw == null) {
       // ⚠️ R-2：这里此前是**静默 return**。后果是配对码录错时两端都毫无提示 ——
       // 控制器等到超时，端点日志里**一条记录都没有**，用户完全分不清
       // "网络不通 / 端点离线 / 配对码错了"。
@@ -883,12 +1041,22 @@ class RcEndpointService {
       await _auditDecodeFail(topic);
       return;
     }
+    // v3 命中 ⇒ 用**密钥对应的 deviceId** 覆盖信封自报的 `from`。
+    // 这是一次"身份重写"而不是"校验"：`msg.from` 从此不再参与任何裁决。
+    final msg = cryptoPeerId != null && cryptoPeerId != raw.from
+        ? RcMessage(
+            id: raw.id,
+            ts: raw.ts,
+            type: raw.type,
+            payload: raw.payload,
+            from: cryptoPeerId,
+          )
+        : raw;
     // ---- P1-17：原子去重（解密确认后、准入/限流/副作用前）----
     // `reserveInboundId` 的查重 + 预占在同一个无 await 的同步段内完成 ⇒ 单
     // isolate 原子。重复投递**不得再执行副作用**，但必须给出**稳定回执**，
     // 否则控制端仍会等到超时（且旧实现会把重复记成 decode.fail，误导排查）。
-    if (!RcCodec.reserveInboundId(
-        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+    if (!_reserveInbound(msg.id, DateTime.now().millisecondsSinceEpoch)) {
       await _ack(msg, true, data: '重复投递（已处理）');
       return;
     }
@@ -944,8 +1112,8 @@ class RcEndpointService {
     if (!outcome.ok) {
       if (!outcome.auditOk) {
         // 连审计都失败（通常是数据库本身不可用）—— 必须被看见。
-        // ignore: avoid_print
-        print('[sonic_shield][remote] audit failed for '
+        // R94 / REM-13：debugPrint + 脱敏（原始异常可能含本机路径/SQL）。
+        debugPrint('[sonic_shield][remote] audit failed for '
             '${msg.type}: ${outcome.reason}');
       }
       // 回执失败同样不能外泄，否则又退回静默。
@@ -958,6 +1126,36 @@ class RcEndpointService {
     _broadcast(msg, peerId: msg.from, peerName: _peerName(msg.from));
   }
 
+  /// 入站去重的统一入口（R94 / REM-15）。
+  ///
+  /// 有落盘表就用它（并在节流窗口后异步落盘），否则回落纯内存判据 ——
+  /// 两条路径**语义相同**（首次 true / 重复 false），只是后者重启即忘。
+  bool _reserveInbound(String id, int nowMs) {
+    final store = _seenStore;
+    if (store == null) return RcCodec.reserveInboundId(_seen, id, nowMs);
+    final first = store.reserve(id, nowMs);
+    if (first) unawaited(store.flushIfDue(nowMs));
+    return first;
+  }
+
+  /// 这串报文是 MQTT LWT 代发的**明文**离线哨兵吗？
+  ///
+  /// 为什么单列一个判据：`_handleRaw` 的 REM-05 廉价门与
+  /// `_handlePeerEvent` 的识别都要回答同一问题，两处各写一遍必然漂移
+  /// （R94 就是这么漏的 —— 只在内侧放了行，外侧的门照样误杀）。
+  /// 判据刻意宽松（能 jsonDecode 且 type 匹配即算），真正的丢弃决策
+  /// 在调用方；解不开/形状不对的返回 false，继续按密文处理。
+  static bool _isPlainOfflineSentinel(String wire) {
+    final trimmed = wire.trimLeft();
+    if (!trimmed.startsWith('{')) return false;
+    try {
+      final j = jsonDecode(trimmed);
+      return j is Map && j['type'] == RcEvt.offline;
+    } on Object {
+      return false;
+    }
+  }
+
   /// 对端广播的回执/信令（`{对端ID}/evt`）：仅解密并转发给 UI，不执行。
   Future<void> _handlePeerEvent(
       String topic, String wire, String ownId, String ownCode) async {
@@ -965,30 +1163,47 @@ class RcEndpointService {
     final peerId = parts.length >= 3 ? parts[2] : '';
 
     // LWT 离线哨兵由 broker 代发，明文且无敏感内容，单独识别。
-    final trimmed = wire.trimLeft();
-    if (trimmed.startsWith('{')) {
-      try {
-        final j = jsonDecode(trimmed);
-        if (j is Map && j['type'] == RcEvt.offline) {
-          if (!_rcEvtCtrl.isClosed) {
-            _rcEvtCtrl.add({
-              'v': 1,
-              'id': '',
-              'ts': DateTime.now().millisecondsSinceEpoch,
-              'type': RcEvt.offline,
-              'payload': const <String, dynamic>{},
-              'from': peerId,
-              'peerId': peerId,
-              'peerName': _peerName(peerId),
-            });
-          }
-          return;
-        }
-      } on Object {
-        // 非明文哨兵 → 继续按密文处理
+    if (_isPlainOfflineSentinel(wire)) {
+      if (!_rcEvtCtrl.isClosed) {
+        _rcEvtCtrl.add({
+          'v': 1,
+          'id': '',
+          'ts': DateTime.now().millisecondsSinceEpoch,
+          'type': RcEvt.offline,
+          'payload': const <String, dynamic>{},
+          'from': peerId,
+          'peerId': peerId,
+          'peerName': _peerName(peerId),
+        });
       }
+      return;
     }
 
+    // ---- R94 / REM-05：evt 侧同样先过廉价门 ----
+    //
+    // evt 主题的密文由**每个**已配对端点各发一份，正常流量比 cmd 高，
+    // 阈值仍是 100 条/10 秒（≈10 条/秒，远高于心跳 + 回执的实际峰值）。
+    // 明文离线哨兵已在上面单独处理，不会被这道门误杀。
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (!looksLikeRcWire(wire)) return;
+    if (!_wireGate.allow(topic, nowMs)) return;
+
+    // ---- v3（R94）：每控制端密钥优先 ----
+    //
+    // evt 主题自带发送方（`{对端ID}/evt`），但**密钥仍是点对点的**：
+    // 对端（端点）在配对 ack 里下发的 `pk` 就存在本机，按 peerId 取即可。
+    // 解不开时（v3 报文）**不回落**共享配对码，理由同 cmd 路径。
+    RcMessage? decoded;
+    final peerKey = _store?.peerKeys.keyFor(peerId);
+    if (peerKey != null) {
+      final hit = await RcCodec.decodeWithCandidates(
+        wire,
+        topic,
+        candidateKeys: <List<int>>[peerKey],
+        peerContext: '$ownId|evt',
+      );
+      decoded = hit?.message;
+    }
     // ---- Q1.B：事件主题的解密盐候选 ----
     //
     // 发送方 deviceId 由主题给出（`{对端ID}/evt`），但**盐可能尚未落盘**：
@@ -996,11 +1211,12 @@ class RcEndpointService {
     // 也可能本机持有的是上一轮的旧盐（对端重装后重生成了盐）。因此同样以
     // [null, 该对端的存盐] 作候选试解：null 覆盖引导报文与旧端点，存盐覆盖
     // 本轮正常流量。首项恒为 null ⇒ 无存盐时与今天**逐字节等价**（v1）。
-    RcMessage? decoded;
-    for (final salt in <List<int>?>[null, _saltStore?.saltFor(peerId)]) {
-      final key = await RcCodec.deriveKey(ownCode, '$ownId|evt', salt: salt);
-      decoded = await RcCodec.decode(wire, key, topic);
-      if (decoded != null) break;
+    if (decoded == null) {
+      for (final salt in <List<int>?>[null, _saltStore?.saltFor(peerId)]) {
+        final key = await RcCodec.deriveKey(ownCode, '$ownId|evt', salt: salt);
+        decoded = await RcCodec.decode(wire, key, topic);
+        if (decoded != null) break;
+      }
     }
     final msg = decoded;
     if (msg == null) {
@@ -1019,8 +1235,7 @@ class RcEndpointService {
     _rememberPeerEvtOk(peerId);
     // P1-17：与 cmd 路径同源 —— 原子查重 + 预占（同步段）后再广播，
     // 防止并发重投把同一条回执/信令重复推给 UI。
-    if (!RcCodec.reserveInboundId(
-        _seen, msg.id, DateTime.now().millisecondsSinceEpoch)) {
+    if (!_reserveInbound(msg.id, DateTime.now().millisecondsSinceEpoch)) {
       return;
     }
     // P1-13 / P2-20：把"配对绑定"与"送达终态"从广播里分出来单独推进。
@@ -1044,7 +1259,12 @@ class RcEndpointService {
     // ---- P1-13：配对 ack 幂等落地（迟到也生效）----
     final pair = _pendingPairs.remove(forId);
     if (pair != null) {
-      if (ok) await _savePeerSalt(pair.endpointId, msg.payload['kdfsalt']);
+      if (ok) {
+        await _savePeerSalt(pair.endpointId, msg.payload['kdfsalt']);
+        // R94：把对端下发的每控制端密钥落盘（控制端侧）。
+        // 与盐同一时机、同一幂等性：迟到/重复的 ack 都只是再写一遍同值。
+        await _savePeerKey(pair.endpointId, msg.payload['pk']);
+      }
       if (!pair.waiter.isCompleted) pair.waiter.complete(msg.payload);
     }
     // ---- P2-20：把 broker/端点最终回执与"已 publish"分开记账 ----
@@ -1091,6 +1311,25 @@ class RcEndpointService {
       if (peerId.isNotEmpty) 'peerId': peerId,
       if (peerName.isNotEmpty) 'peerName': peerName,
     });
+  }
+
+  /// 审计文案里的短 id（callId / scriptId 等 UUID 太长，截前 6 位够定位）。
+  ///
+  /// 只用于**日志**：完整 id 仍走报文，日志里留短串既够追查又少一份可用于
+  /// 关联/重放的素材（REM-14 的同一考量）。
+  static String _shortId(Object? raw) {
+    final s = raw is String ? raw : '';
+    if (s.isEmpty) return '未知';
+    return s.length <= 6 ? s : s.substring(0, 6);
+  }
+
+  /// 只取路径中的**文件名**（REM-14：审计不落绝对路径）。
+  ///
+  /// 同时兼容 `/` 与 `\`：Windows 宿主上跑测试时 `p.basename` 之外的分隔符
+  /// 也要能正确切开（`dart:io` 的 `Platform.pathSeparator` 不跨平台）。
+  static String _fileNameOf(String path) {
+    final i = path.lastIndexOf(RegExp(r'[/\\]'));
+    return i < 0 ? path : path.substring(i + 1);
   }
 
   String _peerName(String peerId) {
@@ -1289,6 +1528,8 @@ class RcEndpointService {
         await _setRemoteGuard(msg, peer, logs);
       case RcCmd.soundPlay:
         await _playRemote(msg, peer, logs);
+      case RcCmd.soundStop:
+        await _stopSound(msg, peer, logs);
       case RcCmd.vibrateStop:
         await _stopVibrate(msg, peer, logs);
       case RcCmd.vibrateStart:
@@ -1358,12 +1599,26 @@ class RcEndpointService {
           await _playPtt(msg, peer, logs);
         }
       case RcCmd.callInvite:
-        await _handleCallInvite(msg, peer);
+        await _handleCallInvite(msg, peer, logs);
       case RcCmd.callAnswer:
+        // R94 / REM-09：通话链路（会开摄像头/麦克风）必须留痕。
+        // candidate 不逐条记（高频），answer/end 各记一条即可回答
+        // "谁在何时接通/结束了这通电话"。
+        await logs.append(
+            source: 'call',
+            action: 'call.answer',
+            status: 'success',
+            message: 'by ${peer.name} · callId=${_shortId(msg.payload['callId'])}');
         await CallService.instance.onAnswer(msg.payload);
       case RcCmd.callCandidate:
         await CallService.instance.onCandidate(msg.payload);
       case RcCmd.callEnd:
+        await logs.append(
+            source: 'call',
+            action: 'call.end',
+            status: 'success',
+            message: 'by ${peer.name} · callId=${_shortId(msg.payload['callId'])}'
+                ' · reason=${msg.payload['reason'] ?? '未说明'}');
         await CallService.instance.onRemoteEnd(msg.payload);
       case RcCmd.deviceStatus:
         await _sendDeviceStatus(msg, peer);
@@ -1425,6 +1680,13 @@ class RcEndpointService {
   /// 会话停止后携旧 `castId` 的 `input.*` 一律拒，杜绝"停了还能操作"。
   String? _castSessionId;
 
+  /// 当前控制会话的**发起方** deviceId（R94 / REM-11）。
+  ///
+  /// 只比 `castId` 不够：另一台已配对控制端只要知道 castId（可从 `rc.screen`
+  /// 事件读到，或干脆暴力枚举）就能注入输入、或替别人停会话。会话归属是
+  /// **端点本机**的状态，放在这里而不是信任报文里的任何字段。
+  String? _castOwnerId;
+
   /// 请求开启控制会话（画面 + 输入）。授权前置见 docs/61 §1。
   Future<void> _screenCastRequest(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
@@ -1438,6 +1700,7 @@ class RcEndpointService {
     if (_castSessionId != null && _castSessionId != castId) {
       await NativeBridge.screenCastStop();
       _castSessionId = null;
+      _castOwnerId = null;
     }
     final wantControl = kind == 'control';
     // 输入授权前置：无障碍须由**端点用户在系统设置**开启。未开 ⇒ 如实拒绝，
@@ -1474,6 +1737,7 @@ class RcEndpointService {
       return;
     }
     _castSessionId = castId;
+    _castOwnerId = msg.from;
     castActive.value = true; // 可见性红线：指示必须先于任何像素出屏 / 注入生效
     // P1 单帧路径（docs/24 阶段1）：`once:true` ⇒ 抓一帧 → `rc.photo` → **立即停会话**
     // （本次授权只覆盖这一帧，符合"授权最小化"）。
@@ -1485,6 +1749,7 @@ class RcEndpointService {
             targetPeerId: msg.from);
       }
       _castSessionId = null;
+      _castOwnerId = null;
       castActive.value = false;
       await NativeBridge.screenCastStop();
       await logs.append(
@@ -1510,10 +1775,33 @@ class RcEndpointService {
   }
 
   /// 停止控制会话（画面与输入**同时**停）。
+  ///
+  /// ## R94 / REM-11：必须校验会话归属
+  ///
+  /// 旧实现无条件清 `_castSessionId` 并停服务 —— 于是**任何**已配对控制端
+  /// 只要发一条 `screen.cast.stop`（哪怕 castId 是瞎写的），就能打断别人
+  /// 正在进行的投屏/远程操作。现在两道判据：
+  /// 1. 带了 castId 且不是当前会话 ⇒ 拒绝（不匹配就是"不是你的会话"）；
+  /// 2. 会话有明确发起方且不是本条命令的发送方 ⇒ 拒绝。
+  /// 拒绝必须**如实回执**（`ok:false` + 原因），否则控制端只会看到"点了没反应"。
   Future<void> _screenCastStop(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
     final castId = (msg.payload['castId'] as String?) ?? '';
+    final mismatch = _castSessionId != null &&
+        ((castId.isNotEmpty && castId != _castSessionId) ||
+            (_castOwnerId != null && _castOwnerId != msg.from));
+    if (mismatch) {
+      await logs.append(
+          source: 'remote',
+          action: 'screen.cast.stop',
+          status: 'rejected',
+          message: 'by ${peer.name} · 拒绝：不是该控制会话的发起方'
+              '（当前 castId=${_castSessionId ?? '无'}）');
+      await _ack(msg, false, data: '不是本次控制会话的发起方：无权停止');
+      return;
+    }
     _castSessionId = null; // 先失效会话锁，再停服务（顺序即护栏）
+    _castOwnerId = null;
     castActive.value = false;
     await NativeBridge.screenCastStop();
     await logs.append(
@@ -1536,6 +1824,7 @@ class RcEndpointService {
   /// 只是发起方是端点自己、无需回执。
   Future<void> stopCastByUser() async {
     _castSessionId = null;
+    _castOwnerId = null;
     castActive.value = false;
     await NativeBridge.screenCastStop();
     final db = _db;
@@ -1566,6 +1855,11 @@ class RcEndpointService {
 
     if (_castSessionId == null || castId.isEmpty || castId != _castSessionId) {
       await deny('无匹配的活动会话（会话可能已停止）');
+      return;
+    }
+    // R94 / REM-11：会话归属 —— 只有开启会话的那台控制端能注入。
+    if (_castOwnerId != null && _castOwnerId != msg.from) {
+      await deny('不是本次控制会话的发起方');
       return;
     }
     if (!await NativeBridge.accessibilityEnabled()) {
@@ -1730,8 +2024,13 @@ class RcEndpointService {
     final ctrlId = (msg.payload['deviceId'] as String?)?.trim() ?? '';
     final code = ((msg.payload['code'] as String?) ?? '').trim().toUpperCase();
     final name = (msg.payload['name'] as String?)?.trim() ?? '';
-    // 长度即格式：deviceId 16 位、配对码 8 位（与 PairQrProtocol.parseUri 同口径）。
-    if (ctrlId.length != 16 || code.length != 8) {
+    // 长度 + 字符集双重判据（REM-06）：真源是 [PairQrProtocol.isValidDeviceId]
+    // —— 扫码、手输、本命令三处共用同一判据，杜绝"一条路径严、一条路径松"。
+    //
+    // 为什么不能只查长度：`ctrlId` 会被拼进 MQTT 主题（`{id}/evt`）与密钥
+    // 派生串。`+/#` 是主题通配符（订阅变成"收全部流量"），`/` 会改变主题
+    // 层级 —— 16 个字符的 `"+/+/+/+/+/+/+/+a"` 恰好能骗过旧的 `length == 16`。
+    if (!PairQrProtocol.isValidDeviceId(ctrlId) || code.length != 8) {
       await logs.append(
           source: 'remote',
           action: 'pair.request',
@@ -1781,6 +2080,16 @@ class RcEndpointService {
       // 重新配对不得抹掉本机给它起的备注名（备注是本机数据，与对端无关）。
       alias: existing?.alias,
     ));
+    // ---- R94 / REM-01：为这台控制端生成（或复用）**专属** 32 字节密钥 ----
+    //
+    // 复用优先：重新配对（对端重装 App 除外）必须沿用已有 peerKey ——
+    // 否则「ack 丢了一次」就等于永久失联（对端已按新 key 加密、本机却按旧 key 解）。
+    // 这与 Q1.B 的盐复用是同一条纪律：**密钥材料只在"确实没有"时生成**。
+    //
+    // 顺序不可交换：必须在 `addPaired` 之后（`setPeerKey` 要写进配对记录），
+    // 且在 ack 之前（ack 就是这把钥匙的唯一分发通道）。
+    final peerKey = _store!.peerKeys.keyFor(ctrlId) ?? RcCodec.newPeerKey();
+    await _store!.setPeerKey(ctrlId, peerKey);
     // 立刻补订它的 evt 主题：重连前也能收到它后续发出的事件（与 BUG-013 同类）。
     await refreshSubscriptions();
     // ---- Q1.B：每设备随机盐（首次配对生成、重复配对**复用已存盐**）----
@@ -1795,9 +2104,14 @@ class RcEndpointService {
         status: 'success',
         message: 'by ${name.isEmpty ? ctrlId : name} · 已登记为已配对控制端'
             '${existing != null ? '（重新确认）' : ''}'
+            '${existing?.peerKey == null ? ' · 已下发 v3 专属密钥' : ' · 复用已有 v3 密钥'}'
             '${msg.from.isNotEmpty && msg.from != ctrlId ? ' · ⚠ 信封 from=${msg.from} 与 payload 不符' : ''}');
     // ⚠️ 必须在 addPaired 之后（回执密钥取自配对表）。
     // 定向发给 `ctrlId` 而不是信封里的 `msg.from`：身份以 payload 为准。
+    //
+    // ⚠️ **ack 里刻意不下发本机全局配对码**（REM-03）：这条回执会被
+    // "任何能解开发给它的密文的人"读到，把全局码放进去等于每配对一次就
+    // 多一个知道本机主密钥的对端。下发的只有**这台控制端专用**的 `pk`。
     await _send(
       RcMessage.now(RcEvt.ack, {
         'ok': true,
@@ -1805,10 +2119,13 @@ class RcEndpointService {
         'forType': msg.type,
         'data': '已配对',
         if (salt != null) 'kdfsalt': base64Encode(salt),
+        // v3：控制端收到后即用它加密此后全部命令（`PairedEndpoint.peerKey`）。
+        'pk': base64Encode(peerKey),
       }),
       targetPeerId: ctrlId,
-      // ⚠️ 这条回执是**盐的引导报文**：控制端此刻还没有盐，若用盐加密，
-      // 它永远解不开 ⇒ 永远拿不到盐（先有鸡还是先有蛋）。因此显式走 v1。
+      // ⚠️ 这条回执是**盐与 peerKey 的引导报文**：控制端此刻还没有这两样，
+      // 若用它们加密，它永远解不开 ⇒ 永远拿不到（先有鸡还是先有蛋）。
+      // 因此显式走 v1（共享配对码）—— 这是 v3 唯一允许走旧路径的出站点。
       withSalt: false,
     );
   }
@@ -2250,7 +2567,12 @@ class RcEndpointService {
         source: 'remote',
         action: 'location',
         status: 'success',
-        message: 'by ${peer.name} · ${pos.latitude},${pos.longitude}');
+        // R94 / REM-14：审计只记**约 110 米精度**（3 位小数）。
+        // 完整坐标（6–7 位）会把"这个人此刻在哪"以明文长期留在本机 DB，
+        // 并在日志导出/备份时外流。回执本身仍是完整精度 —— 控制端要用来导航。
+        message: 'by ${peer.name} · '
+            '${pos.latitude.toStringAsFixed(3)},'
+            '${pos.longitude.toStringAsFixed(3)}');
     await _send(
         RcMessage.now(RcEvt.location, {
           'for': msg.id,
@@ -2434,13 +2756,24 @@ class RcEndpointService {
   /// 现在这里只负责"通知有人打来"。接/拒由用户在界面上点击完成
   /// （`CallService.acceptPending` / `declinePending`），界面由
   /// `CallOverlayHost` 常驻监听 `CallService.phase` 弹出 —— **与当前在哪个路由无关**。
-  Future<void> _handleCallInvite(RcMessage msg, PairedEndpoint peer) async {
+  Future<void> _handleCallInvite(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
     // BUG-117：与 `CallService._onInvite` 同口径 —— 缺省是**音频**，
     // 只有显式 `video: true` 才当作视频来电（通知文案也随之正确）。
     final video = msg.payload['video'] is bool
         ? msg.payload['video'] as bool
         : false;
     final fromName = msg.payload['fromName'] as String? ?? peer.name;
+    // R94 / REM-09：**先记账再开麦**。这条命令会打开摄像头/麦克风，
+    // 是远程模块里隐私等级最高的动作，事后必须能回答"谁在何时打来的"。
+    // `source: 'call'` 便于在审计页按通话过滤（与 remote 类操作区分）。
+    await logs.append(
+        source: 'call',
+        action: 'call.invite',
+        status: 'success',
+        message: 'by ${peer.name} · callId=${_shortId(msg.payload['callId'])}'
+            ' · ${video ? '视频' : '语音'}'
+            '${await CallService.autoAnswerEnabled() ? ' · 自动接通已开启' : ''}');
     await NotificationService.instance.showEvent(
         title: '声盾 · 来电',
         body: incomingCallText(fromName: fromName, video: video));
@@ -2484,16 +2817,72 @@ class RcEndpointService {
   /// 读不到真实计数。回一个 `stopped=0` 是最糟的选择 —— 它看起来像成功，
   /// 而用户真正想确认的"按下去有没有用"完全没被回答（典型的静默降级）。
   /// 真实计数由引擎侧的 `vibrateStop` 监听写在审计里（它在隔离内，数字是准的）。
+  ///
+  /// ## R94 / ARCH-12：回执必须**如实**
+  ///
+  /// 旧实现无条件 `_ack(msg, true)`：引擎没运行、原生桥抛异常时照样回"成功"，
+  /// 控制端于是把"点了没反应"当成"已经停了"。现在两条腿各自 try/catch，
+  /// 只要**真正让它停下来的那条**（原生 `vibrateStop`）失败，就回 `ok=false`
+  /// 并带上失败原因；引擎侧状态另作说明（它可能本来就没在跑，那不是失败）。
   Future<void> _stopVibrate(
       RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
-    await BackgroundServiceManager.instance.stopVibrate(reason: '远程停止');
+    var engineOk = true;
+    var nativeOk = true;
+    String? why;
+    try {
+      await BackgroundServiceManager.instance.stopVibrate(reason: '远程停止');
+    } on Object catch (e) {
+      // 引擎未运行 / 隔离不可达：振动**可能**本来就没有，不单独判失败。
+      engineOk = false;
+      why = describeFailure(e);
+    }
+    try {
+      await NativeBridge.vibrateStop();
+    } on Object catch (e) {
+      nativeOk = false;
+      why = describeFailure(e);
+    }
+    final ok = nativeOk;
     await logs.append(
         source: 'remote',
         action: 'vibrate.stop',
-        status: 'success',
+        status: ok ? 'success' : 'failed',
         message: 'by ${peer.name} · 已请求停止全部进行中的振动'
-            '（实际停止条数见引擎审计）');
-    await _ack(msg, true);
+            '（引擎=${engineOk ? '已通知' : '未运行'} / 原生=${nativeOk ? '已受理' : '失败'}'
+            '${why == null ? '' : ' · $why'}）');
+    await _ack(msg, ok,
+        data: ok
+            ? null
+            : '原生振动器未受理停止请求${why == null ? '' : '：$why'}');
+  }
+
+  /// 远程 `sound.stop`：停止端点**全部**进行中的远程播放（REM-07）。
+  ///
+  /// 与 `sound.play` 是一对：`loop:true` 的持续出声必须有对应的远程叫停通道，
+  /// 否则"任何时刻都能停"就只对振动成立，对声音不成立。
+  ///
+  /// 回执**如实**带停止条数：`stopAllPlaying()` 返回真实数量（`0` 表示本来
+  /// 就没在放），不把它包装成"成功停止 N 项"。`ok` 只表示"停止请求被受理"，
+  /// 条数放在 `data` 里由控制端展示。
+  Future<void> _stopSound(
+      RcMessage msg, PairedEndpoint peer, LogRepository logs) async {
+    var stopped = 0;
+    var ok = true;
+    String? why;
+    try {
+      stopped = await PlaybackService.stopAllPlaying();
+    } on Object catch (e) {
+      ok = false;
+      why = describeFailure(e);
+    }
+    await logs.append(
+        source: 'remote',
+        action: 'sound.stop',
+        status: ok ? 'success' : 'failed',
+        message: 'by ${peer.name} · 停止远程播放'
+            '（stopped=$stopped${why == null ? '' : ' · $why'}）');
+    await _ack(msg, ok,
+        data: ok ? 'stopped=$stopped' : '停止失败${why == null ? '' : '：$why'}');
   }
 
   /// 远程**发起**振动（v2.x）：固定强度/固定时长，或随机强度/随机时长。
@@ -2887,7 +3276,10 @@ class RcEndpointService {
             action: 'record',
             status: 'success',
             durationMs: seconds * 1000,
-            message: path);
+            // R94 / REM-14：只记**文件名**，不记绝对路径。
+            // `/data/user/0/<pkg>/app_flutter/` 泄露包名与目录结构，
+            // 对"谁在何时录了多久"这件事毫无增益。
+            message: _fileNameOf(path));
       }
     } on Object catch (e) {
       stepNotes?.add('步骤 ${stepIndex + 1}（record）失败：$e');
@@ -3190,6 +3582,25 @@ class RcEndpointService {
     final topic = 'sonicshield/v1/${store.deviceId}/evt';
     // 逐控制器密钥各发一份（端点↔控制器密钥独立）。
     for (final peer in peers) {
+      // ---- v3（R94 / REM-01）：有专属密钥就**只**用它 ----
+      //
+      // 有 peerKey 时不再派生共享码密钥（那是一次 PBKDF2，纯浪费），
+      // 也不再把它写进报文：撤销删掉 peerKey 后，这条路径就**没有任何**
+      // 可用的钥匙了 —— 这正是"撤销 = 凭据级失效"的实现方式。
+      final peerKey = withSalt ? peer.peerKeyBytes : null;
+      if (peerKey != null) {
+        final wire = await RcCodec.encode(
+          out,
+          const <int>[],
+          topic,
+          peerKey: peerKey,
+          peerContext: '${peer.deviceId}|evt',
+        );
+        final builder = MqttClientPayloadBuilder()..addString(wire);
+        client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
+            retain: false);
+        continue;
+      }
       // Q1.B：盐按**对端 deviceId** 存储；无存盐 → null → v1 旧路径。
       final salt = withSalt ? _saltStore?.saltFor(peer.deviceId) : null;
       final key = await RcCodec.deriveKey(
@@ -3332,10 +3743,25 @@ class RcEndpointService {
             from: store.deviceId,
           );
     final topic = 'sonicshield/v1/${endpoint.deviceId}/cmd';
-    // Q1.B：盐按对端 deviceId 存储；无存盐 → null → v1 旧路径（逐字节不变）。
-    final key = await RcCodec.deriveKey(
-        endpoint.secret, '${endpoint.deviceId}|cmd',
-        salt: withSalt ? _saltStore?.saltFor(endpoint.deviceId) : null);
+    // 取**存储里最新**的那条记录：UI 可能持有配对前拿到的旧 `PairedEndpoint`
+    // 实例（还没有 `pk`），照它发送就会一直走 v1 —— 表现为"配对了但撤销
+    // 对它无效"（v3 从没被用上）。以 deviceId 为准回查一次，代价可忽略。
+    final fresh = endpointById(store.paired(), endpoint.deviceId);
+    final target = fresh ?? endpoint;
+    // ---- v3（R94 / REM-01）：有专属密钥就走 v3，且**不再派生**共享码密钥 ----
+    //
+    // `withSalt: false` 只用于配对请求（引导报文）—— 那一刻对端还没给我们
+    // 发 key，必须走 v1。其余情况只要有 `pk` 就一律 v3。
+    final peerKey = withSalt ? target.peerKeyBytes : null;
+    final key = peerKey != null
+        ? const <int>[]
+        : await RcCodec.deriveKey(target.secret, '${target.deviceId}|cmd',
+            salt: withSalt ? _saltStore?.saltFor(target.deviceId) : null);
+    // 在线与离线暂存必须用**同一段**编码参数，否则补发时解不开（BUG-053）。
+    Future<String> encodeFor(RcMessage m) => peerKey != null
+        ? RcCodec.encode(m, key, topic,
+            peerKey: peerKey, peerContext: '${target.deviceId}|cmd')
+        : RcCodec.encode(m, key, topic);
     final client = _client;
     if (client == null ||
         client.connectionStatus?.state != MqttConnectionState.connected) {
@@ -3355,7 +3781,7 @@ class RcEndpointService {
         //
         // 现在与在线路径用**同一段** topic/key/encode，保证存进去的就是
         // 补发时能解开的形态。
-        final wireForLater = await RcCodec.encode(out, key, topic);
+        final wireForLater = await encodeFor(out);
         // P1-15：按**消息类型**分新鲜度，实时信令**根本不入队**。
         //
         // 为什么是"不入队"而不是"入队后在补发时丢掉"：outbox 的契约是
@@ -3386,7 +3812,7 @@ class RcEndpointService {
       }
       return false;
     }
-    final wire = await RcCodec.encode(out, key, topic);
+    final wire = await encodeFor(out);
     final builder = MqttClientPayloadBuilder()..addString(wire);
     client.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
         retain: false);
@@ -3491,8 +3917,16 @@ class RcEndpointService {
     final topic = 'sonicshield/v1/${endpoint.deviceId}/cmd';
     // Q1.B：与 [sendTo] 用**同一份盐**（同一 deviceId）—— 否则补发的密文与
     // 在线路径的密钥不一致，接收端一律解不开（补发功能整条失效）。
-    final key = await RcCodec.deriveKey(
-        endpoint.secret, '${endpoint.deviceId}|cmd',
+    //
+    // v3：有 `pk` 时同理必须与在线路径**同为 v3**，否则补发出去的密文
+    // 对端根本解不开（而队列条目会被当成"已补发"删掉，命令静默丢失）。
+    final peerKey = endpoint.peerKeyBytes;
+    final peerContext = '${endpoint.deviceId}|cmd';
+    // ⚠️ 即使有 peerKey 也要派生**旧密钥**：outbox 里可能躺着升级前（v1/v2）
+    // 暂存的命令。只给 v3 候选会让那些条目一律"解不开"而被丢弃 ——
+    // 用户看到的是"升级后离线期间的命令全没了"。旧密钥只用于**解**旧条目，
+    // 重编码仍按 peerKey 走 v3。
+    final legacyKey = await RcCodec.deriveKey(endpoint.secret, peerContext,
         salt: _saltStore?.saltFor(endpoint.deviceId));
     var sent = 0;
     final done = <Map<String, dynamic>>[];
@@ -3505,7 +3939,8 @@ class RcEndpointService {
       }
       // P1-15 / P2-21：先判**该不该补发**（实时信令 / 是否过期），再决定重放。
       // 必须先解密拿到 `type` —— 判据只看类型与过期时刻，与内容无关。
-      final type = await peekOutboxType(wire, key, topic);
+      final type = await peekOutboxType(wire, legacyKey, topic,
+          peerKey: peerKey, peerContext: peerContext);
       final verdict = decideOutboxReplay(
           type: type, expiresAt: outboxExpiresAtOf(m), nowMs: now);
       if (verdict != RcOutboxReplay.replay) {
@@ -3513,7 +3948,8 @@ class RcEndpointService {
         await _auditOutboxDrop(endpoint, rcOutboxDropReason(verdict));
         continue;
       }
-      final reEnc = await prepareOutboxReplay(wire, key, topic);
+      final reEnc = await prepareOutboxReplay(wire, legacyKey, topic,
+          peerKey: peerKey, peerContext: peerContext);
       if (reEnc == null) {
         done.add(m); // 解不开 = 永远发不出，丢弃并留痕
         await _auditOutboxDrop(
@@ -3675,24 +4111,34 @@ List<PairedEndpoint>? resolveRcDelivery(
 /// 1. `pair.request` → [RcAdmission.allowPairing]：它正是"把控制端登记进本机
 ///    配对表"的握手；若连它也拒，解除配对后将**永远无法重新配对**（在配对码
 ///    无轮换入口的前提下，这是唯一恢复路径）。
-/// 2. `senderId` 为空 → [RcAdmission.allowUnidentified]：无法识别发送方
-///    （`tool/rc_probe.dart` 探针不填 `from`；旧控制端亦可能不填）。
+/// 2. `senderId` 为空 → [RcAdmission.rejectUnidentified]：**拒绝**。
 /// 3. `senderPaired` 为真 → [RcAdmission.allowPaired]。
 /// 4. 其余 → [RcAdmission.rejectUnpaired]：**点名了发送方却不在表里**
 ///    （从未配对，或**已被解除配对**）→ 拒绝（fail-closed）。
 ///
-/// 判据**无状态**：同一输入恒得同一裁决（幂等），且判决某一发送方**不会**
+/// ## 判据**无状态**：同一输入恒得同一裁决（幂等），且判决某一发送方**不会**
 /// 改变其它发送方的裁决 —— 故"解除配对一台"不影响其它已配对端点。
 ///
-/// ## 已知缺口（诚实标注，不在本修复范围内）
+/// ## R94：为什么"空 from"必须拒绝（原 P0-001 / REM-01）
 ///
-/// `msg.from` 是信封里由发送方**自报**的字段（`protocol.dart` 的
-/// `RcMessage.from` 注释「不参与鉴权」）。它**在密文之内**，故持有配对码者
-/// 可写入任意值 —— 包括空串或某个**仍**在配对表里的 ID，从而绕过本判据。
-/// 根治需**按设备独立密钥**（每人一码、可单独轮换），而那会改变
-/// 「按接收方身份派生 + 双方互扫」这一**不可改决策**（HANDOVER §4.6）。
-/// 本修复只做**准入判定层**加固：让"诚实但已被解除配对"的控制端**立刻
-/// 失效**、且每次尝试留痕；伪造 `from` 的旁路需另案（密钥模型级）处理。
+/// 旧实现在这一格返回 `allowUnidentified`（放行），理由是"探针/旧控制端可能
+/// 不填 `from`"。而 `msg.from` 是信封里由发送方**自报**的字段（见
+/// `RcMessage.from` 注释「不参与鉴权」），且它**在密文之内** —— 持有配对码者
+/// 可写入任意值。于是 `senderId.isEmpty → 放行` 直接给出了一条**绕过整条
+/// 准入判据**的旁路：任何拿到配对码的人只要把 `from` 留空，就能跳过
+/// [RcAdmission.rejectUnpaired] / [RcAdmission.rejectRevoked]，对已被
+/// **解除配对**的设备继续下发全部指令。这正是「未经授权控制他人设备」
+/// （`docs/08 §2` 红线）的实现级缺口。
+///
+/// 裁决（R94）：**fail-closed**。识别不了发送方就拒绝执行，并在审计里留痕。
+/// 代价是探针工具必须显式填写 `from`（`tool/rc_probe.dart` /
+/// `tool/rc_e2e_controller.dart` 已同步补上），旧控制端若真不填 `from` 也会
+/// 被拒 —— 这是有意为之：**"我不知道你是谁" 不等于 "我允许你做任何事"**。
+///
+/// 真正的根治是 per-controller 密钥（v3）：身份由"用哪把 peerKey 解开"
+/// 决定，不再依赖自报字段。见 [RcCodec.decodeWithCandidates] 与
+/// `peer_key_store.dart`。本判据在 v3 之后仍然保留，作为 v1/v2 旧配对的
+/// 兜底防线（纵深防御，不是过渡遗留）。
 RcAdmission decideRcAdmission({
   required String senderId,
   required String type,
@@ -3708,7 +4154,8 @@ RcAdmission decideRcAdmission({
   // 恢复路径仍然存在 —— 本机轮换配对码（`rotatePairingCode` 会清空撤销表）。
   if (senderRevoked) return RcAdmission.rejectRevoked;
   if (type == RcCmd.pairRequest) return RcAdmission.allowPairing;
-  if (senderId.isEmpty) return RcAdmission.allowUnidentified;
+  // R94 / P0-001：识别不了发送方 ⇒ **拒绝**（旧实现在此放行，构成撤销绕过）。
+  if (senderId.isEmpty) return RcAdmission.rejectUnidentified;
   if (senderPaired) return RcAdmission.allowPaired;
   return RcAdmission.rejectUnpaired;
 }
@@ -3718,8 +4165,11 @@ enum RcAdmission {
   /// 配对握手：无条件放行（登记控制端）。
   allowPairing,
 
-  /// 发送方未标识自身：放行（已知缺口，见 [decideRcAdmission] 文档）。
-  allowUnidentified,
+  /// 发送方**未标识**自身（`from` 为空）：**拒绝执行**（R94 / P0-001）。
+  ///
+  /// 旧值 `allowUnidentified` 是放行，等价于「我不知道你是谁，但我允许你做
+  /// 任何事」—— 持有配对码者只要把 `from` 留空即可绕过全部准入判据。
+  rejectUnidentified,
 
   /// 发送方在当前配对表内：放行。
   allowPaired,
@@ -3732,8 +4182,12 @@ enum RcAdmission {
   rejectRevoked;
 
   /// 是否放行。**唯一**决定"要不要 `_dispatch`"的判据。
+  ///
+  /// R94 起改为**白名单**（只列放行项）而不是黑名单（列拒绝项）：今后若再
+  /// 新增裁决值，默认落到"拒绝"，不会因为忘记在 `allowed` 里补一条就静默
+  /// 放行 —— 这正是 P0-001 的教训。
   bool get allowed =>
-      this != RcAdmission.rejectUnpaired && this != RcAdmission.rejectRevoked;
+      this == RcAdmission.allowPairing || this == RcAdmission.allowPaired;
 }
 
 /// 解密失败审计的**限频器**（R-2）：同一主题 [windowMs] 内只放行一条。
@@ -3941,11 +4395,21 @@ String? taskActionPermDeny(
 /// 而拒收**（或因为 ID 已见过而判重放）—— 那样"端点上线后自动执行"仍然是
 /// 一句空话，只是失败点从"没人补发"挪到了"补发了但被丢"。
 /// 重放是**此刻的发送行为**，信封就该是此刻的。
+/// [peerKey] 非空 ⇒ 按 **v3** 试解/重编码（候选只有这一把，因为 outbox 是
+/// 按端点分桶的，不存在"猜是哪台控制端"的问题）。v3 报文在 `peerKey` 缺失时
+/// 解不开是**正确行为**：撤销删掉钥匙后，队列里那些密文就该永久作废。
 Future<String?> prepareOutboxReplay(
-    String wire, List<int> key, String topic) async {
+  String wire,
+  List<int> key,
+  String topic, {
+  List<int>? peerKey,
+  String peerContext = '',
+}) async {
   // 窗口放到极大：这里要的是"把当年那条命令解出来"，不是"验证它还新"。
   final stale = await RcCodec.decode(wire, key, topic,
-      maxSkewMs: const Duration(days: 3650).inMilliseconds);
+      maxSkewMs: const Duration(days: 3650).inMilliseconds,
+      candidateKeys: peerKey == null ? const <List<int>>[] : <List<int>>[peerKey],
+      peerContext: peerContext);
   if (stale == null) return null;
   final fresh = RcMessage(
     id: RcMessage.now(stale.type).id,
@@ -3954,7 +4418,10 @@ Future<String?> prepareOutboxReplay(
     payload: stale.payload,
     from: stale.from,
   );
-  return RcCodec.encode(fresh, key, topic);
+  return peerKey == null
+      ? RcCodec.encode(fresh, key, topic)
+      : RcCodec.encode(fresh, key, topic,
+          peerKey: peerKey, peerContext: peerContext);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -4138,14 +4605,18 @@ RateLimitVerdict rateLimitFor(
 
 /// 「停」类命令判定（Q10 停类优先，纯函数）。
 ///
-/// `script.stop` / `vibrate.stop` / `call.end` 是安全底线：**永远**要在
-/// 限流判定之前放行 —— 否则窗口被刷满时，连"叫停"都发不进来。
+/// `script.stop` / `vibrate.stop` / `call.end` / `sound.stop` 是安全底线：
+/// **永远**要在限流判定之前放行 —— 否则窗口被刷满时，连"叫停"都发不进来。
 /// 真实排队只发生在指令组步骤之间（[RcScriptExecutor.run] 每步前检查终止
 /// 令牌，既有机制，不再重造），MQTT 命令本身到达即处理，无需优先级队列。
+///
+/// R94 / REM-07 补入 `sound.stop`：远程发起的持续出声必须有对应的远程叫停，
+/// 而"停"必须比"放"更容易到达 —— 它同样享受插队权。
 bool isStopCommand(String type) =>
     type == RcCmd.scriptStop ||
     type == RcCmd.vibrateStop ||
-    type == RcCmd.callEnd;
+    type == RcCmd.callEnd ||
+    type == RcCmd.soundStop;
 
 /// 取得（必要时生成并持久化）与 [deviceId] 关联的盐；未装配盐存储时返回 null。
 ///
@@ -4435,9 +4906,16 @@ String rcOutboxDropReason(RcOutboxReplay verdict) {
 /// 与 [prepareOutboxReplay] 的区别：这里**只读类型**用于裁决，不做重编码。
 /// 时间窗放到极大：要的是"这条当年是什么命令"，不是"它还新不新"。
 Future<String?> peekOutboxType(
-    String wire, List<int> key, String topic) async {
+  String wire,
+  List<int> key,
+  String topic, {
+  List<int>? peerKey,
+  String peerContext = '',
+}) async {
   final msg = await RcCodec.decode(wire, key, topic,
-      maxSkewMs: const Duration(days: 3650).inMilliseconds);
+      maxSkewMs: const Duration(days: 3650).inMilliseconds,
+      candidateKeys: peerKey == null ? const <List<int>>[] : <List<int>>[peerKey],
+      peerContext: peerContext);
   return msg?.type;
 }
 

@@ -23,8 +23,28 @@ import UIKit
 ///
 /// 与 Android 侧同名 `sonic_shield/native`，方法名逐一对齐
 /// （`vibrateCapabilities` / `vibrateWaveform` / `vibrateEnvelope` /
-/// `vibrateStop` / `vibrate`）。未实现的方法返回 `FlutterMethodNotImplemented`，
-/// Dart 侧 `NativeBridge._invoke` 会把它降级成 null —— 与既有约定一致。
+/// `vibrateStop` / `vibrate` / `exactAlarmSupported`）。
+///
+/// ## NAT-12（R94）：未实现的方法必须**可区分**，不得静默 no-op 成功
+/// 其余约 20 个 Android 专属方法（精确闹钟 / 电池白名单 / 投屏抓帧 / 输入注入 /
+/// 麦克风 FGS …）在 iOS 上返回 `FlutterMethodNotImplemented` —— Dart 侧
+/// `NativeBridge._invoke` 收到的是 `MissingPluginException`，与"原生明确
+/// 报错"（`PlatformException`）**可区分**（NAT-13 的错误分类），据此判
+/// "平台不支持"而不是"调用失败"。**不要**改成返回 true/false 之类的
+/// 假成功回执 —— 那会让 Dart 侧把"没实现"当成"做到了"。
+///
+/// `exactAlarmSupported` 是唯一的例外：iOS **没有** Android 的「闹钟和提醒」
+/// 特殊权限概念（`SCHEDULE_EXACT_ALARM` 是 Android 12+ 的东西），该检查在
+/// iOS 上**不适用**。恒返回 false 会让 Dashboard 永久渲染一条"精确闹钟权限
+/// 未开启"的告警 —— 一个 iOS 上不存在也修不了的提示（NAT-12 的误报根因）。
+/// 故这里返回 **true**（语义："本平台不适用该检查"），由 Dart 侧保持
+/// `Future<bool>` 不变；消费侧（Dashboard）归 F6。
+///
+/// ## 未验证项（UNVERIFIED，无 macOS/Xcode 环境）
+/// - CoreHaptics 在后台引擎回调中的实际触感表现；
+/// - `flutter_background_service_ios` 的 `BGAppRefreshTask` 调度时机
+///   （系统可完全跳过，iOS 上定时任务**没有可承诺的准时性**）；
+/// - TTS / 播放由 `flutter_tts` / `just_audio` 插件原生支持，不在本桥范围。
 final class HapticBridge {
 
   private var engine: CHHapticEngine?
@@ -61,7 +81,13 @@ final class HapticBridge {
         "repeat": -1,
         "useAlarmUsage": false,
       ]))
+    case "exactAlarmSupported":
+      // NAT-12：iOS 无 Android 精确闹钟权限概念 ⇒ 返回 true（"不适用该检查"），
+      // 见类文档：恒 false 会造成永久误报。
+      result(true)
     default:
+      // NAT-12：未实现的方法返回**可区分**的 notImplemented（Dart 侧得到
+      // MissingPluginException ⇒ "平台不支持"），绝不静默假成功。
       result(FlutterMethodNotImplemented)
     }
   }

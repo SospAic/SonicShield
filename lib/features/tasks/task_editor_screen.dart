@@ -168,7 +168,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   double _rvAmpMin = 0.4, _rvAmpMax = 1.0;
   int _rvMaxPulses = 200;
   int _rvRampUp = 0;
-  bool _rvRespectDnd = true;
+  bool _rvRespectDnd = false;
 
   // 持续振动（ContinuousVibrateAction）
   int _cvDurMin = 10, _cvDurMax = 30;
@@ -177,7 +177,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   double _cvSharpMin = 0.0, _cvSharpMax = 0.0;
   int _cvDutyPct = 100;
   int _cvRampUp = 0, _cvRampDown = 0;
-  bool _cvRespectDnd = true;
+  bool _cvRespectDnd = false;
 
   /// 本机振动能力（null = 尚未读到）。用于**明示降级**（FR-34 口径修正）：
   /// 承诺了振幅/锐度就必须说清"这台设备做不到"。

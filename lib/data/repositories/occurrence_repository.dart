@@ -9,10 +9,26 @@ class OccurrenceRepository {
 
   final AppDatabase _db;
 
-  /// 幂等合并：同 id 或同 fire_at+task 的条目不重复写入。
+  /// 幂等合并：同 id 的条目不重复写入。
+  ///
+  /// ## 去重口径（DAT-13 更正）
+  /// 旧注释写的是"同 id **或**同 fire_at+task 不重复"，但 schema 上
+  /// `occurrences` **只有 `id` 主键**，没有 `UNIQUE(task_id, fire_at)`
+  /// —— `ConflictAlgorithm.ignore` 因此**只按主键**生效，同刻不同 id 的两行
+  /// 可以并存。注释描述的是设计意图，不是实现事实，会误导维护者。
+  ///
+  /// 这里**不**加 `UNIQUE(task_id, fire_at)`：存量库可能已有重复行（历史
+  /// 版本、远程 `@remote@` id 方案），迁移期建唯一索引会直接失败 ⇒ 整库打不开。
+  /// 改为在 Dart 侧按 `(taskId, fireAtMs)` 去重（成本 O(n)，n = 单批条目数），
+  /// 让"同刻不重复"成为**本方法**的保证，而不是 schema 的假设。
   Future<void> commitAll(List<PlannedOccurrence> list) async {
+    if (list.isEmpty) return;
+    final seenIds = <String>{};
+    final seenSlots = <String>{};
     final batch = _db.db.batch();
     for (final o in list) {
+      final slot = '${o.taskId}@${o.fireAt.millisecondsSinceEpoch}';
+      if (!seenIds.add(o.id) || !seenSlots.add(slot)) continue;
       batch.insert('occurrences', o.toRow(),
           conflictAlgorithm: ConflictAlgorithm.ignore);
     }
@@ -168,18 +184,146 @@ class OccurrenceRepository {
     return out;
   }
 
-  Future<void> markStatus(String id, OccurrenceStatus status,
-          {double? volume, int? durationMs}) =>
-      _db.db.update(
+  /// **条件更新（CAS）**：把 [id] 置为 [to]，返回**受影响行数**。
+  ///
+  /// ## 返回值的含义（F2 调用契约）
+  /// - `1` = **我抢到了**这条计划，可以继续执行动作；
+  /// - `0` = 这条计划**已被别人改过**（另一条连接先抢到 / 用户刚跳过 /
+  ///   已终态），调用方**必须放弃执行**，不得回写终态。
+  ///
+  /// ## 为什么必须是 CAS（DAT-03）
+  /// 旧实现是 `UPDATE ... WHERE id = ?`（无条件、且丢弃返回值）。而
+  /// `AppDatabase` 刻意 `singleInstance:false`（R89）—— 主 UI 引擎与后台引擎
+  /// 各持一条连接：两条连接同时 `due()` 会拿到**同一批** pending 行，
+  /// 两者都"置状态成功"、两者都执行 ⇒ **同一计划播两次**。
+  /// "UPDATE 成功"不等于"我抢到了"，只有"**从 pending 抢到**"才是。
+  ///
+  /// ## [from] 语义
+  /// 非空时追加 `AND status IN (...)`：只有当前状态在集合内才更新。
+  /// 传空集合等价于"任何状态都不可能匹配"（返回 0），这是刻意的 ——
+  /// 调用方写出空集合通常是 bug，静默成功会更难查。
+  ///
+  /// ## [note]
+  /// 可选的**诊断文案**：非 null 时额外写一条 `exec_logs`（`source='db'`、
+  /// `action='markStatus'`、`status='info'`）。用于记录"CAS 落空"这类
+  /// 难以复现的并发事件；默认 null = 零额外写入（热路径不受影响）。
+  Future<int> markStatus(
+    String id,
+    OccurrenceStatus to, {
+    Set<OccurrenceStatus>? from,
+    String? note,
+    double? volume,
+    int? durationMs,
+  }) async {
+    var where = 'id = ?';
+    final args = <Object?>[id];
+    if (from != null) {
+      if (from.isEmpty) return 0;
+      final ph = List.filled(from.length, '?').join(', ');
+      where = 'id = ? AND status IN ($ph)';
+      args.addAll(from.map((s) => s.name));
+    }
+    final n = await _db.db.update(
+      'occurrences',
+      {
+        'status': to.name,
+        if (volume != null) 'volume': volume,
+        if (durationMs != null) 'duration_ms': durationMs,
+      },
+      where: where,
+      whereArgs: args,
+    );
+    if (note != null) {
+      // 诊断留痕**不得**影响状态机：写日志失败只吞掉。
+      try {
+        await _db.db.insert('exec_logs', {
+          'occurrence_id': id,
+          'source': 'db',
+          'action': 'markStatus',
+          'status': 'info',
+          'message': '${to.name} affected=$n${note.isEmpty ? '' : '：$note'}',
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        });
+      } on DatabaseException {
+        // 忽略：审计缺失不能反过来让 CAS 失败。
+      }
+    }
+    return n;
+  }
+
+  /// 把上次进程中断遗留的 [OccurrenceStatus.running] 统一改回 `failed`，
+  /// 返回条数（SCH-04 / DAT-03 配套）。
+  ///
+  /// ## 为什么需要
+  /// `running` 是"某条连接已抢占、正在执行动作"的占用态。执行者若在
+  /// `runAction` 期间被杀（系统回收后台服务、崩溃、重启），那一行会**永久**
+  /// 停在 `running`：`due()` 只看 `pending` ⇒ 它永远不会再被执行，
+  /// 也不会进入 `failed` 审计，`retention` 的 `status != 'pending'` 清理
+  /// 会把它当历史静默删掉 —— 用户看到的是"那次没响，日志里什么都没有"。
+  ///
+  /// 启动时调用一次即可（同一时刻只有一个新引擎在启动，不需要 CAS 循环：
+  /// 此刻不该有别的执行者在跑，真跑着的那条会在 `runAction` 结束后写终态）。
+  Future<int> recoverInterrupted() => _db.db.update(
         'occurrences',
-        {
-          'status': status.name,
-          if (volume != null) 'volume': volume,
-          if (durationMs != null) 'duration_ms': durationMs,
-        },
-        where: 'id = ?',
-        whereArgs: [id],
+        {'status': OccurrenceStatus.failed.name},
+        where: 'status = ?',
+        whereArgs: [OccurrenceStatus.running.name],
       );
+
+  /// **原子替换**某任务的未来计划（DAT-05 / RCA-7）：单事务内
+  /// 「删旧 pending（`fire_at > now`）→ 插新条目」，返回真实计数。
+  ///
+  /// ## 为什么必须单事务
+  /// 远程 `task.upsert` 的旧实现是
+  /// `tasks.upsert` → `deletePendingForTask` → `_rematerialize(commitAll)`
+  /// **三段独立写**。第二段提交后、第三段失败（锁超时/磁盘满/进程被杀）就留下
+  /// "任务已改、旧计划已删、新计划一条没有"的**零计划任务**。
+  /// 而引擎的续算判据是**全局** `MAX(fire_at)`（`latestPendingFireAt`）：
+  /// 只要别的任务（反击计划动辄数百条）把覆盖维持在 48h，
+  /// `planNeedsExtend` 恒 false ⇒ 这个任务**永远不会**被重新物化 ⇒ 长期静默。
+  ///
+  /// ## 语义
+  /// - 只动 `fire_at > now` 的 pending：`fire_at <= now` 的**已到期**计划正由
+  ///   `executeDue` 补执行，删掉会漏触发（陈旧判定交给执行层 10 分钟上限）；
+  /// - `done/failed/skipped/running` 一律不动（审计 + 占用态）；
+  /// - [entries] 内部按 `id` / `(taskId, fireAtMs)` 去重（与 [commitAll] 同口径）。
+  ///
+  /// 返回 `(inserted, keptDue, dropped)`：`keptDue` = 因 `fire_at <= now` 被
+  /// 保留的旧 pending 条数（调用方据此判断"是否还有到期未跑的计划"）。
+  Future<({int inserted, int keptDue, int dropped})> replacePendingForTask(
+    String taskId,
+    List<PlannedOccurrence> entries,
+    DateTime now,
+  ) async {
+    final nowMs = now.millisecondsSinceEpoch;
+    return _db.db.transaction((txn) async {
+      final kept = await txn.rawQuery(
+        'SELECT COUNT(*) AS c FROM occurrences '
+        "WHERE task_id = ? AND status = 'pending' AND fire_at <= ?",
+        [taskId, nowMs],
+      );
+      final keptDue = (kept.first['c'] as int?) ?? 0;
+      final dropped = await txn.delete(
+        'occurrences',
+        where: "task_id = ? AND status = 'pending' AND fire_at > ?",
+        whereArgs: [taskId, nowMs],
+      );
+      final seenIds = <String>{};
+      final seenSlots = <String>{};
+      final batch = txn.batch();
+      var inserted = 0;
+      for (final o in entries) {
+        if (o.taskId != taskId) continue; // 只接受本任务的条目，防止串味
+        final slot = '${o.taskId}@${o.fireAt.millisecondsSinceEpoch}';
+        if (!seenIds.add(o.id) || !seenSlots.add(slot)) continue;
+        batch.insert('occurrences', o.toRow(),
+            conflictAlgorithm: ConflictAlgorithm.ignore);
+        inserted++;
+      }
+      if (inserted > 0) await batch.commit(noResult: true);
+      return (inserted: inserted, keptDue: keptDue, dropped: dropped);
+    });
+  }
 
   /// 某任务的**全部**计划条目（含审计态，按触发时间升序）。
   ///
@@ -211,12 +355,35 @@ class OccurrenceRepository {
     return DateTime.fromMillisecondsSinceEpoch(rows.first['fire_at'] as int);
   }
 
-  /// 清理历史（保留 N 天），由维护任务周期调用。
-  Future<int> purgeOlderThan(DateTime t) => _db.db.delete(
-        'occurrences',
-        where: "status != 'pending' AND fire_at < ?",
-        whereArgs: [t.millisecondsSinceEpoch],
+  /// 清理历史（保留 N 天），**分批**删除（DAT-11）。
+  ///
+  /// ## 为什么必须分批
+  /// 旧实现是一条无 `LIMIT` 的 `DELETE ... WHERE status != 'pending' AND
+  /// fire_at < ?`。积累数十万行时这条语句会**一次持写锁数秒**，
+  /// 对端（UI 保存任务 / 远程 upsert / 引擎 tick）在 `busy_timeout=5000`
+  /// 内拿不到锁就抛 `database is locked` —— 清理本来是为了省空间，
+  /// 结果变成一次可感知的"保存失败"。
+  ///
+  /// 改为 `DELETE ... WHERE rowid IN (SELECT rowid ... LIMIT ?)` 循环：
+  /// 每批独立提交，批间可被其它写者插入（SQLite 的写锁按事务释放）。
+  /// 上界 `fire_at < t` 固定，因此"删的过程中新写入的行"不会被误删。
+  ///
+  /// [batchLimit] 可调（测试/低端机可调小）；≤0 视为不清理，直接返回 0。
+  Future<int> purgeOlderThan(DateTime t, {int batchLimit = 500}) async {
+    if (batchLimit <= 0) return 0;
+    final cutoff = t.millisecondsSinceEpoch;
+    var total = 0;
+    while (true) {
+      final n = await _db.db.rawDelete(
+        'DELETE FROM occurrences WHERE rowid IN ('
+        "SELECT rowid FROM occurrences WHERE status != 'pending' AND fire_at < ? "
+        'LIMIT ?)',
+        [cutoff, batchLimit],
       );
+      total += n;
+      if (n < batchLimit) return total;
+    }
+  }
 
   /// 任务删除时级联清理其计划。
   Future<void> deleteForTask(String taskId) =>
@@ -226,26 +393,57 @@ class OccurrenceRepository {
   ///
   /// 远程 `task.upsert` 改了触发器/免打扰策略后，旧计划已与新定义不符；
   /// 不清理会出现"改了每天 8:00 却仍在 7:00 响"的幽灵计划（docs/14 §2.1）。
-  Future<int> deletePendingForTask(String taskId) => _db.db.delete(
-        'occurrences',
-        where: "task_id = ? AND status = 'pending'",
-        whereArgs: [taskId],
-      );
-
-  /// 「跳过下一次」：把该任务最近的 pending 计划标记为 skipped。
-  /// 返回被跳过的条目数（0 或 1）。
-  Future<int> skipNextForTask(String taskId) async {
-    final rows = await _db.db.query(
-      'occurrences',
-      where: "task_id = ? AND status = 'pending' AND fire_at >= ?",
-      whereArgs: [taskId, DateTime.now().millisecondsSinceEpoch],
-      orderBy: 'fire_at ASC',
-      limit: 1,
-    );
-    if (rows.isEmpty) return 0;
-    await markStatus(rows.first['id'] as String, OccurrenceStatus.skipped);
-    return 1;
+  ///
+  /// [fireAtAfter]（DAT-05 配套）：只删 `fire_at >` 该时刻的 pending。
+  /// 传 null = 删全部 pending（旧行为）。**远程路径已改用原子化的
+  /// [replacePendingForTask]**，本方法保留给"只清不建"的场景
+  /// （如任务被停用时清空未来计划）—— 那里同样应传 `fireAtAfter: now`，
+  /// 否则会把已到期、正待补执行的那几条一起删掉（漏触发）。
+  Future<int> deletePendingForTask(String taskId, {DateTime? fireAtAfter}) {
+    var where = "task_id = ? AND status = 'pending'";
+    final args = <Object?>[taskId];
+    if (fireAtAfter != null) {
+      where = '$where AND fire_at > ?';
+      args.add(fireAtAfter.millisecondsSinceEpoch);
+    }
+    return _db.db.delete('occurrences', where: where, whereArgs: args);
   }
+
+  /// 「跳过下一次」：把该任务最近的**未执行**计划标记为 skipped。
+  /// 返回真实被跳过的条数（0 或 1）。
+  ///
+  /// ## 为什么候选集包含 `running`（R94）
+  /// 用户点"跳过下一次"时，那一条可能**正在执行**（`running` 占用态）。
+  /// 旧实现只找 `pending`，于是会跳掉**再下一次**，而"这一次"照响 ——
+  /// 与用户意图相反。现在命中 `running` 时把它置 `skipped`：执行者的终态 CAS
+  /// （`from: {running}`）会因此落空，**不会**把 skipped 覆盖成 done/failed，
+  /// 审计如实保留"用户跳过了"。
+  ///
+  /// ## 为什么包事务（DAT-17）
+  /// 旧实现是 `SELECT ... LIMIT 1` → `markStatus`，两条独立语句、无状态条件。
+  /// 本地点击与远程 `task.skipNext` 并发时两者读到同一行、各自"成功"、都返回 1，
+  /// 实际只跳了一条。放进单事务（`BEGIN IMMEDIATE` 一开始就持写锁）后
+  /// 读-改-写不可能被插入；再叠加 `WHERE status = ?` 条件，返回值即事实。
+  Future<int> skipNextForTask(String taskId) =>
+      _db.db.transaction((txn) async {
+        final rows = await txn.query(
+          'occurrences',
+          where: "task_id = ? AND status IN ('pending', 'running') "
+              'AND fire_at >= ?',
+          whereArgs: [taskId, DateTime.now().millisecondsSinceEpoch],
+          orderBy: 'fire_at ASC',
+          limit: 1,
+        );
+        if (rows.isEmpty) return 0;
+        final id = rows.first['id'] as String;
+        final cur = rows.first['status'] as String;
+        return txn.update(
+          'occurrences',
+          {'status': OccurrenceStatus.skipped.name},
+          where: 'id = ? AND status = ?',
+          whereArgs: [id, cur],
+        );
+      });
 
   /// 清除**不再被授权**的未执行夜间豁免计划（v1.9 起，v79 改为定向清除）。
   ///

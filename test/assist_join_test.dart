@@ -160,9 +160,9 @@ void main() {
       final s = await host.start();
 
       // I/L/O/U/0/1 不在 Crockford 字母表内 —— 归一化会剔除它们，
-      // 于是长度不足 8 → 判非法（而不是静默纠正成别的字符）。
-      expect(await client.join(s.code, 'ABCDEFGI'), isFalse);
-      expect(client.info.error, contains('8 位'));
+      // 于是长度不足 12 → 判非法（而不是静默纠正成别的字符）。
+      expect(await client.join(s.code, 'ABCDEFGHIJKL'), isFalse);
+      expect(client.info.error, contains('12 位'));
       expect(await client.join(s.code, 'ABC'), isFalse);
       expect(joinBus.subscribed, isEmpty);
     });
@@ -227,7 +227,9 @@ void main() {
     test('AJ-22 密码错误 → 表现为"接入超时"（无可区分的失败信号）', () async {
       final s = await host.start();
 
-      final ok = await client.join(s.code, 'ZZZZZZZZ',
+      // R94 / REM-04：密码位数改为 12 —— 错误样本必须**格式合法但值错误**，
+      // 否则只会命中"格式校验失败"这条即时分支，测不到"主题算错 ⇒ 超时"。
+      final ok = await client.join(s.code, 'ZZZZZZZZZZZZ',
           timeout: const Duration(milliseconds: 120));
 
       expect(ok, isFalse);

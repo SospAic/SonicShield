@@ -1267,11 +1267,24 @@ void main() {
 
     /// `CounterPlanService` 替身：真实 DB 仓储 + 真实 prefs 存储，音源池空
     /// （计划自带 TTS 文案，仍能物化出任务）、replan 为 no-op。
+    ///
+    /// ## 为什么写库那几步必须桩掉（SET-07h/s/i 的根因）
+    /// `_genLocalPlan` / `_genAiPlan` 是在 **UI 线程的 onTap** 里发起的，
+    /// 而 `apply` 末段要写 SQLite（R94 起是 `replaceCounterTasks` 的**单事务**，
+    /// 更早是 `deleteCounterTasks` + `upsertMany` 两条独立写）。sqflite 的写
+    /// 需要**真实**事件循环才能推进，而 `testWidgets` 跑在 **FakeAsync** 区里
+    /// ⇒ 写在里面永不完成：`waitForText` 300 轮超时，tearDown 关库后事务的
+    /// 下一步才抛 `database_closed`。这不是 R94 引入的回归 —— 同形的
+    /// SET-07h/s/i 在 R94 之前就存在，且从诞生起就没绿过。
+    ///
+    /// 因此 UI 层只锁「按钮 → 生成 → apply → **prefs 落库** → 回执」这条链；
+    /// 「apply 真的把任务写进 tasks 表」由 `counter_plan_service_test.dart`
+    /// CPSV-01 在真实 DB 上覆盖（纯 `test()`，不在 FakeAsync 里，事务能正常推进）。
     Override counterPlanOverride() =>
         counterPlanServiceProvider.overrideWith((ref) async {
           final prefs = await SharedPreferences.getInstance();
           return CounterPlanService(
-            tasks: TaskRepository(db),
+            tasks: _NoDbTaskRepository(db),
             store: CounterPlanStore(prefs),
             resolveAudioIds: (ids) async => const <String>{},
             replan: () async {},
@@ -2047,3 +2060,30 @@ class _FakeFilePicker extends FilePicker {
 
 PlatformFile _pf(String name, File f) =>
     PlatformFile(name: name, size: f.lengthSync(), path: f.path);
+
+/// 只把「写 tasks 表」这三步变成 no-op 的 [TaskRepository]。
+///
+/// ## 为什么需要它
+/// `CounterPlanService.apply` 末段要写 SQLite，而设置页的生成/导入按钮是在
+/// **UI 线程的 onTap** 里调用它的 —— `testWidgets` 跑在 FakeAsync 区里，
+/// sqflite 的写永远推进不到完成（详见 [counterPlanOverride] 的注释）。
+/// 摘掉写库后，`apply` 的**校验 → 物化 → prefs 落库 → 回执文案**全部仍是
+/// 真实代码路径，UI 层因此仍能锁住"按钮真的把计划应用了"。
+///
+/// 读取路径**不桩**：需要读 tasks 的用例（SET-06 例外清单等）照常查真库。
+class _NoDbTaskRepository extends TaskRepository {
+  _NoDbTaskRepository(super.db);
+
+  @override
+  Future<({int upserted, int removed})> replaceCounterTasks(
+    String planId,
+    Iterable<Task> tasks,
+  ) async =>
+      (upserted: 0, removed: 0);
+
+  @override
+  Future<void> upsertMany(Iterable<Task> items) async {}
+
+  @override
+  Future<int> deleteCounterTasks(String planId) async => 0;
+}

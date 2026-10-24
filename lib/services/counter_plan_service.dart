@@ -50,10 +50,20 @@ class CounterPlanService {
 
   /// 应用（导入 / 启用 / 编辑后重排）一份计划。
   ///
-  /// [replace] = true（默认，用户显式操作）：先按命名空间**整族删除**旧任务，
-  /// 再整体重建。适用于"计划被改动/重新导入" —— 旧参数下多出来的时刻必须消失，
-  /// 否则会变成幽灵计划。删除只作用于 `counter:{planId}:` 前缀，
-  /// 且执行审计另存于 `logs` 表，不受影响。
+  /// [replace] = true（默认，用户显式操作）：把该命名空间的**整族任务原子替换**
+  /// 为本轮物化结果（见 [TaskRepository.replaceCounterTasks]）—— 单事务内
+  /// 「写新集合 → 删掉不在新集合里的旧 id」。
+  ///
+  /// ## 为什么不是"整族删除 + 批量插入"（DAT-04 / RCA-6）
+  /// 旧实现是 `deleteCounterTasks` → `upsertMany` 两条**独立**语句：删除先提交，
+  /// 插入若失败（锁超时/磁盘满/进程被杀），**旧计划已被删光、新计划一条没写**，
+  /// 用户看到"应用失败"但反击计划已整体消失。而 `occurrences.task_id` 是
+  /// `ON DELETE CASCADE`：整族 DELETE 连**已执行的历史**一起抹掉，
+  /// `exec_logs` 里却还留着执行记录 ⇒ 审计断裂、冷却基准归零。
+  ///
+  /// 现在只删**真正消失**的那些 id：仍在新计划里的任务原地保留，
+  /// 历史与冷却基准都不动；参数变小后多出来的时刻才会被删（那是对的，
+  /// 否则会变成幽灵计划）。
   ///
   /// [replace] = false（自动续算）：只 `upsertMany`，**不删除** ——
   /// id 由「日期 + 时段 + 序号」决定，重算是幂等的：已执行的历史任务原样保留，
@@ -93,8 +103,16 @@ class CounterPlanService {
       return CounterApplyResult.fail(why);
     }
 
-    if (replace) await _tasks.deleteCounterTasks(id);
-    await _tasks.upsertMany(tasks);
+    if (replace) {
+      await _tasks.replaceCounterTasks(id, tasks);
+    } else {
+      await _tasks.upsertMany(tasks);
+    }
+    // ⚠️ prefs 与 SQLite 无法共享事务（DAT-18）：DB 已提交、prefs 写失败时，
+    // 库里有任务而 `enabled` 仍为旧值 —— 下一次 `refreshIfNeeded`/`disable`
+    // 仍按**同一个 planId** 找得到这批任务（planId 没变就删得掉），
+    // 因此不会产生"删不掉的孤儿"；这里把 prefs 写放在 DB 之后是刻意的：
+    // 反过来会得到"UI 显示已启用、实际零任务"，那更糟。
     await _store.savePlan(plan, id: id, enabled: true);
     await _replan();
     final scope = plan.isRecurring
@@ -108,6 +126,11 @@ class CounterPlanService {
   }
 
   /// 下线：清空该计划的**全部**计划任务并置为未启用（保留计划本体以便恢复）。
+  ///
+  /// 顺序刻意是"先删任务、再置 false"：反过来的话，`setEnabled(false)` 成功而
+  /// 删除失败会留下"UI 说已下线、任务照响"的状态（护栏失效方向）。
+  /// 当前顺序的最坏情况是"任务已删、`enabled` 仍 true"，下一次
+  /// `refreshIfNeeded` 会按同一 planId 重新排上 —— 可自愈，且不会静默违规。
   Future<CounterApplyResult> disable({String? planId}) async {
     final id = CounterPlanMaterializer.safePlanId(planId ?? _store.planId);
     final n = await _tasks.deleteCounterTasks(id);

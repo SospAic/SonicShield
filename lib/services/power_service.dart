@@ -63,14 +63,15 @@ class PowerService {
   ///
   /// 这两档里 JobScheduler/AlarmManager 任务可被推迟数小时；app 内无法
   /// 自提权（`am set-standby-bucket` 要 shell 权限），只能提示用户去
-  /// 厂商设置页。`unknown` 返回 **false** —— 读不到 ≠ 受限，不能拿猜测
-  /// 去骚扰用户（BUG-041 同款纪律）。
+  /// 厂商设置页。`unknown` / `unauthorized` / `unsupported` 返回 **false**
+  /// —— 读不到 ≠ 受限，不能拿猜测去骚扰用户（BUG-041 同款纪律）。
   Future<bool> standbyRestricted() async {
     final b = await standbyBucket();
     return b == 'rare' || b == 'restricted';
   }
 
-  /// 面向 UI 的桶状态人话（无法判定给 null，让调用方决定不显示）。
+  /// 面向 UI 的桶状态人话（无法判定 / 未授权 / 不支持都给 null，
+  /// 让调用方决定不显示）。
   static String? standbyBucketLabel(String bucket) => switch (bucket) {
         'active' => '活跃（不受省电策略限制）',
         'working_set' => '常用（限制很轻）',
@@ -80,3 +81,15 @@ class PowerService {
         _ => null,
       };
 }
+
+/// NAT-07：把电源模式同步给**原生**唤醒锁分级策略。
+///
+/// 调用方 = `BackgroundServiceManager.setPowerMode`（用户切档的唯一漏斗，
+/// 设置页写 prefs 后走它）。
+///
+/// 为什么必须直连原生而不是只 invoke 引擎：唤醒锁是**进程级**资源
+/// （`NativeBridgePlugin` 的 companion 单例），与后台引擎是否在跑无关 ——
+/// 引擎没起来时 invoke 无人接收，策略会停在上一档。切到 balanced/saver 时
+/// 原生会**立即释放**上一档（performance）留下的常驻锁。
+Future<void> syncNativeWakeLockPolicy(PowerMode mode) =>
+    NativeBridge.setPowerMode(mode.name);

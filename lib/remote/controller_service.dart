@@ -59,6 +59,15 @@ class RcControllerService {
   Future<bool> sendStatusGet(PairedEndpoint endpoint, RemoteStore store) =>
       _ep.sendTo(endpoint, RcMessage.now(RcCmd.statusGet), store);
 
+  /// 停止端点全部进行中的远程播放（R94 / REM-07）。
+  ///
+  /// 与 [sendSoundPlay] 成对：远程发起的持续出声（尤其 `loop:true`）必须
+  /// 有对应的远程叫停通道，否则"任何时刻都能停"只对振动成立。
+  /// 端点回 `rc.ack {ok, data:'stopped=N'}` —— N 是**真实**停止条数，
+  /// 不把"0 条"包装成成功（ARCH-12 的同一纪律）。
+  Future<bool> sendSoundStop(PairedEndpoint endpoint, RemoteStore store) =>
+      _ep.sendTo(endpoint, RcMessage.now(RcCmd.soundStop), store);
+
   Future<bool> sendTaskToggle(PairedEndpoint endpoint, RemoteStore store,
           String taskId, bool enabled) =>
       _ep.sendTo(

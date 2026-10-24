@@ -19,6 +19,7 @@ import 'package:sonic_shield/domain/scheduling/schedule_engine.dart';
 import 'package:sonic_shield/services/export_crypto.dart';
 
 import 'perf_bench.dart';
+import 'r94_quality_perf_guard.dart';
 
 /// 第二轮性能压测（v1.4–v2.0 新模块，docs/17）。
 /// 覆盖：条件层 / 扫码配对解析 / 加密备份 / 统计聚合 / 指令组序列 / 内存基准。
@@ -29,10 +30,38 @@ import 'perf_bench.dart';
 /// 已统一用 [benchMs] / [benchMsAsync]（预热 + 取最小值）对准算法成本。
 /// **定位：JIT 回归护栏**；**绝对验收在 AOT**：
 /// `integration_test/perf_nfr_test.dart`（`flutter drive --profile`）。
+///
+/// ## R94 / QUA-02 整改（WT-02 假红的根因修复）
+///
+/// 此前 WT-01/02/03、GT-01/02/03、GT-06 共 7 条仍是**裸 `Stopwatch` 单次
+/// 采样**（min-of-1），与本文件头的约定自相矛盾。后果实测发生过：
+/// `_pt/r93gate.log` 第 31-36 行 WT-02 采到 321ms（预算 300ms）判红，
+/// 第 52-53 行同轮重跑 24/24 全绿 —— 红的是测量不是代码。
+/// 现全部改为 [benchGuarded] / [benchGuardedAsync]：
+/// **预热 + min-of-N + 负载定性**（样本离散度超限 ⇒ 跳过时间断言并打印，
+/// BLOCKED 语义）。**阈值一律不放水**（WT-02 仍 ≤300ms）—— 改的是判定
+/// 稳健性，不是松紧。
+/// 平稳窗口 ⇒ 断言最优值 ≤ 预算；负载污染 ⇒ 打印并跳过（BLOCKED 语义）。
+///
+/// R94 / QUA-02：把"loaded 就跳过"的判据收敛成一处，避免每条用例各写
+/// 一遍 if/else 时漏掉 print（静默跳过 = 假绿，比假红更坏）。
+void _expectGuarded(String caseId, GuardedBench b, int budgetMs,
+    {String? reason}) {
+  if (b.loaded) {
+    // ignore: avoid_print
+    print(loadedSkipReason(caseId, b));
+    return;
+  }
+  expect(b.bestMs, lessThanOrEqualTo(budgetMs),
+      reason: '$caseId 最优 ${b.bestMs.toStringAsFixed(1)}ms'
+          '（预算 ${budgetMs}ms；样本 '
+          '${b.sorted.map((e) => e.toStringAsFixed(1)).join(', ')}ms）'
+          '${reason == null ? '' : '；$reason'}');
+}
+
 void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
-
   group('WT-白盒 · 条件层与扫码配对', () {
     const cond = TaskCondition(
       requireCharging: true,
@@ -42,42 +71,67 @@ void main() {
     );
     final now = DateTime(2026, 9, 15, 12); // 12:00，在窗口内
 
+    // R94 / QUA-02：原为裸 Stopwatch 单次采样。改为预热 + min-of-7 +
+    // 负载定性（见 r94_quality_perf_guard.dart）；阈值 800ms 不放水。
     test('WT-01 TaskCondition.evaluate 10 万次 ≤ 800ms', () {
-      final sw = Stopwatch()..start();
-      var pass = 0;
-      for (var i = 0; i < 100000; i++) {
-        if (cond.evaluate(charging: true, batteryLevel: 80, now: now)) {
-          pass++;
+      final b = benchGuarded(() {
+        var pass = 0;
+        for (var i = 0; i < 100000; i++) {
+          if (cond.evaluate(charging: true, batteryLevel: 80, now: now)) {
+            pass++;
+          }
         }
+        expect(pass, 100000); // 每一轮都校验，不是只校验最后一轮
+      });
+      if (b.loaded) {
+        // ignore: avoid_print
+        print(loadedSkipReason('WT-01', b));
+      } else {
+        expect(b.bestMs, lessThanOrEqualTo(800),
+            reason: '条件评估 10 万次最优 ${b.bestMs.toStringAsFixed(1)}ms');
       }
-      sw.stop();
-      expect(pass, 100000);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(800),
-          reason: '条件评估 10 万次耗时 ${sw.elapsedMilliseconds}ms');
     });
 
+    // R94 / QUA-02：WT-02 就是 R93 门禁假红的那条（`_pt/r93gate.log`
+    // 第 31-36 行 321ms 判红 vs 第 52-53 行重跑全绿）。改为 min-of-7 +
+    // 负载定性后，单次墙钟抖动不再能判红；**预算仍 ≤300ms**。
     test('WT-02 parseUri 1 万次（有效/无效混合）≤ 300ms', () {
       const valid =
           'sonicshield://pair/0123456789abcdef/%E5%A3%B0%E7%9B%BE-A1/AB2CD5EF';
-      final sw = Stopwatch()..start();
       var ok = 0;
-      for (var i = 0; i < 10000; i++) {
-        if (PairQrProtocol.parseUri(valid) != null) ok++;
-        if (PairQrProtocol.parseUri('sonicshield://pair/bad') == null) ok++;
+      final b = benchGuarded(() {
+        ok = 0;
+        for (var i = 0; i < 10000; i++) {
+          if (PairQrProtocol.parseUri(valid) != null) ok++;
+          if (PairQrProtocol.parseUri('sonicshield://pair/bad') == null) ok++;
+        }
+        expect(ok, 20000); // 每轮两断言均计入
+      });
+      if (b.loaded) {
+        // ignore: avoid_print
+        print(loadedSkipReason('WT-02', b));
+      } else {
+        expect(b.bestMs, lessThanOrEqualTo(300),
+            reason: 'parseUri 1 万次最优 ${b.bestMs.toStringAsFixed(1)}ms'
+                '（预算 300ms 不放水；样本 ${b.sorted.map((e) => e.toStringAsFixed(1)).join(', ')}ms）');
       }
-      sw.stop();
-      expect(ok, 20000); // 每轮两断言均计入
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(300));
     });
 
     test('WT-03 配对码/设备 ID 生成各 1 万次 ≤ 800ms', () {
-      final sw = Stopwatch()..start();
-      for (var i = 0; i < 10000; i++) {
-        expect(RcCodec.generatePairingCode().replaceAll('-', '').length, 8);
-        expect(RcCodec.generateDeviceId().length, 16);
+      final b = benchGuarded(() {
+        for (var i = 0; i < 10000; i++) {
+          expect(RcCodec.generatePairingCode().replaceAll('-', '').length, 8);
+          expect(RcCodec.generateDeviceId().length, 16);
+        }
+      });
+      if (b.loaded) {
+        // ignore: avoid_print
+        print(loadedSkipReason('WT-03', b));
+      } else {
+        expect(b.bestMs, lessThanOrEqualTo(800),
+            reason: '配对码/设备 ID 生成各 1 万次最优 '
+                '${b.bestMs.toStringAsFixed(1)}ms');
       }
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(800));
     });
   });
 
@@ -114,37 +168,35 @@ void main() {
       ],
     });
 
+    // R94 / QUA-02：三条同工作量用例（120k PBKDF2 + 50KB AES-GCM）共用
+    // kdfBudgetMs 预算。原为裸 Stopwatch 单次采样；改为预热 + min-of-7 +
+    // 负载定性。**预算 4000ms 不放水**（≈ 实测基线 1.05–1.13s × ~3.5）。
     test('GT-01 加密 50KB 备份（含 KDF 12 万次，纯 Dart 实现）≤ 4s', () async {
-      final sw = Stopwatch()..start();
+      final b = await benchGuardedAsync(
+          () async => ExportCrypto.encrypt(bigPayload, 'stress-pass'));
       final enc = await ExportCrypto.encrypt(bigPayload, 'stress-pass');
-      sw.stop();
       expect(enc.length, greaterThan(40000));
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
-          reason: 'GT-01 加密实测 ${sw.elapsedMilliseconds}ms'
-              '（预算 ${kdfBudgetMs}ms = 实测 ≈1.1s × ~3.5）');
+      _expectGuarded('GT-01', b, kdfBudgetMs);
     });
 
     test('GT-02 解密 50KB 备份（含 KDF 12 万次，纯 Dart 实现）≤ 4s', () async {
       final enc = await ExportCrypto.encrypt(bigPayload, 'stress-pass');
-      final sw = Stopwatch()..start();
+      final b = await benchGuardedAsync(
+          () async => ExportCrypto.decrypt(enc, 'stress-pass'));
       final back = await ExportCrypto.decrypt(enc, 'stress-pass');
-      sw.stop();
       expect(back, bigPayload);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
-          reason: 'GT-02 解密实测 ${sw.elapsedMilliseconds}ms'
-              '（预算 ${kdfBudgetMs}ms = 实测 ≈1.05s × ~3.8）');
+      _expectGuarded('GT-02', b, kdfBudgetMs);
     });
 
     test('GT-03 错误密码解密（含 KDF+失败）≤ 4s', () async {
       final enc = await ExportCrypto.encrypt(bigPayload, 'right');
-      final sw = Stopwatch()..start();
+      final b = await benchGuardedAsync(
+          () async => ExportCrypto.decrypt(enc, 'wrong'));
       final back = await ExportCrypto.decrypt(enc, 'wrong');
-      sw.stop();
       expect(back, isNull);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(kdfBudgetMs),
-          reason: 'GT-03 错密码解密实测 ${sw.elapsedMilliseconds}ms'
-              '（预算 ${kdfBudgetMs}ms —— 与 GT-01/02 **同一份工作量**，'
-              '故必须同一预算；曾单独写 1500ms，只剩 1.33× 余量）');
+      _expectGuarded('GT-03', b, kdfBudgetMs,
+          reason: '与 GT-01/02 同一份工作量，故必须同一预算；'
+              '曾单独写 1500ms，只剩 1.33× 余量');
     });
   });
 
@@ -194,6 +246,8 @@ void main() {
   });
 
   group('GT-灰盒 · 指令组序列与 outbox', () {
+    // R94 / QUA-02：原为裸 Stopwatch 单次采样（GT-06 是 WT 组之外
+    // 余量最薄的一条）。改为预热 + min-of-7 + 负载定性；预算 200ms 不放水。
     test('GT-06 50 步指令组 toPayload × 100 ≤ 200ms', () {
       final steps = [
         for (var i = 0; i < 50; i++)
@@ -205,19 +259,19 @@ void main() {
                 })
               : const RcStep(RcStepKind.delay, {'seconds': 30}),
       ];
-      final sw = Stopwatch()..start();
-      for (var i = 0; i < 100; i++) {
-        final payload = RcScript(
-          scriptId: 's$i',
-          name: '压测',
-          fromName: 'A',
-          sentAt: DateTime.now().millisecondsSinceEpoch,
-          steps: steps,
-        ).toJson();
-        expect(payload['steps'], isNotNull);
-      }
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(200));
+      final b = benchGuarded(() {
+        for (var i = 0; i < 100; i++) {
+          final payload = RcScript(
+            scriptId: 's$i',
+            name: '压测',
+            fromName: 'A',
+            sentAt: DateTime.now().millisecondsSinceEpoch,
+            steps: steps,
+          ).toJson();
+          expect(payload['steps'], isNotNull);
+        }
+      });
+      _expectGuarded('GT-06', b, 200);
     });
 
     // 第十七轮修复（BUG-053）：原实现用**裸 Stopwatch 单次采样**，而本文件

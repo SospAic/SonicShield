@@ -21,7 +21,7 @@ import 'support/source_text.dart';
 /// |---|---|---|
 /// | RPE-01 | `pausedAt` 读 `runMasterMode` → `RunPause.paused`（含覆盖表） | 模式改了不生效 / 与反击计划"休息日认定"分叉 |
 /// | RPE-02 | `admitExecution` **最先**拦截，且放行 `forceRun` 例外 | 声音/远程立即执行入口绕过总开关 |
-/// | RPE-03 | `executeDue` 轮首算一次 + 落 `skipped`/`runPause` 审计 | 到期计划照响；或"没响"却无任何痕迹 |
+/// | RPE-03 | `executeDue` 轮首算一次 + 经 `admit` 拒绝 ⇒ 落 `skipped`/`runPause` 审计且不再执行 | 到期计划照响；或"没响"却无任何痕迹 |
 /// | RPE-04 | `replan` 关主开关时保留 `quietExempt == true` 例外 | 双向覆盖被清空（v79 语义回退） |
 ///
 /// 与项目铁律一致：判据抽成顶层纯函数，每条都配**反面样本**（`RPE-90*`），
@@ -103,6 +103,18 @@ void main() {
               ' ScheduleEngine(allowQuietExempt: allowExempt); }'),
           isNotNull);
     });
+
+    test('90e 假解耦（只把 continue 搬走、没接 admit→discard）→ 判红', () {
+      // 直接在**真实源码**上做变异：删掉 executeBatch 里那句"丢弃并留痕"。
+      // 用真实源码而不是手写片段，是为了证明这条守卫钉的是**当前代码**，
+      // 而不是钉一个我自己编出来的形状。
+      final mutated = src.replaceFirst(
+          'discardWithAudit(o, denied.action, denied.message);', '// dropped');
+      expect(mutated, isNot(src), reason: '锚点失效 ⇒ 本样本空转，必须同步锚点');
+      expect(judgeExecuteDueGate(mutated), isNotNull,
+          reason: '★ 抽出去的是循环，不是语义：拒绝理由没有变成'
+              '「落 skipped + 不执行」就是假解耦');
+    });
   });
 }
 
@@ -139,6 +151,22 @@ String? judgeAdmitGate(String src) {
 
 /// `executeDue` 必须轮首算一次 `pausedNow`，暂停时置 `skipped` + 写 `runPause`
 /// 审计并 `continue`（不得继续执行）。
+///
+/// ## R94 / SCH-01 起 `continue` 换了归属（判定器同步收紧，不是放宽）
+/// 批次循环搬到了顶层 [executeBatch]（判定与执行解耦，可被行为测试覆盖），
+/// `executeDue` 只负责**产出**拒绝理由：`admit` 返回
+/// `(action: 'runPause', message: …)`，由 `executeBatch` 统一
+/// `discardWithAudit`（CAS 落 `skipped` + 审计）后 `continue`。
+///
+/// 所以判据拆成两段、**两段都必须成立**：
+/// 1. `executeDue` 体内：`pausedNow` 轮首算一次、`!task.forceRun` 例外、
+///    `runPause` 拒绝理由、`discard:`（CAS 落 skipped 的回调确实接上了）；
+/// 2. 要么 `executeDue` 自己 `continue`，要么 `executeBatch` 里存在
+///    「`admit` → 非 null → `discardWithAudit` → `continue`」这条完整链路。
+///
+/// 任何一段缺失都判红 —— 反面样本 `RPE-90c` 仍然红（缺 forceRun / 缺
+/// skipped+continue 两种坏形状），另有 `RPE-90e` 专门证明"只把 `continue`
+/// 挪走、却没接上 `admit → discard`"这种**假解耦**也会被判红。
 String? judgeExecuteDueGate(String src) {
   final b = methodBody(src, 'Future<void> executeDue()');
   if (!b.contains('final pausedNow = pausedAt(now)')) {
@@ -147,13 +175,32 @@ String? judgeExecuteDueGate(String src) {
   if (!b.contains('if (pausedNow && !task.forceRun)')) {
     return 'executeDue 暂停门缺 forceRun 例外（或写法已变）';
   }
-  if (!b.contains('OccurrenceStatus.skipped')) {
-    return 'executeDue 暂停未置 skipped';
-  }
   if (!b.contains("action: 'runPause'")) {
     return 'executeDue 暂停未写 runPause 审计';
   }
-  if (!b.contains('continue;')) return 'executeDue 暂停后未 continue（会继续执行）';
+  // skipped 的落库点：R94 前是 `OccurrenceStatus.skipped` 直写，
+  // R94 起是 `discard:` 的 CAS 回调（仍必须是 pending→skipped）。
+  final writesSkipped = b.contains('OccurrenceStatus.skipped');
+  final wiredDiscard = b.contains('discard:') &&
+      b.contains('OccurrenceStatus.skipped');
+  if (!writesSkipped) return 'executeDue 暂停未置 skipped';
+  if (!wiredDiscard) return 'executeDue 未把 discard（pending→skipped CAS）接上';
+
+  var continued = b.contains('continue;');
+  if (!continued) {
+    // `continue` 在共享骨架里：必须能看到「admit 拒绝 → 丢弃 → continue」。
+    if (!src.contains('Future<void> executeBatch({')) {
+      return 'executeDue 暂停后未 continue（会继续执行）';
+    }
+    final batch = methodBody(src, 'Future<void> executeBatch({');
+    continued = batch.contains('final denied = await admit?.call(task, o);') &&
+        batch.contains('discardWithAudit(o, denied.action, denied.message)') &&
+        batch.contains('continue;');
+    if (!continued) {
+      return 'executeDue 的拒绝理由没有在 executeBatch 里变成'
+          '「落 skipped + 不执行」（admit→discard→continue 链路断裂）';
+    }
+  }
   return null;
 }
 

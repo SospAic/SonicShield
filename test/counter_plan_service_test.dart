@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:sonic_shield/data/repositories/counter_plan_store.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/action.dart';
@@ -119,7 +120,10 @@ void main() {
       expect(store.enabled, isTrue);
       expect(store.loadPlan(), isNotNull);
       expect(tasks.replanCount!(), 1);
-      expect(tasks.deletedPlanIds, ['local']);
+      // R94：`apply(replace:true)` 走的是**原子整族替换**（DAT-04），
+      // 不再先 `deleteCounterTasks` 再 `upsertMany`（那会在中途失败时丢光旧计划）。
+      expect(tasks.replacedPlanIds, ['local']);
+      expect(tasks.deletedPlanIds, isEmpty);
 
       final fires = tasks.upserted.toList();
       for (final t in fires) {
@@ -164,6 +168,7 @@ void main() {
       expect(r.message, contains('schema'));
       expect(tasks.upserted, isEmpty);
       expect(tasks.deletedPlanIds, isEmpty);
+      expect(tasks.replacedPlanIds, isEmpty);
       expect(store.loadPlan(), isNull);
       expect(tasks.replanCount!(), 0);
     });
@@ -275,6 +280,7 @@ void main() {
       expect(r.message, contains('尚无反击计划'));
       expect(tasks.upserted, isEmpty);
       expect(tasks.deletedPlanIds, isEmpty);
+      expect(tasks.replacedPlanIds, isEmpty);
     });
 
     test('CPSV-11 默认通路：省略 now 仍可用（有音源 ⇒ 只出播放动作）',
@@ -436,12 +442,23 @@ void main() {
 
 /// `TaskRepository` 的替身：只实现反击计划相关的读/删/批写，
 /// 其余成员（本项目其它功能用）无需在此实现。
+///
+/// ## 为什么 `inTransaction` 交给 [_FakeTxn]（R94 / F3c）
+/// 契约是"把共享事务句柄交给 body"。替身没有真实 SQL 执行器，且
+/// **不能**让替身自己 `implements DatabaseExecutor` —— `TaskRepository.delete(String)`
+/// 与 `DatabaseExecutor.delete(String, {where, whereArgs})` 签名不兼容，
+/// 同一个类无法同时满足两者。因此 `inTransaction` 如实 `body(...)`（body 一定被调用），
+/// 但传进去的是 [_FakeTxn]：任何**真正的** SQL 调用都会**显式失败**，
+/// 逼需要事务语义的用例改用内存库 + 真实 `TaskRepository`
+/// （见 `test/r94_data_fixes_test.dart` 的 DAT-04）。
 class _FakeTasks implements TaskRepository {
   _FakeTasks({List<String> existing = const []})
       : existingIds = [...existing];
 
   final List<Task> upserted = [];
   final List<String> deletedPlanIds = [];
+  final List<String> replacedPlanIds = [];
+  final List<String> deletedIds = [];
   final List<String> existingIds;
   int Function()? replanCount;
 
@@ -460,6 +477,43 @@ class _FakeTasks implements TaskRepository {
     return n;
   }
 
+  /// 真实语义：写新集合（**全程无删除**）→ 删掉不在新集合里的旧 id。
+  ///
+  /// 返回 `(upserted, removed)`，与 `TaskRepository.replaceCounterTasks` 同口径；
+  /// 命名空间外的 id 一律忽略（"绝不触碰手动任务"）。
+  @override
+  Future<({int upserted, int removed})> replaceCounterTasks(
+      String planId, Iterable<Task> tasks) async {
+    replacedPlanIds.add(planId);
+    final p = CounterPlanMaterializer.taskIdPrefix(planId);
+    final list = tasks.where((t) => t.id.startsWith(p)).toList();
+    upserted.addAll(list);
+    existingIds.addAll(list.map((e) => e.id));
+    final keep = list.map((e) => e.id).toSet();
+    final stale = <String>{
+      for (final id in existingIds)
+        if (id.startsWith(p) && !keep.contains(id)) id,
+    };
+    existingIds.removeWhere(stale.contains);
+    return (upserted: list.length, removed: stale.length);
+  }
+
+  @override
+  Future<int> deleteMany(Iterable<String> ids) async {
+    final list = ids.where((e) => e.isNotEmpty).toList();
+    deletedIds.addAll(list);
+    var n = 0;
+    for (final id in list) {
+      if (existingIds.remove(id)) n++;
+    }
+    return n;
+  }
+
+  /// 替身即事务句柄：body 一定被调用（见类注释）。
+  @override
+  Future<T> inTransaction<T>(Future<T> Function(DatabaseExecutor txn) body) =>
+      body(_FakeTxn());
+
   @override
   Future<List<String>> counterTaskIds(String planId) async {
     final p = CounterPlanMaterializer.taskIdPrefix(planId);
@@ -473,7 +527,11 @@ class _FakeTasks implements TaskRepository {
   }) async => const [];
 
   @override
-  Future<Task?> get(String id) async => null;
+  Future<Task?> get(
+    String id, {
+    void Function(String id, Object error)? onRowError,
+  }) async =>
+      null;
 
   @override
   Future<void> upsert(Task t) async {}
@@ -487,4 +545,15 @@ class _FakeTasks implements TaskRepository {
   // BUG-148 新增的仓储方法：本替身只服务反击计划用例，无需真实语义。
   @override
   Future<int> removeAssetRef(String assetId) async => 0;
+}
+
+/// 事务句柄替身：**不模拟任何 SQL**。
+///
+/// 所有 `DatabaseExecutor` 成员都落到 [noSuchMethod] 并**抛错** ——
+/// 静默返回 null 会让"其实没写库"的用例伪装成通过。
+class _FakeTxn implements DatabaseExecutor {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError(
+      '_FakeTxn 不提供 SQL（${invocation.memberName}）：'
+      '需要事务语义的用例请改用内存库 + 真实 TaskRepository');
 }

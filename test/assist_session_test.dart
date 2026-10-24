@@ -25,18 +25,20 @@ void main() {
       }
     });
 
-    test('AS-02 访问密码为 8 位且全在 Crockford 字母表内', () {
+    test('AS-02 访问密码为 12 位且全在 Crockford 字母表内', () {
       const alphabet = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
       final seen = <String>{};
       for (var i = 0; i < 50; i++) {
         final pw = RcAssist.generatePassword();
-        expect(pw.length, 8);
+        // R94 / REM-04：8 位（≈40 bit）→ 12 位（≈60 bit）。会合主题是
+        // 密码的函数且对 broker 可见 ⇒ 40 bit 在 GPU 上是分钟级离线爆破。
+        expect(pw.length, 12);
         expect(pw.split('').every(alphabet.contains), isTrue,
             reason: '含字母表外字符：$pw');
         expect(RcAssist.isValidPassword(pw), isTrue);
         seen.add(pw);
       }
-      // 50 次生成不应大量碰撞（40bit 熵，碰撞概率可忽略）
+      // 50 次生成不应大量碰撞（60bit 熵，碰撞概率可忽略）
       expect(seen.length, greaterThan(45), reason: '随机性不足');
     });
 

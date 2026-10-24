@@ -1,8 +1,23 @@
+/// ## 位置说明（R94 / ARCH-10：从 `lib/features/guard/` 迁入本目录）
+///
+/// 本文件的内容（`GuardOrchestration` / `resolveGuardPlan` / `guardOrchestrationKey`）
+/// **完全是领域逻辑**（纯数据 + 纯决策，无任何 Flutter widget 依赖），
+/// 却被按"功能页面"归档在 `lib/features/guard/` 下。后果是
+/// `lib/services/background_engine.dart`（最底层运行时）必须
+/// `import '../features/guard/guard_orchestration.dart'` —— 全仓唯一的
+/// `services → features` 分层倒置边（A1 审计 ARCH-10）。
+///
+/// R94 按审计建议把实现迁到 `lib/domain/scheduling/`（领域层）。
+/// 第九十三轮收口：`background_engine.dart` 早已直连本文件，三个测试文件的
+/// import 也已改直连 ⇒ 兼容层 `lib/features/guard/guard_orchestration.dart`
+/// （纯 `export`、零可执行语句）已删除 —— **分层倒置彻底修复**。
+/// 若未来有人再从 `features/` 引用本文件，`dart analyze` 的
+/// `depend_on_referenced_packages` 与分层审查会直接抓到。
+///
 /// 守卫的声音编排（v1.10）。
 ///
 /// ## 为什么**不是**一套新的编排模型
-///
-/// 用户需求：「守卫的声音支持选定**多个音频、动作**，并支持**随机播放**、
+////// 用户需求：「守卫的声音支持选定**多个音频、动作**，并支持**随机播放**、
 /// **立即或者延时播放**，以及软件中现有的功能」。逐条对照既有能力
 /// （`docs/19-多条件与随机编排设计.md` §1/§3/§4/§7）：
 ///

@@ -138,6 +138,11 @@ void main() {
 
       // 计划：10 天前 done（应删）、10 天前 pending（必须留 —— 可能正待补执行）、
       // 3 天前 done（应留，未过期）。
+      // ⚠️ pending 这条的 fire_at 必须与 done 那条**错开**：R94/DAT-13 起
+      // `commitAll` 在 Dart 侧按 (taskId, fireAtMs) 去重（schema 上只有 id
+      // 主键，没有 UNIQUE(task_id, fire_at)，去重只能上移到 Dart），同刻
+      // 两条会被静默跳过第二条。夹具若给同一时刻，o-old-pending 根本没
+      // 插进库，"pending 永不删"就 asserted 一个不存在的行。
       await occ.commitAll([
         PlannedOccurrence(
           id: 'o-old-done',
@@ -150,7 +155,7 @@ void main() {
           id: 'o-old-pending',
           taskId: 't1',
           fireAt: DateTime.fromMillisecondsSinceEpoch(
-              msAgo(const Duration(days: 10))),
+              msAgo(const Duration(days: 10)) + 1000),
           status: OccurrenceStatus.pending,
         ),
         PlannedOccurrence(

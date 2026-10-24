@@ -45,19 +45,54 @@ class TaskRepository {
     return out;
   }
 
-  Future<Task?> get(String id) async {
+  /// 按 id 取一条任务。
+  ///
+  /// ## DAT-02：坏行**不得**炸穿调用方
+  /// [listAll] 早就做了行级兜底（R90-09），但 `get()` 没有。而
+  /// `BackgroundEngine.executeDue` 的循环里是裸 `await tasksRepo.get(o.taskId)`：
+  /// 一条坏行（未知 `trigger_type` / 坏 `trigger_json` / 缺必填键）就会让
+  /// **整轮到期计划全部作废**（异常穿出 `for`，被 `stepGuarded` 吞成一条审计），
+  /// 下一 tick 同一顺序再次抛 —— 用户感知为"所有任务突然都不响"。
+  ///
+  /// 现在：解析失败 → 回调 [onRowError]（调用方留痕）→ 返回 null。
+  /// 调用方拿到 null 的语义是"这条任务不可用"，与"任务不存在"同路处理
+  /// （跳过本条的 occurrence），**不再**影响同轮其它任务。
+  Future<Task?> get(
+    String id, {
+    void Function(String id, Object error)? onRowError,
+  }) async {
     final rows =
         await _db.db.query('tasks', where: 'id = ?', whereArgs: [id], limit: 1);
-    return rows.isEmpty ? null : Task.fromRow(rows.first);
+    if (rows.isEmpty) return null;
+    try {
+      return Task.fromRow(rows.first);
+    } on Object catch (e) {
+      onRowError?.call(id, e);
+      return null;
+    }
   }
 
-  /// 任务行映射（`upsert` / `upsertMany` 共用，避免两条路径漂移）。
-  static Map<String, Object?> _row(Task t) => {
-        ...t.toRow(),
-        'trigger_json': jsonEncode(t.trigger.toJson()),
-        'action_json': jsonEncode(t.action.toJson()),
-        'asset_ids': jsonEncode(t.assetIds),
-      };
+  /// 在**同一个事务**里执行 [body]（DAT-04 / DAT-15 的共享事务句柄）。
+  ///
+  /// ## 为什么必须由仓储层暴露
+  /// 此前所有"跨仓储多步写"（反击计划替换、批量删除、远程 `task.upsert`）
+  /// 都没有共享事务，因为服务层拿不到 `Database`。sqflite 的
+  /// `db.transaction` 是 `BEGIN IMMEDIATE`（开事务即持写锁），
+  /// 把多步写放进来后，中途任何一步抛错都会**整体回滚**，
+  /// 不会留下"旧数据已删、新数据没写"的空窗。
+  ///
+  /// ⚠️ [body] 里**不要**再调 `_db.db.transaction(...)`（sqflite 不支持嵌套事务，
+  /// 会抛 "cannot start a transaction within a transaction"）；
+  /// 需要多步时在同一个 `txn` 上继续写。
+  Future<T> inTransaction<T>(Future<T> Function(DatabaseExecutor txn) body) =>
+      _db.db.transaction(body);
+
+  /// 任务行映射（`upsert` / `upsertMany` / 批量替换共用，避免多条路径漂移）。
+  ///
+  /// DAT-12 之后 [Task.toRow] 自己就产出可绑定的行（三列 JSON 已编码），
+  /// 这里**不再**覆盖 —— 保留这个薄封装是为了让"行映射只有一处"这件事
+  /// 在调用点仍然可读，而不是到处散落 `t.toRow()`。
+  static Map<String, Object?> _row(Task t) => t.toRow();
 
   /// 写入/更新一条任务（**不使用 REPLACE**）。
   ///
@@ -131,7 +166,36 @@ class TaskRepository {
   Future<void> delete(String id) =>
       _db.db.delete('tasks', where: 'id = ?', whereArgs: [id]);
 
-  /// 从所有任务的 `asset_ids` 里摘掉 [assetId]（BUG-148），返回被改写的任务数。
+  /// **批量**删除（单事务，DAT-15）。
+  ///
+  /// ## 为什么需要它
+  /// 任务列表的"整包删除 / 多选删除 / 单条菜单删除"此前都是 Dart 侧
+  /// `for (final id in ids) { await repo.delete(id); await occ.deleteForTask(id); }`
+  /// —— 中途某条失败就跳出，前面的已删、后面的还在，而提示语只说
+  /// "批量删除失败：$e"，不告诉用户到底删了几条。用户看到"失败"却少了任务，
+  /// 很容易误判数据状态。
+  ///
+  /// 单事务 `DELETE FROM tasks WHERE id IN (...)`：要么全删、要么全不删。
+  /// 按 400 个一组切块，避开 `SQLITE_MAX_VARIABLE_NUMBER`（旧版 999）。
+  /// `occurrences` 由外键 `ON DELETE CASCADE` 一并清理，调用方**不需要**
+  /// 再逐条 `deleteForTask`（那一步本来也是冗余的）。
+  Future<int> deleteMany(Iterable<String> ids) async {
+    final list = ids.where((e) => e.isNotEmpty).toList();
+    if (list.isEmpty) return 0;
+    return _db.db.transaction((txn) async {
+      var n = 0;
+      for (var i = 0; i < list.length; i += 400) {
+        final end = i + 400 < list.length ? i + 400 : list.length;
+        final chunk = list.sublist(i, end);
+        final ph = List.filled(chunk.length, '?').join(',');
+        n += await txn.delete('tasks', where: 'id IN ($ph)', whereArgs: chunk);
+      }
+      return n;
+    });
+  }
+
+  /// 从所有任务的 `asset_ids` 里摘掉 [assetId]（BUG-148 / DAT-06），
+  /// 返回被改写的任务数。
   ///
   /// ## 为什么必须做
   /// 音源被删除后，任务的 `asset_ids` 仍指向它 —— `BackgroundEngine.pickAssetFor`
@@ -141,27 +205,40 @@ class TaskRepository {
   /// 摘引用后任务退化成两种都能理解的状态：还有别的音源 → 从剩下的里挑；
   /// 一个都不剩 → `assetIds` 为空（引擎按"库内全部音源"随机，见 `pickAssetFor`）。
   ///
+  /// ## DAT-06：为什么必须包事务 + 带乐观条件
+  /// 旧实现是 `SELECT 全表`（拿快照）→ Dart 侧过滤 → `batch UPDATE` 用**旧快照**
+  /// 整列覆盖。若这期间另一条写路径（用户刚在编辑器里加了新音源、或远程
+  /// `task.upsert`）改了同一行的 `asset_ids`，新加的音源引用会被回退掉 ——
+  /// 表现为"随机性变差"而非报错，极难排查。
+  ///
+  /// 现在两步在**同一个事务**里（`BEGIN IMMEDIATE` 一开始就持写锁，
+  /// 读到的快照在整个事务内不可能被别的连接改动），并且 UPDATE 额外带上
+  /// `AND asset_ids = <读到的原文>` 做乐观校验：万一将来有人把这段拆出事务，
+  /// 条件不成立时返回 0（不算改写），也不会用旧快照覆盖新值。
+  ///
   /// ⚠️ 用 Dart 侧过滤而不是 SQL `json_remove`：sqflite 绑定的 SQLite 版本
   /// 在 Android/iOS/桌面三端不一致，JSON1 扩展不保证存在。
   Future<int> removeAssetRef(String assetId) async {
     if (assetId.isEmpty) return 0;
-    final rows = await _db.db.query('tasks', columns: ['id', 'asset_ids']);
-    final batch = _db.db.batch();
-    var n = 0;
-    for (final r in rows) {
-      final ids = _decodeAssetIdsColumn(r['asset_ids']);
-      if (!ids.contains(assetId)) continue;
-      batch.update(
-        'tasks',
-        {'asset_ids': jsonEncode(ids.where((x) => x != assetId).toList())},
-        where: 'id = ?',
-        whereArgs: [r['id']],
-      );
-      n++;
-    }
-    if (n == 0) return 0;
-    await batch.commit(noResult: true);
-    return n;
+    return _db.db.transaction((txn) async {
+      final rows = await txn.query('tasks', columns: ['id', 'asset_ids']);
+      var n = 0;
+      for (final r in rows) {
+        final raw = r['asset_ids'];
+        final ids = _decodeAssetIdsColumn(raw);
+        if (!ids.contains(assetId)) continue;
+        final next = jsonEncode(ids.where((x) => x != assetId).toList());
+        final changed = await txn.update(
+          'tasks',
+          {'asset_ids': next},
+          // 乐观条件：只在列值仍是我们读到的那一版时才写。
+          where: 'id = ? AND asset_ids = ?',
+          whereArgs: [r['id'], raw],
+        );
+        n += changed;
+      }
+      return n;
+    });
   }
 
   /// `asset_ids` 列的反解（兼容 DB 里的 JSON 字符串与内存 List）。
@@ -206,6 +283,67 @@ class TaskRepository {
     return _db.db.delete('tasks',
         where: 'id >= ? AND id < ?', whereArgs: [p, '$p\uffff']);
   }
+
+  /// **原子替换**某计划的整族任务（DAT-04）：单事务内
+  /// 「写新集合（UPDATE→INSERT，全程无 DELETE）→ 删掉不在新集合里的旧 id」。
+  ///
+  /// ## 为什么不能沿用"整族删除 + 批量插入"
+  /// 旧 `CounterPlanService.apply(replace:true)` 是
+  /// `deleteCounterTasks` → `upsertMany` 两条**独立**语句。删除先提交后若
+  /// 插入失败（磁盘满 / `database is locked` / 进程被杀 / 行违反 NOT NULL），
+  /// **旧计划已被删光、新计划一条没写** —— 用户看到"应用失败"，
+  /// 但反击计划已整体消失。更糟的是 `occurrences.task_id` 是
+  /// `ON DELETE CASCADE`：整族 DELETE 会把这批任务的**全部历史**
+  /// （done/failed/skipped）一起抹掉，而 `exec_logs` 因无外键仍留着 ⇒
+  /// 审计出现"日志说有执行、计划表里查不到"的断裂，冷却基准也归零。
+  ///
+  /// ## 差异删除的语义
+  /// 只删"旧有、新集合里没有"的 id：仍在新计划里的任务**原地保留**，
+  /// 历史与冷却基准都不受影响。真正消失的那些任务（参数变小后多出来的时刻）
+  /// 仍会被级联删掉其计划 —— 那是正确且必要的（否则变幽灵计划）。
+  ///
+  /// 返回 `(upserted, removed)`：写入的新集合条数 / 真正删掉的旧任务条数。
+  /// ⚠️ 只接受 `counter:{planId}:` 命名空间内的 id，命名空间外的条目直接忽略，
+  /// 保证"绝不触碰手动任务"这条红线。
+  Future<({int upserted, int removed})> replaceCounterTasks(
+      String planId, Iterable<Task> tasks) async {
+    final prefix = CounterPlanMaterializer.taskIdPrefix(planId);
+    final list = tasks.toList();
+    return _db.db.transaction((txn) async {
+      final keep = <String>{};
+      for (final t in list) {
+        if (!t.id.startsWith(prefix)) continue;
+        if (!keep.add(t.id)) continue;
+        final row = _row(t);
+        final n =
+            await txn.update('tasks', row, where: 'id = ?', whereArgs: [t.id]);
+        // 全程无 DELETE ⇒ 不触发 occurrences 的级联（P2-02）。
+        if (n == 0) {
+          await txn.insert('tasks', row,
+              conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+      }
+      final oldRows = await txn.query(
+        'tasks',
+        columns: ['id'],
+        where: 'id >= ? AND id < ?',
+        whereArgs: [prefix, '$prefix\uffff'],
+      );
+      final stale = <String>[
+        for (final r in oldRows)
+          if (!keep.contains(r['id'] as String)) r['id'] as String,
+      ];
+      var removed = 0;
+      for (var i = 0; i < stale.length; i += 400) {
+        final end = i + 400 < stale.length ? i + 400 : stale.length;
+        final chunk = stale.sublist(i, end);
+        final ph = List.filled(chunk.length, '?').join(',');
+        removed +=
+            await txn.delete('tasks', where: 'id IN ($ph)', whereArgs: chunk);
+      }
+      return (upserted: keep.length, removed: removed);
+    });
+  }
 }
 
 /// 音源仓储。
@@ -222,9 +360,64 @@ class AssetRepository {
   /// 库内已有音源名集合 —— 「导入预置库」的**幂等判据**。
   ///
   /// 只取 `name` 一列：预置库导入要按名字去重，把整表读进内存既慢又没必要。
+  ///
+  /// ⚠️ 本方法是"先读后写"的**快照**：单用它做幂等判据存在 TOCTOU 窗口
+  /// （连点两次导入、或导入与另一入口并发，都会读到旧集合 ⇒ 同名重复插入）。
+  /// 需要**原子**幂等时改用 [insertMissingByName]。
   Future<Set<String>> nameSet() async {
     final rows = await _db.db.query('audio_assets', columns: ['name']);
     return rows.map((r) => r['name'] as String).toSet();
+  }
+
+  /// **事务内判重 + 插入**（DAT-16）：把 [items] 里名字尚未落库的条目写入，
+  /// 返回 `(inserted, skipped)`。
+  ///
+  /// ## 为什么不能靠 `nameSet()` + `upsertMany`
+  /// 那是"先读后写"两步：两次导入并发（或用户快速连点"导入预置库"）都会读到
+  /// 旧集合，各插一条同名音源。表本身也不阻止同名（`audio_assets` **没有**
+  /// `UNIQUE(name)`），于是库内出现重复项 —— 权重随机被放大、列表噪音，
+  /// 而且 `resolvePresetAudioIds` 会命中多条。
+  ///
+  /// ## 为什么不加 `UNIQUE(name)`
+  /// 本地导入**允许**同名多份（同一首歌的不同片段），业务上不能一刀切；
+  /// 且存量库可能已有重复行，迁移期建唯一索引会直接失败 ⇒ 整库打不开。
+  ///
+  /// 因此幂等只由"预置导入"这条路径在**单事务**内保证：事务一开始
+  /// （`BEGIN IMMEDIATE`）就持写锁，先 `SELECT ... WHERE name IN (...)`，
+  /// 再插缺失项 —— 并发的第二次调用会在锁上等待，等到的已是写完的集合。
+  /// 同一批内同名条目也只取第一条（`names.add` 失败即跳过）。
+  Future<({int inserted, int skipped})> insertMissingByName(
+      Iterable<AudioAsset> items) async {
+    final list = items.toList();
+    if (list.isEmpty) return (inserted: 0, skipped: 0);
+    return _db.db.transaction((txn) async {
+      final wanted = <String>[];
+      for (final a in list) {
+        if (!wanted.contains(a.name)) wanted.add(a.name);
+      }
+      final existing = <String>{};
+      for (var i = 0; i < wanted.length; i += 400) {
+        final end = i + 400 < wanted.length ? i + 400 : wanted.length;
+        final chunk = wanted.sublist(i, end);
+        final ph = List.filled(chunk.length, '?').join(',');
+        final rows = await txn.query('audio_assets',
+            columns: ['name'], where: 'name IN ($ph)', whereArgs: chunk);
+        existing.addAll(rows.map((r) => r['name'] as String));
+      }
+      final seen = <String>{};
+      var inserted = 0;
+      var skipped = 0;
+      for (final a in list) {
+        if (existing.contains(a.name) || !seen.add(a.name)) {
+          skipped++;
+          continue;
+        }
+        await txn.insert('audio_assets', a.toRow(),
+            conflictAlgorithm: ConflictAlgorithm.replace);
+        inserted++;
+      }
+      return (inserted: inserted, skipped: skipped);
+    });
   }
 
   Future<void> upsert(AudioAsset a) => _db.db.insert(

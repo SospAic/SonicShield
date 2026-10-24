@@ -220,6 +220,10 @@ abstract final class CounterPlanMaterializer {
           durationSecMax: w.durationSecMax,
           amplitudeMin: w.vibrateAmplitudeMin,
           amplitudeMax: w.vibrateAmplitudeMax,
+          // R93：显式 USAGE_ALARM。反击计划是用户**自己开**的，等价闹钟；
+          // 跟随勿扰会撞上"静默失败"（系统吞掉振动、回执仍 success）。
+          // 声音动作仍 respectDnd=true（不炸别人的耳朵），见下一分支。
+          respectDnd: false,
         );
         type = ActionType.randomVibrate;
       } else {

@@ -105,7 +105,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                     ],
                     style: AppText.headlineSmall.copyWith(letterSpacing: 4, fontFamily: 'monospace'),
                     decoration: const InputDecoration(
-                      labelText: '访问密码（8 位）',
+                      labelText: '访问密码（12 位）',
                       hintText: 'ABCD EFGH',
                       border: OutlineInputBorder(),
                     ),

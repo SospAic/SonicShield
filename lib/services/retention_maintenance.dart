@@ -43,6 +43,7 @@ class RetentionMaintenance {
     DateTime Function()? now,
     this.logRetentionDays = 90,
     this.occurrenceRetentionDays = 7,
+    this.batchLimit = 500,
     this.onError,
   }) : now = now ?? DateTime.now;
 
@@ -54,6 +55,15 @@ class RetentionMaintenance {
 
   /// 已终态计划保留天数（`docs/07`：7 天）。
   final int occurrenceRetentionDays;
+
+  /// 单批删除行数（DAT-11）。
+  ///
+  /// 两个 `purgeOlderThan` 都改成了 `LIMIT` 循环：**一次大删除**会在
+  /// `BEGIN IMMEDIATE` 里持写锁数秒，对端（UI 保存任务 / 远程 upsert /
+  /// 引擎 tick）在 `busy_timeout=5000` 内拿不到锁就抛 `database is locked`。
+  /// 500 行/批是"锁持有时间 ≪ 5s"与"往返次数可接受"之间的折中
+  /// （5000 行 ≈ 10 批 ≈ 10 次平台往返）。
+  final int batchLimit;
 
   final DateTime Function() now;
 
@@ -74,6 +84,7 @@ class RetentionMaintenance {
     try {
       logsRemoved = await logs.purgeOlderThan(
         t.subtract(Duration(days: logRetentionDays)),
+        batchLimit: batchLimit,
       );
     } on Object catch (e) {
       onError?.call(e);
@@ -81,6 +92,7 @@ class RetentionMaintenance {
     try {
       occurrencesRemoved = await occurrences.purgeOlderThan(
         t.subtract(Duration(days: occurrenceRetentionDays)),
+        batchLimit: batchLimit,
       );
     } on Object catch (e) {
       onError?.call(e);

@@ -355,11 +355,14 @@ void main() {
             fireAt: future,
             status: OccurrenceStatus.pending,
             quietExempt: true),
-        // 不该被清除：普通待执行计划
+        // 不该被清除：普通待执行计划。
+        // ⚠️ fireAt 必须与上面那条**不同**：R94 / DAT-13 起 `commitAll` 按
+        // `(taskId, fireAtMs)` 去重（同任务同刻不得并存两条，否则同一计划会被
+        // 执行两次）。同刻会让这条被静默合并掉，测的就不再是"豁免过滤"。
         PlannedOccurrence(
             id: 'normal-pending',
             taskId: 't',
-            fireAt: future,
+            fireAt: future.add(const Duration(hours: 1)),
             status: OccurrenceStatus.pending),
         // 不该被清除：已执行的豁免计划（是审计历史，不是待办）
         PlannedOccurrence(

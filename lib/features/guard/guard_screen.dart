@@ -12,7 +12,10 @@ import '../../data/repositories/task_repository.dart';
 import '../../domain/models/task.dart';
 import '../../domain/models/trigger.dart';
 import '../../services/background_service_manager.dart';
-import 'guard_orchestration.dart';
+// ARCH-10（R94）：实现已迁到 domain 层（守卫编排是领域逻辑，不是 UI）。
+// 这里改为从 domain 直连；同目录的 `guard_orchestration.dart` 只剩
+// export 兼容层（给引擎与旧测试的 import 路径过渡，F2 收口后删除）。
+import '../../domain/scheduling/guard_orchestration.dart';
 import 'guard_toggle.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';

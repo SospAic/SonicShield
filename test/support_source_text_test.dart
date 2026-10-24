@@ -70,6 +70,30 @@ void main() {
       expect(out.contains('final a = 1;'), isTrue);
       expect(out.contains('未闭合'), isFalse);
     });
+
+    test('STX-21 XML 注释被剥（清单里"为什么不加某权限"的决策注释不是声明）', () {
+      // 真实形状：`packages/native_bridge/android/src/main/AndroidManifest.xml`
+      // 的 NAT-14 注释逐字写着 `PACKAGE_USAGE_STATS`（说明它为何被移除）。
+      // 不剥 `<!-- -->` ⇒ `contains()` 把说明文字当成"权限已声明" ⇒ 假红，
+      // 而假红最坏的后果是逼下一个人删掉这段决策留痕（LG-13 的同一课）。
+      const xml = '<manifest>\n'
+          '  <!-- NAT-14：PACKAGE_USAGE_STATS 已裁决移除（无授权入口） -->\n'
+          '  <uses-permission android:name="android.permission.CAMERA" />\n'
+          '</manifest>';
+      final out = stripComments(xml);
+      expect(out.contains('PACKAGE_USAGE_STATS'), isFalse,
+          reason: 'XML 注释里的权限名是说明文字，不是声明');
+      expect(out.contains('android.permission.CAMERA'), isTrue,
+          reason: '真声明必须保留（剥注释不能把代码也剥掉）');
+      expect(out.contains('<manifest>'), isTrue, reason: '标签本身不是注释');
+    });
+
+    test('STX-21b 未闭合 XML 注释不越界（截到文件末尾而非抛错）', () {
+      const xml = '<manifest>\n<!-- 未闭合\n';
+      final out = stripComments(xml);
+      expect(out.contains('<manifest>'), isTrue);
+      expect(out.contains('未闭合'), isFalse);
+    });
   });
 
   group('methodBody', () {

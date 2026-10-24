@@ -174,6 +174,8 @@ class PlayAudioAction extends ActionConfig {
     this.fadeInSec = 0,
     this.fadeOutSec = 0,
     this.channel = AudioChannel.media,
+    // 音频**继续**跟随勿扰（R93 只放开振动）：静音/勿扰时不该炸响，
+    // 被系统压掉正是预期行为，不构成静默失败（用户要的就是"别响"）。
     this.respectDnd = true,
     this.rampUpSec = 0, // 渐强唤醒：音量从 5% 线性爬升到目标值的时长（0=关闭）
     this.loopFill = false, // 短音效循环填充到随机时长（Sleep 式声景）
@@ -372,7 +374,8 @@ class RandomVibrateAction extends ActionConfig {
     this.amplitudeMax = 1.0,
     this.maxPulses = 200,
     this.rampUpSec = 0,
-    this.respectDnd = true,
+    // R93：默认 USAGE_ALARM（见下方 `respectDnd` 字段注记）。
+    this.respectDnd = false,
   })  : assert(durationSecMin >= 1 &&
             durationSecMin <= durationSecMax &&
             durationSecMax <= VibrateLimits.maxDurationSec),
@@ -411,6 +414,25 @@ class RandomVibrateAction extends ActionConfig {
 
   /// 是否遵循系统勿扰。false ⇒ 原生侧用 `USAGE_ALARM`（**会穿透勿扰**，
   /// 与音频 `AudioChannel.alarm` 同一合规口径，UI 必须显式提示）。
+  ///
+  /// 🔴 R93 起默认 **false**（本机自排动作 = 用户自己设的"闹钟"）。
+  /// 旧默认 true 走 `USAGE_NOTIFICATION`：系统静音/勿扰时**整条振动被吞**，
+  /// 而 `vibrator.vibrate()` 仍返回成功 ⇒ 回执写 success、用户毫无感觉
+  /// （用户报障"手机震动不好使"的真因，也是最坏的静默失败）。
+  /// ⚠️ 远程入站仍然**强制 true**（`rc_script.dart`）—— 对端不得绕过本机勿扰。
+  ///
+  /// ⚠️ QUA-07（R94）：这个默认值翻转是**用户可感知的行为变更** ——
+  /// 新建任务（编辑器默认随构造器 false）与存量任务（JSON 缺键时
+  /// [RandomVibrateAction.fromJson] 同样取 false，R93 的有意识决定，
+  /// `r93_vibrate_dnd_test` 的 VD 用例锁定）从此都会在静音/勿扰期间震动。
+  /// 行为变更必须让用户知情（穿透勿扰的合规口径），提示契约：
+  /// - prefs 键 **`dnd_default_changed_notice_pending`**（常量
+  ///   `kDndDefaultChangedNoticePending`，定义在 `lib/core/app_keys.dart`，
+  ///   归 F6；键名字符串跨 isolate 共享，拼写以此注释与常量为准）；
+  /// - **写入方**：启动链在检测到"默认已翻转且未提示过"时置 `true`；
+  /// - **读取方**：设置页一次性横幅（`settings_screen.dart`）读到 true
+  ///   时展示说明，用户关闭后置回 `false`；
+  /// - **横幅 UI 归 F6**，本文件只锁定键名与写入/读取契约，防止两侧漂移。
   final bool respectDnd;
 
   /// BUG-123：四个区间都必须运行时夹紧 —— 这是最容易崩的一族。
@@ -436,7 +458,12 @@ class RandomVibrateAction extends ActionConfig {
       amplitudeMax: amp.max,
       maxPulses: _clampInt(j['maxPulses'], 200, 1, VibrateLimits.maxPulses),
       rampUpSec: _clampInt(j['rampUpSec'], 0, 0, VibrateLimits.maxRampSec),
-      respectDnd: j['respectDnd'] as bool? ?? true,
+      // R93：缺省随构造器默认（false = USAGE_ALARM）。
+      // 旧数据里没有这个键时**不能**再回落 true —— 那等于把静默失败留给存量任务。
+      // ⚠️ QUA-07：这是用户可感知的行为变更，一次性提示契约见
+      // [RandomVibrateAction.respectDnd] 字段注记（prefs 键
+      // `dnd_default_changed_notice_pending`，横幅归 F6）。
+      respectDnd: j['respectDnd'] as bool? ?? false,
     );
   }
 
@@ -475,7 +502,8 @@ class ContinuousVibrateAction extends ActionConfig {
     this.dutyCyclePct = 100,
     this.rampUpSec = 0,
     this.rampDownSec = 0,
-    this.respectDnd = true,
+    // R93：默认 USAGE_ALARM（见下方 `respectDnd` 字段注记）。
+    this.respectDnd = false,
   })  : assert(durationSecMin >= 1 &&
             durationSecMin <= durationSecMax &&
             durationSecMax <= VibrateLimits.maxDurationSec),
@@ -508,6 +536,8 @@ class ContinuousVibrateAction extends ActionConfig {
   final int rampUpSec;
   final int rampDownSec;
 
+  /// 同 [RandomVibrateAction.respectDnd]（R93 起默认 false = USAGE_ALARM；
+  /// QUA-07 一次性提示契约见那里的字段注记）。
   final bool respectDnd;
 
   /// BUG-123：区间/占空比全部运行时夹紧（理由同 [RandomVibrateAction.fromJson]）。
@@ -530,7 +560,7 @@ class ContinuousVibrateAction extends ActionConfig {
       dutyCyclePct: _clampInt(j['dutyCyclePct'], 100, 10, 100),
       rampUpSec: _clampInt(j['rampUpSec'], 0, 0, VibrateLimits.maxRampSec),
       rampDownSec: _clampInt(j['rampDownSec'], 0, 0, VibrateLimits.maxRampSec),
-      respectDnd: j['respectDnd'] as bool? ?? true,
+      respectDnd: j['respectDnd'] as bool? ?? false,
     );
   }
 

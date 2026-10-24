@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/providers.dart';
+import '../../core/app_keys.dart';
 import '../../core/constants.dart';
 import '../../data/repositories/api_config_store.dart';
 import '../../data/repositories/counter_plan_store.dart';
@@ -51,6 +52,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// 存 `SharedPreferences`（与本页其它设置同一存储）。**不做 DB 读取** ——
   /// kv 表要走一次 sqflite 往返，会让整页 widget 测试留下未完成的锁超时 Timer。
   bool _quietExemptMaster = false;
+
+  /// R94 / QUA-07：`respectDnd` 默认值语义变更的一次性提示是否待展示。
+  ///
+  /// 由 F5 在启动链写 prefs 键 [kDndDefaultChangedNoticePending]=true；
+  /// 本页读到后展示横幅，用户关闭即置回 false（一次性，不重复骚扰）。
+  bool _showDndDefaultNotice = false;
 
   // ---------------- 语音与接口 / 反击计划（v2.0） ----------------
   //
@@ -344,6 +351,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _quietEnd = p.getInt(PrefsKeys.quietEndHour) ??
           ComplianceGuardrails.defaultQuietEndHour;
       _quietExemptMaster = p.getBool(PrefsKeys.quietExemptMaster) ?? false;
+      // R94 / QUA-07：一次性提示（respectDnd 默认值 true→false 的行为变更）。
+      // F5 写 true 表示"待提示"；这里只读不写（写在关闭回调里）——
+      // 避免"进页即消费"导致用户没看清就没了。
+      _showDndDefaultNotice =
+          p.getBool(kDndDefaultChangedNoticePending) ?? false;
       _dsBaseUrl = cfg.baseUrl;
       _dsModel = cfg.model;
       _dsApiKey = cfg.apiKey;
@@ -365,6 +377,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// R94 / QUA-07：关闭「respectDnd 默认值变更」一次性提示。
+  ///
+  /// 立即置回 prefs（不等页面销毁）—— 用户点完再闪退也要记住
+  /// "已经告知过"，否则下次进来还弹同一条（一次性提示变骚扰）。
+  Future<void> _dismissDndDefaultNotice() async {
+    if (!mounted) return;
+    setState(() => _showDndDefaultNotice = false);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(kDndDefaultChangedNoticePending, false);
   }
 
   // ---------------- 语音与接口（v2.0） ----------------
@@ -889,6 +912,45 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// TAB 1「执行与护栏」：电源策略 / 强制免打扰时段 / 夜间独立豁免。
   List<Widget> _secExecution(BuildContext context) => [
+          // R94 / QUA-07：`respectDnd` 默认值语义变更的一次性提示。
+          //
+          // 为什么必须提示（A6 审计 QUA-07）：R93 把缺省从 `?? true` 改成
+          // `?? false` 后，**存量任务**（JSON 里没有该键）读出来就是
+          // false ⇒ 升级后在静音/勿扰期间也开始震动。这是用户可感知的
+          // 行为变更，要有一次显式告知，请用户复查历史振动任务。
+          // 只展示一次：关闭即把 prefs 键置回 false（写入方是 F5）。
+          if (_showDndDefaultNotice)
+            Card(
+              key: const ValueKey<String>('dnd_default_changed_notice'),
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.md),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('振动任务行为变更提示',
+                        style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    const Text(
+                        '新版本起，振动任务默认不再跟随系统「静音/勿扰」'
+                        '（穿透勿扰播放）。此前创建的任务如在旧版本下保存，'
+                        '可能仍按旧行为执行；请到各振动任务的编辑页确认'
+                        '「穿透系统勿扰」开关是否符合预期。',
+                        style: AppText.bodySmall),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        key: const ValueKey<String>(
+                            'dnd_default_changed_notice_ok'),
+                        onPressed: _dismissDndDefaultNotice,
+                        child: const Text('我已知晓'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Text('电源策略', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           SegmentedButton<String>(

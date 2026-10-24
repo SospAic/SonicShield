@@ -20,6 +20,7 @@ import 'package:sonic_shield/remote/rc_script.dart';
 import 'package:sonic_shield/remote/remote_store.dart';
 
 import 'perf_bench.dart';
+import 'r94_quality_perf_guard.dart';
 
 /// 性能与压力测试（白盒/灰盒，TDD）。
 ///
@@ -38,6 +39,16 @@ import 'perf_bench.dart';
 /// （`flutter drive --profile`，真实设备/模拟器）。
 /// 2026-09-18 首次取得 AOT 数据：100 任务物化 **13–15ms** / 预算 500ms（33× 余量）、
 /// 1000 任务 **140–204ms** / 预算 5000ms，**NFR-04 绝对达标**。
+///
+/// ## R94 / QUA-02 整改
+///
+/// 第十七轮的三条硬规矩（下方）此前**没有覆盖到本文件的 9 条用例**：
+/// `sampleInWindow` / `planSeed` / `occurrences 批量提交` / `due+pending 查询` /
+/// `purgeOlderThan` / `JSON 往返` / `RcCodec 加解密` / `指令组校验` / `outbox`
+/// 仍全是裸 `Stopwatch` 单次采样（min-of-1）。这与文件头"已统一用 benchMs"
+/// 的声明自相矛盾（A6 审计 QUA-02：两个性能文件合计 16 条）。
+/// R94 全部改为 [benchGuarded] / [benchGuardedAsync]（预热 + min-of-N +
+/// 负载定性，见 `test/r94_quality_perf_guard.dart`）；**阈值一律不放水**。
 ///
 /// 另一条环境约束：本机即使在空闲状态，CPU 也被 WSL2（vmmemWSL 常驻约 12GB）
 /// 与 IDE 占用 38–71%。**护栏阈值以"数量级"为粒度，不要为几成的波动调阈值。**
@@ -140,29 +151,32 @@ void main() {
       expect(count, greaterThanOrEqualTo(3000), reason: '500 任务 × 6 条');
     });
 
+    // R94 / QUA-02：原为裸 Stopwatch 单次采样（min-of-1）。
+    // 判定值 = 100 次调用的**总时间**（原断言 `elapsed ~/ 100 ≤ 50`
+    // 即总量 ≤ 5000ms），阈值不放水。
     test('sampleInWindow 100 次平均 ≤ 50ms/次', () {
       final rng = Random(1);
-      final sw = Stopwatch()..start();
-      for (var i = 0; i < 100; i++) {
-        sampleInWindow(
-            n: 24,
-            window: const Duration(hours: 12),
-            minGap: const Duration(minutes: 30),
-            rng: rng);
-      }
-      sw.stop();
-      expect(sw.elapsedMilliseconds ~/ 100, lessThanOrEqualTo(50));
+      final b = benchGuarded(() {
+        for (var i = 0; i < 100; i++) {
+          sampleInWindow(
+              n: 24,
+              window: const Duration(hours: 12),
+              minGap: const Duration(minutes: 30),
+              rng: rng);
+        }
+      });
+      expectGuarded('sampleInWindow×100', b, 5000,
+          reason: '100 次总时间 ≤ 5000ms ⇔ 平均 ≤ 50ms/次');
     });
 
     test('DPRNG planSeed 10 万次 ≤ 1000ms（JIT 标定；AOT 约×5）', () {
       final d = DateTime(2026, 9, 14);
-      final sw = Stopwatch()..start();
-      for (var i = 0; i < 100000; i++) {
-        planSeed('task-$i', d);
-      }
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(1000),
-          reason: 'JIT 实测 ${sw.elapsedMilliseconds}ms');
+      final b = benchGuarded(() {
+        for (var i = 0; i < 100000; i++) {
+          planSeed('task-$i', d);
+        }
+      });
+      expectGuarded('planSeed×10万', b, 1000);
     });
   });
 
@@ -193,10 +207,13 @@ void main() {
             durationMs: 5000,
           ),
       ];
-      final sw = Stopwatch()..start();
-      await occ.commitAll(list);
-      sw.stop();
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(1000));
+      // R94 / QUA-02：原为裸 Stopwatch 单次采样。批量提交是 DB 写路径，
+      // 单次采样测的是"SQL 准备 + 页缓存冷热"的混合体；预热后取最小值
+      // 才能对准稳态提交成本。阈值 1000ms 不放水。
+      final b = await benchGuardedAsync(() async {
+        await occ.commitAll(list);
+      });
+      expectGuarded('occurrences 批量 1000', b, 1000);
     });
 
     test('万级表中 due/pending 查询 ≤ 50ms', () async {
@@ -211,15 +228,17 @@ void main() {
             status: OccurrenceStatus.pending,
           ),
       ]);
-      final sw = Stopwatch()..start();
-      final due =
-          await occ.due(base.add(const Duration(hours: 100)), limit: 10);
-      final pending = await occ.pendingCountAfter(base);
-      sw.stop();
-      expect(due.length, 10);
-      expect(pending, 9999); // fire_at > now 严格大于（首条==now 不计）
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(50),
-          reason: '万级查询耗时 ${sw.elapsedMilliseconds}ms');
+      // R94 / QUA-02：原为裸 Stopwatch 单次采样。查询用例的意图是
+      // "稳态查询延迟"，首测混入 SQL 准备成本（GT-04 注释实测 333ms vs
+      // 稳态 <50ms 同类现象）⇒ 预热 + min-of-N。阈值 50ms 不放水。
+      final b = await benchGuardedAsync(() async {
+        final due =
+            await occ.due(base.add(const Duration(hours: 100)), limit: 10);
+        final pending = await occ.pendingCountAfter(base);
+        expect(due.length, 10);
+        expect(pending, 9999); // fire_at > now 严格大于（首条==now 不计）
+      });
+      expectGuarded('due/pending 万级', b, 50);
     });
 
     test('任务 CRUD 500 次 ≤ 2s', () async {
@@ -264,20 +283,35 @@ void main() {
     test('purgeOlderThan 万级清理 ≤ 1s', () async {
       final occ = OccurrenceRepository(db);
       final base = DateTime(2026, 9, 14, 12);
-      await occ.commitAll([
-        for (var i = 0; i < 10000; i++)
-          PlannedOccurrence(
-            id: 'o$i',
-            taskId: 't',
-            fireAt: base.subtract(Duration(minutes: i)),
-            status: OccurrenceStatus.done,
-          ),
-      ]);
-      final sw = Stopwatch()..start();
-      final n = await occ.purgeOlderThan(base.add(const Duration(days: 1)));
-      sw.stop();
-      expect(n, 10000);
-      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(1000));
+      // R94 / QUA-02：原为裸 Stopwatch 单次采样，且**只能测一次**
+      // （purge 是破坏性的：删完就没了，第二轮删 0 条 = 假绿灯）。
+      // 现改为：每轮采样**之前在计时外**重新灌入同等工作量（10000 条
+      // done），只给 purge 本身计时 ⇒ min-of-7 且工作量恒定。
+      // 阈值 1000ms 不放水。
+      List<PlannedOccurrence> rows(String tag) => [
+            for (var i = 0; i < 10000; i++)
+              PlannedOccurrence(
+                id: '$tag-$i',
+                taskId: 't',
+                fireAt: base.subtract(Duration(minutes: i)),
+                status: OccurrenceStatus.done,
+              ),
+          ];
+      // 预热 2 轮：SQLite 页缓存/事务状态进入稳态后再采样。
+      for (var w = 0; w < 2; w++) {
+        await occ.commitAll(rows('w$w'));
+        await occ.purgeOlderThan(base.add(const Duration(days: 1)));
+      }
+      final samples = <double>[];
+      for (var r = 0; r < 7; r++) {
+        await occ.commitAll(rows('r$r')); // 计时外补数据
+        final sw = Stopwatch()..start();
+        final n = await occ.purgeOlderThan(base.add(const Duration(days: 1)));
+        sw.stop();
+        samples.add(sw.elapsedMicroseconds / 1000.0);
+        expect(n, 10000, reason: '第 $r 轮 purge 的删除条数');
+      }
+      expectGuarded('purgeOlderThan 万级', guardedFromSamples(samples), 1000);
     });
   });
 

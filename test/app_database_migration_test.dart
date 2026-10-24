@@ -116,8 +116,12 @@ void main() {
 
     final row = (await db.db.query('tasks')).single;
     expect(row['id'], 'legacy-1', reason: '升级不得丢数据');
-    expect(row['quiet_exempt'], 0,
-        reason: '老库补列后必须为 0（v79 三值：0=跟随主开关）—— 否则升级完就静默改变了护栏');
+    // R94 / DAT-01 裁决：老库回填统一为 **2 = 强制不豁免**。
+    // 0（跟随主开关）会让升级后的老任务**静默获得**夜间响铃能力 ——
+    // 那是"能力变多"的一侧，与 fail-closed 相悖。回填到最严的一侧，
+    // 需要夜间响铃的任务由使用者显式改。
+    expect(row['quiet_exempt'], 2,
+        reason: '老库补列后必须回填 2（强制不豁免）—— 否则升级完就静默放宽了护栏');
     expect(row['force_run'], 0,
         reason: '老库补列后必须为 0（= 受总开关约束，更安全的一侧）');
     expect(row['condition_json'], isNull, reason: '老任务没有条件层，必须是 null');
@@ -143,7 +147,8 @@ void main() {
     final row = (await db.db.query('tasks')).single;
     expect(row['condition_json'], '{"kind":"timeWindow"}',
         reason: 'v2 已有数据必须原样保留 —— 重跑 v1→v2 会抛 duplicate column name');
-    expect(row['quiet_exempt'], 0);
+    expect(row['quiet_exempt'], 2,
+        reason: 'R94 / DAT-01：回填 2 = 强制不豁免（fail-closed 一侧）');
     expect(row['force_run'], 0);
   });
 

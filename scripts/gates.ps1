@@ -4,17 +4,22 @@
 # ⚠️ 本文件与 scripts/gates.sh 必须是**同一套判据**。历史上 .ps1 停在「3 步、
 #    无覆盖率 ratchet」而 .sh 已到 4 步，结果走 .ps1 的路线**完全不受 ratchet 约束**
 #    —— 覆盖率掉多少都不红（2026-09-24 审计 P0-T-03 实测：.ps1 停在 v1.7，
-#    既无 ratchet 也无「环境阻塞 RC=3」语义）。现在补齐第 4 步；
-#    同时 CI（.github/workflows/ci.yml）用 `flutter analyze --fatal-infos`，
-#    比本脚本的 grep 判据更严 —— **三条路线（local .sh / local .ps1 / CI）任一条红即红**。
+#    既无 ratchet 也无「环境阻塞 RC=3」语义）。现在补齐第 4 步。
+#   CI（.github/workflows/ci.yml）自 2026-10-24（第九十三轮，QUA-04 裁决）起只跑
+#   `flutter analyze` + 秒级治理契约锁（doc_gate_consistency / gate_entrypoint_consistency
+#   / coverage_sentinel / support_source_text）—— **不带** `--fatal-infos`（比本脚本的
+#   analyze 判据**宽松**，不构成额外约束），全量功能层/压测层/覆盖率 ratchet 仍归
+#   本地两条脚本。**三条路线（local .sh / local .ps1 / CI）任一条红即红**。
 #
 # 用法：
 #   .\scripts\gates.ps1                  # analyze + 功能(+覆盖率) + 压测 + 覆盖率ratchet
 #   .\scripts\gates.ps1 -WithDevice      # + 设备端全套（检测到模拟器/真机时）
 #   .\scripts\gates.ps1 -WithAot         # + AOT 绝对验收（flutter drive --profile）
 #   $env:ALLOW_DEVICE_SKIP = '1'         # 无 adb/无设备时**显式**放行跳过设备层（默认 BLOCKED/RC=3）
-#   $env:COVERAGE_MIN = '98.8'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
-#   $env:MIN_COVERED  = '12653'          # 可覆盖"绝对覆盖行"下限（同上）
+#   $env:COVERAGE_MIN = '98.6'           # 可覆盖 ratchet 阈值（默认见下，**必须与 gates.sh 同值**）
+#   $env:MIN_COVERED  = '12872'          # 可覆盖"绝对覆盖行"下限（同上）
+#   （示例值即 2026-10-24 的当前默认值；第九十三轮全量审计修复后阈值契约保持不变。
+#     QUA-11：此前示例停在 98.8 / 12653，与真实默认值脱节 ⇒ 已按实测回刷。）
 #   第 45 轮（2026-09-28）：90.4 / 8680 → 92.6 / 8892（可测面 92.82% / 8898 分子 − 6 行余量）。
 #   第 66 轮（2026-10-02）：98.7 / 9477 → 98.8 / 9487（可测面 98.92% / 9493 分子 − 6 行余量）；
 #   第 67 轮（2026-10-03）：MIN_COVERED 9487 → 9490 → 9503（可测面 99.08% / 9509 分子 − 6 行余量；COVERAGE_MIN 保持 98.8）。

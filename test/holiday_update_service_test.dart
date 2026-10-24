@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:sonic_shield/data/repositories/counter_plan_store.dart';
 import 'package:sonic_shield/data/repositories/task_repository.dart';
 import 'package:sonic_shield/domain/models/counter_plan.dart';
@@ -271,6 +272,9 @@ void main() {
 class _FakeTasks implements TaskRepository {
   final List<Task> upserted = [];
   final List<String> deletedPlanIds = [];
+  final List<String> replacedPlanIds = [];
+  final List<String> deletedIds = [];
+  final List<String> existingIds = [];
 
   @override
   Future<void> upsertMany(Iterable<Task> items) async => upserted.addAll(items);
@@ -280,6 +284,41 @@ class _FakeTasks implements TaskRepository {
     deletedPlanIds.add(planId);
     return upserted.length;
   }
+
+  /// 与真实仓储同口径：写新集合（无 DELETE）→ 删掉不在新集合里的旧 id。
+  @override
+  Future<({int upserted, int removed})> replaceCounterTasks(
+      String planId, Iterable<Task> tasks) async {
+    replacedPlanIds.add(planId);
+    final p = CounterPlanMaterializer.taskIdPrefix(planId);
+    final list = tasks.where((t) => t.id.startsWith(p)).toList();
+    upserted.addAll(list);
+    existingIds.addAll(list.map((e) => e.id));
+    final keep = list.map((e) => e.id).toSet();
+    final stale = <String>{
+      for (final id in existingIds)
+        if (id.startsWith(p) && !keep.contains(id)) id,
+    };
+    existingIds.removeWhere(stale.contains);
+    return (upserted: list.length, removed: stale.length);
+  }
+
+  @override
+  Future<int> deleteMany(Iterable<String> ids) async {
+    final list = ids.where((e) => e.isNotEmpty).toList();
+    deletedIds.addAll(list);
+    var n = 0;
+    for (final id in list) {
+      if (existingIds.remove(id)) n++;
+    }
+    return n;
+  }
+
+  /// 替身即事务句柄（同 `counter_plan_service_test.dart` 的说明）：
+  /// `inTransaction` 如实 `body(...)`，真正的 SQL 调用会显式失败。
+  @override
+  Future<T> inTransaction<T>(Future<T> Function(DatabaseExecutor txn) body) =>
+      body(_FakeTxn());
 
   @override
   Future<List<String>> counterTaskIds(String planId) async => const [];
@@ -291,7 +330,11 @@ class _FakeTasks implements TaskRepository {
   }) async => const [];
 
   @override
-  Future<Task?> get(String id) async => null;
+  Future<Task?> get(
+    String id, {
+    void Function(String id, Object error)? onRowError,
+  }) async =>
+      null;
 
   @override
   Future<void> upsert(Task t) async {}
@@ -305,4 +348,12 @@ class _FakeTasks implements TaskRepository {
   // BUG-148 新增的仓储方法：本替身只服务节假日用例，无需真实语义。
   @override
   Future<int> removeAssetRef(String assetId) async => 0;
+}
+
+/// 事务句柄替身：不模拟任何 SQL，任何调用都**显式失败**（不静默通过）。
+class _FakeTxn implements DatabaseExecutor {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError(
+      '_FakeTxn 不提供 SQL（${invocation.memberName}）：'
+      '需要事务语义的用例请改用内存库 + 真实 TaskRepository');
 }

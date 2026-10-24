@@ -148,6 +148,21 @@ Future<PlaybackResolution> resolvePlayback(
   );
 }
 
+/// `sound.play` 的时长上下界（秒，REM-07）。
+///
+/// ## 为什么必须有上界
+///
+/// 旧实现只夹紧了 `volume`，`durationSec` **原样透传**：`{durationSec:
+/// 999999999}` 等于让对端扬声器持续出声 31 年，而远程命令集里**没有**
+/// `sound.stop`（`script.stop` 只作用于指令组执行器）—— 唯一的停止路径是
+/// 端点用户自己走到设备前。这与「持续振动不设硬上限，但任何时刻都能停」
+/// 的既定纪律不对称。
+///
+/// 下界取 1：`0` 不是"播一下"，而是"发了一条什么都不做的命令"，
+/// 静默无效果比显式失败更糟。
+const int rcSoundMinDurationSec = 1;
+const int rcSoundMaxDurationSec = 600;
+
 /// 一次远程播放的完整结果（审计与回执都用它）。
 class RemotePlayOutcome {
   const RemotePlayOutcome({
@@ -156,6 +171,7 @@ class RemotePlayOutcome {
     required this.volume,
     required this.durationMs,
     this.path,
+    this.durationOutOfRange = false,
   });
 
   /// 是否**真的播放成功**（解析到音源且播放器返回成功）。
@@ -167,6 +183,30 @@ class RemotePlayOutcome {
   final String? path;
   final double volume;
   final int durationMs;
+
+  /// 请求的时长超出 `[1,600]` 秒（越界 ⇒ 本次**未播放**，见 [reason]）。
+  ///
+  /// 刻意暴露而不是内部吞掉：控制端与审计都该能区分"播了 600 秒"
+  /// 与"你要求的 10^9 秒被拒了"。
+  final bool durationOutOfRange;
+}
+
+/// 把 `durationSec` 夹紧到 `[1,600]`（纯函数，宿主可穷举）。
+///
+/// 返回 `(seconds, outOfRange)`：`outOfRange` 为 true 表示**原值越界**。
+/// 调用方据此决定"夹紧后照播"还是"显式失败"——本文件选择后者（见
+/// [performRemotePlay]），因为"把 31 年悄悄改成 10 分钟并报成功"正是
+/// 本项目反复出现的静默降级。
+({int seconds, bool outOfRange}) clampRemotePlayDuration(Object? raw) {
+  final v = (raw as num?)?.toInt();
+  if (v == null) return (seconds: 5, outOfRange: false); // 缺省 5 秒（v1 语义）
+  if (v < rcSoundMinDurationSec) {
+    return (seconds: rcSoundMinDurationSec, outOfRange: true);
+  }
+  if (v > rcSoundMaxDurationSec) {
+    return (seconds: rcSoundMaxDurationSec, outOfRange: true);
+  }
+  return (seconds: v, outOfRange: false);
 }
 
 /// 执行一次远程播放请求：解析 → 播放 → 汇总结果。
@@ -188,8 +228,23 @@ Future<RemotePlayOutcome> performRemotePlay(
   final volume = ((payload['volume'] as num?)?.toDouble() ?? 0.9)
       .clamp(0.0, 1.0)
       .toDouble();
-  final durationSec = (payload['durationSec'] as num?)?.toInt() ?? 5;
+  final duration = clampRemotePlayDuration(payload['durationSec']);
+  final durationSec = duration.seconds;
   final loop = payload['loop'] as bool? ?? false;
+
+  // 越界 ⇒ **显式失败，不播放**（REM-07）。
+  //
+  // 为什么不"夹紧后照播"：控制端要的是"响 10 分钟"，端点悄悄响 10 秒
+  // 并回 ok=true，使用者只会以为"端点坏了"。失败 + 明确文案才让两端一致。
+  if (duration.outOfRange) {
+    return RemotePlayOutcome(
+      ok: false,
+      reason: '时长超出范围（$rcSoundMinDurationSec..$rcSoundMaxDurationSec 秒）',
+      volume: volume,
+      durationMs: durationSec * 1000,
+      durationOutOfRange: true,
+    );
+  }
 
   final r = await resolvePlayback(
     PlaybackSelector.of(payload),
@@ -215,5 +270,6 @@ Future<RemotePlayOutcome> performRemotePlay(
     volume: volume,
     durationMs: durationSec * 1000,
     path: r.path,
+    durationOutOfRange: false,
   );
 }

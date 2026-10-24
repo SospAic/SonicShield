@@ -79,8 +79,23 @@ class ExactAlarmPermissionReceiver : BroadcastReceiver() {
         const val ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED =
             "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"
 
-        /** 权限刚恢复，无需等待白名单窗口；留 1s 让系统设置页先收起。 */
-        private const val KICK_DELAY_MS = 1_000L
+        /**
+         * 权限恢复广播 → kick 闹钟的延迟 —— **必须与 app 侧 `BootReceiver` 的
+         * 30s 归因窗口对齐**（NAT-17）。
+         *
+         * ⚠️ 旧值 1s 的注释假设"权限刚恢复、无需等待白名单窗口"——**未实测**。
+         * BootReceiver 在 API 36 模拟器上实测取证：系统给广播源开 **20s** 临时
+         * 白名单，窗口内触发的 FGS 启动会被**归因回广播源**（而非
+         * ALARM_MANAGER_WHILE_IDLE）⇒ 撞上"广播源不得启动 mediaPlayback 型
+         * FGS"的禁令 ⇒ `ForegroundServiceStartNotAllowedException`（10s 延迟
+         * 必崩，30s 成功，见 BootReceiver.KICK_DELAY_MS 的完整取证注释）。
+         * 本接收器同样是"广播 → 排闹钟 → 看门狗拉 FGS"的同一形状，若 1s 就
+         * 触发，kick 仍在该广播的归因窗口内 ⇒ 同样可能被拒（被拒时
+         * AlarmWatchdogReceiver 会 SelfHealNotice，不静默，但**功能失效**）。
+         * 故取 30s（20s 窗口 + 10s 余量）：宁可让自动重排晚半分钟，也不要
+         * 一条看着排上、实则拉不起的假路径。
+         */
+        private const val KICK_DELAY_MS = 30_000L
         private const val KICK_REQUEST_CODE = 0x0E47
     }
 }

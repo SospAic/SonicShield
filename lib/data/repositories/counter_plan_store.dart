@@ -10,6 +10,8 @@ import '../../domain/scheduling/counter_plan_materializer.dart';
 /// 「随机反击计划」的本机持久化（SharedPreferences，KV 简单可靠）。
 ///
 /// ## 存什么、为什么分四把键
+/// - `counter_plan_state`（v6 起，**权威**）：`{plan, id, enabled}` 的单份 JSON，
+///   三者**一次写入**（DAT-18，见下方"三个同生共死的键"）；
 /// - `counter_plan_json`：计划本体（固定 schema，导出/远程下发即此文本）；
 /// - `counter_plan_id`：计划的稳定标识 —— 决定任务 id 命名空间与随机种子，
 ///   因此**必须落盘**：重启后若 planId 变了，旧任务会全部变成"回不来的孤儿"
@@ -28,10 +30,27 @@ import '../../domain/scheduling/counter_plan_materializer.dart';
 /// ## 容错口径与模型一致
 /// 读不懂的 JSON **不抛**：返回 null / 空表，由调用方如实告知"未配置"或
 /// "覆盖表已损坏"，而不是让一次坏读把设置页打崩。
+///
+/// ## DAT-18：三个"同生共死"的键合成**一次**写入
+/// `plan` / `planId` / `enabled` 三者必须一致 —— 尤其 `planId`：
+/// 它决定任务 id 命名空间，与库里的 `counter:{planId}:*` 行是**跨存储**的一对。
+/// 旧实现分三次 `setString/setBool`：若在"任务已按新 planId 落库"之后、
+/// "planId 写入 prefs"之前进程被杀，库里就有了一整套新命名空间的任务，
+/// 而 prefs 仍是旧 planId ⇒ 之后 `disable`/`apply` 只按旧前缀删除，
+/// 新任务**永远删不掉**且继续按旧计划触发（护栏失效）。
+///
+/// 现在权威状态是**单键** [kState] 里的一份 JSON（`{plan, id, enabled}`），
+/// 一次 `setString` 提交 ⇒ 三者要么一起生效、要么一起不生效。
+///
+/// 旧的三个键仍会被**镜像**写入（只读方还在直读它们），但读取一律以
+/// 单键快照为准 —— 镜像只是兼容层，不再承担一致性责任。
 class CounterPlanStore {
   CounterPlanStore(this._prefs);
 
   final SharedPreferences _prefs;
+
+  /// 权威状态键（单次写入，DAT-18）。
+  static const String kState = 'counter_plan_state';
 
   static const _kPlanJson = 'counter_plan_json';
   static const _kPlanId = 'counter_plan_id';
@@ -44,17 +63,41 @@ class CounterPlanStore {
   /// 缺省 planId（首次生成本机随机计划时使用）。
   static const String defaultPlanId = 'local';
 
+  /// 读权威快照；缺失/损坏 → 空 map（不抛）。
+  Map<String, dynamic> _state() {
+    final raw = _prefs.getString(kState);
+    if (raw == null || raw.trim().isEmpty) return const <String, dynamic>{};
+    try {
+      final j = jsonDecode(raw);
+      return j is Map<String, dynamic> ? j : const <String, dynamic>{};
+    } on Object {
+      return const <String, dynamic>{};
+    }
+  }
+
   /// 当前计划标识；未配置时回落 [defaultPlanId]（永不为空，便于拼前缀）。
   String get planId {
-    final v = _prefs.getString(_kPlanId)?.trim() ?? '';
+    final fromState = (_state()['id'] as String?)?.trim() ?? '';
+    final v = fromState.isNotEmpty
+        ? fromState
+        : (_prefs.getString(_kPlanId)?.trim() ?? '');
     return v.isEmpty ? defaultPlanId : CounterPlanMaterializer.safePlanId(v);
   }
 
   /// 本机是否启用反击计划（**默认关**：需要用户显式开启）。
-  bool get enabled => _prefs.getBool(_kEnabled) ?? false;
+  bool get enabled =>
+      (_state()['enabled'] as bool?) ?? _prefs.getBool(_kEnabled) ?? false;
 
   /// 读取计划本体；未配置 / 损坏 → null（不抛）。
   CounterPlan? loadPlan() {
+    final fromState = _state()['plan'];
+    if (fromState is Map<String, dynamic>) {
+      try {
+        return CounterPlan.fromJson(fromState);
+      } on Object {
+        // 权威快照里的计划坏了：继续看兼容键（可能是半写，但值得一试）。
+      }
+    }
     final raw = _prefs.getString(_kPlanJson);
     if (raw == null || raw.trim().isEmpty) return null;
     try {
@@ -76,15 +119,58 @@ class CounterPlanStore {
   }
 
   /// 保存计划本体（可选同时写 id / 启用状态）。
+  ///
+  /// 三者写入**同一个** JSON、一次 `setString`（DAT-18，见类注释）。
   Future<void> savePlan(CounterPlan plan, {String? id, bool? enabled}) async {
-    await _prefs.setString(_kPlanJson, jsonEncode(plan.toJson()));
-    if (id != null && id.trim().isNotEmpty) {
-      await _prefs.setString(_kPlanId, CounterPlanMaterializer.safePlanId(id));
-    }
-    if (enabled != null) await _prefs.setBool(_kEnabled, enabled);
+    final st = _state();
+    final explicit = (id ?? '').trim();
+    final current = (st['id'] as String?)?.trim() ??
+        (_prefs.getString(_kPlanId)?.trim() ?? '');
+    final nextId = explicit.isNotEmpty
+        ? CounterPlanMaterializer.safePlanId(explicit)
+        : current;
+    final nextEnabled =
+        enabled ?? (st['enabled'] as bool?) ?? _prefs.getBool(_kEnabled) ?? false;
+    await _writeState(
+      planJson: plan.toJson(),
+      id: nextId,
+      enabled: nextEnabled,
+    );
   }
 
-  Future<void> setEnabled(bool v) => _prefs.setBool(_kEnabled, v);
+  Future<void> setEnabled(bool v) async {
+    final st = _state();
+    final plan = st['plan'];
+    await _writeState(
+      planJson: plan is Map<String, dynamic> ? plan : null,
+      id: (st['id'] as String?) ?? _prefs.getString(_kPlanId),
+      enabled: v,
+    );
+  }
+
+  /// 单次提交权威快照 + 兼容镜像。
+  ///
+  /// 镜像**必须**在权威写之后：即使镜像写失败（进程被杀），下一次读取仍走
+  /// 权威快照 ⇒ 状态自洽；反过来则会留下"镜像新、权威旧"的分歧。
+  Future<void> _writeState({
+    Map<String, dynamic>? planJson,
+    String? id,
+    required bool enabled,
+  }) async {
+    final snap = <String, dynamic>{
+      if (planJson != null) 'plan': planJson,
+      if (id != null && id.trim().isNotEmpty) 'id': id,
+      'enabled': enabled,
+    };
+    await _prefs.setString(kState, jsonEncode(snap));
+    if (planJson != null) {
+      await _prefs.setString(_kPlanJson, jsonEncode(planJson));
+    }
+    if (id != null && id.trim().isNotEmpty) {
+      await _prefs.setString(_kPlanId, id);
+    }
+    await _prefs.setBool(_kEnabled, enabled);
+  }
 
   /// 读取生成参数；未配置 / 损坏 → null（不抛）。
   CounterPlanParams? loadParams() {
@@ -146,6 +232,7 @@ class CounterPlanStore {
 
   /// 清空全部反击计划状态（下线并遗忘）。
   Future<void> clear() async {
+    await _prefs.remove(kState);
     await _prefs.remove(_kPlanJson);
     await _prefs.remove(_kPlanId);
     await _prefs.remove(_kEnabled);

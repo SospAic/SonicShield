@@ -12,12 +12,14 @@
     <!-- 条件层「仅 Wi-Fi 下执行」需要读取网络类型。normal 权限：安装即授予、
          无运行时弹窗；且仅用于判断传输类型，不读取任何网络内容。 -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- App Standby 桶自检（docs/59 缺口2）：读本应用所在省电桶，稀有/受限时
-         如实提示用户（app 内无法自提权，只能引导）。未授权时原生侧抛
-         SecurityException 并归为 unknown —— 读不到≠确定状态，不猜。
-         权限本身是 appop 门控：用户在「设置-使用情况访问」里授予。 -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
+    <!-- NAT-14（2026-10，R94）：`PACKAGE_USAGE_STATS`（使用情况访问权）已裁决
+         **移除**。它是 appop 门控的特殊权限，只能由用户在「设置-使用情况访问」
+         手动授予，而本产品不提供该引导入口（全仓无 ACTION_USAGE_ACCESS_SETTINGS）
+         —— 声明它只会让 App Standby 桶自检永远读不到（SecurityException）。
+         按"移除权限 + 显式降级"处理：清单不再声明；原生侧
+         `NativeBridgePlugin.appStandbyBucket` 在拿不到该 appop 时如实返回
+         "unauthorized"、API<28 返回 "unsupported"，不再用含糊的 "unknown"
+         掩盖"永远读不到"。回归锁：test/r94_native_fixes_test.dart（NAT-14 组）。 -->
 
     <application>
         <service

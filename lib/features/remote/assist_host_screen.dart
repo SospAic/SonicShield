@@ -115,7 +115,7 @@ class _AssistHostScreenState extends State<AssistHostScreen> {
           children: [
             Text('如何协助他人', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
-            const Text('1. 在本机点击「生成临时码」，屏幕会显示 9 位临时码与 8 位访问密码；\n'
+            const Text('1. 在本机点击「生成临时码」，屏幕会显示 9 位临时码与 12 位访问密码；\n'
                 '2. 把这两个值口述给你信任的人（对方在「远程 → 临时协助 → 接入」输入）；\n'
                 '3. 对方接入后，逐项开启你允许的能力；不需要时点「终止会话」。'),
             const SizedBox(height: 12),

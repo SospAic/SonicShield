@@ -328,11 +328,20 @@ const String kGlobalLabel = r'全局|对外诚实数字';
 /// （8 + 0 + 53）。
 /// 实测依据：`_pt/gate89b.log`（2026-10-19 16:15，`GATES_RC=0`）与
 /// `coverage/lcov.info` 逐文件复算。
-const int kDeviceExemptLines = 710 + 72 + 74;
+/// 🔴 第九十三轮（2026-10-24，R94 全栈审计 92 条缺陷修复）**再次校正** ——
+/// R94 给 `background_engine.dart` 加了调度引擎重构后的接线、数据层 CAS 回执、
+/// 原生桥接失败收敛等，`LF` **710 → 883**（+173）；`main.dart` 因启动链新增
+/// 端点安全校验与协助会话预热，`LF` **72 → 76**（+4）；`neural_tts.dart` 未动（74）。
+/// ⇒ 豁免面分母 **856 → 1033**（883 + 76 + 74）。
+/// 已覆盖同步校正：`background_engine` **8 → 79**、`main` 0、`neural_tts` 53
+/// ⇒ 已覆盖 **61 → 132**（79 + 0 + 53）。
+/// 实测依据：`/tmp/gates_r96b.log`（2026-10-25 03:5x，`GATES_RC=0`；
+/// 全局 15121/16153 − 可测面 14989/15120 = **1033 / 132**，与 lcov 逐文件复算一致）。
+const int kDeviceExemptLines = 883 + 76 + 74;
 
-/// 设备层豁免面**已覆盖**行（`background_engine.dart` 8 + `main.dart` 0 +
-/// `neural_tts.dart` 53 ⇒ 61）。
-const int kDeviceExemptCovered = 61;
+/// 设备层豁免面**已覆盖**行（`background_engine.dart` 79 + `main.dart` 0 +
+/// `neural_tts.dart` 53 ⇒ 132）。
+const int kDeviceExemptCovered = 132;
 
 // ═════════════════════ MCL：机器锁「自述计数」一致锁（第五十九轮） ═════════════════════
 
@@ -511,7 +520,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 710 + 72 + 74，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 883 + 76 + 74，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1140,9 +1149,9 @@ void main() {
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 710 + 72 + 74，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 883 + 76 + 74，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
-          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 8/655）');
+          reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 79/883）');
     });
 
     test('BAS-04 ★ 7 个「当前基线」落点必须逐位含有根节的绝对分数', () {

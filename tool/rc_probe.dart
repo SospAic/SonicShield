@@ -355,7 +355,10 @@ Future<void> main(List<String> args) async {
     bool Function(List<RcMessage> got)? until,
   }) async {
     replies.clear();
-    final cmd = RcMessage.now(type, payload);
+    // R94 / P0-001（REM-01）：`from` 必须显式填写。端点侧准入判据已改为
+    // **拒收空 `from`**（旧实现放行，构成「撤销授权后仍可控制」的旁路）。
+    // 探针身份就是 selfid，填进去即可与产品侧对齐。
+    final cmd = RcMessage.now(type, payload, selfId);
     final wire = await RcCodec.encode(cmd, keys.cmd, cmdTopic);
     final builder = MqttClientPayloadBuilder()..addString(wire);
     client.publishMessage(cmdTopic, MqttQos.atLeastOnce, builder.payload!,

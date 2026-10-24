@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'credential_sealer.dart';
 import 'node_catalog.dart';
+import 'peer_key_store.dart';
 import 'protocol.dart';
 
 /// 已配对端点。
@@ -15,12 +18,42 @@ class PairedEndpoint {
     required this.pairedAt,
     this.alias,
     this.lastConnectedAt,
+    this.peerKey,
   });
 
   final String deviceId;
   final String name;
   final String secret; // 配对秘密（本地保存；派生消息密钥用）
   final DateTime pairedAt;
+
+  /// 每控制端密钥（v3，REM-01 根治）：32 字节，**端点侧**生成、配对 ack 下发。
+  ///
+  /// ## 为什么它必须与控制端记录同生共死
+  ///
+  /// `secret` 是**全局**配对码：删掉记录不改变它，被删的控制端照样能解开发给
+  /// 本机的命令。`peerKey` 是点对点材料 —— `removePaired(id)` 同时把它删掉，
+  /// 旧密文就**永久解不开**（这才是"撤销 = 凭据级失效"）。
+  ///
+  /// ## 为什么可以缺省（null）
+  ///
+  /// 旧配对（升级前完成、或对端是不支持 v3 的旧版本）没有这把钥匙。
+  /// 缺省 null 时全部路径**逐字节回落** v2/v1 + `rc_revoked` + 拒空 `from`
+  /// 的旧防线 —— 兼容铁律：升级不得让已配对设备失联。
+  ///
+  /// JSON 键刻意用短名 `pk`（与 `rc_paired` 同一条紧凑记录）。
+  final String? peerKey;
+
+  /// `peerKey` 的原始字节；未生成 / Base64 坏值 ⇒ null（走旧路径）。
+  List<int>? get peerKeyBytes {
+    final raw = peerKey;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final bytes = base64Decode(raw);
+      return bytes.length == 32 ? bytes : null;
+    } on Object {
+      return null;
+    }
+  }
 
   /// 备注名（「我的设备」列表用）。为空时展示 [name]。
   ///
@@ -47,17 +80,24 @@ class PairedEndpoint {
   Map<String, dynamic> toJson() => {
         'deviceId': deviceId,
         'name': name,
-        'secret': secret,
+        // R94 / REM-10：对端的配对码也是**长期主密钥**（拿到它就能伪造发给
+        // 本机的回执），落盘同样加密。加密器未就绪时 `seal` 原样返回，
+        // 因此不会写坏值、也不会阻断配对。
+        'secret': CredentialSealer.seal(secret),
         'pairedAt': pairedAt.millisecondsSinceEpoch,
         if (alias != null) 'alias': alias,
         if (lastConnectedAt != null)
           'lastConnectedAt': lastConnectedAt!.millisecondsSinceEpoch,
+        // 缺省不写键：旧版本读到未知键会忽略，但"不写"更省事也更好断言。
+        if (peerKey != null) 'pk': peerKey,
       };
 
   static PairedEndpoint fromJson(Map<String, dynamic> j) => PairedEndpoint(
         deviceId: j['deviceId'] as String,
         name: j['name'] as String? ?? '未命名设备',
-        secret: j['secret'] as String,
+        // 旧明文值原样返回；密文解不开 ⇒ 空串（调用方按"没有可用密钥"处理，
+        // 而不是拿一串密文去派生密钥 —— 那会得到一把"看起来能用"的错密钥）。
+        secret: CredentialSealer.open(j['secret'] as String? ?? ''),
         pairedAt: DateTime.fromMillisecondsSinceEpoch(
             (j['pairedAt'] as num?)?.toInt() ??
                 DateTime.now().millisecondsSinceEpoch),
@@ -66,6 +106,9 @@ class PairedEndpoint {
             ? null
             : DateTime.fromMillisecondsSinceEpoch(
                 (j['lastConnectedAt'] as num).toInt()),
+        // 缺键 ⇒ null（旧配对），**不是**空串：空串会让 `peerKeyBytes` 与
+        // "有键但坏值"两种情形混在一起，无法在审计里区分。
+        peerKey: j['pk'] as String?,
       );
 
   PairedEndpoint copyWith({
@@ -75,6 +118,7 @@ class PairedEndpoint {
     DateTime? pairedAt,
     Object? alias = _sentinel,
     Object? lastConnectedAt = _sentinel,
+    Object? peerKey = _sentinel,
   }) =>
       PairedEndpoint(
         deviceId: deviceId ?? this.deviceId,
@@ -86,6 +130,8 @@ class PairedEndpoint {
         lastConnectedAt: identical(lastConnectedAt, _sentinel)
             ? this.lastConnectedAt
             : lastConnectedAt as DateTime?,
+        // 同理：`copyWith(peerKey: null)` 是"删掉这把钥匙"（撤销/轮换）。
+        peerKey: identical(peerKey, _sentinel) ? this.peerKey : peerKey as String?,
       );
 }
 
@@ -129,9 +175,27 @@ PairedEndpoint? endpointById(List<PairedEndpoint> endpoints, String deviceId) {
 
 /// 远程遥控持久化状态（SharedPreferences，KV 简单可靠）。
 class RemoteStore {
-  RemoteStore(this._prefs);
+  RemoteStore(this._prefs) {
+    // R94 / REM-10：异步取一次设备秘密（失败静默降级为明文）。
+    //
+    // 不 await：构造函数遍布 UI 与 `main`，改异步会波及全部调用点。
+    // `ensure()` 幂等且内部 try/catch，这里只是"尽早就绪"；
+    // 需要**保证**已就绪的路径（配对码读写、broker 连接）会显式 await
+    // [ensureSecretsLoaded]。
+    unawaited(CredentialSealer.ensure());
+  }
 
   final SharedPreferences _prefs;
+
+  /// 等待凭据加密器就绪（无设备秘密时也会正常返回，只是降级为明文）。
+  Future<void> ensureSecretsLoaded() => CredentialSealer.ensure();
+
+  /// 每控制端密钥存储（v3，REM-01 根治）。
+  ///
+  /// 与配对表共用同一份 prefs：**撤销必须同时删两处**，共用存储才能保证
+  /// `removePaired` 的两次写落在同一个文件、同一次提交里（不会出现
+  /// "配对表删了、钥匙还在"的中间态跨越进程重启）。
+  late final PeerKeyStore peerKeys = PeerKeyStore(_prefs);
 
   static const _kEnabled = 'rc_enabled';
   static const _kDeviceId = 'rc_device_id';
@@ -202,7 +266,7 @@ class RemoteStore {
 
   String get turnUser => _prefs.getString(_kTurnUser) ?? '';
 
-  String get turnCred => _prefs.getString(_kTurnCred) ?? '';
+  String get turnCred => CredentialSealer.open(_prefs.getString(_kTurnCred) ?? '');
 
   /// 是否已配置可用的 TURN 中继。
   bool get turnConfigured => turnUrl.trim().isNotEmpty;
@@ -213,9 +277,10 @@ class RemoteStore {
     required String user,
     required String cred,
   }) async {
+    await CredentialSealer.ensure();
     await _prefs.setString(_kTurnUrl, url.trim());
     await _prefs.setString(_kTurnUser, user.trim());
-    await _prefs.setString(_kTurnCred, cred);
+    await _prefs.setString(_kTurnCred, CredentialSealer.seal(cred));
   }
 
   bool get enabled => _prefs.getBool(_kEnabled) ?? false;
@@ -256,9 +321,10 @@ class RemoteStore {
   /// broker 用户名（自建 broker 开启鉴权时填）；空串 = 未配置。
   String get brokerUsername => _prefs.getString(_kBrokerUser) ?? '';
 
-  /// broker 密码；空串 = 未配置。明文落盘与 [turnCred] 同一信任级别
-  /// （仅本机 SharedPreferences，不参与任何同步/上报）。
-  String get brokerPassword => _prefs.getString(_kBrokerPass) ?? '';
+  /// broker 密码；空串 = 未配置。R94 / REM-10：落盘为 `enc1:` 密文，
+  /// 读时透明解密；旧明文值原样返回（升级不丢配置）。
+  String get brokerPassword =>
+      CredentialSealer.open(_prefs.getString(_kBrokerPass) ?? '');
 
   /// 保存自定义 broker 配置（`host` 传空串即整体清除、回到默认公共）。
   ///
@@ -271,6 +337,7 @@ class RemoteStore {
     String username = '',
     String password = '',
   }) async {
+    await CredentialSealer.ensure();
     await _prefs.setString(_kBrokerHost, host.trim());
     if (port != null && port > 0) {
       await _prefs.setInt(_kBrokerPort, port);
@@ -278,7 +345,7 @@ class RemoteStore {
       await _prefs.remove(_kBrokerPort);
     }
     await _prefs.setString(_kBrokerUser, username.trim());
-    await _prefs.setString(_kBrokerPass, password);
+    await _prefs.setString(_kBrokerPass, CredentialSealer.seal(password));
   }
 
   Future<void> setIdentity(String id, String name) async {
@@ -330,14 +397,18 @@ class RemoteStore {
   /// 密钥模型是**按接收方身份派生**的：发送方用「接收方 deviceId +
   /// 接收方配对码」加密，接收方用自己的配对码 + 自己的 deviceId 解密。
   /// 因此本机需要随时能取到自己的配对码（见 RcEndpointService._handleRaw）。
-  String get pairingCode => _prefs.getString(_kPairCode) ?? '';
+  String get pairingCode =>
+      CredentialSealer.open(_prefs.getString(_kPairCode) ?? '');
 
   /// 首次使用时生成并持久化（多台控制器可重复扫码配对本机）。
   Future<String> ensurePairingCode() async {
+    // 先确保加密器就绪：否则会把"已加密的码"当成空串，重新生成一把新码
+    // ⇒ 所有已配对控制端瞬间失联（这是本函数里唯一危险的时序）。
+    await CredentialSealer.ensure();
     var code = pairingCode;
     if (code.length != 8) {
       code = RcCodec.generatePairingCode().replaceAll('-', '');
-      await _prefs.setString(_kPairCode, code);
+      await _prefs.setString(_kPairCode, CredentialSealer.seal(code));
     }
     return code;
   }
@@ -354,11 +425,23 @@ class RemoteStore {
   /// 只做落盘，不碰网络：刷新接收侧缓存由
   /// `RcEndpointService.rotateOwnPairingCode` 负责（否则"扫完即失联"）。
   Future<String> rotatePairingCode() async {
+    await CredentialSealer.ensure();
     final next = RcCodec.rotatedPairingCode(pairingCode).replaceAll('-', '');
-    await _prefs.setString(_kPairCode, next);
+    await _prefs.setString(_kPairCode, CredentialSealer.seal(next));
     // BUG-110：新码 = 新的授权基线。旧码派生出的所有密钥已失效，
     // 撤销名单随之作废（否则被撤销的设备换了新码也永远配不上）。
     await clearRevoked();
+    // R94 / REM-01：**全部** per-controller 密钥一并作废。
+    //
+    // 轮换配对码的语义是"我怀疑钥匙泄露了，全部重置"。只换共享码而留下
+    // peerKey，等于旧控制端仍能用 v3 继续下发命令（撤销变成一句空话）——
+    // 它必须与共享码一起被作废，之后每台控制端重新配对才能拿到新钥匙。
+    await peerKeys.clearAll();
+    // 配对记录里残留的 `pk` 也一并抹掉：否则列表看起来"还带着钥匙"，
+    // 而存储里已经没有它，下一轮 `_send` 会落到 v1 旧路径（静默降级）。
+    final list = paired().map((p) => p.copyWith(peerKey: null)).toList();
+    await _prefs.setString(
+        _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
     return next;
   }
 
@@ -410,10 +493,36 @@ class RemoteStore {
     ];
     await _prefs.setString(
         _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
+    // ---- R94 / REM-01 根治：**删掉这把钥匙** ----
+    //
+    // 这是整个撤销链最关键的一步。此前撤销只做「列表少一行 + 记入撤销名单」：
+    // 名单只挡 `pair.request`，而共享配对码从未改变 ⇒ 被删的控制端拿着旧码
+    // 照样能解开发给本机的命令（"配对移出了列表，对方仍能控制本机"）。
+    //
+    // peerKey 一删，它发来的 v3 密文**永久解不开**（没有任何回退路径，
+    // 见 `RcCodec.decodeWithCandidates` 的 v3 分支），撤销才真的是凭据级失效。
+    if (deviceId.isNotEmpty) await peerKeys.remove(deviceId);
     // 删掉的若正是当前目标，清空选择（否则列表里会出现"选中了一个不存在的端点"）。
     if (selectedEndpointId == deviceId) await selectEndpoint('');
     // BUG-110：同时登记"已撤销"，让它的配对握手请求在准入层就被拒。
     if (deviceId.isNotEmpty) await revoke(deviceId);
+  }
+
+  /// 写入某控制端的 peerKey（端点侧配对握手 / 控制端侧收下发的 ack 都走它）。
+  ///
+  /// 同时更新**配对记录**里的 `pk`：`_send` 是按记录里的值选 v3 还是 v1，
+  /// 只写 PeerKeyStore 会让出站仍走旧路径（"钥匙存了却没用上"）。
+  Future<void> setPeerKey(String deviceId, List<int> key) async {
+    if (deviceId.isEmpty || key.length != 32) return;
+    final b64 = base64Encode(key);
+    await peerKeys.save(deviceId, key);
+    final list = paired();
+    final i = list.indexWhere((p) => p.deviceId == deviceId);
+    if (i < 0) return; // 未配对设备不写记录（钥匙留给下一次配对复用）
+    if (list[i].peerKey == b64) return;
+    list[i] = list[i].copyWith(peerKey: b64);
+    await _prefs.setString(
+        _kPaired, jsonEncode(list.map((p) => p.toJson()).toList()));
   }
 
   // ---------------- 授权撤销（BUG-110） ----------------

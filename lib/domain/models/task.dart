@@ -109,15 +109,28 @@ class Task {
         updatedAt: updatedAt ?? DateTime.now(),
       );
 
+  /// 行映射：**可直接喂给 `db.insert/update`**（DAT-12）。
+  ///
+  /// ## 为什么三列必须 `jsonEncode`
+  /// `tasks.trigger_json` / `action_json` / `asset_ids` 在 schema 里都是
+  /// `TEXT`，而 [trigger] / [action] / [assetIds] 在内存里是 `Map` / `List`。
+  /// 旧实现把内存对象直接放进 row map，靠 `TaskRepository._row` 事后覆盖三列
+  /// 才不崩 —— 那是**契约不一致**：任何新调用点（导入、测试夹具、将来的同步
+  /// 模块）只要直接用 `toRow()` 写库，就会拿到
+  /// `type 'Map<String, dynamic>' is not a subtype of type 'String'`。
+  /// 现在 `toRow()` 自己就是"行"，仓储层不再需要打补丁（见 `TaskRepository._row`）。
+  ///
+  /// 读侧 [fromRow] 仍**同时兼容** JSON 字符串与内存对象（`_decodeJson` /
+  /// `_decodeAssetIds`），因此老测试夹具与 `TaskWire` 的旧形态不会被打断。
   Map<String, dynamic> toRow() => {
         'id': id,
         'name': name,
         'enabled': enabled ? 1 : 0,
         'trigger_type': triggerType.name,
-        'trigger_json': trigger.toJson(),
+        'trigger_json': jsonEncode(trigger.toJson()),
         'action_type': actionType.name,
-        'action_json': action.toJson(),
-        'asset_ids': assetIds,
+        'action_json': jsonEncode(action.toJson()),
+        'asset_ids': jsonEncode(assetIds),
         'cooldown_sec': cooldownSec,
         'quiet_policy': quietPolicy.name,
         // 三值编码（v79）：0=跟随主开关 / 1=强制豁免 / 2=强制不豁免。
@@ -179,8 +192,25 @@ class Task {
   }
 }
 
-/// 已物化的触发计划条目。
-enum OccurrenceStatus { pending, done, skipped, failed }
+/// 已物化的触发计划条目状态。
+///
+/// ## 状态机（CAS 契约，DAT-03 / SCH-04）
+///
+/// ```
+/// pending ──(执行者抢到)──> running ──> done | failed
+///    │                        │
+///    └──────> skipped         └──(进程被杀，下次启动 recoverInterrupted)──> failed
+/// ```
+///
+/// [running] 是 R94 新增的**占用态**：`executeDue` 用
+/// `markStatus(id, running, from: {pending})` 抢占一条计划，返回 1 才算抢到。
+/// 在此之前"乐观置状态"是无条件 UPDATE，两条连接（UI 引擎 + 后台引擎，
+/// `singleInstance:false`）会同时认为自己抢到同一条计划 ⇒ 同一时刻响两次。
+///
+/// ⚠️ 该列是裸 `TEXT`（无 CHECK），反解用 `values.byName`：未知值会抛。
+/// 新增枚举值本身**向后兼容**（老代码不认 `running` 会在 `listAll` 的行级兜底里
+/// 被跳过，不会拖垮整表），但降级安装会看不到正在执行的那条 —— 可接受。
+enum OccurrenceStatus { pending, running, done, skipped, failed }
 
 class PlannedOccurrence {
   const PlannedOccurrence({

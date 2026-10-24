@@ -165,6 +165,27 @@ class _FakeRepo implements AssetRepository {
     deletedIds.add(id);
     items.removeWhere((x) => x.id == id);
   }
+
+  /// DAT-16：事务内判重 + 插入。内存版按 `name` 去重（与真实实现同语义：
+  /// 已落库的名字跳过，同批内同名只取第一条）。
+  @override
+  Future<({int inserted, int skipped})> insertMissingByName(
+      Iterable<AudioAsset> batch) async {
+    final present = items.map((a) => a.name).toSet();
+    final seen = <String>{};
+    var inserted = 0;
+    var skipped = 0;
+    for (final a in batch) {
+      if (present.contains(a.name) || !seen.add(a.name)) {
+        skipped++;
+        continue;
+      }
+      items.add(a);
+      seen.add(a.name);
+      inserted++;
+    }
+    return (inserted: inserted, skipped: skipped);
+  }
 }
 
 /// 假播放器。
@@ -195,6 +216,7 @@ class _FakePlayer extends PlaybackService {
     int fadeOutMs = 0,
     int rampUpMs = 0,
     bool loopFill = false,
+    PlayPriority priority = PlayPriority.normal,
   }) async {
     played.add(path);
     final t = throwOnPlay;

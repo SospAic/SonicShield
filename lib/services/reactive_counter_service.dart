@@ -210,6 +210,7 @@ class ReactiveCounterService {
     CounterTimerFn? timerFactory,
     math.Random? rng,
     DateTime Function()? clock,
+    Duration Function()? elapsed,
   })  : _pool = List<CounterAction>.unmodifiable(pool),
         _audit = audit,
         _playAudio = playAudio,
@@ -217,7 +218,29 @@ class ReactiveCounterService {
         _isBusy = isBusy ?? _defaultBusy,
         _timerFactory = timerFactory ?? _realTimerFactory,
         _rng = rng ?? math.Random(),
-        _clock = clock ?? DateTime.now;
+        _clock = clock ?? DateTime.now,
+        _elapsed = elapsed ?? _defaultElapsed(clock);
+
+  /// 「经过时长」的**单调**时间源（R94 / SCH-10）。
+  ///
+  /// ## 为什么不能直接用 [clock]
+  /// 冷却（`cooldown`）与静默判定（`silenceMin`）都是**间隔**语义，不是
+  /// "日历时刻"语义。旧实现拿 `DateTime.now()` 做差 ⇒ 系统时间跳变时语义反转：
+  /// - **前跳**（NTP 大校正 / 用户改时间）：冷却立刻过期 ⇒ 反击可以立刻再来
+  ///   一次；静默判定立刻为真 ⇒ 白天有人时也可能触发静默反制；
+  /// - **回跳**：`_cooldownUntil` 变成"未来" ⇒ 反击被静默禁用，回跳多久禁多久。
+  ///
+  /// 生产路径（不注入 [clock]）现在用 `Stopwatch`（VM 内单调，与 `Timer` 同源）；
+  /// 注入了 [clock] 的调用方（宿主测试）则以注入时钟的**差值**作为单调源 ——
+  /// 测试推进假时钟时行为与旧实现逐字等价，不会把既有用例改成"永远冷却中"。
+  static Duration Function() _defaultElapsed(DateTime Function()? injected) {
+    if (injected == null) {
+      final sw = Stopwatch()..start();
+      return () => sw.elapsed;
+    }
+    final origin = injected();
+    return () => injected().difference(origin);
+  }
 
   /// 生产默认互斥探测：复用 `PlaybackService` 的登记表（唯一真源）。
   static bool _defaultBusy() => PlaybackService.anyPlaying;
@@ -234,14 +257,19 @@ class ReactiveCounterService {
   final CounterTimerFn _timerFactory;
   final math.Random _rng;
   final DateTime Function() _clock;
+  final Duration Function() _elapsed;
 
   final List<CounterAuditRecord> _records = <CounterAuditRecord>[];
 
   bool _running = false;
   bool _acting = false;
   int _escalation = 0;
-  DateTime? _lastSoundAt;
-  DateTime? _cooldownUntil;
+
+  /// 最近一次"有声音"的**单调**时刻（SCH-10：静默判定只认经过时长）。
+  Duration? _lastSoundElapsed;
+
+  /// 冷却截止的**单调**时刻（不是墙钟 —— 见 [_defaultElapsed]）。
+  Duration? _cooldownUntilElapsed;
   CounterTimer? _silenceTimer;
   Duration? _lastSilenceDelay;
 
@@ -258,10 +286,15 @@ class ReactiveCounterService {
   Duration? get lastScheduledSilenceDelay => _lastSilenceDelay;
 
   /// 启动：记下"最后有声时刻"，并按 15–25 分钟随机排定首次静默检查。
+  ///
+  /// 幂等：对**同一实例**重复 `start()` 是 no-op（`_running` 早退）。
+  /// ⚠️ 跨实例不幂等 —— 引擎侧 `startReactiveCounter` 必须**先停旧实例**
+  /// 再装配新实例（SCH-09：旧实现直接覆盖引用，旧 Timer 仍在跑，
+  /// 表现为"关掉动态反击后仍会自己出声"）。
   void start() {
     if (_running) return;
     _running = true;
-    _lastSoundAt = _clock();
+    _lastSoundElapsed = _elapsed();
     _escalation = 0;
     _scheduleSilence();
   }
@@ -293,7 +326,7 @@ class ReactiveCounterService {
           grade: grade, acted: false, reason: 'not-running');
     }
     // 有声音 ⇒ 静默升级归零（活动状态下的强度不该继续爬）。
-    _lastSoundAt = _clock();
+    _lastSoundElapsed = _elapsed();
     _escalation = 0;
 
     await _record(CounterAuditRecord(
@@ -337,8 +370,10 @@ class ReactiveCounterService {
   Future<CounterOutcome?> handleSilence() async {
     if (!_running) return null;
     final now = _clock();
-    final last = _lastSoundAt ?? now;
-    if (now.difference(last) < config.silenceMin) {
+    // SCH-10：判据用**单调经过时长**（不是墙钟差值）—— 系统时间前跳不得
+    // 把"刚有声音"误判成"已静默 20 分钟"。
+    final sinceSound = _elapsed() - (_lastSoundElapsed ?? Duration.zero);
+    if (sinceSound < config.silenceMin) {
       await _record(CounterAuditRecord(
         at: now,
         kind: 'silence',
@@ -358,16 +393,15 @@ class ReactiveCounterService {
     required SoundGrade grade,
     int escalateStep = 0,
   }) async {
-    final now = _clock();
     if (_acting) {
       return _skip(grade, 'busy', '已有反击在执行：跳过（防叠加）');
     }
     if (_isBusy()) {
       return _skip(grade, 'busy', '手动/调度正在播放：跳过（互斥）');
     }
-    final cd = _cooldownUntil;
-    if (cd != null && now.isBefore(cd)) {
-      final left = cd.difference(now).inSeconds;
+    final cd = _cooldownUntilElapsed;
+    if (cd != null && _elapsed() < cd) {
+      final left = (cd - _elapsed()).inSeconds;
       return _skip(grade, 'cooldown', '冷却中（约剩 ${left}s）：跳过');
     }
     if (_pool.isEmpty) {
@@ -388,7 +422,8 @@ class ReactiveCounterService {
 
     _acting = true;
     // 冷却从"决定反击"那一刻起算：即使执行较久，也不会紧接着再来一次。
-    _cooldownUntil = now.add(config.cooldown);
+    // 基准是**单调**时刻（SCH-10）：墙钟跳变不得解除/延长冷却。
+    _cooldownUntilElapsed = _elapsed() + config.cooldown;
     var ok = false;
     String? failure;
     try {

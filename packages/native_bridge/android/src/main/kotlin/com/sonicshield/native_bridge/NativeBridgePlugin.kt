@@ -1,6 +1,7 @@
 package com.sonicshield.native_bridge
 
 import android.app.AlarmManager
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -24,11 +25,26 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.util.Log
+import android.view.WindowManager
 import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodChannel
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.roundToInt
 
 /**
@@ -49,12 +65,21 @@ private const val API_BAKLAVA = 36
  *
  * 通道：sonic_shield/native
  * 能力：精确闹钟（通道B 看门狗）/ 精确闹钟权限引导 / 电池白名单 /
- *       厂商自启动深链 / 震动 / 音量设置 / 找回提示（device.alert）/ 麦克风前台服务 / 开机自启标志。
+ *       厂商自启动深链 / 震动 / 音量设置 / 找回提示（device.alert）/ 麦克风前台服务 / 开机自启标志 /
+ *       唤醒锁分级（NAT-07）/ 截屏标志（F1 QR 页）/ 设备秘密（REM-10）。
+ *
+ * ⚠️ 同时实现 [ActivityAware]：本插件被注册到**每一个** Flutter 引擎，但只有
+ * UI 引擎挂在 Activity 上（后台服务引擎没有）—— `setSecureFlag` 这类
+ * "必须动 Activity window" 的能力只在拿到 Activity 引用时可用，拿不到时
+ * **如实回 false**，不猜、不崩。
  */
-class NativeBridgePlugin : FlutterPlugin {
+class NativeBridgePlugin : FlutterPlugin, ActivityAware {
 
     private var channel: MethodChannel? = null
     private var appContext: Context? = null
+
+    /** UI 引擎的 Activity 引用（后台引擎 / 已 detach 时为 null）。 */
+    private var activity: Activity? = null
 
     companion object {
         const val CHANNEL = "sonic_shield/native"
@@ -74,15 +99,38 @@ class NativeBridgePlugin : FlutterPlugin {
         const val EXTRA_GENERATION = "generation"
         private const val TAG = "NativeBridge"
 
+        /** 设备秘密密文的 SharedPreferences 键（Keystore 封存，REM-10）。 */
+        private const val KEY_DEVICE_SECRET_WRAPPED = "device_secret_wrapped"
+
+        /** Keystore 里的 AES 密钥别名（设备秘密的封存/解封密钥）。 */
+        private const val KEYSTORE_ALIAS = "sonic_shield_device_secret"
+
+        /**
+         * 当前电源模式（NAT-07，老板裁决：唤醒锁**分级**跟随 powerMode）。
+         *
+         * - `performance`：常驻 `PARTIAL_WAKE_LOCK`（用户显式选择的耗电换可靠）；
+         * - `balanced` / `saver`：**不常驻** —— 引擎按需 acquire，
+         *   任务结束 `releaseWakeLock()` 显式释放；切到这两档时上一档留下的
+         *   常驻锁会被**立即释放**（策略在切档点强制执行，不靠引擎自觉）。
+         *
+         * 为什么放 companion object：插件会被注册到**每一个** Flutter 引擎
+         * （UI 引擎 + flutter_background_service 的后台服务引擎），但二者同属
+         * **同一 app 进程** ⇒ 唤醒锁与模式都必须是进程级唯一，否则会出现
+         * "UI 引擎设 performance、后台引擎不知道"，release 时互相看不见。
+         */
+        @Volatile
+        private var powerMode: String = "balanced"
+
         /**
          * 「性能优先」极致保活档持有的**常驻 PARTIAL_WAKE_LOCK**（进程级单例）。
          *
-         * 为什么放 companion object（而非插件实例字段）：插件会被注册到**每一个**
-         * Flutter 引擎（UI 引擎 + flutter_background_service 的后台服务引擎），
-         * 但二者同属**同一 app 进程** ⇒ 唤醒锁必须进程级唯一，否则会出现
-         * "UI 引擎持一把、后台引擎又持一把"，release 时互相看不见、锁泄漏。
+         * 为什么放 companion object（而非插件实例字段）：同上 —— 唤醒锁必须
+         * 进程级唯一，否则 "UI 引擎持一把、后台引擎又持一把"，release 时互相
+         * 看不见、锁泄漏。
          *
-         * 语义：**只在电源模式 = performance 时持有**（用户显式选择的取舍）；
+         * 语义（NAT-07 分级）：**只在电源模式 = performance 时常驻**；
+         * balanced / saver 下引擎可按需短暂持有，但必须在任务结束时调
+         * `releaseWakeLock` 释放 —— 常驻锁在这两档是**策略禁止**的。
          * 目的 = 锁屏 / Doze 下**不让 CPU 休眠**，使通道 A（应用内 Dart Timer）
          * 也能持续运行，而不只依赖通道 B（精确闹钟）。代价 = 持续耗电。
          */
@@ -143,6 +191,16 @@ class NativeBridgePlugin : FlutterPlugin {
                             val on = call.argument<Boolean>("enabled") == true
                             result.success(setPersistentWakeLock(ctx, on))
                         }
+                        // ---- NAT-07：唤醒锁分级跟随电源模式（老板裁决）----
+                        "setPowerMode" -> {
+                            val mode = call.argument<String>("mode") ?: "balanced"
+                            result.success(setPowerMode(mode))
+                        }
+                        "releaseWakeLock" -> {
+                            // balanced/saver 档"按需 acquire、任务结束显式释放"
+                            // 的释放出口（Dart 侧 background_engine 调用）。
+                            result.success(releaseWakeLock())
+                        }
                         // ---- 远程桌面级控制（docs/61）P0 ----
                         // ⚠️ 输入注入是**高危能力**：本桥只做"转发 + 如实回执"；
                         // 授权（MediaProjection 弹窗 / 系统无障碍开关）与权限位
@@ -196,15 +254,49 @@ class NativeBridgePlugin : FlutterPlugin {
                             result.success(if (f == null || t == null) false else f(t))
                         }
                         "screenCaptureOnce" -> {
-                            // 抓帧是**异步**的（ImageReader 回调）⇒ `result` 延迟回投；
-                            // 未登记（未投屏 / 未授权）⇒ 如实回 null（不静默）。
+                            // 抓帧是**异步**的（等待镜像产帧）⇒ `result` 延迟回投。
+                            // NAT-01/13：失败必须**带异常类型名**回 error，
+                            // 不再只回 null —— 否则审计分不清 IllegalStateException
+                            // （Android 14+ 契约违例）/ SecurityException（授权丢失）/
+                            // 超时，只能看到一句笼统的"抓帧失败"。
                             val f = RemoteCaptureRegistry.captureOnce
                             if (f == null) {
-                                result.success(null)
+                                // 未登记 = 没有投屏会话（未授权 / 服务已停）——
+                                // 这是**确定失败**，不是"平台没这个能力"。
+                                result.error(
+                                    "CAST_NOT_ACTIVE",
+                                    "投屏会话未登记（未授权或服务未运行）",
+                                    null,
+                                )
                             } else {
-                                val timeout =
-                                    (call.argument<Number>("timeoutMs"))?.toLong() ?: 5000L
-                                f(timeout) { b64 -> result.success(b64) }
+                                // 恰好一次回投的哨兵：理论上 `f` 内部全包
+                                // try/catch、回调幂等，双回投不可达；这里再兜一层，
+                                // 任何路径（回调 + 同步抛错）都不许二次 reply。
+                                val replied = AtomicBoolean(false)
+                                try {
+                                    val timeout =
+                                        (call.argument<Number>("timeoutMs"))?.toLong() ?: 5000L
+                                    f(timeout) { b64, err ->
+                                        if (!replied.compareAndSet(false, true)) return@f
+                                        if (b64 != null) {
+                                            result.success(b64)
+                                        } else {
+                                            result.error(
+                                                "CAPTURE_FAILED",
+                                                err ?: "抓帧失败",
+                                                null,
+                                            )
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    if (replied.compareAndSet(false, true)) {
+                                        result.error(
+                                            "CAPTURE_FAILED",
+                                            "${e.javaClass.simpleName}: ${e.message}",
+                                            null,
+                                        )
+                                    }
+                                }
                             }
                         }
                         "openOemAutostart" -> {
@@ -274,11 +366,28 @@ class NativeBridgePlugin : FlutterPlugin {
                             result.success(true)
                         }
                         "stopMicService" -> {
-                            ctx.stopService(
-                                Intent(ctx, MicGuardService::class.java),
-                            )
+                            stopMicGuardService(ctx)
                             result.success(true)
                         }
+                        // NAT-11：与 stopMicService 同一动作（幂等），供远程关闭
+                        // 守卫路径调用（endpoint_service）—— 跨包契约名。
+                        "stopMicGuardService" -> {
+                            stopMicGuardService(ctx)
+                            result.success(true)
+                        }
+                        // NAT-03：麦克风采集中台（MicGuardService）存活探测。
+                        // F2 在引擎 bootstrap 自恢复守卫前调用：拿不到通行证就
+                        // 不启动采音（否则后台 AudioRecord 只回静音，UI 却报
+                        // "守卫运行中"—— 核心能力静默失效）。
+                        "isMicServiceRunning" -> result.success(isMicServiceRunning())
+                        // F1（QR 页 FLAG_SECURE）：配对二维码页禁截屏/录屏。
+                        "setSecureFlag" -> {
+                            val on = call.argument<Boolean>("on") == true
+                            result.success(setSecureFlag(on))
+                        }
+                        // F1（REM-10）：设备秘密（base64），落盘加密用。
+                        "getOrCreateDeviceSecret" ->
+                            result.success(getOrCreateDeviceSecret(ctx))
                         "setServiceShouldRun" -> {
                             val on = call.argument<Boolean>("value") == true
                             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -299,8 +408,16 @@ class NativeBridgePlugin : FlutterPlugin {
                         "networkType" -> result.success(networkType(ctx))
                         else -> result.notImplemented()
                     }
+                } catch (e: UnsupportedOperationException) {
+                    // NAT-13：**真·平台不支持**必须与其它异常区分开 ——
+                    // Dart 侧据此判 unsupported，而不是把 SecurityException
+                    // 之类的失败也折叠成"平台没这功能"（审计结论会指错方向）。
+                    result.error("UNSUPPORTED", e.message, null)
                 } catch (e: Exception) {
-                    result.error("NATIVE_ERROR", e.message, null)
+                    // NAT-13：异常**类型名**必须回传（SecurityException /
+                    // IllegalStateException / IOException …）—— 只回 message
+                    // 会让审计把"权限被拒"误报成"平台未实现"。
+                    result.error("NATIVE_ERROR", "${e.javaClass.simpleName}: ${e.message}", null)
                 }
             }
         }
@@ -310,6 +427,28 @@ class NativeBridgePlugin : FlutterPlugin {
         channel?.setMethodCallHandler(null)
         channel = null
         appContext = null
+        // 不留 Activity 引用：插件生命周期可能长于 Activity。
+        activity = null
+    }
+
+    // ---------- ActivityAware（只有 UI 引擎会收到；后台引擎无 Activity） ----------
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activity = binding.activity
+    }
+
+    override fun onDetachedFromActivity() {
+        activity = null
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        // 配置变更（旋转等）：Activity 被重建，换成新实例。
+        activity = binding.activity
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        // 配置变更期间先留着旧引用（马上会 onReattached…ForConfigChanges
+        // 换成新 Activity）；与官方 ActivityAware 示例一致。
     }
 
     // ---------- 精确闹钟（通道B 看门狗） ----------
@@ -341,6 +480,16 @@ class NativeBridgePlugin : FlutterPlugin {
      * Android 12+ 同受 `canScheduleExactAlarms` 约束（denied 路径不变）；
      * 排布失败逐条回退 setExactAndAllowWhileIdle 并在 error 中说明，
      * 绝不静默假装排上了特权通道。
+     *
+     * ## ARCH-02（R94）：先清后排
+     * 旧实现直接 `putStringSet(KEY_ALARMS, saved)` **整体覆盖**：上一轮排过、
+     * 本轮不在计划里的闹钟**失去引用**，而 `clearExactAlarms` 只遍历
+     * `KEY_ALARMS` —— 这些孤儿闹钟到点仍会拉起引擎空转（耗电 + 用户
+     * "删了任务还被唤醒"）。现在每轮重排以**新集合为准**：先撤旧再排新。
+     * 代价：先清后排的窗口内进程被杀 ⇒ 暂无闹钟（下一轮引擎启动必 replan
+     * 自愈，可接受）；Dart 侧 `pushExactAlarms` 的 `stopping` 早退保持，
+     * 停机清理链与并发 replan 不会互踩（cancel/set 的 requestCode 计算
+     * 一致，cancel 旧 PI 与排新 PI 互不影响）。
      */
     private fun scheduleExactAlarms(
         ctx: Context,
@@ -357,6 +506,8 @@ class NativeBridgePlugin : FlutterPlugin {
             result["denied"] = true
             return result
         }
+        // ARCH-02：先撤上一轮全部（KEY_ALARMS 现在是全集，clear 后重写）。
+        clearExactAlarms(ctx)
         val am = alarmManager(ctx)
         val saved = mutableSetOf<String>()
         var ok = 0
@@ -447,17 +598,22 @@ class NativeBridgePlugin : FlutterPlugin {
      * 本应用当前的 **App Standby Bucket**（docs/59 缺口2 自检）。
      *
      * 取值：`active` / `working_set` / `frequent` / `rare` / `restricted` /
-     * `unknown`。`unknown` = **无法判定**（API<28 / 未授予使用情况访问权 /
-     * 平台异常），语义是"读不到"而不是"某种确定状态" —— 与 Dart 侧
-     * `isOnWifi()` 返回 null 的先例一致（BUG-041）：不能把读不到当成
-     * "rare/restricted"去弹警告，也不能当成"active"假装没问题。
+     * `unknown` / `unauthorized` / `unsupported`。
+     * - `unknown` = **无法判定**（服务缺失 / 平台异常），语义是"读不到"
+     *   而不是"某种确定状态" —— 与 Dart 侧 `isOnWifi()` 返回 null 的先例
+     *   一致（BUG-041）：不能把读不到当成 "rare/restricted" 去弹警告，
+     *   也不能当成 "active" 假装没问题；
+     * - `unauthorized` = **未授予使用情况访问权**（NAT-14：`PACKAGE_USAGE_STATS`
+     *   是 appop 门控，只能由用户在系统设置里授予，而本产品不提供该引导入口
+     *   —— 已裁决"移除权限 + 显式降级"，不再用 unknown 掩盖"永远读不到"）；
+     * - `unsupported` = API < 28，平台没有这个语义。
      *
      * 为什么需要它：rare/restricted 桶里，JobScheduler/AlarmManager 任务
      * 会被推迟数小时；app 内无法自提权（`am set-standby-bucket` 需要
      * shell/系统权限），只能**如实告诉用户**并由他跳厂商设置页处理。
      */
     private fun appStandbyBucket(ctx: Context): String {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return "unknown"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return "unsupported"
         return try {
             val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE)
                     as? UsageStatsManager
@@ -470,9 +626,11 @@ class NativeBridgePlugin : FlutterPlugin {
                 UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "restricted"
                 else -> "unknown"
             }
+        } catch (e: SecurityException) {
+            // NAT-14：未授予使用情况访问权（appop）—— **显式**降级。
+            "unauthorized"
         } catch (e: Exception) {
-            // 典型：未授予 PACKAGE_USAGE_STATS（appop）时抛 SecurityException。
-            // 如实归为 unknown，由调用方按"无法判定"处理，不猜。
+            // 其它异常仍归 unknown（无法判定，不猜）。
             "unknown"
         }
     }
@@ -535,13 +693,20 @@ class NativeBridgePlugin : FlutterPlugin {
      * 为什么需要它（真机 `shengnong` / Android 16 实测反馈）：锁屏进入 Doze 后，
      * 系统会冻结应用进程的 CPU —— 应用内 Dart Timer（通道 A）随之停摆，只能靠
      * 原生精确闹钟（通道 B）唤醒。若用户希望"锁屏也像前台一样准点"，唯一的
-     * 手段是**显式持有唤醒锁**不让 CPU 休眠。这是一个**耗电换可靠**的取舍，
-     * 因此只在电源模式 = performance 时由引擎持有（默认 balanced 不持）。
+     * 手段是**显式持有唤醒锁**不让 CPU 休眠。这是一个**耗电换可靠**的取舍。
+     *
+     * ## NAT-07（R94，老板裁决：分级跟随 powerMode）
+     * - `performance`：本方法 acquire 的锁**常驻**，直到
+     *   `setPersistentWakeLock(false)` 或切档释放；
+     * - `balanced` / `saver`：引擎**按需** acquire（仍走本方法），但必须在
+     *   任务结束时调 `releaseWakeLock()` 显式释放 —— 这两档常驻持锁是
+     *   **策略禁止**的（"平衡/省电模式不持锁"的产品承诺）。切档到这两档时
+     *   上一档留下的常驻锁会被 [setPowerMode] 立即释放。
      *
      * `PARTIAL_WAKE_LOCK` 自 API 1 可用（**未废弃** —— 废弃的是
      * `SCREEN_BRIGHT_WAKE_LOCK` / `FULL_WAKE_LOCK`），需要 `WAKE_LOCK` 权限
-     * （Manifest 已声明）。**无超时** `acquire()`：由引擎在切档 / 停止时对称
-     * `release()`；`setReferenceCounted(false)` + `isHeld` 判重避免重复持锁。
+     * （Manifest 已声明）。**无超时** `acquire()`；`setReferenceCounted(false)`
+     * + `isHeld` 判重避免重复持锁。
      *
      * 幂等：重复 enable 不会叠加持锁；重复 disable 不抛异常。
      * 返回 true = 调用后处于持锁状态。
@@ -568,6 +733,51 @@ class NativeBridgePlugin : FlutterPlugin {
         } catch (e: Exception) {
             // 持锁失败不致命（最坏退回"仅通道 B"的默认行为），但要留痕。
             Log.w(TAG, "setPersistentWakeLock failed", e)
+            false
+        }
+    }
+
+    /**
+     * NAT-07：切换电源模式，并按分级策略**强制执行**唤醒锁语义。
+     *
+     * 由 Dart 侧 `power_service.syncNativeWakeLockPolicy` 在用户切档时调用
+     * （`BackgroundServiceManager.setPowerMode` 是唯一漏斗）。
+     *
+     * - `performance`：允许常驻持锁（引擎随后会 `setPersistentWakeLock(true)`）；
+     * - `balanced` / `saver`：**立即释放**当前持有的锁 —— 不依赖引擎自觉，
+     *   策略在切档点落地；此后引擎按需 acquire + `releaseWakeLock()` 配对。
+     * - 无法识别的值按 `balanced` 处理（安全侧：不持锁）。
+     */
+    private fun setPowerMode(mode: String): Boolean {
+        val normalized = when (mode) {
+            "performance" -> "performance"
+            "saver" -> "saver"
+            else -> "balanced"
+        }
+        powerMode = normalized
+        if (normalized != "performance") {
+            // 分级策略：非 performance 档不得残留常驻锁。
+            releaseWakeLock()
+        }
+        return true
+    }
+
+    /**
+     * NAT-07：显式释放唤醒锁（balanced/saver 档"按需 acquire、任务结束
+     * release"的释放出口；Dart 侧 `background_engine` 在任务执行结束/停机
+     * 时调用 —— F2 调用点）。
+     *
+     * 幂等：未持锁时也返回 true（"调用后不持锁"即为达成态）。
+     * performance 档请走 `setPersistentWakeLock(false)` 的正规路径。
+     */
+    private fun releaseWakeLock(): Boolean {
+        return try {
+            val cur = persistentWakeLock
+            if (cur?.isHeld == true) cur.release()
+            persistentWakeLock = null
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "releaseWakeLock failed", e)
             false
         }
     }
@@ -672,6 +882,12 @@ class NativeBridgePlugin : FlutterPlugin {
      * ⚠️ `hasAmplitudeControl == false` 时系统会把**所有非零振幅一律当成 100%**
      * （官方文档原文），即"强度设置静默失效"。所以这个值必须如实上报给
      * Dart 侧并由 UI 明示 —— 这是 FR-34 口径从"静默降级"改为"明示降级"的依据。
+     *
+     * ## 回执里的系统状态字段（R93 + QUA-09）
+     * - `ringerMode`：0=正常 / 1=静音 / 2=振动，**-1 = 读不到**（哨兵）；
+     * - `dndActive`：勿扰是否开启，**-1 = 读不到**（哨兵，QUA-09 起与
+     *   ringerMode 语义对齐）；true/false = 确定状态。
+     *   ⚠️ Dart 侧 F5 需按哨兵解析（见函数体内 QUA-09 注释）。
      */
     @Suppress("DEPRECATION")
     private fun vibrateCapabilities(ctx: Context): Map<String, Any> {
@@ -704,12 +920,58 @@ class NativeBridgePlugin : FlutterPlugin {
                 env = false
             }
         }
+        // R93（用户报障"手机震动不好使"）：系统响铃/勿扰状态必须一起读回来。
+        // 背景见 Dart 侧 `VibrateCaps.ringerMode` 的注记 —— 振动按
+        // USAGE_NOTIFICATION 下发时，静音/勿扰会**整条吞掉**振动，而
+        // `vibrator.vibrate(...)` 仍返回成功 ⇒ 不读状态就无法回答
+        // "明明调用了为什么没震"（静默失败）。
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+        val ringerMode = try {
+            am?.ringerMode ?: -1
+        } catch (e: Exception) {
+            -1
+        }
+        // QUA-09（R94）：勿扰状态**读不到**时必须回**可区分哨兵 -1**，
+        // 而不是 false。旧实现把「取不到 NotificationManager / 抛异常 /
+        // API<23 没有 interruption filter API」一律报成 false
+        // （= "确定没开勿扰"）—— 这与同回执里 ringerMode 的 -1 哨兵语义
+        // **不一致**：调用方无法区分"没开勿扰"与"不知道开没开"，排障时会把
+        // 读不到误报成"勿扰没开，振动应该能震"（实际可能正被吞）。
+        // 哨兵约定与 ringerMode 对齐：-1 = 读不到；true/false = 确定状态。
+        //
+        // ⚠️ F5 配合点（Dart 侧 `vibrate_caps.dart`）：`fromMap` 目前写的是
+        // `dndActive: m['dndActive'] as bool? ?? false` —— 收到 -1（Int）会
+        // 在这里抛 TypeError。F5 需改成容忍 Int 的解析（例如
+        // `final d = m['dndActive']; dndActive: d is bool ? d : (d as num?)?.toInt() == 1`，
+        // 并把 -1 暴露成"读不到"状态），否则本修复会在 F5 改完前把
+        // `vibrateCapabilities()` 变成一条运行时 TypeError 路径。
+        // 本次只改 Kotlin（本文件归 F4），Dart 归 F5，不越界。
+        val dndActive: Any = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE)
+                        as? android.app.NotificationManager
+                if (nm == null) {
+                    // 服务缺失 = 读不到（不是"没开勿扰"）。
+                    -1
+                } else {
+                    nm.currentInterruptionFilter !=
+                        android.app.NotificationManager.INTERRUPTION_FILTER_ALL
+                }
+            } else {
+                // API<23 没有 interruption filter API ⇒ 读不到，不是"没开"。
+                -1
+            }
+        } catch (e: Exception) {
+            -1
+        }
         return mapOf(
             "hasVibrator" to hasVib,
             "hasAmplitudeControl" to amp,
             "hasEnvelope" to env,
             "minControlPointMs" to minCp,
             "platform" to "android",
+            "ringerMode" to ringerMode,
+            "dndActive" to dndActive,
         )
     }
 
@@ -938,11 +1200,25 @@ class NativeBridgePlugin : FlutterPlugin {
      * 找回动作：点亮屏幕 → 高优先级通知横幅显示 [message] →
      * 媒体音量置最大并播放约 3 秒提示音。
      *
+     * ⚠️ NAT-10（R94）：Android 13+ 用户拒绝 `POST_NOTIFICATIONS` 时
+     * `nm.notify()` 是**静默 no-op**（不抛异常）。旧实现照样 `ok = true`，
+     * 远程收到"找回告警已展示"的**假成功**，而通知栏什么都没有。
+     * 现在通知步骤前先判 [NotificationManagerCompat.areNotificationsEnabled]，
+     * 未授权 ⇒ 整体 `ok = false` 并带原因（`reason` 累加），让上层如实回
+     * `ok:false`。
+     *
+     * ⚠️ NAT-15（R94）：[MediaPlayer] 改 try/finally 语义 ——
+     * `setDataSource/prepare/start` 任一抛错都必须 `release()`，
+     * 否则每次"找回"失败泄漏一个原生解码器，最终提示音永久失效。
+     * 释放恰好一次（延时回调与异常路径互斥，`playerAlive` 哨兵）。
+     *
+     * ⚠️ 回执改为**结构化** Map：`{ok, screen, notification, sound, reason}`。
+     * 裸 bool 回执表达不了"哪一步挂了"；Dart 侧 `alert` 仍按 bool 消费
+     * （升级路径兼容），诊断信息经 `reason` 原样呈现。
+     *
      * ⚠️ 任何异常都【不得】抛回 Dart 侧：每个子步骤独立 try/catch，
-     * 单步失败不影响其余步骤；有任一步成功即返回 true，全部失败返回 false
-     * （Log.w 留痕），调用方按 false 走降级链。这与 handler 外层的
-     * `catch → result.error` 不同 —— 本方法自己兜底，绝不让原生异常
-     * 变成 Dart 侧的 PlatformException。
+     * 单步失败不影响其余步骤。这与 handler 外层的
+     * `catch → result.error` 不同 —— 本方法自己兜底。
      *
      * API 等级说明（minSdk 24）：
      * - `SCREEN_BRIGHT_WAKE_LOCK` 自 API 1 可用（API 13 起标记废弃但
@@ -951,9 +1227,16 @@ class NativeBridgePlugin : FlutterPlugin {
      * - `NotificationChannel` 是 API 26 起，按 SDK 分支；API 24/25 走
      *   旧 `Notification.Builder(ctx)` + `setPriority(MAX)`（已废弃，同上 suppress）。
      * - `MediaPlayer.setAudioAttributes` 自 API 21 可用，无版本分支。
+     * - `areNotificationsEnabled()` 自 API 24 可用（support lib 兜底），无分支。
      */
-    private fun deviceAlert(ctx: Context, message: String): Boolean {
-        var ok = false
+    private fun deviceAlert(ctx: Context, message: String): Map<String, Any> {
+        var screenOk = false
+        var notifOk = false
+        var soundOk = false
+        // NAT-10：通知**被系统拦截**（权限未授予）是独立于"notify 抛异常"的
+        // 一种失败 —— 它不抛异常、静默丢弃，必须单独记。
+        var notifBlocked = false
+        val reasons = mutableListOf<String>()
 
         // 1. 点亮屏幕：SCREEN_BRIGHT_WAKE_LOCK + ACQUIRE_CAUSES_WAKEUP，
         //    8 秒后自动释放（超时释放是 acquire(long) 的既有语义）。
@@ -966,66 +1249,81 @@ class NativeBridgePlugin : FlutterPlugin {
                     "sonic_shield:device_alert",
                 )
                 wl.acquire(8000L)
-                ok = true
+                screenOk = true
             }
         } catch (e: Exception) {
             Log.w(TAG, "deviceAlert: wake screen failed", e)
+            reasons.add("亮屏失败：${e.javaClass.simpleName}")
         }
 
         // 2. 高优先级通知横幅（带全屏 intent，无权限时系统自动降级为横幅）。
         try {
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             if (nm != null) {
-                val chId = "sonic_shield_alert"
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    nm.createNotificationChannel(
-                        NotificationChannel(
-                            chId,
-                            "设备找回提示",
-                            NotificationManager.IMPORTANCE_HIGH,
-                        ),
-                    )
-                }
-                val openIntent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
-                val pi = if (openIntent != null) {
-                    PendingIntent.getActivity(
-                        ctx, 9001, openIntent,
-                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                    )
+                // NAT-10：先问"通知到底展不展得出来"。未授权时 notify 是静默
+                // no-op，不查就等于把"没展示"报成"已展示"。
+                if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) {
+                    notifBlocked = true
+                    reasons.add("通知权限未授予：系统会丢弃通知，找回横幅不可见")
+                    Log.w(TAG, "deviceAlert: notifications disabled, banner dropped")
                 } else {
-                    null
+                    val chId = "sonic_shield_alert"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        nm.createNotificationChannel(
+                            NotificationChannel(
+                                chId,
+                                "设备找回提示",
+                                NotificationManager.IMPORTANCE_HIGH,
+                            ),
+                        )
+                    }
+                    val openIntent =
+                        ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
+                    val pi = if (openIntent != null) {
+                        PendingIntent.getActivity(
+                            ctx, 9001, openIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                        )
+                    } else {
+                        null
+                    }
+                    val notif: Notification
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val b = Notification.Builder(ctx, chId)
+                            .setContentTitle("设备找回")
+                            .setContentText(message)
+                            .setStyle(Notification.BigTextStyle().bigText(message))
+                            .setSmallIcon(ctx.applicationInfo.icon)
+                            .setCategory(Notification.CATEGORY_ALARM)
+                            .setVisibility(Notification.VISIBILITY_PUBLIC)
+                            .setAutoCancel(true)
+                        if (pi != null && canUseFullScreenIntent(ctx)) {
+                            b.setFullScreenIntent(pi, true)
+                        }
+                        notif = b.build()
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val b = Notification.Builder(ctx)
+                            .setContentTitle("设备找回")
+                            .setContentText(message)
+                            .setStyle(Notification.BigTextStyle().bigText(message))
+                            .setSmallIcon(ctx.applicationInfo.icon)
+                            .setPriority(Notification.PRIORITY_MAX)
+                            .setCategory(Notification.CATEGORY_ALARM)
+                            .setVisibility(Notification.VISIBILITY_PUBLIC)
+                            .setAutoCancel(true)
+                        if (pi != null && canUseFullScreenIntent(ctx)) {
+                            b.setFullScreenIntent(pi, true)
+                        }
+                        notif = b.build()
+                    }
+                    nm.notify(9001, notif)
+                    notifOk = true
                 }
-                val notif: Notification
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val b = Notification.Builder(ctx, chId)
-                        .setContentTitle("设备找回")
-                        .setContentText(message)
-                        .setStyle(Notification.BigTextStyle().bigText(message))
-                        .setSmallIcon(ctx.applicationInfo.icon)
-                        .setCategory(Notification.CATEGORY_ALARM)
-                        .setVisibility(Notification.VISIBILITY_PUBLIC)
-                        .setAutoCancel(true)
-                    if (pi != null && canUseFullScreenIntent(ctx)) b.setFullScreenIntent(pi, true)
-                    notif = b.build()
-                } else {
-                    @Suppress("DEPRECATION")
-                    val b = Notification.Builder(ctx)
-                        .setContentTitle("设备找回")
-                        .setContentText(message)
-                        .setStyle(Notification.BigTextStyle().bigText(message))
-                        .setSmallIcon(ctx.applicationInfo.icon)
-                        .setPriority(Notification.PRIORITY_MAX)
-                        .setCategory(Notification.CATEGORY_ALARM)
-                        .setVisibility(Notification.VISIBILITY_PUBLIC)
-                        .setAutoCancel(true)
-                    if (pi != null && canUseFullScreenIntent(ctx)) b.setFullScreenIntent(pi, true)
-                    notif = b.build()
-                }
-                nm.notify(9001, notif)
-                ok = true
             }
         } catch (e: Exception) {
             Log.w(TAG, "deviceAlert: notification failed", e)
+            reasons.add("通知失败：${e.javaClass.simpleName}")
         }
 
         // 3. 请求音频焦点 + 媒体音量临时置最大 + 短提示音；3 秒后**还原音量并释放焦点**。
@@ -1053,19 +1351,38 @@ class NativeBridgePlugin : FlutterPlugin {
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             if (uri != null) {
                 val player = MediaPlayer()
-                player.setAudioAttributes(audioAttributes(AudioAttributes.USAGE_MEDIA))
-                player.setDataSource(ctx, uri)
-                player.prepare()
-                player.start()
-                Handler(Looper.getMainLooper()).postDelayed({
-                    try {
-                        player.stop()
-                    } catch (_: Exception) {
-                    }
+                // NAT-15：释放恰好一次 —— 延时收尾与异常路径用同一哨兵互斥。
+                var playerAlive = true
+                fun releasePlayer() {
+                    if (!playerAlive) return
+                    playerAlive = false
                     try {
                         player.release()
                     } catch (_: Exception) {
                     }
+                }
+                try {
+                    player.setAudioAttributes(audioAttributes(AudioAttributes.USAGE_MEDIA))
+                    player.setDataSource(ctx, uri)
+                    player.prepare()
+                    player.start()
+                    soundOk = true
+                } catch (e: Exception) {
+                    // 异常路径：立即释放，绝不留给"延时回调"（成功路径才登记它）。
+                    releasePlayer()
+                    reasons.add("提示音播放失败：${e.javaClass.simpleName}")
+                    Log.w(TAG, "deviceAlert: alert tone failed", e)
+                }
+                // 无论提示音成功与否，音量还原 + 焦点释放都必须执行
+                // （准备阶段失败同样可能已把音量顶到最大）。
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (playerAlive) {
+                        try {
+                            player.stop()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    releasePlayer()
                     // 还原用户原音量 + 释放焦点，不把"临时最大"留成副作用。
                     if (am != null) {
                         if (origMusicVolume >= 0) {
@@ -1085,13 +1402,22 @@ class NativeBridgePlugin : FlutterPlugin {
                         }
                     }
                 }, 3000L)
-                ok = true
             }
         } catch (e: Exception) {
             Log.w(TAG, "deviceAlert: alert tone failed", e)
+            reasons.add("提示音步骤失败：${e.javaClass.simpleName}")
         }
 
-        return ok
+        // NAT-10：通知被系统拦截 ⇒ 整体判失败（"找回告警已展示"不成立），
+        // 不再是"任一步成功即 true"的假成功。通知渠道可用时维持原 OR 语义。
+        val ok = !notifBlocked && (screenOk || notifOk || soundOk)
+        return mapOf(
+            "ok" to ok,
+            "screen" to screenOk,
+            "notification" to notifOk,
+            "sound" to soundOk,
+            "reason" to if (reasons.isEmpty()) null else reasons.joinToString("；"),
+        )
     }
 
     /**
@@ -1123,5 +1449,191 @@ class NativeBridgePlugin : FlutterPlugin {
             ctx,
             Intent(ctx, MicGuardService::class.java),
         )
+    }
+
+    /**
+     * NAT-11：撤下麦克风通行证（停 [MicGuardService] + 其常驻通知）。幂等。
+     *
+     * **契约（调用方）**：任何"关闭守卫"的入口都必须成对调用本方法 ——
+     * 本地开关（guard_toggle）、远程 `guard.set{enabled:false}`
+     * （endpoint_service，F1）、引擎停机（background_engine）三条路径一致。
+     * 漏掉的后果：常驻通知"正在监听声音事件"残留，与"守卫已关"矛盾，
+     * 且麦克风通行证被长期占用（隐私感知 + 耗电）。
+     */
+    private fun stopMicGuardService(ctx: Context) {
+        try {
+            ctx.stopService(
+                Intent(ctx, MicGuardService::class.java),
+            )
+        } catch (e: Exception) {
+            // 停服务失败不致命（幂等语义：下次还会再停），但必须留痕。
+            Log.w(TAG, "stopMicGuardService failed", e)
+        }
+    }
+
+    /**
+     * NAT-03：麦克风采集中台（[MicGuardService]）是否**真的**在运行。
+     *
+     * F2 调用点（`background_engine.dart` 引擎 bootstrap 自恢复守卫前）：
+     * 守卫自恢复必须先确认通行证存活。Android 11+ while-in-use 语义下，
+     * 后台（无 microphone 型 FGS）`AudioRecord` **不抛异常但只回静音** ——
+     * 直接自恢复会采到全静音，而 UI 仍报"守卫运行中"（核心安全能力
+     * 静默失效，本项目最忌讳的形态）。拿不到通行证 ⇒ 不启动采音，
+     * 如实置 `guardError` 并回投 `guardActive:false`。
+     *
+     * 实现：进程级静态标志（[MicGuardService.onCreate]/`onDestroy` 维护）——
+     * 服务与插件同进程，标志即权威；比 `getRunningServices` 轻且无需权限。
+     * **fail-closed**：探测异常按"没有通行证"返回 false，绝不静默采音。
+     */
+    private fun isMicServiceRunning(): Boolean = try {
+        MicGuardService.running
+    } catch (e: Exception) {
+        Log.w(TAG, "isMicServiceRunning failed", e)
+        false
+    }
+
+    // ---------- QR 页截屏标志（F1，REM-10 同批契约） ----------
+
+    /**
+     * 设置 / 清除 Activity 的 `FLAG_SECURE`（禁截屏、禁录屏、最近任务缩略图
+     * 打码）。F1 调用点：配对二维码页进入时 `on: true`，退出时 `on: false`。
+     *
+     * 只在 **UI 引擎**可用（后台服务引擎没有 Activity ⇒ 如实回 false）。
+     * MethodChannel handler 运行在平台线程（即 UI 线程），window flag
+     * 操作无需再切线程。
+     */
+    private fun setSecureFlag(on: Boolean): Boolean {
+        val act = activity ?: run {
+            Log.w(TAG, "setSecureFlag: no activity attached (background engine?)")
+            return false
+        }
+        return try {
+            if (on) {
+                act.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                act.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "setSecureFlag failed", e)
+            false
+        }
+    }
+
+    // ---------- 设备秘密（F1，REM-10 落盘加密） ----------
+
+    /**
+     * 取**设备秘密**（base64，32 字节 CSPRNG），供落盘加密使用。
+     *
+     * ## 主路径：Keystore 封存（硬件保护）
+     * 首次调用生成随机秘密，用 AndroidKeyStore 里的 AES-256-GCM 密钥
+     * **封存**后落 SharedPreferences（`iv.ct` 两段 base64）；之后每次
+     * 调用解封回同一值。Keystore 私钥材料**不可导出**，故落盘的只是密文 ——
+     * 拿走 prefs 文件没有 Keystore 密钥也还原不出秘密（密钥随应用卸载 /
+     * 清除数据一并销毁，与 prefs 同生命周期）。
+     *
+     * ## 降级路径：设备指纹派生（**安全性折扣**，必须如实标注）
+     * Keystore 不可用（极端老旧/破损设备）时退化为
+     * `SHA-256(ANDROID_ID | Build 信息 | 包名)`。折扣：
+     * ① 无硬件保护，任何能复现同样输入的设备可算出同样值；
+     * ② ANDROID_ID 在恢复出厂后改变（API 26+ 按签名+用户作用域稳定）。
+     * 仅作"比明文好一点"的兜底，**不是**安全承诺。
+     *
+     * ## 失败语义
+     * 两条路都失败才返回 null —— 调用方必须按"没有设备密钥"降级，
+     * **不得**把 null 当成空串去加密（那等于没加密）。
+     */
+    private fun getOrCreateDeviceSecret(ctx: Context): String? {
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val wrapped = prefs.getString(KEY_DEVICE_SECRET_WRAPPED, null)
+        if (wrapped != null) {
+            val raw = unwrapDeviceSecret(wrapped)
+            if (raw != null) return raw
+            // 解封失败（密钥被系统作废 / prefs 与密钥不一致）⇒ 走重建流程，
+            // 不把失败伪装成"没有秘密"、也不复用旧密文。
+            Log.w(TAG, "device secret unwrap failed, regenerating")
+        }
+        val secret = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val b64 = Base64.encodeToString(secret, Base64.NO_WRAP)
+        val blob = wrapDeviceSecret(secret)
+        if (blob != null) {
+            prefs.edit().putString(KEY_DEVICE_SECRET_WRAPPED, blob).apply()
+            return b64
+        }
+        Log.w(TAG, "keystore unavailable, degrade to device-fingerprint secret")
+        return deriveFromDeviceFingerprint(ctx)
+    }
+
+    /** 取（不存在则生成）Keystore 里的 AES-256 密钥；不可用返回 null。 */
+    private fun keystoreKey(): SecretKey? = try {
+        val ks = KeyStore.getInstance("AndroidKeyStore")
+        ks.load(null)
+        val existing = ks.getKey(KEYSTORE_ALIAS, null) as? SecretKey
+        if (existing != null) {
+            existing
+        } else {
+            val spec = KeyGenParameterSpec.Builder(
+                KEYSTORE_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+            val kg = KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            kg.init(spec)
+            kg.generateKey()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "keystore key unavailable", e)
+        null
+    }
+
+    /** 封存：`Base64(iv) + "." + Base64(ciphertext)`；失败返回 null。 */
+    private fun wrapDeviceSecret(secret: ByteArray): String? {
+        val key = keystoreKey() ?: return null
+        return try {
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.ENCRYPT_MODE, key)
+            val iv = c.iv
+            val ct = c.doFinal(secret)
+            Base64.encodeToString(iv, Base64.NO_WRAP) + "." +
+                Base64.encodeToString(ct, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.w(TAG, "wrapDeviceSecret failed", e)
+            null
+        }
+    }
+
+    /** 解封：密文 → base64 明文；失败（含密文被篡改）返回 null。 */
+    private fun unwrapDeviceSecret(blob: String): String? {
+        val key = keystoreKey() ?: return null
+        return try {
+            val parts = blob.split(".")
+            if (parts.size != 2) return null
+            val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+            val ct = Base64.decode(parts[1], Base64.NO_WRAP)
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
+            Base64.encodeToString(c.doFinal(ct), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.w(TAG, "unwrapDeviceSecret failed", e)
+            null
+        }
+    }
+
+    /** 降级路径：设备指纹 SHA-256（安全性折扣见 [getOrCreateDeviceSecret] 注释）。 */
+    private fun deriveFromDeviceFingerprint(ctx: Context): String? = try {
+        val androidId = Settings.Secure.getString(
+            ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+        val material = "sonic_shield.device_secret.v1|$androidId" +
+            "|${Build.BRAND}|${Build.MODEL}|${Build.DEVICE}|${ctx.packageName}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(material.toByteArray(Charsets.UTF_8))
+        Base64.encodeToString(digest, Base64.NO_WRAP)
+    } catch (e: Exception) {
+        Log.w(TAG, "deriveFromDeviceFingerprint failed", e)
+        null
     }
 }

@@ -59,14 +59,50 @@ void main() {
     await tester.pump();
   }
 
+  /// 真实异步区里生成会话。
+  ///
+  /// ## 为什么必须借 `runAsync`
+  /// 会合主题/会话密钥由 PBKDF2 ×100k 派生，且刻意跑在**后台隔离区**
+  /// （见 `RcAssist.offThread`）——否则生成临时码会把 UI 线程冻住一秒上下。
+  /// 隔离区的完成事件是**真实**事件循环的分发，而 `testWidgets` 默认在
+  /// FakeAsync 区里：那里只驱动微任务与假时钟，真实事件根本不会被投递 ⇒
+  /// 直接在测试体里 `await host.start()` 会永久挂起（R94 期间 17 处 assist
+  /// UI 测试全部死锁正是这个原因）。`runAsync` 临时切回真实异步区。
+  Future<AssistSession> open(WidgetTester tester,
+          {Duration ttl = RcAssist.defaultTtl}) async {
+    // `runAsync<T>` 的返回类型是 `Future<T?>` —— 这里 T 已知非空。
+    final s = await tester.runAsync(() => host.start(ttl: ttl));
+    return s!;
+  }
+
+  /// 有界地在真实异步区等待条件成立。
+  ///
+  /// 隔离区派生只能靠**真实**时间推进 —— `pump(Duration)` 推的是假时钟，
+  /// 对隔离区一无所知。UI 触发式（点「生成临时码」）无法把整段流程搬进
+  /// `runAsync`（`pump` 不能在 `runAsync` 里调），只能等它算完再回假时钟渲染。
+  Future<void> waitReal(
+    WidgetTester tester,
+    bool Function() done, {
+    Duration timeout = const Duration(seconds: 20),
+  }) =>
+      tester.runAsync(() async {
+        final deadline = DateTime.now().add(timeout);
+        while (!done() && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+      });
+
   /// 把会话推进到 active（模拟控制端完成 hello 握手）。
-  Future<AssistSession> activate() async {
-    final s = await host.start();
-    final ctlKey = await RcAssist.ctlKey(s.code, s.password);
-    await host.onWire(await RcCodec.encode(
-        RcMessage.now(RcAssistCmd.hello, {'ctrlName': '小李的手机'}),
-        ctlKey,
-        s.topic));
+  Future<AssistSession> activate(WidgetTester tester) async {
+    final s = await open(tester);
+    final ctlKey =
+        (await tester.runAsync(() => RcAssist.ctlKey(s.code, s.password)))!;
+    await tester.runAsync(() async {
+      await host.onWire(await RcCodec.encode(
+          RcMessage.now(RcAssistCmd.hello, {'ctrlName': '小李的手机'}),
+          ctlKey,
+          s.topic));
+    });
     return s;
   }
 
@@ -74,8 +110,9 @@ void main() {
   String groupedCode(String code) =>
       '${code.substring(0, 3)} ${code.substring(3, 6)} ${code.substring(6)}';
 
-  /// 把 8 位密码按 4 位分组。
-  String groupedPw(String pw) => '${pw.substring(0, 4)} ${pw.substring(4)}';
+  /// 把 12 位密码按 4 位分组（R94 / REM-04：密码位数 8 → 12）。
+  String groupedPw(String pw) =>
+      '${pw.substring(0, 4)} ${pw.substring(4, 8)} ${pw.substring(8)}';
 
   testWidgets('AHW-01 无会话时提示"未被控制"并给出唯一入口按钮', (tester) async {
     await pump(tester);
@@ -88,7 +125,7 @@ void main() {
   });
 
   testWidgets('AHW-02 等待接入：显示临时码/密码/倒计时，且仍无权限开关', (tester) async {
-    final s = await host.start();
+    final s = await open(tester);
     await pump(tester);
 
     expect(find.text('协助会话进行中'), findsOneWidget);
@@ -106,7 +143,7 @@ void main() {
   });
 
   testWidgets('AHW-03 已接入：显示控制端名 + 权限开关且默认全关', (tester) async {
-    await activate();
+    await activate(tester);
     await pump(tester);
 
     expect(find.text('正在被「小李的手机」协助'), findsOneWidget);
@@ -123,7 +160,7 @@ void main() {
   });
 
   testWidgets('AHW-04 拨动开关 → 会话权限位同步更新', (tester) async {
-    final s = await activate();
+    final s = await activate(tester);
     await pump(tester);
 
     await tester.tap(find.widgetWithText(SwitchListTile, '播放音效'));
@@ -136,7 +173,7 @@ void main() {
   });
 
   testWidgets('AHW-05 倒计时按 TTL 渲染为 mm:ss', (tester) async {
-    final s = await host.start(ttl: const Duration(minutes: 5));
+    final s = await open(tester, ttl: const Duration(minutes: 5));
     await pump(tester);
 
     // 注：**不能**用 tester.pump(Duration) 推进倒计时 —— FakeAsync 只虚拟化
@@ -155,7 +192,7 @@ void main() {
   });
 
   testWidgets('AHW-06 短 TTL 渲染为 00:ss（不出现负数/越界）', (tester) async {
-    final s = await host.start(ttl: const Duration(seconds: 45));
+    final s = await open(tester, ttl: const Duration(seconds: 45));
     await pump(tester);
 
     // 短 TTL 必须渲染成 00:ss —— 两位秒、不越界、不出现负号。
@@ -167,7 +204,7 @@ void main() {
   });
 
   testWidgets('AHW-07 终止会话后回到"未被控制"初始态', (tester) async {
-    await activate();
+    await activate(tester);
     await pump(tester);
 
     await tester.tap(find.text('终止会话'));
@@ -181,13 +218,16 @@ void main() {
 
   // ---------------- AHW-1x 生成路径（P0-1 回归锁） ----------------
 
-  testWidgets('AHW-10 点击「生成临时码」→ 屏幕出现 9 位临时码与 8 位密码', (tester) async {
+  testWidgets('AHW-10 点击「生成临时码」→ 屏幕出现 9 位临时码与 12 位密码', (tester) async {
     await pump(tester);
     expect(find.text('生成临时码'), findsOneWidget);
 
     await tester.tap(find.text('生成临时码'));
     await tester.pump(); // 触发 _start()
-    await tester.pump(const Duration(milliseconds: 200)); // 派生 + emit
+    // 派生跑在后台隔离区 ⇒ 只能等**真实**时间（假时钟的 pump(Duration)
+    // 推不动隔离区）。有界等待，不靠魔法数字。
+    await waitReal(tester, () => host.session != null);
+    await tester.pump(); // 回到假时钟渲染
 
     final s = host.session;
     expect(s, isNotNull, reason: '点击后必须真的建立会话');
@@ -211,7 +251,8 @@ void main() {
 
     await tester.tap(find.text('生成临时码'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 200));
+    await waitReal(tester, () => host.session != null);
+    await tester.pump();
 
     final s = host.session;
     expect(s, isNotNull, reason: '审计失败不得阻断会话创建');
@@ -250,13 +291,16 @@ void main() {
   // ---------------------------------------------------------------------------
   testWidgets('AHW-13 握手被爆破 → 等待卡必须显示"已拒绝 N 次"（不能静默）',
       (tester) async {
-    final s = await host.start();
+    final s = await open(tester);
     // 密码错误的密文（与 assist_host_test.dart AH-10 同一构造，非伪造输入）。
-    final wrong = await RcAssist.ctlKey(s.code, 'ZZZZZZZZ');
-    await host.onWire(await RcCodec.encode(
-        RcMessage.now(RcAssistCmd.hello, {'ctrlName': '攻击者'}),
-        wrong,
-        s.topic));
+    final wrong =
+        (await tester.runAsync(() => RcAssist.ctlKey(s.code, 'ZZZZZZZZ')))!;
+    await tester.runAsync(() async {
+      await host.onWire(await RcCodec.encode(
+          RcMessage.now(RcAssistCmd.hello, {'ctrlName': '攻击者'}),
+          wrong,
+          s.topic));
+    });
     expect(s.failures, 1, reason: '前置：必须真的计了一次失败');
 
     await pump(tester);
@@ -288,7 +332,7 @@ void main() {
     addTearDown(() => tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null));
 
-    final s = await host.start();
+    final s = await open(tester);
     await pump(tester);
 
     await tester.ensureVisible(find.text('复制临时码 + 密码'));

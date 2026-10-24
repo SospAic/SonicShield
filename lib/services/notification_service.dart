@@ -154,6 +154,71 @@ class NotificationService {
     }
   }
 
+  /// 通话**进行中**的常驻通知（R94 / REM-08）。
+  ///
+  /// ## 为什么自动接通必须有它
+  ///
+  /// 手动振铃路径已经发 [showIncomingCall]（可见）。而「自动接通」路径
+  /// 此前**一条通知都没有**：`call.invite` → 立即 `getUserMedia` 开麦/开摄像头，
+  /// App 在后台/锁屏时使用者除系统指示灯外**毫无感知**（docs/08「隐蔽监控」
+  /// 的边界项）。授权策略是一次性设置，单次会话的可见指示必须每通都有。
+  ///
+  /// ## 为什么返回 bool 而不是静默吞掉
+  ///
+  /// 调用方（[CallService.onIncomingCall]）用它做**失败关闭**：通知发不出去
+  /// （权限被拒 / 渠道被关）就不许静默接通 —— 退回振铃，由用户点「接听」。
+  /// 这正是审计给的建议（"若用户拒绝通知权限，则需退回禁止自动接通"）。
+  ///
+  /// 与来电通知分两个 id：来电可被「接听」取消，通话中的常驻通知要一直留到
+  /// 会话结束（两者同时存在会互相覆盖）。
+  static const int ongoingCallId = 0xCA12;
+
+  /// 弹「通话中」常驻通知；返回**是否真的显示成功**（权限关闭时 false）。
+  Future<bool> showOngoingCall({
+    required String title,
+    required String body,
+  }) async {
+    try {
+      await ensure();
+      final android = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      // Android 13+ 未授予 POST_NOTIFICATIONS 时 show() 不会报错，只是**不显示**
+      // —— 必须显式查询，否则"可见指示"就是一句空话。
+      final enabled = await android?.areNotificationsEnabled();
+      if (enabled == false) return false;
+      const details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          NotificationChannels.calls,
+          '来电',
+          channelDescription: '远程来电与通话中提醒',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.call,
+          ongoing: true,
+          autoCancel: false,
+          playSound: true,
+          enableVibration: true,
+          onlyAlertOnce: true,
+        ),
+        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+      );
+      await _plugin.show(ongoingCallId, title, body, details);
+      return true;
+    } on Object {
+      // 插件未就绪（宿主测试 / 被系统回收）：如实返回 false，由调用方降级。
+      return false;
+    }
+  }
+
+  /// 收起「通话中」常驻通知（会话收尾时调用）。
+  Future<void> cancelOngoingCall() async {
+    try {
+      await _plugin.cancel(ongoingCallId);
+    } on Object {
+      // 无副作用。
+    }
+  }
+
   /// 事件通知的**唯一** id 序列（R90-18）。
   ///
   /// 旧实现用 `title.hashCode` 作 id：同标题的两条取证通知会互相覆盖

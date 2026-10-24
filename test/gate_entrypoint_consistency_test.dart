@@ -95,60 +95,83 @@ void main() {
         reason: '★ 反例必须与真源不同 ⇒ GEC-02 在同一判据下会判红 ⇒ 判据非恒真');
   });
 
-  // ───────────────────── 阶段 D：CI 收敛为 iOS IPA 构建（P2-27 收窄） ─────────────────────
-  // 2026-10-10：CI 收敛为「只构建未签名 iOS IPA」—— 覆盖率 ratchet / analyze /
-  // 宿主测试 / Android 构建 / 模拟器集成测试全部裁撤（改由本地 `scripts/gates.sh`
-  // 承担）。因此这里不再要求 CI 带 `--gate`/`--min-covered`，而是**锁住新形状**：
-  // 只剩 ios-build，且产出未签名 IPA。反例保证判据非恒真。
+  // ───────────────────── 阶段 D：CI = analyze + 秒级契约锁 + 产物（QUA-04 裁决）─────────
+  // 2026-10-10：CI 曾收敛为「只构建产物」—— analyze/test/coverage/emulator 全部裁撤
+  // （改由本地 scripts/gates.sh 承担，省 Actions 计费）。
+  // 2026-10-24（第九十三轮，QUA-04 用户裁决：折中方案）：在"只构建"之上**恢复一个
+  // 秒级契约锁 job**（analyze-test）。全量功能层 / `--tags perf` 压测层 / 覆盖率
+  // ratchet 仍裁撤（分钟级 + 本地 sqlite3 原生库依赖）；CI 只拦治理层漂移
+  // （文档自述过期 / 门禁两条入口不同源 / 覆盖率哨兵失真 / 源码锁工具退化）。
+  // 判据锁住新形状；反例保证判据非恒真（见 GEC-06r）。
   final ci = File('.github/workflows/ci.yml').readAsStringSync();
 
-  /// 新 CI 判据：只保留 iOS IPA 构建，其余 job 一律不得存在。
+  /// 新 CI 判据：两个产物 job + 一个秒级契约锁 job，重活一律不得进 CI。
   ///
-  /// ⚠️ 第八十四轮修正：`analyze-test` / `emulator-test` / `--min-covered=` 的
-  /// **「不得存在」判据此前会误伤注释** —— `ci.yml` 里恰有一行说明「analyze-test /
-  /// emulator-test 仍保持在本地 gates.sh（不恢复）」，于是判据把**注释**当成了 job
-  /// definition 而判红（实测 `GEC-06` 假红）。注释描述的是「**为什么**不恢复」，
-  /// 与「是否真的存在该 job」是两回事 ⇒ 检查前先剥掉 YAML 注释行。
-  /// 反例保证判据非恒真（见 `GEC-06r`：真塞回 `analyze-test:` job 仍判红）。
-  bool ciIsIpaOnly(String src) {
+  /// ⚠️ 第八十四轮修正：**「不得存在」判据此前会误伤注释** —— `ci.yml` 里恰有注释
+  /// 逐字写着 `analyze-test` / `emulator-test` / `--min-covered=` / `--tags perf`
+  /// 来解释"为什么不跑"，于是判据把**注释**当成了 job definition 而判红
+  /// （实测 `GEC-06` 假红）。注释描述的是「**为什么**不恢复」，与「是否真的存在
+  /// 该 job」是两回事 ⇒ 检查前先剥掉 YAML 注释行。
+  bool ciHasFastLocks(String src) {
     final code = src
         .split('\n')
         .where((l) => !l.trimLeft().startsWith('#'))
         .join('\n');
-    return code.contains('ios-build') &&
-        code.contains('sonic_shield-unsigned.ipa') &&
-        // 第八十三轮（远程合并轮）：恢复 `android-build`（签名 APK）—— 本仓交付
-        // 目标是「所有系统的 release」，Android 侧必须出 APK；远程 2026-10-10 的
-        // `1d8db2e` 把 android-build 一并裁掉了，与交付目标冲突。analyze/emulator/
-        // 覆盖率 ratchet 仍裁撤（改由本地 gates.sh 承担，不恢复）。
+    return code.contains('analyze-test') &&
+        code.contains('flutter analyze') &&
+        // 秒级治理锁四件套（缺一件即判红：CI 的门禁意义就在这四把锁）
+        code.contains('doc_gate_consistency_test.dart') &&
+        code.contains('gate_entrypoint_consistency_test.dart') &&
+        code.contains('coverage_sentinel_test.dart') &&
+        code.contains('support_source_text_test.dart') &&
+        // 产物 job 保持（交付目标：所有系统的 release）
         code.contains('android-build') &&
         code.contains('name: sonicshield-apk') &&
-        !code.contains('analyze-test') &&
+        code.contains('ios-build') &&
+        code.contains('sonic_shield-unsigned.ipa') &&
+        // 分钟级/重活一律不得进 CI（省 Actions 计费 + 依赖本地 sqlite3 原生库）
         !code.contains('emulator-test') &&
-        !code.contains('--min-covered=');
+        !code.contains('--min-covered=') &&
+        !code.contains('--tags perf');
   }
 
-  test('GEC-06 ★ CI 只构建产物：Android 签名 APK + iOS 未签名 IPA（analyze/emulator/ratchet 已裁撤）', () {
-    expect(ciIsIpaOnly(ci), isTrue,
-        reason: 'CI 必须同时产出 android-build（name: sonicshield-apk）与 '
-            'ios-build（name: sonicshield-ios-ipa）；analyze/test/coverage/'
+  test('GEC-06 ★ CI = analyze + 秒级契约锁 + 两个产物 job（QUA-04 裁决）', () {
+    expect(ciHasFastLocks(ci), isTrue,
+        reason: 'CI 必须同时含 analyze-test（flutter analyze + 四把秒级治理锁）、'
+            'android-build（name: sonicshield-apk）与 ios-build'
+            '（name: sonicshield-ios-ipa）；全量功能层/压测层/覆盖率 ratchet/'
             'emulator 均应裁撤（改由本地 gates.sh 承担）');
   });
 
-  test('GEC-06r 反例：塞回 analyze/emulator/覆盖率 ratchet、或删掉任一产物 job 都判红', () {
-    expect(ciIsIpaOnly(ci.replaceAll('android-build', 'X')), isFalse,
+  test('GEC-06r 反例：删掉任一秒级锁 / 塞回重活 / 删掉任一产物 job 都判红', () {
+    expect(ciHasFastLocks(ci.replaceAll('android-build', 'X')), isFalse,
         reason: '删掉 android-build 必须判红（交付目标是所有系统）');
-    expect(ciIsIpaOnly(ci.replaceAll('ios-build', 'X')), isFalse,
+    expect(ciHasFastLocks(ci.replaceAll('ios-build', 'X')), isFalse,
         reason: '没有 iOS job 必须判红');
-    expect(ciIsIpaOnly('$ci\n  analyze-test:\n    runs-on: ubuntu-latest\n'),
-        isFalse, reason: '塞回 analyze-test 必须判红（改由本地 gates.sh 承担）');
-    expect(ciIsIpaOnly('$ci\n  emulator-test:\n'), isFalse,
-        reason: '塞回 emulator-test 必须判红');
+    expect(ciHasFastLocks(ci.replaceAll('analyze-test', 'X')), isFalse,
+        reason: '删掉 analyze-test job 必须判红（QUA-04：CI 至少要拦治理层漂移）');
+    expect(ciHasFastLocks(ci.replaceAll('doc_gate_consistency_test.dart', 'X')),
+        isFalse,
+        reason: '少一把秒级治理锁必须判红（四件套是一件都不能少的）');
     expect(
-        ciIsIpaOnly('$ci\n      run: dart run tool/coverage_report.dart '
-            '--gate=98.8 --min-covered=12653\n'),
+        ciHasFastLocks(ci.replaceAll('gate_entrypoint_consistency_test.dart', 'X')),
+        isFalse,
+        reason: '少 gate_entrypoint_consistency 必须判红');
+    expect(ciHasFastLocks(ci.replaceAll('coverage_sentinel_test.dart', 'X')),
+        isFalse,
+        reason: '少 coverage_sentinel 必须判红');
+    expect(ciHasFastLocks(ci.replaceAll('support_source_text_test.dart', 'X')),
+        isFalse,
+        reason: '少 support_source_text 必须判红');
+    expect(ciHasFastLocks('$ci\n  emulator-test:\n'), isFalse,
+        reason: '塞回 emulator-test 必须判红（重活归本地 gates.sh）');
+    expect(
+        ciHasFastLocks('$ci\n      run: dart run tool/coverage_report.dart '
+            '--gate=98.6 --min-covered=12872\n'),
         isFalse,
         reason: '塞回覆盖率 ratchet 必须判红');
+    expect(ciHasFastLocks('$ci\n      run: flutter test --tags perf\n'), isFalse,
+        reason: '塞回压测层必须判红');
   });
 
   /// 设备套件"无 adb / 无设备"分支必须落在 BLOCKED，且由 ALLOW_DEVICE_SKIP 显式放行 ——

@@ -16,10 +16,41 @@ class PlayResult {
   final String? message;
 }
 
+/// 播放优先级（ARCH-09：播放无优先级仲裁 —— 计划 / 远程 / TTS 三路可同时出声）。
+///
+/// ## 调用方约定（本包只定义 + 实现 + 默认值；传参归各调用方）
+///
+/// - **F2 计划执行**（`background_engine` 的 `play` / `playSoundscape` 调用点）：
+///   传 `PlayPriority.normal`（默认值即可）—— 计划任务与用户自排内容同级；
+/// - **F1 远程播放**（`main.dart` 的 `playHandler` / 端点指令组 play 步）：
+///   传 `PlayPriority.high` —— 远程喊话/取证播报必须被听见；
+/// - **TTS**（`neural_tts` / `tts_service` / `online_tts_client`）与远程
+///   **同级**：双方同优先级时按**到达顺序**排队（FIFO），不互抢占；
+/// - 未显式传参的调用方（含既有代码）走默认 [PlayPriority.normal]，
+///   行为与本轮之前完全一致。
+///
+/// ## 语义
+///
+/// - 高优先级播放前**打断**所有正在播放的更低优先级 solo 播放
+///   （被打断方如实报 `ok:false` + 原因，绝不记 success）；
+/// - 同级**不互打断**：按到达顺序并行（与 R90-07 的并发隔离一致，
+///   不引入新的互斥）；
+/// - 低优先级播放遇到正在进行的更高优先级 ⇒ **让行**（yield）：
+///   不播放，如实报 `ok:false` + 原因，不覆盖高优先级的声音；
+/// - 声景多轨与对讲会话**不参与**抢占：混音是产品特性（docs/20 声景），
+///   一刀切"新播放停旧播放"会破坏它（ARCH-09 Regression Risks）。
+enum PlayPriority { low, normal, high, urgent }
+
 /// 播放服务：封装 just_audio + audio_session。
 ///
 /// 关键行为：
 /// - 按 channel 申请对应类型音频焦点（media / alarm），媒体通道尊重勿扰；
+/// - **焦点配对放弃**（NAT-04）：最后一路播放结束/停止/异常/释放时
+///   `setActive(false)`，不再"只申请不放弃"（否则别人的音乐被 duck 后
+///   音量一直偏低、被暂停后不自动恢复）；
+/// - **优先级仲裁**（ARCH-09）：`play(priority:)` 高优先级打断低优先级、
+///   同级按到达顺序不互抢、低优先级向更高优先级让行（调用方约定见
+///   [PlayPriority] 注释）；
 /// - 播放前设置目标音量（随机落点由调度引擎物化期决定）；
 /// - [maxDurationMs] 到点淡出停止，实现“随机时长”；
 /// - 播放结束释放解码器与唤醒（just_audio 内部持有 wakelock 到停止）。
@@ -68,6 +99,20 @@ class PlaybackService {
 
   /// 所有**在飞**的 solo 播放器（R90-07 并发隔离）。
   final Set<AudioPlayer> _soloPlayers = <AudioPlayer>{};
+
+  /// 在飞 solo 播放器的**优先级台账**（ARCH-09）：player → priority。
+  ///
+  /// 与 [_soloPlayers] 同增同消（`play()` 的 `finally` 里一起清）。
+  final Map<AudioPlayer, PlayPriority> _soloPriority =
+      <AudioPlayer, PlayPriority>{};
+
+  /// 被更高优先级**抢占**的在飞播放器（ARCH-09）。
+  ///
+  /// 为什么需要显式标记而不只 `stop()` 播放器：`_waitPlayWindow` 按代次
+  /// （[_stopGen]）判断"是否收到停止"，而抢占是**按优先级**的精确打断
+  /// （不能推全局代次 —— 那会误伤同级的另一路）。等待循环每 tick 查一次
+  /// 本表，被标中的播放立刻退出并如实报失败。
+  final Set<AudioPlayer> _preempted = <AudioPlayer>{};
 
   /// 在飞 solo 播放的**引用计数**。
   ///
@@ -159,15 +204,26 @@ class PlaybackService {
     int fadeOutMs = 0,
     int rampUpMs = 0, // 渐强唤醒：音量 5%→目标 线性爬升
     bool loopFill = false, // 短音效循环填充到目标时长
+    PlayPriority priority = PlayPriority.normal, // ARCH-09：调用方约定见枚举注释
   }) async {
     final player = AudioPlayer();
     _player = player;
     _soloPlayers.add(player);
+    _soloPriority[player] = priority;
     _activePlays++;
     _playing.add(this);
     final gen = _stopGen;
     final sw = Stopwatch()..start();
     try {
+      // ARCH-09：优先级仲裁必须发生在起播之前 —— 抢占是"可感知"的
+      // （立刻静音），让行则根本不出声。放在这里而不是 `configure` 之后：
+      // 仲裁失败时不该留下任何已申请的资源。
+      if (await _arbitratePriority(priority, player)) {
+        return PlayResult(
+            ok: false,
+            playedMs: sw.elapsedMilliseconds,
+            message: '已有更高优先级的播放在进行，本次让行未播放（ARCH-09）');
+      }
       // 1) 申请音频会话/焦点：alarm 通道在 Android 上映射 USAGE_ALARM，
       //    可穿透勿扰与媒体静音（合规约束见 docs/08）。
       final session = await AudioSession.instance;
@@ -197,7 +253,7 @@ class PlaybackService {
               ? maxDurationMs
               : fileMs);
       if (target > 0) {
-        await _waitPlayWindow(Duration(milliseconds: target), gen);
+        await _waitPlayWindow(Duration(milliseconds: target), gen, player);
       }
       if (gen != _stopGen) {
         // 收到停止：**立刻静音**（不做淡出 —— 用户要的就是停），并把结果
@@ -207,6 +263,15 @@ class PlaybackService {
             ok: false,
             playedMs: sw.elapsedMilliseconds,
             message: '已终止（收到停止请求）');
+      }
+      if (_preempted.remove(player)) {
+        // ARCH-09：被更高优先级抢占 —— 与"收到停止"同口径：如实报失败。
+        // 记 success 会让排障者以为这段声音播完了（实际被掐掉）。
+        await _hardStop(player);
+        return PlayResult(
+            ok: false,
+            playedMs: sw.elapsedMilliseconds,
+            message: '被更高优先级的播放抢占（ARCH-09）');
       }
       if (fadeOutMs > 0) {
         await _fadeOut(player, fadeOutMs);
@@ -227,6 +292,8 @@ class PlaybackService {
           ok: false, playedMs: sw.elapsedMilliseconds, message: e.toString());
     } finally {
       _soloPlayers.remove(player);
+      _soloPriority.remove(player);
+      _preempted.remove(player);
       // R90-07：每路播放器独立释放 —— 共享句柄时"后一次 setFilePath 打断前一次"
       // 与"前一次的 _hardStop 静音后一次"都会发生，且两边都记 success。
       try {
@@ -239,7 +306,54 @@ class PlaybackService {
       if (_activePlays <= 0) {
         _activePlays = 0;
         _playing.remove(this);
+        // NAT-04：**最后一路**播放结束才放弃音频焦点。
+        await _abandonAudioFocus();
       }
+    }
+  }
+
+  /// ARCH-09：播放优先级仲裁。返回 true = 本次播放应**让行**（有更高
+  /// 优先级正在播放）；同时把**正在播放的更低优先级**全部抢占。
+  ///
+  /// 抢占动作 = 标记 + 立刻静音：被抢占方的 `_waitPlayWindow` 在下一个
+  /// tick（≤50ms）发现标记后退出，如实报 `ok:false`。不能只静音不标记 ——
+  /// 那样等待方要等满整个窗口（"点了停却继续出声"的同款问题）。
+  Future<bool> _arbitratePriority(
+      PlayPriority priority, AudioPlayer self) async {
+    var yieldToHigher = false;
+    for (final p in List<AudioPlayer>.of(_soloPlayers)) {
+      if (identical(p, self)) continue;
+      final other = _soloPriority[p];
+      if (other == null) continue;
+      if (priority.index > other.index) {
+        _preempted.add(p);
+        await _hardStop(p);
+      } else if (priority.index < other.index) {
+        yieldToHigher = true;
+      }
+      // 同级：不抢不让，按到达顺序并行（R90-07 语义不变）。
+    }
+    return yieldToHigher;
+  }
+
+  /// NAT-04：放弃音频焦点（`audio_session` 只在 `setActive(false)` 时
+  /// `abandonAudioFocus`）。
+  ///
+  /// 为什么必须配对：just_audio 在 `play()` 时 `setActive(true)` 申请焦点，
+  /// 而 `stop()` / `dispose()` 都不会放弃，本项目此前也没补 —— 于是从
+  /// 第一次播放起一直持有焦点：别人的音乐被 duck 后**音量一直偏低**、
+  /// 被暂停后不会自动恢复（A5 NAT-04）。引用计数收口：还有在飞播放
+  /// （solo / 声景 / 对讲）时**不**释放，否则会盖掉仍在播的那一路。
+  Future<void> _abandonAudioFocus() async {
+    if (_soloPlayers.isNotEmpty || _mixPlayers.isNotEmpty || _pttStreams > 0) {
+      return;
+    }
+    try {
+      final session = await AudioSession.instance;
+      await session.setActive(false);
+    } on Object {
+      // 放弃失败不影响播放语义：进程死亡时焦点由系统回收。
+      // （宿主测试环境 `setActive` 直接 return true，不走平台通道。）
     }
   }
 
@@ -268,11 +382,15 @@ class PlaybackService {
   /// （对照 `playSoundscape` 的 250ms 轮询）。
   /// 旧实现是裸 `await Future.delayed(maxDurationMs)`：`stop()` 只是把播放器
   /// 停了，等待方仍要傻等到时长耗尽才返回 —— 端点因此"点了停却继续出声"。
-  Future<void> _waitPlayWindow(Duration total, int gen) async {
+  ///
+  /// [player] 参与 ARCH-09 抢占轮询：被更高优先级标中（[_preempted]）时
+  /// 同样立刻返回，由调用方如实报失败。
+  Future<void> _waitPlayWindow(Duration total, int gen, AudioPlayer player) async {
     const tick = Duration(milliseconds: 50);
     var left = total;
     while (left > Duration.zero) {
       if (gen != _stopGen) return;
+      if (_preempted.contains(player)) return;
       final step = left < tick ? left : tick;
       await Future<void>.delayed(step);
       left -= step;
@@ -313,6 +431,8 @@ class PlaybackService {
         // 忽略停止异常：状态自愈。
       }
     }
+    // NAT-04：端点静音后焦点也该放手（还有在飞播放时内部会跳过释放）。
+    await _abandonAudioFocus();
   }
 
   Future<void> _fadeIn(AudioPlayer p, double target, int ms) async {
@@ -362,6 +482,9 @@ class PlaybackService {
     } finally {
       _player = null;
     }
+    // NAT-04：播放器都放了，音频焦点一起放弃（幂等；仍有在飞播放时
+    // `_abandonAudioFocus` 内部会跳过 —— 引用计数收口）。
+    await _abandonAudioFocus();
   }
 }
 
@@ -448,6 +571,8 @@ extension PlaybackSoundscape on PlaybackService {
       }
       _mixStopped = false;
       PlaybackService._playing.remove(this);
+      // NAT-04：混音收尾放弃焦点（仍有 solo/对讲在飞时内部跳过）。
+      await _abandonAudioFocus();
     }
   }
 
@@ -560,5 +685,7 @@ class PttPlaybackSession implements PttStreamSink {
     } on Object {
       // 忽略释放异常。
     }
+    // NAT-04：对讲会话结束也要放弃焦点（最后一个会话才真正释放）。
+    await _service._abandonAudioFocus();
   }
 }

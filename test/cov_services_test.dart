@@ -90,6 +90,9 @@ void main() {
         minControlPointMs: 24,
         platform: 'android',
         backgroundSupported: false,
+        // R93：系统响铃/勿扰状态也必须进 map（否则跨进程回执丢状态）。
+        ringerMode: 1,
+        dndActive: true,
       );
       expect(caps.toMap(), {
         'hasVibrator': true,
@@ -98,6 +101,8 @@ void main() {
         'minControlPointMs': 24,
         'platform': 'android',
         'backgroundSupported': false,
+        'ringerMode': 1,
+        'dndActive': true,
       });
     });
 

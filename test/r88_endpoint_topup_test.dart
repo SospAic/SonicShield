@@ -344,8 +344,11 @@ void main() {
       await RcAssistHost.instance.close(silent: true);
 
       final join = AssistJoinClient.instance;
-      final joining =
-          join.join('123456789', 'ABCDEFGH', timeout: const Duration(seconds: 2));
+      // REM-04：访问密码 **12 位**（Crockford 字母表）。旧 8 位夹具会在
+      // join() 的格式校验处直接失败（_topic 永不算出来）⇒ 下面这句 until
+      // 只会干等 8 秒超时，把"夹具过期"伪装成"派生挂起"。
+      final joining = join.join('123456789', 'ABCDEFGHJKMN',
+          timeout: const Duration(seconds: 2));
       await until(() => join.topic.isNotEmpty, 'join 应先算出会合主题');
       final topic = join.topic;
       // 先等 join 自己那次 subscribe 落定，再清空 —— 否则它迟到的订阅
@@ -381,8 +384,11 @@ void main() {
       await RcAssistHost.instance.close(silent: true);
 
       final join = AssistJoinClient.instance;
-      final joining =
-          join.join('123456789', 'ABCDEFGH', timeout: const Duration(seconds: 2));
+      // REM-04：访问密码 **12 位**（Crockford 字母表）。旧 8 位夹具会在
+      // join() 的格式校验处直接失败（_topic 永不算出来）⇒ 下面这句 until
+      // 只会干等 8 秒超时，把"夹具过期"伪装成"派生挂起"。
+      final joining = join.join('123456789', 'ABCDEFGHJKMN',
+          timeout: const Duration(seconds: 2));
       await until(() => join.topic.isNotEmpty, 'join 应先算出会合主题');
       final topic = join.topic;
 

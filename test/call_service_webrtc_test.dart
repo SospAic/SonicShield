@@ -24,6 +24,21 @@
 /// 接缝）：`sendTo` 的成功分支要求一个 `connected` 的 MQTT 客户端，宿主机上
 /// **结构性不可达** —— 不注入就只能覆盖失败分支。
 ///
+/// ## R94 / REM-08：被叫「自动接通」多了一个「可见指示」前置
+///
+/// `onIncomingCall` 的自动接通分支现在**先要**弹出一条「通话中」常驻通知
+/// （`NotificationService.showOngoingCall`）；弹不出去（通知权限被关 /
+/// 渠道被停 / 宿主无插件）就 **fail-closed 退回振铃**，绝不静默开麦开摄像头
+/// —— 见 `call_service.dart` 的 REM-08 段与 `notification_service.dart`
+/// 的 `showOngoingCall` 文档（审计建议：拒绝通知权限 ⇒ 禁止自动接通）。
+///
+/// 因此 CS-11 / CS-13 / CS-14 / BK-CS-01 / CS-45 这些**写于 REM-08 之前**的
+/// 「自动接通真的接通」用例，在裸宿主上会被整片降级成振铃而**假红**
+/// （相位停在 ringing、answer 从未发出、sender 从未建立）—— 那不是产品回归，
+/// 而是新设计要求"先看见通知才准接通"。setUp 因此给本地通知通道打桩
+/// （形制同 `cov_services_test.dart` 的 NS 组）让该前置可满足；
+/// CS-11b 则反向锁死「通知不可见 ⇒ 退回振铃」这条新设计本身。
+///
 /// ## 明确不测什么
 ///
 /// - **不测**真实媒体协商：SDP 是常量串，ICE 不真的打洞，`RTCVideoView` 的纹理
@@ -44,6 +59,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -68,6 +84,12 @@ class _Sent {
   Map<String, dynamic> get payload => msg.payload;
 }
 
+/// 本地通知通道名 —— R94 / REM-08「可见指示」走这里。
+///
+/// 值与 `cov_services_test.dart` / `rc_script_executor_test.dart` 等既有用例
+/// 保持一致：flutter_local_notifications 17.2.4 的 MethodChannel 名。
+const _notifChannel = MethodChannel('dexterous.com/flutter/local_notifications');
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -80,6 +102,15 @@ void main() {
   late bool sendOk;
   late List<String> failures;
   StreamSubscription<String>? failSub;
+
+  /// 「通知权限是否已授予」的桩状态（Android 13+ 的 POST_NOTIFICATIONS）。
+  ///
+  /// 默认 `true` = 可见指示可满足 ⇒ 自动接通走真接通路径；
+  /// CS-11b 置 `false` 复刻 REM-08 的 fail-closed 降级。
+  bool notifEnabled = true;
+
+  /// 发往本地通知通道的方法名记录（断言「可见指示」真的被尝试过）。
+  final notifCalls = <String>[];
 
   PairedEndpoint peer(String id) => PairedEndpoint(
         deviceId: id,
@@ -106,6 +137,28 @@ void main() {
   }
 
   setUp(() async {
+    // R94 / REM-08 的「可见指示」前置：宿主没有通知插件 ⇒
+    // `showOngoingCall` 恒 false ⇒ 自动接通会被 fail-closed 全部降级成振铃。
+    // 这里给本地通知通道打桩，让"通知弹得出去"这一前置可满足，
+    // 使 CS-11/13/14、BK-CS-01、CS-45 驱动的仍是**自动接通真的接通**。
+    notifEnabled = true;
+    notifCalls.clear();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_notifChannel, (call) async {
+      notifCalls.add(call.method);
+      switch (call.method) {
+        case 'initialize':
+          // 插件 initialize 要 bool：回 null 会让 `ensure()` 抛 TypeError，
+          // 于是 `showOngoingCall` 从"通知没显示"变成"整个方法炸掉"。
+          return true;
+        case 'areNotificationsEnabled':
+          return notifEnabled;
+        default:
+          // show / cancel 等：宿主无需回业务数据（回 null 即"平台无回复"）。
+          return null;
+      }
+    });
+
     rtc.failUserMedia = false;
     rtc.failCreateOffer = false;
     rtc.failSetRemoteDescription = false;
@@ -136,6 +189,8 @@ void main() {
     await failSub?.cancel();
     failSub = null;
     endpointSvc.debugSendTo = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_notifChannel, null);
     rtc.uninstall();
   });
 
@@ -308,6 +363,43 @@ void main() {
       expect(answer.payload['callId'], 'C-11');
       expect(answer.payload['sdp'], rtc.localSdp);
       expect(svc.awaitingAnswer, isFalse, reason: 'invite 已被消费');
+    });
+
+    // R94 / REM-08 的对称一半：**通知不可见时自动接通必须退回振铃**。
+    //
+    // 为什么需要它（也是"上面几条旧断言为何不再直接成立"的答案）：
+    // CS-11/13/14、BK-CS-01、CS-45 写于 REM-08 之前 —— 那时自动接通没有
+    // 「可见指示」这一前置，裸宿主上直接就能接通。R94 之后
+    // `showOngoingCall` 返回 false ⇒ fail-closed 退回振铃；上述用例靠 setUp
+    // 里的通知桩满足前置后才能继续驱动"真的接通"。本条专门锁死**前置不满足
+    // 时**的新设计行为，防止有人为了迁就旧断言把这道合规门删掉。
+    test('CS-11b 通知不可见 → 自动接通退回振铃，不静默开麦（REM-08 fail-closed）',
+        () async {
+      await freshPrefs(<String, Object>{'rc_call_auto_answer': true});
+      notifEnabled = false; // 复刻 Android 13+ 未授予 POST_NOTIFICATIONS
+      // （无需手工复位：setUp 每条用例前都会把 notifEnabled 打回 true）
+
+      final ok = await svc.onIncomingCall(
+          <String, dynamic>{
+            'callId': 'C-11B',
+            'sdp': 'offer-sdp',
+            'type': 'offer',
+            'video': true,
+          },
+          peer('EP0021B'),
+          store);
+
+      expect(ok, isTrue, reason: '退回振铃 = 仍然受理这通来电，而不是静默丢弃');
+      expect(svc.currentPhase, CallPhase.ringing);
+      expect(svc.awaitingAnswer, isTrue,
+          reason: '降级后与手动振铃同一条路：存下 invite，等用户点「接听」');
+      expect(svc.visibleIndicator.value, isFalse);
+      expect(notifCalls, contains('areNotificationsEnabled'),
+          reason: '必须真的尝试过常驻通知才降级 —— 否则"没尝试"与"尝试失败"分不清');
+      expect(rtc.called('getUserMedia'), isFalse,
+          reason: '没有可见指示就不许静默打开麦克风/摄像头（合规边界，docs/08）');
+      expect(rtc.called('createAnswer'), isFalse);
+      expect(sent, isEmpty, reason: '退回振铃不产生任何通话信令');
     });
 
     test('CS-12 占线：通话中收到 invite → 回 callEnd(busy) 且不打断本通话', () async {
