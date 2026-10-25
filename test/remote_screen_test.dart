@@ -638,11 +638,21 @@ void main() {
       await tester.pump();
       await Future<void>.delayed(const Duration(seconds: 9));
     });
-    await tester.pumpAndSettle();
+
+    // 🔴 有界等待，**不用 `pumpAndSettle`**：探测期间界面有持续动画（进度指示），
+    // 且真实网络 IO 的完成时刻不可预测 —— `pumpAndSettle` 会一直等到 10s
+    // 超时再抛 `pumpAndSettle timed out`，失败原因**伪装成业务缺陷**
+    // （与 PA-05 同类：等一个「不会自己停」的东西）。改为「渲染出结果就停」的轮询。
+    var rendered = false;
+    for (var i = 0; i < 200 && !rendered; i++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)));
+      await tester.pump(const Duration(milliseconds: 100));
+      rendered = find.textContaining(' ms').evaluate().isNotEmpty ||
+          find.textContaining('不可达').evaluate().isNotEmpty;
+    }
 
     // 结果列表必须渲染出来（可达显示「N ms」、不可达显示「不可达/超时」）。
-    final rendered = find.textContaining(' ms').evaluate().isNotEmpty ||
-        find.textContaining('不可达').evaluate().isNotEmpty;
     expect(rendered, isTrue, reason: '测速后必须展示结果（否则按钮是装饰）');
   }, timeout: const Timeout(Duration(seconds: 120)));
 }

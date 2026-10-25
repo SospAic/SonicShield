@@ -207,7 +207,15 @@ void main() {
         path: p1,
         channel: AudioChannel.alarm,
         volume: 0.8,
-        maxDurationMs: 400,
+        // 🔴 R96：窗口必须**远长于**渐强（曾用 400ms / 200ms = 2:1 ⇒ 四次偶红）。
+        // `_rampUp` 是 **unawaited**，且 `play()` 的 `finally` 会 `player.dispose()`
+        // ⇒ 窗口先结束就把渐强掐死在负载相关的某一步（历史实测末值 0.363 / 0.705 /
+        // 0.743 / 0.781 = 第 17 / 35 / 37 / 39 步，`_waitUntil` 等 120s 也等不到）。
+        // `maxDurationMs: 0` ⇒ 窗口 = 文件时长 2000ms（40×50ms tick），
+        // 渐强 = 200ms（40×5ms）—— **同为 40 个定时器、标称时长 10:1** ⇒
+        // 任何负载模型（均匀变慢 / 固定额外开销）下渐强都**必定先跑完**，
+        // "终点兑现目标音量"这条判据从此确定性地成立，且**没有任何放松**。
+        maxDurationMs: 0,
         rampUpMs: 200,
       );
 
@@ -215,20 +223,13 @@ void main() {
       // [0] = 激活期恢复 1.0；[1] = 渐强的起点（playback_service.dart:130 的 volume*0.05）。
       expect(audio.volumes[1], closeTo(0.04, 1e-9));
 
-      // ⚠️ `_rampUp` 是 **unawaited**（playback_service.dart:131），且它跑在播放窗口
-      //    之外：窗口（400ms）与渐强（200ms）虽然标称同时起步，但渐强要排 40 个
-      //    `Future.delayed`、窗口只排 8 个 —— 门禁在 `--coverage` + 整层默认并发下，
-      //    前者的实际延迟被拉长得更多，窗口结束时渐强可能只爬到一半
-      //    （2026-10-04 门禁实测末值 **0.363**；2026-10-08 实测 5s 内仅 **0.705**）。
-      //    判据要的是"**终点**兑现目标音量"，所以有界轮询到渐强末步真正落地再断言 ——
-      //    确定性，且不放松任何业务判据（反而把"渐强真的爬到终点"锁得更死）。
-      //    超时 5s → **120s**（[_waitUntil] 默认）：5s / 20s 在**带载 + 并发**下
-      //    都不够（2026-10-08 门禁实测：20s 只到 **0.743**，定时器被饿死 ≈100×）；
-      //    120s 只是**反挂死护栏**，不改变任何业务判据。
+      // 有界轮询到渐强末步真正落地再断言（反挂死护栏，正常路径下窗口结束时早已落地）。
       await _waitUntil(() => audio.volumes.last >= 0.79);
       expect(audio.volumes.last, closeTo(0.8, 1e-9),
           reason: '_rampUp 末步 = 0.05 + 0.95 = 1.0 ⇒ 恰好目标音量');
-      expect(audio.volumes.length, greaterThan(10), reason: '确实是"线性爬升"');
+      // 1（激活期）+ 40（渐强步）= 41 —— 步数也钉死，防"只跑了一半"。
+      expect(audio.volumes.length, greaterThanOrEqualTo(41),
+          reason: '渐强 40 步必须全部落地（R96：由 >10 收紧为 ≥41）');
       // 渐强段（跳过激活期那一步）必须单调不减：睡眠唤醒场景骤降 = 把人吵醒。
       final ramp = audio.volumes.sublist(1);
       for (var i = 1; i < ramp.length; i++) {
