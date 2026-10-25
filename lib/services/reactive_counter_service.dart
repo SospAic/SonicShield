@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
+
 import '../core/utils/random.dart';
 import 'playback_service.dart';
 import 'sound_guard_service.dart';
@@ -261,6 +263,22 @@ class ReactiveCounterService {
 
   final List<CounterAuditRecord> _records = <CounterAuditRecord>[];
 
+  /// 内存审计记录的**条数**硬上限（R88-AUD-06）。
+  ///
+  /// `_records` 只是**诊断留痕**：全仓没有任何统计 / 去重 / 节流逻辑读它，
+  /// 持久历史由注入的 [CounterAuditSink] 承担 ⇒ 淘汰它不会算错任何既有语义。
+  static const int maxRecords = 500;
+
+  /// 内存审计记录的**时间窗**（R88-AUD-06）。
+  ///
+  /// 只限条数会让"每天几条"的慢速场景把一周前的旧记录一直留着；只限时间窗
+  /// 则挡不住事件风暴（几秒内几千条）。两者同时生效才既有时效又有硬顶。
+  static const Duration recordRetention = Duration(hours: 24);
+
+  /// 累计被淘汰的记录条数（可观测：淘汰必须可见，不能静默丢数据）。
+  int get prunedCount => _prunedCount;
+  int _prunedCount = 0;
+
   bool _running = false;
   bool _acting = false;
   int _escalation = 0;
@@ -490,6 +508,7 @@ class ReactiveCounterService {
   /// 写一条审计：**先入内存**（保证"尽量记录"），sink 失败不上抛。
   Future<void> _record(CounterAuditRecord r) async {
     _records.add(r);
+    _pruneRecords();
     final sink = _audit;
     if (sink == null) return;
     try {
@@ -497,5 +516,25 @@ class ReactiveCounterService {
     } on Object {
       // sink 是旁路：它失败不能把反击本身拖垮（内存记录已留下）。
     }
+  }
+
+  /// 双约束淘汰（R88-AUD-06）：先按 [recordRetention] 时间窗，再按
+  /// [maxRecords] 条数。
+  ///
+  /// 顺序有意义：时间窗先淘汰后，条数上限只吃"真正溢出"的部分，慢速场景下
+  /// 不会把仍在窗口内的旧记录误删。按 `at` 逐条判定（而非假设列表有序），
+  /// 注入时钟回跳时也不会误删。
+  void _pruneRecords() {
+    final before = _records.length;
+    final cutoff = _clock().subtract(recordRetention);
+    _records.removeWhere((r) => r.at.isBefore(cutoff));
+    final excess = _records.length - maxRecords;
+    if (excess > 0) _records.removeRange(0, excess);
+    final removed = before - _records.length;
+    if (removed == 0) return;
+    _prunedCount += removed;
+    debugPrint('[sonic_shield][reactive] 审计记录淘汰 $removed 条'
+        '（保留 ${_records.length}/$maxRecords，窗口 ${recordRetention.inHours}h，'
+        '累计淘汰 $_prunedCount）');
   }
 }

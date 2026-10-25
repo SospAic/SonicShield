@@ -667,6 +667,18 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 成功启动 / 主动关闭时清空 —— 否则 UI 会一直拿着一条过期的错误。
   String? guardError;
 
+  /// **守卫命令代次**（🔴 R97 / R88-AUD-03）。
+  ///
+  /// `service.on('guard')` 是独立的 async 监听器，**没有任何串行化**：
+  /// 用户快速「开 → 关」时，开启那一支会停在 `guard.start()` 的取流 `await` 里，
+  /// 关闭那一支完整跑完（`guard.stop()` 此时 `_sub == null` ⇒ 实际是空操作），
+  /// 随后开启那一支恢复执行 ⇒ **`guardEnabled=false` 而 `guard.isRunning=true`**：
+  /// 麦克风继续采流、`onSoundEvent` 继续被调用（可继续触发延时动作）。
+  ///
+  /// 修法：每个命令在**同步段**里 `guardGen++` 并取快照，`guard.start()` 返回后
+  /// 复核代次与目标态；不成立就立刻 `guard.stop()` 并如实记审计。
+  int guardGen = 0;
+
   /// 精确闹钟（通道B）降级原因（P1-04），随每次 `state` 广播回投给 UI。
   /// 排布正常时清空 —— 与 [guardError] 同为"失败必须可见"的载体。
   String? alarmDiag;
@@ -2246,7 +2258,18 @@ Future<void> _engineBody(ServiceInstance service) async {
   /// 拿不到通行证 ⇒ **不启动采音**，如实回投 `guardActive:false` + 原因。
   Future<void> applyGuardEnabled(bool enabled,
       {bool requireMicPassport = false}) async {
+    // 🔴 R97（R88-AUD-03）：**第一条语句**同步推进守卫代次并取快照。
+    // 之后每一处 `await` 都可能被"反方向的命令"插队（开↔关），
+    // 只有代次能告诉本支"我是不是已经过期了"。
+    final gen = ++guardGen;
     guardEnabled = enabled;
+    // 🔴 R97（R88-AUD-07）：**先清旧错误，再进 await 链**。
+    //
+    // 旧实现只在 `await guard.start()` **之后**才写 `guardError`，于是启动窗口
+    // 内的每一次 `broadcast()` 都还带着**上一轮的失败文案** ⇒ UI 一收到状态
+    // 就判「启动失败」，用户看到开关弹回。错误必须在"开始尝试"这一刻就清掉，
+    // 失败时再由 `started.message` 写回。
+    guardError = null;
     await prefs.setBool(PrefsKeys.guardEnabled, enabled);
     if (enabled) {
       if (requireMicPassport) {
@@ -2284,6 +2307,23 @@ Future<void> _engineBody(ServiceInstance service) async {
                   ((profiles.first['only_while_charging'] as int?) ?? 0) == 1,
             );
       final started = await guard.start(cfg);
+      // 🔴 R97（R88-AUD-03）：取流窗口内可能已到达「关闭」命令（或又一次「开启」）。
+      // 代次不等 ⇒ 本次启动**已经过期**：立刻停掉刚起来的守卫并如实留痕，
+      // 绝不把 `guardActive:true` 投给 UI —— 那会把"关了还在采"粉饰成"看起来正常"，
+      // 而这正是本缺陷最危险的一面（核心安全能力静默失效）。
+      if (gen != guardGen) {
+        if (guard.isRunning) await guard.stop();
+        guardError = '守卫启动完成时已被后续命令取消（未开始采音）';
+        await logs.append(
+          source: 'guard',
+          action: 'start',
+          status: 'skipped',
+          message: '启动完成时已被后续命令取消：本次不采音'
+              '（当前目标态 guardEnabled=$guardEnabled）',
+        );
+        await broadcast();
+        return;
+      }
       guardError = started.message;
       if (started.ok) {
         await guardSub?.cancel();
@@ -2383,6 +2423,14 @@ Future<void> _engineBody(ServiceInstance service) async {
       // 手机还会继续震到本片自然结束（最长 20s，且下一片已排定）。
       // `stopAll` 会同时清活跃表（停续发）并调原生 cancel（S3 契约）。
       await vibrate.stopAll(reason: '引擎停止');
+      // 🔴 R97（R88-AUD-02）：`stopAll` 之后**再 dispose 一次**。
+      //
+      // `VibrateSession.dispose()` 是 BUG-127 为"引擎关停"补的出口，但全仓
+      // **零调用点** —— 那次修复是空转的。这里显式接上：`stopAll` 已 await 过
+      // 原生 cancel，`dispose` 再补一刀（fire-and-forget）专治「表丢了但原生
+      // 还在震」的残留（例如上一次进程被杀后系统振动器仍在执行 20s 分片），
+      // 同时取消续发定时器 —— 这是 isolate 即将被杀前最后一个能"停"的时刻。
+      vibrate.dispose();
       // R90-19：停机时释放引擎独占的播放器句柄。
       //
       // 旧实现只 `stop()` 不 `dispose()` —— `AudioPlayer`（ExoPlayer）原生句柄

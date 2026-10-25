@@ -986,23 +986,29 @@ void main() {
 
     await tester.tap(find.text('删除'));
 
-    // 真实事件循环转一圈 + 排空 fake 微任务（机制见文件头 §二）。
-    // ⚠️ **固定轮数、不做早退**：`_deleteAsset` 先删记录、再（异步）删文件、
-    // 最后才 `setState`。文件被 OS 删掉是同步可见的（`existsSync()` 立刻为
-    // false），但 Dart 侧的 `await f.delete()` **续体**要等下一次 pump 才恢复
-    // ⇒ 用"文件已消失"当退出条件会在 `setState` 之前收工，列表不刷新
-    // （首两跑实测正是这样红的：断言只看到旧的 'A'）。
-    for (var i = 0; i < 30; i++) {
+    // 🔴 R97：**等目标现象**，不要数轮数。
+    //
+    // 旧写法是「固定 30 轮 `runAsync(零延迟)`、不做早退」—— 本轮门禁在整机
+    // 满载（他项目 WSL2 + SD-WebUI 占满 CPU/内存）下实测复现一次红：30 轮
+    // 不够让 `await f.delete()` 的续体恢复并走到 `setState`，断言于是看到
+    // **旧的** 'A' ⇒ 失败原因被伪装成「列表没刷新」这个业务缺陷。
+    //
+    // 纪律与 PA-05 / RS-ND4 同源：等一个**会自己发生的事**（列表刷新），
+    // 而不是等一个固定次数。退出条件刻意**不是**「文件已消失」——
+    // 文件删除比 `setState` 更早可见，拿它当条件会过早收工。
+    var refreshed = false;
+    for (var i = 0; i < 300 && !refreshed; i++) {
       await tester.runAsync(() async {
         await Future<void>.delayed(Duration.zero);
       });
       await tester.pump();
+      refreshed = find.text('A').evaluate().isEmpty;
     }
+    expect(refreshed, isTrue, reason: '删完列表要立刻刷新');
 
     expect(repo.deletedIds, ['a'], reason: '确认删除必须真的删记录，否则是"假删除"');
     expect(File(a.path).existsSync(), isFalse,
         reason: '文件也要删 —— 只删记录会留下永远无人回收的孤儿文件');
-    expect(find.text('A'), findsNothing, reason: '删完列表要立刻刷新');
   }, timeout: _timeout);
 
   testWidgets('SLB-21 卸载时释放试听播放器（否则解码器与唤醒锁会漏）',

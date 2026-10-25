@@ -399,12 +399,18 @@ class BackgroundServiceManager {
     try {
       return await completer.future.timeout(timeout);
     } on TimeoutException {
-      _pendingRun.remove(reqId);
       return const RunNowResult(ok: false, message: '引擎执行超时');
-    } on Object catch (e) {
-      // 兜底：回投侧 completeError 也要摘表，否则同样泄漏。
+    } finally {
+      // 🔴 R97：三个出口统一摘表。
+      //
+      // 旧写法在 `on TimeoutException` 与 `on Object` 里各写一遍 `remove`，
+      // 其中 `on Object` 分支**恒不可达**：`completer.future` 的唯一完成点是
+      // 回投侧的 `_pendingRun.remove(reqId)` + `complete(...)`（全仓**没有**
+      // `completeError` 调用点），而 `.timeout()` 只可能抛 `TimeoutException`
+      // ⇒ 那两行是死代码，且"正常回投"这条真实出口反而**没有**在这里摘表。
+      // 改成 `finally` 后三条出口一致、无死代码；回投侧已先摘表，
+      // 这里再摘一次是幂等的。
       _pendingRun.remove(reqId);
-      return RunNowResult(ok: false, message: '引擎回投异常：$e');
     }
   }
 

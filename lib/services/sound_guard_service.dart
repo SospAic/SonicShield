@@ -100,6 +100,18 @@ class SoundGuardService {
   final AudioRecorder _recorder;
   StreamSubscription<Uint8List>? _sub;
 
+  /// 「启动正在进行中」——从 `start()` 进入取流 await 起，到拿到流（或失败）为止。
+  ///
+  /// 🔴 R97（R88-AUD-03）：这个标志的唯一用途是让 [stop] 知道「现在停止会落在
+  /// 取流窗口里」。窗口内 `_sub` 还是 null、`_running` 还是 false ⇒ 旧实现的
+  /// `stop()` 会**什么都没做**（取消一个 null 订阅 + `isRecording()` 还是 false），
+  /// 随后 `start()` 恢复执行把 `_running` 置回 true ⇒ **用户已经关了，麦克风还在采**，
+  /// 而且引擎侧 `guardEnabled=false` 与 `guard.isRunning=true` 自相矛盾。
+  bool _starting = false;
+
+  /// 取流窗口内收到过停止请求 —— 拿到流之后必须**立刻放弃**，不得挂监听。
+  bool _stopRequestedWhileStarting = false;
+
   final _events = StreamController<SoundEvent>.broadcast();
   final _levels = StreamController<double>.broadcast();
 
@@ -139,6 +151,11 @@ class SoundGuardService {
   Future<GuardStartResult> start(SoundTrigger cfg) async {
     if (_running) return const GuardStartResult.ok();
 
+    // 🔴 R97（R88-AUD-03）：进入取流窗口前先立「启动中」旗，让并发到达的
+    // [stop] 能把「停止」这件事**记住**（见 `_stopRequestedWhileStarting`）。
+    _starting = true;
+    _stopRequestedWhileStarting = false;
+
     // 16kHz 单声道 PCM16 足够做能量检测且功耗低。
     final Stream<Uint8List> stream;
     try {
@@ -153,8 +170,19 @@ class SoundGuardService {
       // 取流抛异常后 `_running` 停在 true ⇒ `guard.isRunning` 为真、
       // 引擎回投 `guardActive:true` ⇒ **UI 报"守卫运行中"，实际一个字节都没采**
       // （"成功不得被误报"，BUG-073 同类）。
+      _starting = false;
       _running = false;
       return GuardStartResult.failed('麦克风启动失败：$e');
+    }
+    _starting = false;
+
+    // 🔴 R97（R88-AUD-03）：取流窗口内被要求停止 ⇒ **不许**置 `_running`、
+    // 不许挂监听，并把刚拿到的流立刻释放（否则原生录音器会一直采）。
+    // 这是本缺陷最要命的一条：旧实现无条件往下走，于是「关了还在采」。
+    if (_stopRequestedWhileStarting) {
+      _stopRequestedWhileStarting = false;
+      await _releaseRecorderQuietly();
+      return const GuardStartResult.failed('启动完成时已被关闭请求取消（未开始采音）');
     }
     _running = true;
 
@@ -222,10 +250,23 @@ class SoundGuardService {
   /// 清理失败不改变"已停止"这一事实：宁可留一个需要 GC 的原生句柄，
   /// 也不能让 UI 永远卡在"运行中"。
   Future<void> stop() async {
+    // 🔴 R97（R88-AUD-03）：停止请求若落在 `start()` 的取流窗口里，此刻
+    // `_sub == null`、`_running == false` ⇒ 下面的清理**全是空操作**，
+    // 随后 `start()` 恢复执行会把 `_running` 置回 true。因此先把这次停止
+    // **记在旗子上**，由 `start()` 在拿到流之后自行放弃并释放录音器。
+    if (_starting) _stopRequestedWhileStarting = true;
     _running = false;
     final sub = _sub;
     _sub = null;
     await sub?.cancel();
+    await _releaseRecorderQuietly();
+  }
+
+  /// 尽力释放原生录音器（**不抛、不拖**）：状态由调用方负责。
+  ///
+  /// 抽出来是因为现在有**两个**调用点（正常停止 / 启动窗口内被取消），
+  /// 两处的纪律完全一致：宁可留一个等 GC 的句柄，也不能让 UI 卡在「运行中」。
+  Future<void> _releaseRecorderQuietly() async {
     try {
       if (await _recorder.isRecording().timeout(const Duration(seconds: 2))) {
         await _recorder.stop().timeout(const Duration(seconds: 2));

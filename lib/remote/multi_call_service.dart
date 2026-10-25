@@ -46,6 +46,28 @@ String? nextActiveId(List<String> ids, String? current) {
   return ids.first;
 }
 
+/// 存活复核：`s` 是否**仍是** [deviceId] 当前的那一路会话（R88-AUD-04）。
+///
+/// ## 为什么需要它
+/// [MultiCallService.connect] 在**所有 await 之前**就把会话写进表里
+/// （入表 → `createPeerConnection` → `addTrack` → `createOffer` →
+/// `setLocalDescription` → `_send(callInvite)` 全是异步）。若 `hangUp()`
+/// 落在这串 await 中间，表里那条已被摘走，而 `connect()` 手上只有**快照** `s`：
+/// 它会继续把 invite 发出去（对端开始振铃），并在孤儿会话上起 45s 计时器 ——
+/// 本端 UI 没有这一路，`hangUp()` 也再找不到它。
+///
+/// ## 判据
+/// * **对象身份**：表里此刻的那一条必须就是 `s` 本身。换成新的一路（同设备
+///   重连）也算不成立 —— 代次已经变了。
+/// * **未被关闭**：`pc.onConnectionState` 的 closed 分支会把 `phase` 置成
+///   [MultiCallPhase.closed] 但**不摘表**；此时继续发 invite 同样是错的。
+///
+/// 抽成纯函数（与 [ownedCallIdOf] / [nextActiveId] 同一手法）：竞态判据写错
+/// **不会抛异常**，只会静默地多关一个 PC 或少发一条 invite，只能靠锁。
+bool stillCurrent(Map<String, MultiCallSession> sessions, String deviceId,
+        MultiCallSession s) =>
+    identical(sessions[deviceId], s) && s.phase != MultiCallPhase.closed;
+
 /// 窗口状态文案。
 ///
 /// 抽成纯函数：展示类逻辑**写错不会抛异常**，只会显示成空白/错误的话，
@@ -285,6 +307,16 @@ class MultiCallService {
   /// 4 路 = 单屏 2×2 的可用上限，也是中端机的编解码预算。
   static const int maxConcurrentSessions = 4;
 
+  /// 宿主测试接缝：替换 [CallService.peerConnectionConfig]（R97-MC-02 用）。
+  ///
+  /// 为什么需要它：入表之后的**第一个** await 就是取 PC 配置，而竞态锁必须
+  /// 能把 [connect] 精确停在这个"会话已在表里、`s.pc` 仍为 null"的窗口内
+  /// （正是审计点名的场景：`hangUp()` 此时摘表，`s.pc` 还是 null ⇒ 它关不掉
+  /// 随后才建好的那个 PC）。宿主机上没有第二个可注入的延迟点。
+  /// 生产代码**永不**赋值 ⇒ 行为与直接调用 `CallService.peerConnectionConfig` 完全一致。
+  @visibleForTesting
+  static Future<Map<String, dynamic>> Function()? debugPeerConnectionConfig;
+
   /// 当前是否已达并发上限（供 UI 给出可执行提示）。
   bool get atCapacity => _sessions.length >= maxConcurrentSessions;
 
@@ -309,10 +341,19 @@ class MultiCallService {
     _activeId ??= deviceId;
     _notify();
 
+    // ⚠️ R88-AUD-04：从入表这一行起，**每一个 await 都可能被 `hangUp()` 插进来**
+    // （用户点挂断 / 退出页面 `hangUpAll`）。因此每个 await 之后都必须用
+    // [stillCurrent] 复核；不成立就走 [_abortConnect] 收场 —— 绝不发 invite。
     try {
-      final pc = s.pc = await createPeerConnection(
-        await CallService.peerConnectionConfig(),
-      );
+      // ⚠️ 这个分支刻意保留 `CallService.peerConnectionConfig()` 的**字面形状**：
+      // `call_ice_test.dart` 的 CS-21 用它断言"多路复用单路那份统一配置"。
+      final cfg = debugPeerConnectionConfig != null
+          ? await debugPeerConnectionConfig!()
+          : await CallService.peerConnectionConfig();
+      final pc = s.pc = await createPeerConnection(cfg);
+      // 建 PC 之前被摘表时 `s.pc` 还是 null ⇒ `hangUp()` 没关掉这个 PC。
+      // 这里必须自查并补关，否则原生 `RTCPeerConnection` 无人释放（泄漏）。
+      if (!stillCurrent(_sessions, deviceId, s)) return await _abortConnect(s);
       // 复用同一条本地流：为 N 路各开一次摄像头既耗资源，
       // 也会在部分机型上直接失败（相机被占用）。
       //
@@ -378,11 +419,15 @@ class MultiCallService {
       };
 
       final offer = await pc.createOffer();
+      if (!stillCurrent(_sessions, deviceId, s)) return await _abortConnect(s);
       await pc.setLocalDescription(offer);
       // 本地描述就位 → 按**当前并发路数**对本路与既有各路统一下发档位
       // （docs/16 §10）：新加一路会让所有路一起降级，避免低端机编码器过载。
       await _applyProfilesToAll();
       final desc = await pc.getLocalDescription();
+      // ⚠️ 这一处复核是**最关键**的一条：它挡在 `call.invite` 之前。
+      // 少了它，用户点了挂断、对端照样开始振铃（审计后果第 1 条）。
+      if (!stillCurrent(_sessions, deviceId, s)) return await _abortConnect(s);
       final sent = await _send(
           peer,
           RcCmd.callInvite,
@@ -394,6 +439,10 @@ class MultiCallService {
             'fromName': store.deviceName,
           },
           store);
+      // invite 的 await 内也可能被挂断：此时 invite 已出门（无法撤回），但本路
+      // 已不在表里 —— 既不能起"等待应答"计时器，也不能再走 `hangUp()`（它摘表时
+      // 已返回，会把刚建好的 PC 漏在那里）。
+      if (!stillCurrent(_sessions, deviceId, s)) return await _abortConnect(s);
       if (!sent) {
         // 端点离线：实时通话不能用 outbox 暂存，直接判失败。
         s.phase = MultiCallPhase.failed;
@@ -408,12 +457,56 @@ class MultiCallService {
       _startWaitTimer(s);
       return true;
     } on Object {
+      // 异常也可能是"await 期间被挂断"的副产品（例如 PC 已被 `hangUp` 关掉，
+      // 随后的 `addTrack`/`createOffer` 必然抛）：此时不能走 `hangUp()`，
+      // 它摘表已经返回，会把这一路刚建好的 PC 漏成孤儿。
+      if (!stillCurrent(_sessions, deviceId, s)) return await _abortConnect(s);
       s.phase = MultiCallPhase.failed;
       s.failure = '建立连接失败';
       _notify();
       await hangUp(deviceId);
       return false;
     }
+  }
+
+  /// [connect] 在 await 期间被判"已不是当前会话"时的收尾（R88-AUD-04）。
+  ///
+  /// 只做**这一路**的事，且天然幂等：
+  /// * 若 `s` 还在表里（`phase` 已被 closed 分支置为 closed），走标准
+  ///   [hangUp]，但**不发** `call.end` —— 这一路从没发出过 invite，对端
+  ///   根本不知道它的存在，回一条 end 只会制造"挂断风暴"（BUG-136 同源）。
+  /// * 若已被 [hangUp] 摘表：它摘表那一刻 `s.pc` 可能还是 null（我们那时还没
+  ///   建好 PC），所以由这里补关 —— 这是审计后果第 2 条（原生对象泄漏）的补丁。
+  ///   `close()`/`dispose()` 各自吞异常，重复调用也安全。
+  ///
+  /// 恒返回 `false`（= 没连上），与 [connect] 既有契约一致。
+  Future<bool> _abortConnect(MultiCallSession s) async {
+    final deviceId = s.peer.deviceId;
+    if (identical(_sessions[deviceId], s)) {
+      await hangUp(deviceId, notifyPeer: false);
+    }
+    _cancelWaitTimer(s);
+    _cancelConnectTimer(s);
+    _byCallId.remove(s.callId);
+    final pc = s.pc;
+    s.pc = null;
+    if (pc != null) {
+      try {
+        await pc.close();
+      } on Object {
+        // 关闭失败也要继续 dispose（与 [hangUp] 同处置）。
+      }
+      try {
+        await pc.dispose();
+      } on Object {
+        // 已释放 / 平台不支持：忽略。
+      }
+    }
+    s.senders = <RTCRtpSender>[];
+    s.phase = MultiCallPhase.closed;
+    _activeId = nextActiveId(_sessions.keys.toList(), _activeId);
+    _notify();
+    return false;
   }
 
   Future<bool> _ensureLocalStream({required bool video}) async {

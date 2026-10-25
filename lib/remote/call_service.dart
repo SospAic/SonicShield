@@ -164,6 +164,23 @@ class CallService {
   bool _screen = false;
   CallPhase _phase = CallPhase.idle;
 
+  /// 会话代次：每次**新会话**（[startCall] / [onIncomingCall] 真正受理）自增。
+  ///
+  /// R88-AUD-05：`_teardown` 的收尾要跨越若干 await（免提归位 / `close` /
+  /// `dispose`），期间用户完全可能已经发起**下一通**。收尾在恢复时用
+  /// 这个代次判断"我这一代还在不在台面上"：代次变了就只收自己的资源，
+  /// **绝不**再改 `_phase` / `_callId` / `_peer` —— 否则一条陈旧的收尾会把
+  /// 刚建立的新通话清掉（本缺陷最狠的一面）。
+  int _sessionGen = 0;
+
+  /// 收尾重入闸（R88-AUD-05）。
+  ///
+  /// `_pc.close()` 会让 `onConnectionState` 变成 `closed`，那里的
+  /// `_teardown()` 会在第一次收尾**停在 await 上**时二次进入 ⇒ 同一个
+  /// `RTCPeerConnection` 被 `close()` / `dispose()` 两次（原生 dispose 非幂等）。
+  /// 闸门是**同步**的：二次进入不 await、不再关一遍，直接返回。
+  bool _tearingDown = false;
+
   /// 本端是否已成功 `setRemoteDescription`。
   ///
   /// ICE candidate **必须**在它之后才能喂给 PeerConnection（WebRTC 硬要求），
@@ -477,6 +494,7 @@ class CallService {
     _screen = screen;
     _peer = endpoint;
     _callId = const Uuid().v4();
+    _sessionGen++; // 新会话起点（R88-AUD-05：让上一代的收尾失效）
     _setPhase(CallPhase.connecting);
 
     final ok = await _ensureMedia(video: video, screen: screen);
@@ -610,6 +628,7 @@ class CallService {
     _isCaller = false;
     _peer = peer;
     _callId = rawId;
+    _sessionGen++; // 新会话起点（R88-AUD-05：让上一代的收尾失效）
     // BUG-117：缺省必须是**音频**（false），不能是视频。
     // 旧默认 true ⇒ 老版本控制器 / 漏字段的报文会让被叫直接开摄像头，
     // 默认值落在更敏感的一侧。显式 true 才开视频。
@@ -972,6 +991,10 @@ class CallService {
       }
     };
     pc.onConnectionState = (state) {
+      // R88-AUD-05：回调绑在**这一代**的 pc 上，只有它仍是当前 `_pc` 才有效。
+      // `_pc` 被摘掉（收尾中）或已换成新通话的 pc 时，陈旧事件一律不许驱动
+      // 任何状态变化 —— 否则 pc-1 迟到的 `closed` 会把 pc-2（新通话）关掉。
+      if (!identical(pc, _pc)) return;
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _failureReason = null;
         // 媒体已连通 ⇒ 必然已应答。这里再确认一次，防止"answer 信令丢了
@@ -1076,59 +1099,87 @@ class CallService {
   /// `onConnectionState` 变成 `closed`，那里再调一次 `_teardown()`）
   /// 必须传 `null`，否则会用"没有语义的结束"覆盖掉真正的原因 ——
   /// 用户会看到"对方无应答"被冲成空白（BUG-050）。
+  ///
+  /// ## R88-AUD-05：重入闸 + 会话代次（三层，缺一不可）
+  ///
+  /// 1. **同步闸** [\_tearingDown]：二次进入直接返回 —— 不 await、不再关一遍。
+  ///    缺陷本体：`_pc.close()` 的 `closed` 副作用会在第一次收尾停在 await 上时
+  ///    二次进入，同一个 pc 被 `close()`/`dispose()` 两次（原生 dispose 非幂等）。
+  /// 2. **先摘引用再关**：`_pc` / 流 / sender 在**第一个 await 之前**就搬到局部
+  ///    变量并从字段清空。此后任何重入都拿不到这一代的句柄（`_pc?.close()`
+  ///    对着 null 调用即无操作），不会再产生第二次原生 dispose。
+  /// 3. **代次比对** [\_sessionGen]：收尾跨越 await 恢复时，若代次已变
+  ///    （用户已发起新通话），只收自己的资源，**绝不**再改 `_phase` /
+  ///    `_callId` / `_peer` / 镜像 —— 否则一条陈旧收尾会把刚建立的新通话打死。
   Future<void> _teardown({CallEndReason? reason}) async {
-    _cancelWaitTimer();
-    _cancelConnectTimer();
-    _answered = false;
-    // BUG-145：来电通知是 `ongoing`（只能由应用自己取消）—— 接听/拒接/超时
-    // 任何一条收尾路径都要收起它，否则通知栏会永远挂着一条"来电"。
-    unawaited(NotificationService.instance.cancelIncomingCall());
-    // R94 / REM-08：自动接通产生的「通话中」常驻通知同理必须收起，
-    // 并复位可见指示（下一通要重新判定，不能沿用上一通的结论）。
-    unawaited(NotificationService.instance.cancelOngoingCall());
-    visibleIndicator.value = false;
-    // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
-    // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。
-    _pendingCandidates.clear();
-    _remoteDescSet = false;
-    // 免提归位：**只关本端自己开过的那次**（BUG-142，见 [_speakerOn]）。
-    // 不关的话，通话结束后整个应用的媒体播放仍走扬声器。
-    if (_speakerOn) await _setSpeakerphone(false);
-    try {
-      await _pc?.close();
-      await _pc?.dispose();
-    } on Object {
-      // ignore
-    }
+    if (_tearingDown) return; // ① 同步闸：closed 副作用触发的二次进入到此为止
+    _tearingDown = true;
+    final gen = _sessionGen;
+    // ② 先摘引用：后面即使还有 await，重入/新会话都拿不到这一代的句柄。
+    final pc = _pc;
+    final local = _localStream;
     _pc = null;
     // sender 随 `_pc` 一起失效（它们只是 pc 的句柄）：不清会在下一通里
     // 对着一批已 dispose 的 sender 调 setParameters。
     _senders = const <RTCRtpSender>[];
-    try {
-      _localStream?.getTracks().forEach((t) => t.stop());
-    } on Object {
-      // ignore
-    }
     _localStream = null;
     _remoteStream = null;
-    _remoteCtrl.add(null);
-    // 镜像归位：**不广播**（"通话已结束"由 callEnded / phase 负责），
-    // 否则 UI 会先收到 ended 再收到 unknown，白闪一下。
-    _remoteState = RemoteCallState.unknown;
-    _setPhase(CallPhase.ended);
-    _callId = null;
-    _peer = null;
-    // 待接 invite 必须一起清掉：否则下一通来电的「接听」按钮
-    // 可能拿到**上一通**的 SDP（连错人）。
-    _pendingInvite = null;
-    if (reason != null) {
-      _endReason = reason;
-      if (!_endedCtrl.isClosed) _endedCtrl.add(reason);
+
+    // 下面整段都在 try 里：`_tearingDown` 必须**无论如何**被复位，
+    // 否则一次异常会让后续所有收尾被闸门永久吞掉（比原缺陷更糟）。
+    try {
+      _cancelWaitTimer();
+      _cancelConnectTimer();
+      _answered = false;
+      // BUG-145：来电通知是 `ongoing`（只能由应用自己取消）—— 接听/拒接/超时
+      // 任何一条收尾路径都要收起它，否则通知栏会永远挂着一条"来电"。
+      unawaited(NotificationService.instance.cancelIncomingCall());
+      // R94 / REM-08：自动接通产生的「通话中」常驻通知同理必须收起，
+      // 并复位可见指示（下一通要重新判定，不能沿用上一通的结论）。
+      unawaited(NotificationService.instance.cancelOngoingCall());
+      visibleIndicator.value = false;
+      // 候选缓存与远端描述标记必须跟着本次会话一起清掉：留着会在下一通
+      // 通话里被当成"本次的候选"重放给新的 PeerConnection（连错人）。
+      _pendingCandidates.clear();
+      _remoteDescSet = false;
+      // 免提归位：**只关本端自己开过的那次**（BUG-142，见 [_speakerOn]）。
+      // 不关的话，通话结束后整个应用的媒体播放仍走扬声器。
+      if (_speakerOn) await _setSpeakerphone(false);
+      try {
+        await pc?.close();
+        await pc?.dispose();
+      } on Object {
+        // ignore
+      }
+      try {
+        local?.getTracks().forEach((t) => t.stop());
+      } on Object {
+        // ignore
+      }
+    } finally {
+      // ③ 只在自己这一代还在台面上时归位会话状态。
+      if (gen == _sessionGen) {
+        _remoteCtrl.add(null);
+        // 镜像归位：**不广播**（"通话已结束"由 callEnded / phase 负责），
+        // 否则 UI 会先收到 ended 再收到 unknown，白闪一下。
+        _remoteState = RemoteCallState.unknown;
+        _setPhase(CallPhase.ended);
+        _callId = null;
+        _peer = null;
+        // 待接 invite 必须一起清掉：否则下一通来电的「接听」按钮
+        // 可能拿到**上一通**的 SDP（连错人）。
+        _pendingInvite = null;
+        if (reason != null) {
+          _endReason = reason;
+          if (!_endedCtrl.isClosed) _endedCtrl.add(reason);
+        }
+        // 归位（下一次呼叫从 idle 开始）。
+        scheduleMicrotask(() {
+          if (_phase == CallPhase.ended) _setPhase(CallPhase.idle);
+        });
+      }
+      _tearingDown = false;
     }
-    // 归位（下一次呼叫从 idle 开始）。
-    scheduleMicrotask(() {
-      if (_phase == CallPhase.ended) _setPhase(CallPhase.idle);
-    });
   }
 
   /// 切换摄像头（通话中，Android 有效）。

@@ -225,6 +225,26 @@ class VibrateSession {
   Timer? _ticker;
   bool _pumping = false;
 
+  /// **停止代次闸门**（🔴 R97 / R88-AUD-01）。
+  ///
+  /// ## 缺陷形状（真机可复现，P1）
+  /// [start] 在真正下发首片之前有**三处平台往返**（`capabilities()` /
+  /// `environment()` / `battery()`）。若 [stopAll] 落在这段窗口里：
+  /// `_active` 还是空的 ⇒ `stopAll` 认为「当前没有进行中的振动」、审计记
+  /// `skipped`、原生 `cancel()` 先发完；随后 [start] 恢复执行**照常下发首片**
+  /// ⇒ **用户点了「停止」，振动才刚刚开始**（S3「任何时刻都能停」被击穿）。
+  ///
+  /// ## 修法
+  /// 所有"停止"入口（[stopAll] / [stopFor] / [dispose] / [recoverAfterRestart]）
+  /// 在**同步段**里 `_stoppedGen++`；[start] 在入口同步取快照，每个 `await`
+  /// 之后复核 —— 不等即说明"停止请求发生在本次启动途中"，记 `skipped` 并放弃。
+  ///
+  /// ## 为什么是**全局**代次而不是 per-id
+  /// 与 [stopFor] 既有注释同一取舍：原生 `cancel()` 没有"按 id 停"的粒度，
+  /// S3 优先级高于"精确停一个"。宁可多取消一次正在起头的会话（用户刚点了停，
+  /// 少震一次无害），也不能出现"点了停还在震"。
+  int _stoppedGen = 0;
+
   /// 静态能力缓存（NAT-05：只缓存 [VibrateCaps.staticOnly] 投影，
   /// 失败不缓存以便重试）。
   VibrateCaps? _capsCache;
@@ -302,6 +322,10 @@ class VibrateSession {
     required double amplitude,
     required String source,
   }) async {
+    // 🔴 R97（R88-AUD-01）：在**任何 await 之前**同步取停止代次快照。
+    // Dart 单线程 ⇒ 这一句与下面所有 `await` 之间不可能被插队，快照就是
+    // "本次启动的出生代次"；任何停止入口都会让 `_stoppedGen` 大于它。
+    final gen = _stoppedGen;
     // NAT-05：静态能力走缓存，动态状态现读，两者拼成这一次执行的完整视图。
     final staticCaps = await capabilities();
     final env = await environment();
@@ -343,6 +367,22 @@ class VibrateSession {
         taskId: taskId,
         occurrenceId: occurrenceId,
         message: '电量 ${b.level}% 且未充电，已跳过振动（省电降级）',
+      );
+      return false;
+    }
+
+    // 🔴 R97（R88-AUD-01）：**停止代次复核**（见 `_stoppedGen` 的说明）。
+    //
+    // 位置刻意放在最后一处平台往返（`battery()`）之后、任何下发之前 ——
+    // 这里是「窗口已全部关闭、但首片还没发」的那个唯一确定时刻。
+    if (gen != _stoppedGen) {
+      await _log(
+        source: source,
+        action: action.kind,
+        status: 'skipped',
+        taskId: taskId,
+        occurrenceId: occurrenceId,
+        message: '启动过程中收到停止请求，已取消下发（未开始振动）',
       );
       return false;
     }
@@ -523,6 +563,13 @@ class VibrateSession {
           continue;
         }
 
+        // 🔴 R97（R88-AUD-01 第二条）：`battery()` 是平台往返，期间该 id 可能
+        // 已被**新会话接管**（BUG-126 的同 id 重入）或被停止摘表。旧实现继续用
+        // **快照里的旧会话** `s` 续发，或在收尾时按 id `_active.remove(id)` ——
+        // 于是被删掉、并记成「振动完成」的会是**新会话**（账目与原生状态全错）。
+        // 身份复核（`identical`）后跳过：新会话由它自己那一轮负责。
+        if (!identical(_active[s.occurrenceId], s)) continue;
+
         if (elapsed >= s.totalMs) {
           finished.add(s.occurrenceId);
           continue;
@@ -563,6 +610,9 @@ class VibrateSession {
 
   /// 停止**全部**进行中的振动（本地按钮 / 远程 `vibrate.stop` / 引擎关停共用）。
   Future<void> stopAll({String reason = '用户停止'}) async {
+    // 🔴 R97（R88-AUD-01）：**第一条语句**同步推进停止代次（在任何 await 之前）。
+    // 这一句就是"点了停"对**正在起头、还没进活跃表**的会话的唯一约束手段。
+    _stoppedGen++;
     final ids = _active.keys.toList(growable: false);
     for (final id in ids) {
       await stopFor(id, reason: reason, skipNative: true);
@@ -587,6 +637,9 @@ class VibrateSession {
     String reason = '任务停止',
     bool skipNative = false,
   }) async {
+    // 🔴 R97（R88-AUD-01）：与 [stopAll] 同理 —— 同步推进代次，让"停"这件事
+    // 对**正在起头**的会话也生效（全局代次的取舍见 `_stoppedGen` 注释）。
+    _stoppedGen++;
     final s = _active.remove(occurrenceId);
     if (!skipNative) await stopNative();
     if (_active.isEmpty) {
@@ -615,6 +668,7 @@ class VibrateSession {
   /// 同一哲学。若 kv 里残留了上次的活跃标记，说明上次进程结束时振动没停干净
   /// （或恰好死在振动中），此时额外写一条审计，让用户能看见这件事发生过。
   Future<void> recoverAfterRestart() async {
+    _stoppedGen++;
     _active.clear();
     _ticker?.cancel();
     _ticker = null;
@@ -648,6 +702,7 @@ class VibrateSession {
   /// `dispose()` 是**同步**接口（调用点在引擎 teardown），因此 cancel 以
   /// fire-and-forget 下发；通道已销毁时异常吞掉，不制造未处理异步错误。
   void dispose() {
+    _stoppedGen++;
     _ticker?.cancel();
     _ticker = null;
     _active.clear();
