@@ -1229,7 +1229,7 @@ class NativeBridgePlugin : FlutterPlugin, ActivityAware {
      * - `MediaPlayer.setAudioAttributes` 自 API 21 可用，无版本分支。
      * - `areNotificationsEnabled()` 自 API 24 可用（support lib 兜底），无分支。
      */
-    private fun deviceAlert(ctx: Context, message: String): Map<String, Any> {
+    private fun deviceAlert(ctx: Context, message: String): Map<String, Any?> {
         var screenOk = false
         var notifOk = false
         var soundOk = false
@@ -1411,7 +1411,11 @@ class NativeBridgePlugin : FlutterPlugin, ActivityAware {
         // NAT-10：通知被系统拦截 ⇒ 整体判失败（"找回告警已展示"不成立），
         // 不再是"任一步成功即 true"的假成功。通知渠道可用时维持原 OR 语义。
         val ok = !notifBlocked && (screenOk || notifOk || soundOk)
-        return mapOf(
+        // R98：`reason` 在成功时为 null ⇒ 值类型必须可空，否则 Kotlin 2.x 会把
+        // mapOf 推断成交集类型（`Comparable<Boolean & String>? & Serializable?`），
+        // 与返回类型 `Map<String, Any>` 不兼容而编译失败（release 变体才编到）。
+        // Dart 侧按 `r['reason'] as String?` 消费，null 是既有契约。
+        return mapOf<String, Any?>(
             "ok" to ok,
             "screen" to screenOk,
             "notification" to notifOk,

@@ -94,13 +94,24 @@ class ScreenCastService : Service() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                startForegroundWithNotification()
+                // R98：`getMediaProjection` 返回**可空**（token 失效 / 系统拒绝时给 null）。
+                // 旧代码直接 `mp.registerCallback(...)` ⇒ 编译期即报「nullable receiver」。
+                // 与上面 `data == null` 同语义：没有可用 projection 就拒绝启动，不留僵尸通知。
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 val mp = mpm.getMediaProjection(resultCode, data)
+                if (mp == null) {
+                    Log.w(TAG, "getMediaProjection 返回空（授权 token 失效），拒绝启动投屏服务")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                startForegroundWithNotification()
                 projection = mp
                 // NAT-01①：Android 14+ 硬性契约 —— createVirtualDisplay 之前
                 // **必须** registerCallback，否则抛 IllegalStateException。
-                val cb = object : MediaProjection.Callback {
+                // R98：`MediaProjection.Callback` 是 Java 抽象类、带隐式无参构造器
+                // ⇒ Kotlin 必须写 `Callback()`，漏括号编译期报
+                // 「This type has a constructor, so it must be initialized here」。
+                val cb = object : MediaProjection.Callback() {
                     override fun onStop() {
                         // 用户从系统 UI（通知栏"停止共享"等）撤销投屏 ⇒ 镜像
                         // 会话已死，本服务没有存在意义，干净退场。

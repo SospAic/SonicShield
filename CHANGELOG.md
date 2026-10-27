@@ -5,6 +5,47 @@
 
 ## [1.9.12] - 2026-10-25（第九十五轮：R88 审计遗留 7 条缺陷全部修复 + 覆盖率长尾收口）
 
+#### 第九十五轮补（R98）· **release 构建修复：两处 Kotlin 编译错误（自 R93 起从未被编译过）**
+
+> 触发：老板要求「检查进度 → 构建 release」。构建**连续两轮失败**，暴露的是**真实代码缺陷**，
+> 不是环境问题 —— 同一台机、同一套配方（JDK17 + ANDROID_HOME + 代理 7897），修完即绿。
+
+**缺陷 A · `NativeBridgePlugin.deviceAlert` 返回类型不可空**
+
+R93 把 `device.alert` 的原生回执从裸 `bool` 改成结构化 `Map`
+（`{ok, screen, notification, sound, reason}`），`reason` 在成功时是 `null`，
+而函数签名仍是 `Map<String, Any>`（值**非空**）。Kotlin 2.x 把
+`mapOf("ok" to Boolean, "reason" to String?)` 推断成**交集类型**
+`Map<String, Comparable<Boolean & String>? & Serializable?>` ⇒
+`:native_bridge:compileReleaseKotlin` 报 `Return type mismatch`。
+
+修法：签名改 `Map<String, Any?>` + `mapOf<String, Any?>(...)` 显式类型参数。
+Dart 侧本来就是 `r['reason'] as String?`（`lib/services/native_bridge.dart:357`），
+**协议零变化**，null 是既有契约。
+
+**缺陷 B · `ScreenCastService` 两处**
+
+- `object : MediaProjection.Callback` **漏构造器括号** —— Java 抽象类带隐式无参构造器，
+  Kotlin 必须写 `Callback()`（报 `This type has a constructor, so it must be initialized here`）。
+- `mp.registerCallback(...)` 的 `mp` 来自 `getMediaProjection()`，该方法**返回可空**
+  ⇒ 补判空早退（与既有 `data == null` 同语义：没有可用 projection 就 `stopSelf()` 返回，
+  不留僵尸通知），并把 `startForegroundWithNotification()` 挪到判空之后。
+
+**为什么一直没被发现**：`flutter analyze` 与 `flutter test` 都**不编译 Kotlin**；上一版 APK 是
+2026-10-20（R91 时代）构建的，R93 之后**再没跑过 `flutter build`** ⇒ 这类错误只能溜到出包时才炸。
+**教训：Kotlin 侧的正确性只有 `flutter build` 能证明，Dart 门禁全绿不代表能出包。**
+
+**产物**（`1.9.12+35`，`dfda1f1` + 本修复）：
+
+| 项 | 值 |
+|---|---|
+| 路径 | `build/app/outputs/flutter-apk/app-release.apk` |
+| 大小 | 269 484 159 B（257.0 MB） |
+| SHA256 | `e76bd9f8b2fc25245b899892de6f92754fa4526f31f5416ba089dd0962d2e3a3` |
+| 归档 | `_artifacts/r98/app-release-1.9.12+35-dfda1f1.apk` |
+| 元信息 | `versionCode='35' versionName='1.9.12'` / minSdk 24 / targetSdk 36（`aapt dump badging` 实测） |
+| 签名 | `CN=Android Debug`（本机无 `android/key.properties` ⇒ 既有降级，见 `docs/10` §4） |
+
 #### 第九十五轮（R97）· **R88 只读审查遗留的 7 条缺陷全部修复（P1×3 / P2×4）+ 覆盖率长尾按文件收口**
 
 R88 只读审查 `lib/remote/**` + `lib/services/**`（47 文件 / 20 005 行）时留下 7 条
