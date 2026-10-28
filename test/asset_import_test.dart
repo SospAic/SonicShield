@@ -282,15 +282,18 @@ void main() {
   });
 
   group('预置库清单与磁盘资源一致性', () {
-    test('70 条 / 13 分类 / 每个 file 都存在 / 名字唯一', () {
+    test('78 条 / 14 分类 / 每个 file 都存在 / 名字唯一', () {
       final raw = File('assets/audio/presets_manifest.json').readAsStringSync();
       final m = jsonDecode(raw) as Map<String, dynamic>;
       final items = (m['items'] as List).cast<Map<String, dynamic>>();
 
       // v2.0 阶段 A：新增 `annoy` 分类（咳嗽/吐痰/嘲笑/「干啥呢」等 10 条
-      // 招人烦音效）→ 60/12 抬到 70/13。此锁随清单同步演进，防止"清单悄悄少一条"。
-      expect(items, hasLength(70));
-      expect(items.map((i) => i['category']).toSet(), hasLength(13));
+      // 招人烦音效）→ 60/12 抬到 70/13。
+      // 2026-10-28：新增 `harsh` 分类（摔盘子/玻璃砸碎/家具倒塌/金属重砸/
+      // 踩碎玻璃/指甲刮黑板/金属尖啸/电钻 8 条刺耳破坏）→ 70/13 抬到 78/14。
+      // 此锁随清单同步演进，防止"清单悄悄少一条"。
+      expect(items, hasLength(78));
+      expect(items.map((i) => i['category']).toSet(), hasLength(14));
 
       final names = <String>[];
       for (final it in items) {

@@ -3,7 +3,7 @@
   "sampleRate": 22050,
   "license": "MIT（程序化合成，无采样素材）",
   "generator": "tool/gen_sfx.dart (seed=20260913)",
-  "total": 70,
+  "total": 78,
   "categories": {
     "knocks": 5,
     "impacts": 5,
@@ -17,7 +17,8 @@
     "nature": 5,
     "tech": 5,
     "ambient": 5,
-    "annoy": 10
+    "annoy": 10,
+    "harsh": 8
   },
   "items": [
     {
@@ -579,6 +580,70 @@
       "desc": "「哈哈哈」连串嘲笑",
       "file": "presets/annoy_mocking_laugh.wav",
       "durationMs": 1200
+    },
+    {
+      "id": "harsh_glass_smash",
+      "category": "harsh",
+      "name": "玻璃砸碎（重物）",
+      "desc": "重物砸穿玻璃：低频冲击 + 高频爆 + 碎片长尾",
+      "file": "presets/harsh_glass_smash.wav",
+      "durationMs": 2000
+    },
+    {
+      "id": "harsh_plate_smash",
+      "category": "harsh",
+      "name": "摔盘子（瓷器碎裂）",
+      "desc": "瓷盘砸地：短促爆裂 + 密集碎片",
+      "file": "presets/harsh_plate_smash.wav",
+      "durationMs": 1300
+    },
+    {
+      "id": "harsh_furniture_crash",
+      "category": "harsh",
+      "name": "家具倒塌",
+      "desc": "柜体倒地：低频轰 + 木头断裂 + 零碎碰撞",
+      "file": "presets/harsh_furniture_crash.wav",
+      "durationMs": 2600
+    },
+    {
+      "id": "harsh_metal_crash",
+      "category": "harsh",
+      "name": "金属重砸",
+      "desc": "铁皮/金属板被重物砸中（金属模态 + 噪声爆）",
+      "file": "presets/harsh_metal_crash.wav",
+      "durationMs": 1700
+    },
+    {
+      "id": "harsh_glass_grind",
+      "category": "harsh",
+      "name": "踩碎玻璃",
+      "desc": "鞋底碾过碎玻璃：高频砂砾摩擦 + 连续碎响",
+      "file": "presets/harsh_glass_grind.wav",
+      "durationMs": 1800
+    },
+    {
+      "id": "harsh_nails_blackboard",
+      "category": "harsh",
+      "name": "指甲刮黑板",
+      "desc": "最经典刺耳：2–4kHz 强共振 + 断续刮擦",
+      "file": "presets/harsh_nails_blackboard.wav",
+      "durationMs": 1500
+    },
+    {
+      "id": "harsh_metal_screech",
+      "category": "harsh",
+      "name": "金属尖啸（刹车/刮铁）",
+      "desc": "高频滑移尖啸 + 砂砾摩擦",
+      "file": "presets/harsh_metal_screech.wav",
+      "durationMs": 2000
+    },
+    {
+      "id": "harsh_drill",
+      "category": "harsh",
+      "name": "电钻",
+      "desc": "高频旋转钻头：转速爬升 + 谐波 + 宽带噪声",
+      "file": "presets/harsh_drill.wav",
+      "durationMs": 2000
     }
   ]
 }

@@ -272,8 +272,8 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
                     Text('暂无音源。', textAlign: TextAlign.center),
                     SizedBox(height: 8),
                     Text(
-                        '点击右上角「导入预置库」一键导入 70 条内置音效\n'
-                        '（敲击/撞击/拖拽/门窗/玻璃/人声/动物/铃声/警示/自然/电子/助眠/招人烦），\n'
+                        '点击右上角「导入预置库」一键导入 78 条内置音效\n'
+                        '（敲击/撞击/拖拽/门窗/玻璃/人声/动物/铃声/警示/自然/电子/助眠/招人烦/刺耳破坏），\n'
                         '或用右下角导入本地音频文件。',
                         textAlign: TextAlign.center),
                   ],

@@ -501,14 +501,15 @@ void main() {
   // SLB-A · 渲染
   // ══════════════════════════════════════════════════════════════════════
 
-  testWidgets('SLB-01 空态：说清"两条路都能导入"，且点名 70 条 / 13 分类',
+  testWidgets('SLB-01 空态：说清"两条路都能导入"，且点名 78 条 / 14 分类',
       (tester) async {
     await pumpLib(tester);
 
     expect(find.text('暂无音源。'), findsOneWidget);
     expect(find.textContaining('导入预置库'), findsWidgets);
     // v2.0 阶段 A：新增 `annoy`（招人烦）分类 → 60/12 抬到 70/13。
-    expect(find.textContaining('70 条内置音效'), findsOneWidget);
+    // 2026-10-28：新增 `harsh`（刺耳破坏）8 条 → 70/13 抬到 78/14。
+    expect(find.textContaining('78 条内置音效'), findsOneWidget);
     expect(find.textContaining('敲击/撞击/拖拽/门窗'), findsOneWidget,
         reason: '分类清单是"这里到底有什么"的唯一说明，别删');
   }, timeout: _timeout);

@@ -242,6 +242,89 @@ List<double> frictionDrag(double seconds,
   return out;
 }
 
+/// 高频噪声爆（带通白噪 × 指数衰减）—— 玻璃/瓷器"炸开"的那一下。
+///
+/// 刺耳感的来源：能量集中在 2–10kHz，且衰减极快（`tau` 几十毫秒）⇒
+/// 人耳听成"爆裂"而不是"噪声"。
+List<double> noiseBurst(double dur,
+    {double lo = 1400,
+    double hi = 9000,
+    double tau = 0.05,
+    double attack = 0.001}) {
+  final n = (dur * sampleRate).round();
+  // ⚠️ 二阶（串联两次一阶）而不是一次：一阶在 11kHz 处只衰减到 54%，
+  // 白噪声的高频尾巴会漏出去 ⇒ 手机小喇叭放不出、听感变"嘶"。
+  var raw = highpass(whiteNoise(dur), lo);
+  raw = highpass(raw, lo);
+  raw = lowpass(raw, hi);
+  raw = lowpass(raw, hi);
+  final env = attackDecayEnv(n, attack, tau);
+  return [for (var i = 0; i < n; i++) raw[i] * env[i]];
+}
+
+/// 碎片群：随机时刻 / 随机高频模态的短促脆响簇（碎玻璃、碎瓷的"沙沙叮当"）。
+///
+/// `spread` 控制时间分布：1.0 = 均匀，>1 = 前密后疏（碎片先多后少，更像真实
+/// 落地）；<1 则偏后。每片用 3 个非谐波模态，避免听成"电子音"。
+///
+/// ⚠️ 模态频率超过 0.45×SR 会被**丢弃**（不是夹到边界）：`resonator` 的
+/// `cos(2πf/SR)` 在 f > SR/2 时不会报错，而是把能量折到混叠频率上 ——
+/// 实测这是 `harsh_glass_smash` 频谱重心冲到 9.6kHz 的真凶（2–10kHz 只剩
+/// 23.9%，能量全糊在 10kHz 以上）。
+List<double> debris(double seconds,
+    {int count = 40,
+    double fLo = 2200,
+    double fHi = 7500,
+    double spread = 0.85,
+    double decay = 0.02}) {
+  final out = silence(seconds);
+  const maxMode = sampleRate * 0.45; // 9922Hz：留出抗混叠余量
+  for (var k = 0; k < count; k++) {
+    final t = pow(_rng.nextDouble(), spread) * seconds;
+    final f = fLo + _rng.nextDouble() * (fHi - fLo);
+    final amp = 0.25 + _rng.nextDouble() * 0.75;
+    final modes = [f, f * 1.71, f * 2.93].where((m) => m < maxMode).toList();
+    final piece = strike(
+      modes: modes,
+      decay: decay * (0.6 + _rng.nextDouble()),
+      dur: 0.12,
+      q: 26,
+    );
+    mixInto(out, piece, srcAmp: amp, at: (t * sampleRate).round());
+  }
+  return out;
+}
+
+/// 金属尖啸：高频基频 + 非整数倍谐波 + 抖频 + 缓慢滑移 + 砂砾层。
+///
+/// 用于刹车尖啸 / 铁器刮擦。谐波取 2.02 / 3.07 倍（**非整数**）——
+/// 整数倍会听成乐音，非整数倍才有金属刮擦的"毛刺"感。
+List<double> screech(double seconds,
+    {double f0 = 2400,
+    double f1 = 3300,
+    double wobbleHz = 10,
+    double wobbleDepth = 0.06,
+    double grit = 0.35}) {
+  final n = (seconds * sampleRate).round();
+  final out = List<double>.filled(n, 0);
+  var phase = 0.0;
+  for (var i = 0; i < n; i++) {
+    final t = i / n;
+    final base = f0 + (f1 - f0) * t;
+    final w = 1 + wobbleDepth * sin(2 * pi * wobbleHz * t);
+    phase += 2 * pi * base * w / sampleRate;
+    out[i] = sin(phase) + 0.45 * sin(phase * 2.02) + 0.22 * sin(phase * 3.07);
+  }
+  // 砂砾层：高频噪声随抖动调制 —— "刮"的质感，纯正弦会太干净。
+  final gritLayer = bandpass(whiteNoise(seconds), 3000, 9500);
+  for (var i = 0; i < n; i++) {
+    final t = i / sampleRate;
+    final m = 0.5 + 0.5 * sin(2 * pi * wobbleHz * 1.7 * t);
+    out[i] = out[i] * (0.7 + 0.3 * m) + gritLayer[i] * grit * m;
+  }
+  return out;
+}
+
 /// 共振峰人声近似（3 共振峰 + 基频 + 开口噪声）。
 /// 不是真实人声录音，是"类人声"合成（合规与版权双安全）。
 List<double> formantVoice({
@@ -325,9 +408,9 @@ List<double> waves(double seconds, {double period = 6}) {
 final List<Map<String, dynamic>> manifest = [];
 
 void emit(String category, String id, String name, String desc, List<double> x,
-    {double peak = 0.9}) {
+    {double peak = 0.9, double fadeIn = 0.008}) {
   final norm = fadeEdges(
-      normalize(x, peak), 0.008, min(0.05, x.length / sampleRate / 3));
+      normalize(x, peak), fadeIn, min(0.05, x.length / sampleRate / 3));
   final fileName = 'presets/${category}_$id.wav';
   final f = File('assets/audio/$fileName');
   f.createSync(recursive: true);
@@ -367,7 +450,7 @@ List<int> _u32(int v) =>
 List<int> _u16(int v) => [v & 0xff, (v >> 8) & 0xff];
 
 // ============================================================
-// 音效库定义（13 类：12 类 × 5 条 + annoy 10 条 = 70 种）
+// 音效库定义（14 类：12 类 × 5 条 + annoy 10 条 + harsh 8 条 = 78 种）
 // ============================================================
 
 void main() {
@@ -1120,6 +1203,148 @@ void main() {
     }
     return out;
   }());
+
+  // ---------- 14. harsh 刺耳破坏（2026-10-28 新增：摔东西 / 玻璃破碎 / 尖啸） ----------
+  //
+  // 设计目标：**能量集中在 2–10kHz + 快衰减瞬态**。这一带正是人耳最敏感的
+  // 等响区（3–4kHz 附近最刺），所以"刺耳"不是靠把音量调大，而是靠频谱重心。
+  // 与前 13 类相比，这一类的每条都叠了 3 层以上：冲击低频 + 高频爆 + 碎片长尾。
+  emit('harsh', 'glass_smash', '玻璃砸碎（重物）',
+      '重物砸穿玻璃：低频冲击 + 高频爆 + 碎片长尾', () {
+    final out = silence(2.0);
+    // 砸穿那一下的低频冲击（大面积薄板，低频不会太深）
+    mixInto(out, strike(modes: [58, 96, 143], decay: 0.16, dur: 0.5, q: 9),
+        srcAmp: 0.9);
+    // 高频爆：玻璃炸开的主体。
+    // ⚠️ 上限压到 7kHz（不是 9kHz）：能量堆在 10kHz 以上时，手机小喇叭
+    // （8kHz 以上衰减严重）会把"爆"放成"嘶"，听感反而不够响。实测调参见
+    // `_pt/sfx_spectral.py` 的 2–10kHz 占比。
+    mixInto(out, noiseBurst(0.45, lo: 1200, hi: 7000, tau: 0.055),
+        srcAmp: 1.0, at: (0.006 * sampleRate).round());
+    // 碎片群（前密后疏）
+    mixInto(out, debris(1.5, count: 70, fLo: 2000, fHi: 6500),
+        srcAmp: 0.85, at: (0.02 * sampleRate).round());
+    // 大块碎片二次落地
+    for (var k = 0; k < 4; k++) {
+      mixInto(
+          out,
+          strike(
+              modes: [420.0 + k * 90, 1500.0 + k * 220],
+              decay: 0.05,
+              dur: 0.2,
+              q: 20),
+          srcAmp: 0.35,
+          at: ((0.35 + k * 0.22) * sampleRate).round());
+    }
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'plate_smash', '摔盘子（瓷器碎裂）',
+      '瓷盘砸地：短促爆裂 + 密集碎片', () {
+    final out = silence(1.3);
+    mixInto(out, noiseBurst(0.3, lo: 1800, hi: 7800, tau: 0.035), srcAmp: 1.0);
+    mixInto(out, strike(modes: [95, 170, 260], decay: 0.09, dur: 0.35, q: 10),
+        srcAmp: 0.7);
+    mixInto(out, debris(0.95, count: 55, fLo: 2400, fHi: 7000, decay: 0.016),
+        srcAmp: 0.9, at: (0.01 * sampleRate).round());
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'furniture_crash', '家具倒塌',
+      '柜体倒地：低频轰 + 木头断裂 + 零碎碰撞', () {
+    final out = silence(2.6);
+    // 整体倒地
+    mixInto(out, strike(modes: [46, 72, 110], decay: 0.35, dur: 1.0, q: 7),
+        srcAmp: 1.0);
+    // 木头断裂（多次高频脆裂，时刻递进）
+    for (var k = 0; k < 7; k++) {
+      final f = 900.0 + _rng.nextDouble() * 1800;
+      mixInto(out, strike(modes: [f, f * 1.9], decay: 0.04, dur: 0.25, q: 16),
+          srcAmp: 0.5, at: ((0.04 + k * 0.055) * sampleRate).round());
+    }
+    // 抽屉/摆件散落
+    mixInto(out, debris(1.8, count: 45, fLo: 1200, fHi: 6000, decay: 0.03),
+        srcAmp: 0.6, at: (0.12 * sampleRate).round());
+    // 落稳的第二下沉
+    mixInto(out, strike(modes: [52, 88], decay: 0.2, dur: 0.6, q: 8),
+        srcAmp: 0.6, at: (1.05 * sampleRate).round());
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'metal_crash', '金属重砸',
+      '铁皮/金属板被重物砸中（金属模态 + 噪声爆）', () {
+    final out = silence(1.7);
+    // 前置硬瞬态：砸中的"当"那一下必须先到，否则长余韵会把峰值推到中段，
+    // 听感变成"嗡嗡"而不是"砸"。attack 取 4ms 而非默认 1ms：峰值要落在
+    // `emit` 的 1.5ms 淡入区之后，否则归一化到 0.9 会被淡入削到 0.82。
+    mixInto(out, noiseBurst(0.12, lo: 2200, hi: 8000, tau: 0.015, attack: 0.004),
+        srcAmp: 1.1);
+    // 金属板模态：高 Q 长余韵（这是"金属"与"木头"的听感分界）
+    mixInto(
+        out,
+        strike(
+            modes: [180, 465, 980, 1730, 2650], decay: 0.32, dur: 1.4, q: 42),
+        srcAmp: 1.0);
+    mixInto(out, noiseBurst(0.25, lo: 2500, hi: 8000, tau: 0.03),
+        srcAmp: 0.85);
+    mixInto(out, strike(modes: [62, 105], decay: 0.14, dur: 0.5, q: 8),
+        srcAmp: 0.8);
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'glass_grind', '踩碎玻璃',
+      '鞋底碾过碎玻璃：高频砂砾摩擦 + 连续碎响', () {
+    final out = silence(1.8);
+    mixInto(out, frictionDrag(1.6, lo: 2400, hi: 7000, wobble: 6.5),
+        srcAmp: 0.9);
+    mixInto(
+        out,
+        debris(1.6, count: 60, fLo: 2800, fHi: 7000, decay: 0.014, spread: 1.4),
+        srcAmp: 0.8);
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'nails_blackboard', '指甲刮黑板',
+      '最经典刺耳：2–4kHz 强共振 + 断续刮擦', () {
+    final n = (1.5 * sampleRate).round();
+    final raw = bandpass(whiteNoise(1.5), 1900, 5200);
+    // 两个强共振峰：板面（2.85k）+ 指甲/玻璃面（3.75k），3–4kHz 正是最刺的等响峰
+    final r1 = resonator(raw, 2850, 30);
+    final r2 = resonator(raw, 3750, 26);
+    final out = List<double>.filled(n, 0);
+    for (var i = 0; i < n; i++) {
+      final t = i / sampleRate;
+      // 断续感：手不是匀速划的
+      final stroke = 0.55 + 0.45 * sin(2 * pi * 3.1 * t + sin(2 * pi * 0.9 * t));
+      final env = i < n * 0.06 ? i / (n * 0.06) : exp(-(t - 0.09) / 0.85);
+      out[i] = (r1[i] + r2[i] * 0.7) * stroke * env;
+    }
+    return out;
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'metal_screech', '金属尖啸（刹车/刮铁）',
+      '高频滑移尖啸 + 砂砾摩擦', () {
+    final out = screech(2.0, f0: 2400, f1: 3300, wobbleHz: 9.5, grit: 0.4);
+    final n = out.length;
+    final env = attackDecayEnv(n, 0.05, 1.6);
+    return [for (var i = 0; i < n; i++) out[i] * env[i]];
+  }(), fadeIn: 0.0015);
+  emit('harsh', 'drill', '电钻', '高频旋转钻头：转速爬升 + 谐波 + 宽带噪声',
+      () {
+    final n = (2.0 * sampleRate).round();
+    final out = List<double>.filled(n, 0);
+    var phase = 0.0;
+    for (var i = 0; i < n; i++) {
+      final t = i / sampleRate;
+      // 转速 0–0.25s 爬升，之后带轻微波动（负载变化）
+      final rpm = t < 0.25
+          ? 120 + (t / 0.25) * 780
+          : 900 + 30 * sin(2 * pi * 0.7 * t);
+      final f = rpm / 60 * 6; // 六极电机 ⇒ 电频率 × 6
+      phase += 2 * pi * f / sampleRate;
+      out[i] = sin(phase) * 0.7 + sin(phase * 2) * 0.3 + sin(phase * 3) * 0.15;
+    }
+    final hiss = bandpass(whiteNoise(2.0), 1800, 9000);
+    for (var i = 0; i < n; i++) {
+      out[i] = out[i] * 0.6 + hiss[i] * 0.5;
+    }
+    final env = attackDecayEnv(n, 0.02, 1.9);
+    return [for (var i = 0; i < n; i++) out[i] * env[i]];
+  }(), fadeIn: 0.0015);
 
   // ---------- manifest ----------
   final byCat = <String, int>{};

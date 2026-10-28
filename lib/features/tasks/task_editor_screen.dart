@@ -601,6 +601,10 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       'bells': '铃声',
       'alarms': '警示',
       'tech': '电子',
+      // 2026-10-28：补上 `annoy` / `harsh` 两个新分类的中文名 ——
+      // 缺了虽有 fallback（显示英文 id），但声景轨道标题会中英混杂。
+      'annoy': '招人烦',
+      'harsh': '刺耳破坏',
     };
     return [
       const SizedBox(height: 8),
