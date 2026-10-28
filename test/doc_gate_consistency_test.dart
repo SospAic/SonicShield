@@ -583,7 +583,12 @@ String _mutateChangelogSection(String md, Pattern from, String to) {
 //     `CHANGELOG.md` 最上面那条 `#### 第N轮` 标题），或在 ±5 行内有显式历史标记；
 //   - `BRL-03`：凡写「阈值链」的行，**必须含 `scripts/gates.sh` 的 COVERAGE_MIN 默认值**。
 
-/// 中文数字 → 整数（只支持到 99，轮次足够）。解析失败返回 `null`。
+/// 中文数字 → 整数（支持到 999）。解析失败返回 `null`。
+///
+/// 2026-10-28（R100）：**放开百位**。原实现里有 `if (ch == '百') return null;`，
+/// 注释写着「轮次不会到百位」—— 项目刚好跑到第一百轮，这条假设当场失效：
+/// `CHANGELOG` 首条变成「第一百轮」⇒ `chineseNumeralToInt` 返回 null ⇒
+/// `BRL-01` 判「解析不到最新轮次」而红。**假设型护栏到期就得改，不能改文档迁就它**。
 int? chineseNumeralToInt(String s) {
   const digits = {
     '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
@@ -591,11 +596,17 @@ int? chineseNumeralToInt(String s) {
   };
   if (s.isEmpty) return null;
   if (RegExp(r'^\d+$').hasMatch(s)) return int.tryParse(s);
+  var hundreds = 0; // 百位
   var tens = 0; // 十位（`十` 之前的部分 × 10）
   var ones = 0; // 个位
   var sawDigit = false;
   for (final ch in s.split('')) {
-    if (ch == '百') return null; // 轮次不会到百位；解析不了返回 null，调用方判红
+    if (ch == '百') {
+      hundreds = (sawDigit ? ones : 1) * 100;
+      ones = 0;
+      sawDigit = false;
+      continue;
+    }
     if (ch == '十') {
       tens = (sawDigit ? ones : 1) * 10;
       ones = 0;
@@ -607,7 +618,7 @@ int? chineseNumeralToInt(String s) {
     ones = d;
     sawDigit = true;
   }
-  final v = tens + ones;
+  final v = hundreds + tens + ones;
   return v == 0 ? null : v;
 }
 
@@ -1284,7 +1295,12 @@ void main() {
       expect(chineseNumeralToInt('五十七'), 57);
       expect(chineseNumeralToInt('十'), 10);
       expect(chineseNumeralToInt('五十六'), 56);
-      expect(chineseNumeralToInt('百'), isNull, reason: '百位不支持 ⇒ 必须显式判红');
+      // R100：项目跑到第一百轮，解析器放开百位（原实现假设「轮次不会到百位」已到期）。
+      expect(chineseNumeralToInt('一百'), 100);
+      expect(chineseNumeralToInt('一百零五'), 105);
+      expect(chineseNumeralToInt('二百一十'), 210);
+      // 无法解析的形态仍必须返回 null（判红而不是静默当 0）。
+      expect(chineseNumeralToInt('若干'), isNull);
     });
 
     test('BRL-02 ★ 凡称「最近一次全绿门禁」的行必须指向最新轮次（或有历史标记）', () {

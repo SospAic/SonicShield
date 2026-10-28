@@ -14,6 +14,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/providers.dart';
 import '../../core/app_keys.dart';
 import '../../core/constants.dart';
+import '../../core/widgets/number_field.dart';
 import '../../data/repositories/api_config_store.dart';
 import '../../data/repositories/counter_plan_store.dart';
 import '../../domain/models/action.dart';
@@ -1539,12 +1540,12 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
         ];
       case PlanScheduleMode.several:
         return <Widget>[
-          _intDropdown('次数', 'pp_occ', _p.occurrenceCount, 1, 12,
+          _intField('次数', 'pp_occ', _p.occurrenceCount, 1, 12,
               (v) => setState(() => _p = _p.copyWith(occurrenceCount: v))),
         ];
       case PlanScheduleMode.severalDays:
         return <Widget>[
-          _intDropdown('天数', 'pp_span', _p.spanDays, 1, 30,
+          _intField('天数', 'pp_span', _p.spanDays, 1, 30,
               (v) => setState(() => _p = _p.copyWith(spanDays: v))),
         ];
       case PlanScheduleMode.specificDate:
@@ -1589,23 +1590,35 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
     }
   }
 
-  Widget _intDropdown(String label, String key, int value, int lo, int hi,
-      ValueChanged<int> onChanged) {
-    return Row(
-      children: [
-        Expanded(child: Text(label)),
-        DropdownButton<int>(
-          key: ValueKey<String>(key),
-          value: value.clamp(lo, hi),
-          items: [
-            for (var i = lo; i <= hi; i++)
-              DropdownMenuItem<int>(value: i, child: Text('$i')),
-          ],
-          onChanged: (v) {
-            if (v != null) onChanged(v);
-          },
-        ),
-      ],
+  /// 整数输入行（R100：`DropdownButton` → **输入框 + 上下键**）。
+  ///
+  /// 为什么不用下拉框：手机上要**三次触达**（点开 → 滚动 → 再点），列表项又矮又密。
+  /// 也不用纯步进器：从 1 调到 12 要点 11 次。
+  /// 「输入框 + 上下键」把两种意图分开 —— **想跳到某个值就输入**（弹数字键盘，一次触达），
+  /// **想微调一格就点上/下**（一次一档）。
+  Widget _intField(
+    String label,
+    String key,
+    int value,
+    int lo,
+    int hi,
+    ValueChanged<int> onChanged,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.xs),
+      child: Row(
+        children: [
+          Expanded(child: Text(label)),
+          NumberField(
+            fieldKey: ValueKey<String>(key),
+            value: value.clamp(lo, hi),
+            min: lo,
+            max: hi,
+            onChanged: onChanged,
+            keyPrefix: key,
+          ),
+        ],
+      ),
     );
   }
 
@@ -1668,6 +1681,8 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
             (v) => setState(() => _p = update(
                 w.copyWith(volumeMin: v.start, volumeMax: v.end))),
             fmt: (v) => '${(v * 100).round()}%',
+            // 音量在模型里是 0–1 的 double，界面按百分比整数输入。
+            scale: 100,
           ),
           _range(
             '$label 时长（秒）',
@@ -1698,6 +1713,17 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
     );
   }
 
+  /// 区间输入（R100：`RangeSlider` → **起/止两个输入框 + 上下键**）。
+  ///
+  /// 滑块在手机上的两个硬伤：① 手指挡住滑块，松手才发现差 3 档；
+  /// ② 大跨度（1 → 60s）要么拖不准、要么来回拖半天。输入框直接给精确值，
+  /// 上下键管微调一格。
+  ///
+  /// **不做交叉夹取**：起点输得比终点大时，把终点**顶上去**（而不是把输入吞掉）——
+  /// 用户想整体右移一段区间时，不必"先调终点再调起点"。
+  ///
+  /// [scale] 把模型值放大成「人话单位」：音量是 0–1 的 double，界面上按
+  /// **百分比整数**输入（30 而不是 0.3）—— 让用户敲 `0.3` 是反直觉的。
   Widget _range(
     String label,
     double min,
@@ -1707,26 +1733,60 @@ class _PlanParamsDialogState extends State<_PlanParamsDialog> {
     double hi,
     ValueChanged<RangeValues> onChanged, {
     required String Function(double) fmt,
+    int scale = 1,
+    String? suffix,
   }) {
     final a = lo.clamp(min, max);
     final b = hi.clamp(min, max);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: AppSpacing.sm),
-          child: Text('$label：${fmt(a)} – ${fmt(b)}',
-              style: AppText.bodySmall),
-        ),
-        RangeSlider(
-          min: min,
-          max: max,
-          divisions: divisions,
-          values: RangeValues(a <= b ? a : b, a <= b ? b : a),
-          labels: RangeLabels(fmt(a), fmt(b)),
-          onChanged: onChanged,
-        ),
-      ],
+    final start = a <= b ? a : b;
+    final end = a <= b ? b : a;
+    final loInt = (min * scale).round();
+    final hiInt = (max * scale).round();
+    final startInt = (start * scale).round();
+    final endInt = (end * scale).round();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$label：${fmt(start)} – ${fmt(end)}', style: AppText.bodySmall),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              NumberField(
+                fieldKey: ValueKey<String>('rng_${label}_start'),
+                keyPrefix: 'rng_${label}_start',
+                value: startInt,
+                min: loInt,
+                max: hiInt,
+                suffix: suffix,
+                onChanged: (v) {
+                  final ns = v / scale;
+                  // 起点越过终点 ⇒ 终点跟着走（不夹取，避免输入被吞）。
+                  onChanged(RangeValues(ns, ns > end ? ns : end));
+                },
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+                child: Text('–'),
+              ),
+              NumberField(
+                fieldKey: ValueKey<String>('rng_${label}_end'),
+                keyPrefix: 'rng_${label}_end',
+                value: endInt,
+                min: loInt,
+                max: hiInt,
+                suffix: suffix,
+                onChanged: (v) {
+                  final ne = v / scale;
+                  onChanged(RangeValues(ne < start ? ne : start, ne));
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

@@ -201,6 +201,40 @@ void main() {
       ], reason: 'loopFill 必须在起播前把循环模式设为 one（否则 50ms 音效 50ms 就结束）');
     });
 
+    test('PA-04b 短音效未传 loopFill ⇒ 仍自动循环填满目标时长（R100 老板需求）',
+        () async {
+      audio.fileDuration = const Duration(milliseconds: 50);
+      final r = await PlaybackService().play(
+        path: p1,
+        channel: AudioChannel.media,
+        volume: 0.5,
+        maxDurationMs: 220,
+      );
+
+      expect(r.ok, isTrue);
+      // 旧行为：50ms 播完就静默，用户设的 220ms 有 170ms 是哑的（体感"没生效"）。
+      // 现在必须循环填满。
+      expect(r.playedMs, greaterThanOrEqualTo(180),
+          reason: '50ms 的文件必须被循环填到 220ms，而不是 50ms 就结束');
+      expect(audio.loopModes, contains(LoopModeMessage.one),
+          reason: '短音效自动填充必须真的向平台设过 LoopMode.one');
+    });
+
+    test('PA-04c 音效比目标长 ⇒ 不设循环（不许把长音频变成无限循环）', () async {
+      audio.fileDuration = const Duration(seconds: 5);
+      final r = await PlaybackService().play(
+        path: p1,
+        channel: AudioChannel.media,
+        volume: 0.5,
+        maxDurationMs: 150,
+      );
+
+      expect(r.ok, isTrue);
+      expect(r.playedMs, greaterThanOrEqualTo(100));
+      expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
+          reason: '文件比目标长时不该自动循环 —— 到点硬停即可');
+    });
+
     test('PA-05 rampUpMs ⇒ 从 5% 起线性渐强，终点兑现目标音量', () async {
       audio.fileDuration = const Duration(seconds: 2);
       final r = await PlaybackService().play(

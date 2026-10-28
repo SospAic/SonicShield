@@ -791,18 +791,41 @@ void main() {
   // TEI-E · 动作区交互
   // ══════════════════════════════════════════════════════════════════════
 
-  testWidgets('TEI-E1 动作：随机音量与随机时长两条 RangeSlider', (tester) async {
+  testWidgets('TEI-E1 动作：随机音量与随机时长两条区间输入（R100：输入框 + 上下键）',
+      (tester) async {
     await pumpEditor(tester, remoteSave: (t) async => true);
-    // `_RangeSliderTile` 在 play/composite 输入里的书写顺序：音量 → 时长。
-    expect(find.byType(RangeSlider), findsNWidgets(2));
+    // R100：`_RangeSliderTile` 由滑块改成「起/止输入框 + 上下键」。
+    // `play/composite` 输入里的书写顺序仍是：音量 → 时长。
+    expect(find.byType(RangeSlider), findsNothing,
+        reason: 'R100 起区间控件不再是滑块');
+
+    Future<void> typeStart(String label, String value) async {
+      final f = find.byKey(ValueKey<String>('tse_${label}_start'));
+      await tester.ensureVisible(f);
+      await tester.enterText(f, value);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+    }
+
     final volBefore = textOf(tester, find.textContaining('随机音量：'));
-    await dragIt(tester, find.byType(RangeSlider).at(0), -200);
-    expect(textOf(tester, find.textContaining('随机音量：')), isNot(volBefore));
+    await typeStart('随机音量', '5');
+    expect(textOf(tester, find.textContaining('随机音量：')), isNot(volBefore),
+        reason: '输入起点应改变区间文案');
 
     final durBefore = textOf(tester, find.textContaining('随机时长（秒）：'));
-    await dragIt(tester, find.byType(RangeSlider).at(1), -200);
+    await typeStart('随机时长（秒）', '2');
     expect(
         textOf(tester, find.textContaining('随机时长（秒）：')), isNot(durBefore));
+
+    // 上下键路径：终点 -1 也要生效。
+    final volEndDown =
+        find.byKey(const ValueKey<String>('tse_随机音量_end_down'));
+    await tester.ensureVisible(volEndDown);
+    final before = textOf(tester, find.textContaining('随机音量：'));
+    await tester.tap(volEndDown);
+    await tester.pump();
+    expect(textOf(tester, find.textContaining('随机音量：')), isNot(before),
+        reason: '终点下键应 -1 个百分点');
   }, timeout: perTest);
 
   testWidgets('TEI-E2 动作：闹钟通道开关 + 循环填充开关（渐强随之隐藏）',
@@ -813,9 +836,9 @@ void main() {
     await tester.pump();
     expect(switchValue(tester, '闹钟通道（穿透勿扰/静音）'), isTrue);
 
-    await tester.tap(find.widgetWithText(SwitchListTile, '循环填充（声景模式）'));
+    await tester.tap(find.widgetWithText(SwitchListTile, '强制整段循环（声景模式）'));
     await tester.pump();
-    expect(switchValue(tester, '循环填充（声景模式）'), isTrue);
+    expect(switchValue(tester, '强制整段循环（声景模式）'), isTrue);
     // 循环填充与渐强互斥（短音效循环填满时长，谈不上"渐强"）。
     expect(find.textContaining('渐强唤醒：'), findsNothing);
   }, timeout: perTest);

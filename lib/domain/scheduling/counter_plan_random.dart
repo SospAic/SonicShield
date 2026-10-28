@@ -21,7 +21,10 @@ import '../models/counter_plan.dart';
 import '../models/counter_plan_params.dart';
 
 abstract final class CounterPlanRandom {
-  /// 「招人烦」预置音效池（复用 [CounterPlan.defaultPresetIds]，单一真源）。
+  /// 出厂预置音效池（复用 [CounterPlan.defaultPresetIds]，单一真源）。
+  ///
+  /// 2026-10-28 起含两类：10 条 `annoy`（招人烦人声）+ 8 条 `harsh`（刺耳破坏），
+  /// 共 **18 条**。名字保留历史叫法，避免牵连远程协议与既有调用点。
   static const List<String> annoyPresets = CounterPlan.defaultPresetIds;
 
   /// 可选 TTS 文案池（复用 [CounterPlan.defaultTtsTexts]）。

@@ -177,10 +177,21 @@ void main() {
     return (tile.subtitle! as Text).data!;
   }
 
-  /// 拖一条 `RangeSlider`。`drag` 的起点会被离散成该处数值再按 dx 移动 →
-  /// `onChanged` 必被调用。用 ± 大位移保证跨过多个 division。
-  Future<void> dragIt(WidgetTester tester, Finder f, double dx) async {
-    await tester.drag(f, Offset(dx, 0));
+  /// 驱动一条区间输入（R100：`RangeSlider` → 起/止输入框 + 上下键）。
+  ///
+  /// 先点终点上键；若该端已到上限（按钮置灰、文案不变）再点下键 ——
+  /// 这样无论默认区间落在哪一段，都保证有一次真实的 `onChanged`。
+  Future<void> bumpRange(WidgetTester tester, String label) async {
+    String now() => textOf(tester, find.textContaining('$label：'));
+    final before = now();
+    final up = find.byKey(ValueKey<String>('tse_${label}_end_up'));
+    await tester.ensureVisible(up);
+    await tester.tap(up);
+    await tester.pump();
+    if (now() != before) return;
+    final down = find.byKey(ValueKey<String>('tse_${label}_end_down'));
+    await tester.ensureVisible(down);
+    await tester.tap(down);
     await tester.pump();
   }
 
@@ -338,7 +349,7 @@ void main() {
     expect(find.text('总时长（秒）：12s ~ 45s'), findsOneWidget);
     expect(find.text('随机振幅：30% ~ 90%'), findsOneWidget);
     expect(find.text('强度波动周期（毫秒，0=恒定）：250'), findsOneWidget);
-    expect(find.text('锐度（仅 Android 16 生效）：0.10 ~ 0.60'), findsOneWidget);
+    expect(find.text('锐度（仅 Android 16 生效）：10% ~ 60%'), findsOneWidget);
     expect(find.text('占空比（%，100=不停顿）：80'), findsOneWidget);
     expect(find.text('渐强（秒）：5'), findsOneWidget);
     expect(find.text('渐弱（秒）：6'), findsOneWidget);
@@ -386,15 +397,15 @@ void main() {
     await pickVibrate(tester, '震动·随机脉冲');
     // 顺序依据：`_vibrateRandomInputs()` 里的**书写顺序** ——
     // 0=总时长、1=单次振动时长、2=脉冲间隔、3=强度。
-    expect(find.byType(RangeSlider), findsNWidgets(4),
-        reason: '随机脉冲正好四条区间滑条');
+    expect(find.byType(RangeSlider), findsNothing,
+        reason: 'R100：区间控件已换成「输入框 + 上下键」');
 
-    const labels = ['总时长（秒）：', '单次振动时长（毫秒）：', '脉冲间隔（毫秒）：', '强度：'];
+    const labels = ['总时长（秒）', '单次振动时长（毫秒）', '脉冲间隔（毫秒）', '强度'];
     for (var i = 0; i < labels.length; i++) {
-      final before = textOf(tester, find.textContaining(labels[i]));
-      await dragIt(tester, find.byType(RangeSlider).at(i), -200);
-      expect(textOf(tester, find.textContaining(labels[i])), isNot(before),
-          reason: '拖第 $i 条滑条应改变「${labels[i]}」的显示值');
+      final before = textOf(tester, find.textContaining('${labels[i]}：'));
+      await bumpRange(tester, labels[i]);
+      expect(textOf(tester, find.textContaining('${labels[i]}：')), isNot(before),
+          reason: '驱动第 $i 条区间应改变「${labels[i]}」的显示值');
     }
 
     // 步进器：脉冲数上限（1..1000）与渐强（0..600）。
@@ -426,14 +437,15 @@ void main() {
     await pickVibrate(tester, '震动·持续');
     // 顺序依据：`_vibrateContinuousInputs()` 的书写顺序 ——
     // 0=总时长、1=随机振幅、2=锐度。
-    expect(find.byType(RangeSlider), findsNWidgets(3));
+    expect(find.byType(RangeSlider), findsNothing,
+        reason: 'R100：区间控件已换成「输入框 + 上下键」');
 
-    const labels = ['总时长（秒）：', '随机振幅：', '锐度（仅 Android 16 生效）：'];
+    const labels = ['总时长（秒）', '随机振幅', '锐度（仅 Android 16 生效）'];
     for (var i = 0; i < labels.length; i++) {
-      final before = textOf(tester, find.textContaining(labels[i]));
-      await dragIt(tester, find.byType(RangeSlider).at(i), 200);
-      expect(textOf(tester, find.textContaining(labels[i])), isNot(before),
-          reason: '拖第 $i 条滑条应改变「${labels[i]}」的显示值');
+      final before = textOf(tester, find.textContaining('${labels[i]}：'));
+      await bumpRange(tester, labels[i]);
+      expect(textOf(tester, find.textContaining('${labels[i]}：')), isNot(before),
+          reason: '驱动第 $i 条区间应改变「${labels[i]}」的显示值');
     }
 
     await tester.tap(stepperBtn('强度波动周期（毫秒，0=恒定）', Icons.add_circle_outline));
@@ -538,9 +550,9 @@ void main() {
     expect(find.textContaining('本机不支持振动锐度'), findsNothing,
         reason: '没设锐度时不该提示锐度不可用');
 
-    // 把锐度拖上去 → 提示必须**当场**出现（而不是等保存才说）。
+    // 把锐度设上去 → 提示必须**当场**出现（而不是等保存才说）。
     final sharpBefore = textOf(tester, find.textContaining('锐度（仅 Android 16 生效）：'));
-    await dragIt(tester, find.byType(RangeSlider).at(2), 200);
+    await bumpRange(tester, '锐度（仅 Android 16 生效）');
     expect(textOf(tester, find.textContaining('锐度（仅 Android 16 生效）：')),
         isNot(sharpBefore));
     expect(find.textContaining('本机不支持振动锐度'), findsOneWidget,

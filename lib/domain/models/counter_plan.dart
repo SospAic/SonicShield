@@ -283,10 +283,17 @@ class CounterPlan {
     this.weekdays = defaultWeekdays,
   });
 
-  /// 出厂预置动作池：「招人烦」音效（对应 `presets_manifest.json` 的 id）。
+  /// 出厂预置动作池：「招人烦」+「刺耳破坏」音效（对应 `presets_manifest.json` 的 id）。
   ///
   /// 默认**非空**，否则模版一导入就因"动作池为空"不可用。真实可用性由物化期
   /// 用设备实际音源库求交集决定（见 `CounterPlanMaterializer.assetIdPool`）。
+  ///
+  /// 2026-10-28（R100）：在 10 条 `annoy` 之后追加 8 条 `harsh`（刺耳破坏：
+  /// 摔盘子 / 玻璃砸碎 / 家具倒塌 / 金属重砸 / 踩碎玻璃 / 指甲刮黑板 /
+  /// 金属尖啸 / 电钻）。两类混编后随机池 **18 条** —— 反击的"不可预测"不只靠
+  /// 时间随机，音色本身也要跨类（人声抱怨 vs 破坏巨响是完全不同的心理压迫）。
+  /// ⚠️ 这些 id 必须与 `tool/gen_sfx.dart` 的 `emit` 一一对应，
+  /// `asset_import_test` 与 `counter_plan` 的池一致性测试会逐条校验。
   static const List<String> defaultPresetIds = <String>[
     'annoy_cough_fit',
     'annoy_throat_clear_hard',
@@ -298,6 +305,14 @@ class CounterPlan {
     'annoy_what_doing',
     'annoy_hey_you',
     'annoy_mocking_laugh',
+    'harsh_glass_smash',
+    'harsh_plate_smash',
+    'harsh_furniture_crash',
+    'harsh_metal_crash',
+    'harsh_glass_grind',
+    'harsh_nails_blackboard',
+    'harsh_metal_screech',
+    'harsh_drill',
   ];
 
   /// 出厂 TTS 文案池 —— **2026-10 起恒为空**。

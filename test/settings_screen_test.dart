@@ -1506,26 +1506,44 @@ void main() {
       await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
           reason: '应弹出参数对话框');
 
-      Future<void> driveAllSliders() async {
-        final sliders = find.byType(RangeSlider);
-        final n = sliders.evaluate().length;
-        for (var i = 0; i < n; i++) {
-          final s = tester.widget<RangeSlider>(sliders.at(i));
-          s.onChanged!(RangeValues(s.min, s.max));
+      // R100：区间控件由 `RangeSlider` 换成「输入框 + 上下键」，这里按新交互驱动。
+      // 两条路径都要覆盖：`enterText` + 提交（`_commit` 夹取/回填）、点上下键（`_nudge`）。
+      Future<void> typeRange(String label, int start, int end) async {
+        for (final pair in [
+          ('rng_${label}_start', start),
+          ('rng_${label}_end', end),
+        ]) {
+          final f = find.byKey(ValueKey<String>(pair.$1));
+          await tester.ensureVisible(f);
+          await tester.enterText(f, '${pair.$2}');
+          await tester.testTextInput.receiveAction(TextInputAction.done);
           await tester.pump();
         }
       }
 
-      // 1) 顶端两条：白天时段 / 动作间隔（精确驱动一次，校验文案随之变化）。
-      final top = find.byType(RangeSlider);
-      tester.widget<RangeSlider>(top.at(0)).onChanged!(const RangeValues(6, 22));
-      await tester.pump();
+      /// 点一次上下键（`suffix` = `up` / `down`）。
+      Future<void> nudge(String fieldLabel, String suffix) async {
+        final b = find.byKey(ValueKey<String>('rng_${fieldLabel}_$suffix'));
+        await tester.ensureVisible(b);
+        await tester.tap(b);
+        await tester.pump();
+      }
+
+      // 1) 顶端两条：白天时段 / 动作间隔（输入后文案随之变化）。
+      await typeRange('白天时段', 6, 22);
       expect(find.text('白天时段：6:00 – 22:00'), findsOneWidget);
-      tester
-          .widget<RangeSlider>(top.at(1))
-          .onChanged!(const RangeValues(300, 1800));
-      await tester.pump();
+      await typeRange('动作间隔（秒）', 300, 1800);
       expect(find.text('动作间隔（秒）：300s – 1800s'), findsOneWidget);
+
+      // 1b) 上下键微调：起点 +1、终点 -1（各走一次 `_nudge`）。
+      await nudge('白天时段_start', 'up');
+      expect(find.text('白天时段：7:00 – 22:00'), findsOneWidget,
+          reason: '起点上键应 +1 小时');
+      await nudge('白天时段_end', 'down');
+      expect(find.text('白天时段：7:00 – 21:00'), findsOneWidget,
+          reason: '终点下键应 -1 小时');
+      // 复原，避免影响后面「恢复默认」之外的断言。
+      await typeRange('白天时段', 6, 22);
 
       // 2) R92：死设置「遵循免打扰时段」已从参数对话框移除（自 v79 起就不
       //    映射任何行为）。改成断言**依赖说明**在界面上 —— 免打扰的真实判据
@@ -1537,8 +1555,18 @@ void main() {
       );
       await tester.pump();
 
-      // 3) 工作日两段（默认开）→ 驱动其音量/时长/次数三条滑块。
-      await driveAllSliders();
+      // 3) 工作日两段（默认开）→ 用上下键驱动音量/时长/次数。
+      Future<void> driveWindows(List<String> labels) async {
+        for (final label in labels) {
+          for (final f in ['音量', '时长（秒）', '每小时次数']) {
+            // 起点 +1、终点 -1：都在区间内部，按钮不会置灰。
+            await nudge('$label ${f}_start', 'up');
+            await nudge('$label ${f}_end', 'down');
+          }
+        }
+      }
+
+      await driveWindows(['工作日·白天', '工作日·夜间']);
 
       // 4) 打开休息日两段 → 再驱动一遍（此时共 6 段全部启用）。
       for (final label in ['休息日·白天', '休息日·夜间']) {
@@ -1547,7 +1575,7 @@ void main() {
         tester.widget<SwitchListTile>(sw).onChanged!(true);
         await tester.pump();
       }
-      await driveAllSliders();
+      await driveWindows(['休息日·白天', '休息日·夜间']);
 
       // 5) 「恢复默认」→ 回到出厂区间；再「保存」落库。
       await tester.tap(find.widgetWithText(TextButton, '恢复默认'));
@@ -1577,9 +1605,13 @@ void main() {
       await waitFor(tester, () => find.text('反击计划生成参数').evaluate().isNotEmpty,
           reason: '应弹出参数对话框');
 
-      final sliders = find.byType(RangeSlider);
-      tester.widget<RangeSlider>(sliders.at(0)).onChanged!(const RangeValues(9, 19));
+      // R100：区间控件改成「输入框 + 上下键」，用输入框驱动一次。
+      final dayStart = find.byKey(const ValueKey<String>('rng_白天时段_start'));
+      await tester.ensureVisible(dayStart);
+      await tester.enterText(dayStart, '9');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
+      expect(find.textContaining('白天时段：9:00'), findsOneWidget);
 
       await tester.tap(find.widgetWithText(TextButton, '取消'));
       await tester.pumpAndSettle();
@@ -1609,12 +1641,13 @@ void main() {
       expect(find.byKey(const ValueKey<String>('pp_wd_1')), findsOneWidget);
       expect(find.byKey(const ValueKey<String>('pp_occ')), findsNothing);
 
-      // 切「几次」→ 出现次数下拉，驱动一次。
+      // 切「几次」→ 出现次数输入框，驱动一次。
       tapMode(PlanScheduleMode.several);
       await tester.pump();
       final occ = find.byKey(const ValueKey<String>('pp_occ'));
       expect(occ, findsOneWidget);
-      tester.widget<DropdownButton<int>>(occ).onChanged!(6);
+      await tester.enterText(occ, '6');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
 
       // 切「指定日期」→ 出现日期按钮，未设置。
@@ -1680,12 +1713,13 @@ void main() {
             reason: '日期选择器应关闭（$tileKey）');
       }
 
-      // 「几天内」（severalDays）：出现"天数"下拉并驱动一次（含 spanDays 回写）。
+      // 「几天内」（severalDays）：出现"天数"输入框并驱动一次（含 spanDays 回写）。
       tapMode(PlanScheduleMode.severalDays);
       await tester.pump();
       final span = find.byKey(const ValueKey<String>('pp_span'));
       expect(span, findsOneWidget, reason: 'severalDays 必须有"天数"字段');
-      tester.widget<DropdownButton<int>>(span).onChanged!(7);
+      await tester.enterText(span, '7');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump();
 
       // 「指定日期」：点开日期选择器并确认 → onChanged 回填。

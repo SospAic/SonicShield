@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/constants.dart';
+import '../../core/widgets/number_field.dart';
 import '../../core/providers.dart';
 import '../../data/repositories/task_repository.dart' show AudioAsset;
 import '../../domain/models/action.dart';
@@ -992,6 +993,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         start: _volMin,
         end: _volMax,
         format: (v) => '${(v * 100).round()}%',
+        // 0–1 的 double → 界面按百分比整数输入。
+        scale: 100,
         onChanged: (a, b) => setState(() {
           _volMin = a;
           _volMax = b;
@@ -1016,8 +1019,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         onChanged: (v) => setState(() => _alarmChannel = v),
       ),
       SwitchListTile(
-        title: const Text('循环填充（声景模式）'),
-        subtitle: const Text('短音效循环播放，填满随机时长'),
+        title: const Text('强制整段循环（声景模式）'),
+        // R100：短音效已**自动**循环填满目标时长，这个开关只剩"文件够长也循环"的用途。
+        subtitle: const Text('短音效已自动循环填满；开启后即使音效比时长长也整段循环'),
         value: _loopFill,
         onChanged: (v) => setState(() => _loopFill = v),
       ),
@@ -1241,6 +1245,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         start: _rvAmpMin,
         end: _rvAmpMax,
         format: (v) => '${(v * 100).round()}%',
+        scale: 100,
         onChanged: (s, e) => setState(() {
           _rvAmpMin = s.clamp(0.0, 1.0);
           _rvAmpMax = e.clamp(_rvAmpMin, 1.0);
@@ -1306,6 +1311,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         start: _cvAmpMin,
         end: _cvAmpMax,
         format: (v) => '${(v * 100).round()}%',
+        scale: 100,
         onChanged: (s, e) => setState(() {
           _cvAmpMin = s.clamp(0.0, 1.0);
           _cvAmpMax = e.clamp(_cvAmpMin, 1.0);
@@ -1324,7 +1330,9 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         max: 1,
         start: _cvSharpMin,
         end: _cvSharpMax,
-        format: (v) => v.toStringAsFixed(2),
+        // 0.10 对用户没意义，统一按百分比显示（与音量/强度一致）。
+        format: (v) => '${(v * 100).round()}%',
+        scale: 100,
         onChanged: (s, e) => setState(() {
           _cvSharpMin = s.clamp(0.0, 1.0);
           _cvSharpMax = e.clamp(_cvSharpMin, 1.0);
@@ -2019,6 +2027,13 @@ class _IntStepper extends StatelessWidget {
   }
 }
 
+/// 区间输入（R100：`RangeSlider` → 起/止两个「输入框 + 上下键」）。
+///
+/// 滑块在手机上的硬伤见 [NumberField] 的文档。这里额外负责两件事：
+/// ① 把模型值按 [scale] 放大成整数 —— 音量/强度/锐度这类 0–1 的 double
+///    在界面上按百分比整数输入（`30` 而不是 `0.3`）；
+/// ② 两端不交叉 —— 起点越过终点时把终点**顶上去**（而不是把输入吞掉），
+///    这样"整体右移一段区间"不必先调终点再调起点。
 class _RangeSliderTile extends StatelessWidget {
   const _RangeSliderTile({
     required this.label,
@@ -2028,6 +2043,7 @@ class _RangeSliderTile extends StatelessWidget {
     required this.end,
     required this.format,
     required this.onChanged,
+    this.scale = 1,
   });
 
   final String label;
@@ -2038,24 +2054,56 @@ class _RangeSliderTile extends StatelessWidget {
   final String Function(double) format;
   final void Function(double, double) onChanged;
 
+  /// 模型值 → 界面整数的放大倍数（0–1 的 double 传 100 即按百分比）。
+  final int scale;
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
-          child: Text('$label：${format(start)} ~ ${format(end)}'),
-        ),
-        RangeSlider(
-          values: RangeValues(start, end),
-          min: min,
-          max: max,
-          divisions: 100,
-          labels: RangeLabels(format(start), format(end)),
-          onChanged: (v) => onChanged(v.start, v.end),
-        ),
-      ],
+    final loInt = (min * scale).round();
+    final hiInt = (max * scale).round();
+    final startInt = (start * scale).round();
+    final endInt = (end * scale).round();
+    final keyBase = 'tse_$label';
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg, vertical: AppSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$label：${format(start)} ~ ${format(end)}'),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              NumberField(
+                fieldKey: ValueKey<String>('${keyBase}_start'),
+                keyPrefix: '${keyBase}_start',
+                value: startInt,
+                min: loInt,
+                max: hiInt,
+                onChanged: (v) {
+                  final ns = v / scale;
+                  onChanged(ns, ns > end ? ns : end);
+                },
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+                child: Text('~'),
+              ),
+              NumberField(
+                fieldKey: ValueKey<String>('${keyBase}_end'),
+                keyPrefix: '${keyBase}_end',
+                value: endInt,
+                min: loInt,
+                max: hiInt,
+                onChanged: (v) {
+                  final ne = v / scale;
+                  onChanged(ne < start ? ne : start, ne);
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

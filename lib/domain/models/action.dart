@@ -178,7 +178,9 @@ class PlayAudioAction extends ActionConfig {
     // 被系统压掉正是预期行为，不构成静默失败（用户要的就是"别响"）。
     this.respectDnd = true,
     this.rampUpSec = 0, // 渐强唤醒：音量从 5% 线性爬升到目标值的时长（0=关闭）
-    this.loopFill = false, // 短音效循环填充到随机时长（Sleep 式声景）
+    // R100 起：短音效（时长 < 目标）**自动**循环填充，此开关只用于
+    // 「文件够长也要整段循环」的声景铺底场景（见 `PlaybackService.play`）。
+    this.loopFill = false,
   })  : assert(volumeMin >= 0 && volumeMin <= 1),
         assert(volumeMax >= 0 && volumeMax <= 1),
         assert(volumeMin <= volumeMax),

@@ -203,7 +203,12 @@ class PlaybackService {
     int fadeInMs = 0,
     int fadeOutMs = 0,
     int rampUpMs = 0, // 渐强唤醒：音量 5%→目标 线性爬升
-    bool loopFill = false, // 短音效循环填充到目标时长
+    /// 显式要求**整段循环**（声景铺底）。
+    ///
+    /// R100 起「文件比目标时长短」**自动**循环填充（老板需求：不许播完就静默），
+    /// 调用方不再需要为短音效传 true；此参数只用于「文件够长、但仍要整段循环」
+    /// 的场景（声景多轨铺底）。
+    bool loopFill = false,
     PlayPriority priority = PlayPriority.normal, // ARCH-09：调用方约定见枚举注释
   }) async {
     final player = AudioPlayer();
@@ -231,6 +236,21 @@ class PlaybackService {
 
       // 2) 载入并播放。渐强唤醒优先于普通淡入。
       await player.setFilePath(path);
+      // R100（老板需求）：**音效短于目标时长 ⇒ 循环播放填满**，不许"播完就静默"。
+      //
+      // 旧行为：`loopFill` 默认 false，短音效播完就结束，剩余时长是**静默**——
+      // 用户设了「随机时长 30 秒」，实际只响 1.3 秒，体感是"没生效"。
+      // 现在：`setFilePath` 完成即可拿到 `duration`（just_audio 会等元数据），
+      // 只要「文件比目标短」就自动 `LoopMode.one`，到目标时长再硬停。
+      //
+      // `loopFill` 参数保留原语义（**即使文件够长也循环**，用于声景铺底），
+      // 短音效不再需要用户手动开这个开关。
+      //
+      // ⚠️ `duration` 拿不到（null/0）时**不自动循环**：无法判断是否够长，
+      // 盲目循环会让"只该响一遍"的长音频变成无限循环。此时退回旧行为
+      // （等到 maxDurationMs 后硬停），已登记为已知限制。
+      final fileMs = (player.duration ?? Duration.zero).inMilliseconds;
+      final autoFill = fileMs > 0 && maxDurationMs > 0 && fileMs < maxDurationMs;
       if (rampUpMs > 0) {
         await player.setVolume(volume * 0.05);
         unawaited(_rampUp(player, volume, rampUpMs));
@@ -240,18 +260,17 @@ class PlaybackService {
           unawaited(_fadeIn(player, volume, fadeInMs));
         }
       }
-      if (loopFill) {
-        await player.setLoopMode(LoopMode.one); // 单曲循环填充
+      if (loopFill || autoFill) {
+        await player.setLoopMode(LoopMode.one); // 单曲循环填充到目标时长
       }
       await player.play();
 
-      // 3) 随机时长控制：到点停止（非循环时若文件更短则自然结束）。
-      final fileMs = (player.duration ?? Duration.zero).inMilliseconds;
-      final target = maxDurationMs <= 0
-          ? fileMs
-          : (loopFill || fileMs <= 0 || fileMs > maxDurationMs
-              ? maxDurationMs
-              : fileMs);
+      // 3) 时长控制：目标就是 `maxDurationMs`（`<= 0` 表示不限制 ⇒ 播一遍文件）。
+      //
+      // R100 之前这里还有一档 `fileMs < maxDurationMs ? fileMs : ...`——
+      // 即"文件比目标短就按文件时长收尾"，剩下的时间静默。现在 `autoFill`
+      // 已把短音效循环到目标，那一档会让循环**白设**（50ms 的文件仍然 50ms 就停）。
+      final target = maxDurationMs <= 0 ? fileMs : maxDurationMs;
       if (target > 0) {
         await _waitPlayWindow(Duration(milliseconds: target), gen, player);
       }
