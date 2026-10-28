@@ -202,11 +202,12 @@ void main() {
       // `_IdleAudioPlayer`（纯 Dart 无操作）⇒ off 只在 Dart 层生效，
       // 平台侧仍停在 `one`：一旦 `stop()` 在真机上失效（老板实测「铺满后还在响」），
       // 就没有任何一层能把它拦住。改成先关循环后，平台侧确实收到 off。
-      expect(audio.loopModes, <LoopModeMessage>[
-        LoopModeMessage.off,
-        LoopModeMessage.one,
-        LoopModeMessage.off,
-      ], reason: '起播前设 one 填充，收尾必须把 off 真正关到平台（R101）');
+      // R103：**不再用 LoopMode.one**，改为手动重复（seek + play）——
+      // 非循环模式下即使 stop() 失效，文件播完也会自然停止（最多多响一遍）。
+      expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
+          reason: '不许再设循环模式：它正是"停不下来"的根源');
+      expect(audio.countOf('seek'), greaterThanOrEqualTo(3),
+          reason: '50ms 文件铺满 220ms 需要重复播放（每遍 seek 回开头）');
     });
 
     test('PA-04b 播 2 次 ⇒ 时长按「文件 × 次数」算，而不是铺满 maxDurationMs（R102）',
@@ -229,8 +230,9 @@ void main() {
           reason: '必须真的播了 4 遍（1200ms），而不是只播一遍');
       expect(r.playedMs, lessThan(1900),
           reason: '不许铺满到 maxDurationMs(2000) —— 铺满会让 1.3s 音效连响 20+ 遍');
-      expect(audio.loopModes, contains(LoopModeMessage.one),
-          reason: 'repeat>1 必须靠 LoopMode.one 让文件自然重复');
+      expect(audio.countOf('seek'), greaterThanOrEqualTo(3),
+          reason: 'repeat=4 必须真的重复播放（seek 回开头 3 次），'
+              '而不是靠 LoopMode.one —— 后者一旦 stop 失效就是无限播放');
     });
 
     test('PA-04c 默认 repeat=1 ⇒ 不设循环、播一遍就停（撤销铺满后的基线）', () async {
@@ -245,8 +247,10 @@ void main() {
       expect(r.ok, isTrue);
       expect(r.playedMs, lessThan(900),
           reason: 'R102 起不再自动铺满：300ms 文件播一遍就是 ~300ms（含开销）');
+      expect(audio.countOf('seek'), 0,
+          reason: 'repeat=1 只播一遍 ⇒ 不该有任何重复');
       expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
-          reason: 'repeat=1 且未显式 loopFill ⇒ 不该开循环');
+          reason: '默认路径绝不能开循环模式');
     });
 
     test('PA-04d 多次播放到点：收尾必须把 off 真正关到平台（R101 回归锁）',
@@ -265,12 +269,11 @@ void main() {
       );
 
       expect(r.ok, isTrue);
-      // 核心判据：**off 必须到达平台**（旧顺序下这里是 2 个元素，收尾 off 观测不到）。
-      expect(audio.loopModes, <LoopModeMessage>[
-        LoopModeMessage.off,
-        LoopModeMessage.one,
-        LoopModeMessage.off,
-      ], reason: '收尾的 off 必须转发到平台 —— 否则真机上 stop 一失败就会一直响');
+      // R103 后不再有 `one`；判据收敛为两条：**重复播放靠 seek**、
+      // **收尾必须把 off 关到平台**（旧顺序下这次 off 到不了平台）。
+      expect(audio.countOf('seek'), greaterThanOrEqualTo(1));
+      expect(audio.loopModes.last, LoopModeMessage.off,
+          reason: '收尾的 off 必须转发到平台');
     });
 
     test('PA-05 rampUpMs ⇒ 从 5% 起线性渐强，终点兑现目标音量', () async {

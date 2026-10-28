@@ -159,7 +159,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
   /// 「立即执行」进行中（防连点：连点会重复跑同一任务）。
   bool _runningNow = false;
   bool _alarmChannel = false;
-  bool _loopFill = false;
+  // R103：`loopFill` 开关已移除（它是"铺满/停不下来"的高危入口）。
+  // 模型字段保留以兼容旧 JSON，但新建/编辑一律写 false —— 声景动作走自己的循环。
   int _rampUpSec = 0;
 
   // ---------------- 振动族（v1.9，docs/20 §4/§10） ----------------
@@ -423,7 +424,6 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _repeatMax = a.repeatMax;
         _alarmChannel = a.channel == AudioChannel.alarm;
         _rampUpSec = a.rampUpSec;
-        _loopFill = a.loopFill;
         _actionKind = ActionKindChoice.play;
       } else if (a is SoundscapeAction) {
         _scTracks.addAll(a.tracks);
@@ -494,7 +494,6 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           _repeatMax = p.repeatMax;
           _alarmChannel = p.channel == AudioChannel.alarm;
           _rampUpSec = p.rampUpSec;
-          _loopFill = p.loopFill;
         }
       }
     }
@@ -1061,25 +1060,23 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         value: _alarmChannel,
         onChanged: (v) => setState(() => _alarmChannel = v),
       ),
-      SwitchListTile(
-        title: const Text('强制整段循环（声景模式）'),
-        // R100：短音效已**自动**循环填满目标时长，这个开关只剩"文件够长也循环"的用途。
-        subtitle: const Text('短音效已自动循环填满；开启后即使音效比时长长也整段循环'),
-        value: _loopFill,
-        onChanged: (v) => setState(() => _loopFill = v),
-      ),
-      if (!_loopFill)
-        ListTile(
-          title: Text('渐强唤醒：$_rampUpLabel'),
-          subtitle: Slider(
-            value: _rampUpSec.toDouble(),
-            min: 0,
-            max: 300,
-            divisions: 20,
-            label: _rampUpLabel,
-            onChanged: (v) => setState(() => _rampUpSec = v.round()),
-          ),
+      // R103（老板实测「还是一直播放」）：**移除「强制整段循环」开关**。
+      //
+      // 它开着就是"铺满"——1.3 秒的音效按 30 秒时长连响 23 遍，正是老板说不要的
+      // 行为；而且它是「停不下来」的高危入口（循环模式一旦 stop 失效就无限播放）。
+      // 模型字段 `loopFill` 保留（旧 JSON 兼容、声景动作走自己的循环），
+      // 但普通播放**不再暴露**这个开关，`_loopFill` 恒为 false。
+      ListTile(
+        title: Text('渐强唤醒：$_rampUpLabel'),
+        subtitle: Slider(
+          value: _rampUpSec.toDouble(),
+          min: 0,
+          max: 300,
+          divisions: 20,
+          label: _rampUpLabel,
+          onChanged: (v) => setState(() => _rampUpSec = v.round()),
         ),
+      ),
     ];
     switch (_actionKind) {
       case ActionKindChoice.soundscape:
@@ -1824,7 +1821,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           repeatMax: _repeatMax.clamp(_repeatMin, PlayAudioAction.maxRepeat),
           channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
           rampUpSec: _rampUpSec,
-          loopFill: _loopFill,
+          loopFill: false, // R103：普通播放不再铺满
         );
       case ActionKindChoice.soundscape:
         // ⚠️ BUG-067：`SoundscapeAction` 的 assert 要求 1–4 轨，而 `_save()`
@@ -1946,7 +1943,7 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             repeatMax: _repeatMax.clamp(_repeatMin, PlayAudioAction.maxRepeat),
             channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
             rampUpSec: _rampUpSec,
-            loopFill: _loopFill,
+            loopFill: false, // R103：普通播放不再铺满
           ),
           prefixNotify: NotifyAction(title: '声盾 · 触发', body: _nameCtrl.text),
         );

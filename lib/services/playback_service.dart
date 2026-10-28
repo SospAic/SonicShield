@@ -243,27 +243,9 @@ class PlaybackService {
 
       // 2) 载入并播放。渐强唤醒优先于普通淡入。
       await player.setFilePath(path);
-      // R100（老板需求）：**音效短于目标时长 ⇒ 循环播放填满**，不许"播完就静默"。
-      //
-      // 旧行为：`loopFill` 默认 false，短音效播完就结束，剩余时长是**静默**——
-      // 用户设了「随机时长 30 秒」，实际只响 1.3 秒，体感是"没生效"。
-      // 现在：`setFilePath` 完成即可拿到 `duration`（just_audio 会等元数据），
-      // 只要「文件比目标短」就自动 `LoopMode.one`，到目标时长再硬停。
-      //
-      // `loopFill` 参数保留原语义（**即使文件够长也循环**，用于声景铺底），
-      // 短音效不再需要用户手动开这个开关。
-      //
-      // ⚠️ `duration` 拿不到（null/0）时**不自动循环**：无法判断是否够长，
-      // 盲目循环会让"只该响一遍"的长音频变成无限循环。此时退回旧行为
-      // （等到 maxDurationMs 后硬停），已登记为已知限制。
+      // `setFilePath` 完成后 `duration` 即就绪（just_audio 会等元数据）。
+      // 拿不到（null/0）时退回 `maxDurationMs` 兜底，不做任何循环推算。
       final fileMs = (player.duration ?? Duration.zero).inMilliseconds;
-      // R102（老板改需求）：**撤销 R100 的"短音效自动铺满时长"**。
-      // 改为按**次数**播放：`repeat` 次（默认 1，调用方随机 1–2）。
-      // 理由：铺满会让 1.3 秒的音效连响 20+ 遍，听感是"卡带循环"；
-      // 用户要的是"这一下响两回"，不是"响满 30 秒"。
-      //
-      // `loopFill` 仍保留原语义（显式要求整段循环，声景铺底用）。
-      final needLoop = loopFill || repeat > 1;
       if (rampUpMs > 0) {
         await player.setVolume(volume * 0.05);
         unawaited(_rampUp(player, volume, rampUpMs));
@@ -273,23 +255,39 @@ class PlaybackService {
           unawaited(_fadeIn(player, volume, fadeInMs));
         }
       }
-      if (needLoop) {
-        await player.setLoopMode(LoopMode.one); // 单曲循环，按次数收尾
-      }
-      await player.play();
 
-      // 3) 时长控制：**自然时长优先** = 文件时长 × 次数。
+      // ⚠️ R103（老板实测「还是一直播放」）：**这里不再设 `LoopMode.one`**。
       //
-      // `loopFill`（声景铺底，显式开关）仍按 `maxDurationMs` 铺满 —— 那是它原本
-      // 的语义；普通播放不再铺满，只播 `repeat` 遍。
-      // `maxDurationMs` 在次数模式下只在「文件时长未知」时兜底，**不再截断**
-      // （否则 60 秒的长音效配默认 3–15 秒护栏会被砍成 3 秒）。
+      // 前两轮都栽在同一个假设上：以为 `LoopMode.one` 下 `stop()` 一定生效。
+      // 实测证明它不可靠 —— 一旦 `stop()` 失效，循环模式就是**无限播放**，
+      // 没有任何一层能兜住（`_hardStop` 的 pause/静音也可能被平台忽略）。
+      //
+      // 现在的做法是**手动重复**：每播完一遍 `seek(0)` 再 `play()`，播够次数收尾。
+      // 关键收益不是"能停"，而是**停不下来的最坏情况被消灭**：
+      // 非循环模式下文件播完就自然停止 —— 即使 `stop()` 完全失效，
+      // 最多多响一遍（≤ 文件时长），绝不会无限循环。
+      //
+      // `loopFill`（声景铺底）同样走手动重复，只是次数按 `maxDurationMs` 折算。
       final natural = fileMs > 0 ? fileMs * (repeat < 1 ? 1 : repeat) : 0;
-      final target = loopFill && maxDurationMs > 0
+      final total = loopFill && maxDurationMs > 0
           ? maxDurationMs
           : (natural > 0 ? natural : (maxDurationMs > 0 ? maxDurationMs : 0));
-      if (target > 0) {
-        await _waitPlayWindow(Duration(milliseconds: target), gen, player);
+      final perPass = fileMs > 0 ? fileMs : total;
+      final passes = perPass > 0 ? (total / perPass).ceil() : 1;
+
+      await player.play();
+      for (var i = 0; i < passes; i++) {
+        // 等这一遍播完（`_waitPlayWindow` 内部按代次/抢占提前返回）。
+        await _waitPlayWindow(Duration(milliseconds: perPass), gen, player);
+        if (gen != _stopGen || _preempted.contains(player)) break;
+        if (i == passes - 1) break;
+        // 再播一遍：seek 失败就停在这里 —— 宁可少响一遍，也不能失控。
+        try {
+          await player.seek(Duration.zero);
+          await player.play();
+        } on Object {
+          break;
+        }
       }
       if (gen != _stopGen) {
         // 收到停止：**立刻静音**（不做淡出 —— 用户要的就是停），并把结果

@@ -829,7 +829,7 @@ void main() {
         reason: '终点下键应 -1 个百分点');
   }, timeout: perTest);
 
-  testWidgets('TEI-E2 动作：闹钟通道开关 + 循环填充开关（渐强随之隐藏）',
+  testWidgets('TEI-E2 动作：闹钟通道开关；「循环填充」开关已移除（R103）',
       (tester) async {
     await pumpEditor(tester, remoteSave: (t) async => true);
     expect(find.textContaining('渐强唤醒：'), findsOneWidget);
@@ -837,11 +837,12 @@ void main() {
     await tester.pump();
     expect(switchValue(tester, '闹钟通道（穿透勿扰/静音）'), isTrue);
 
-    await tester.tap(find.widgetWithText(SwitchListTile, '强制整段循环（声景模式）'));
-    await tester.pump();
-    expect(switchValue(tester, '强制整段循环（声景模式）'), isTrue);
-    // 循环填充与渐强互斥（短音效循环填满时长，谈不上"渐强"）。
-    expect(find.textContaining('渐强唤醒：'), findsNothing);
+    // R103：老板实测「还是一直播放」⇒ 移除「强制整段循环」开关 ——
+    // 它开着就是铺满（1.3s 音效连响 23 遍），且是"停不下来"的高危入口。
+    expect(find.textContaining('强制整段循环'), findsNothing,
+        reason: '铺满/循环开关必须彻底下架，普通播放只按次数');
+    // 渐强不再被循环开关挤掉。
+    expect(find.textContaining('渐强唤醒：'), findsOneWidget);
   }, timeout: perTest);
 
   testWidgets('TEI-E3 动作：语音播报文本输入', (tester) async {
