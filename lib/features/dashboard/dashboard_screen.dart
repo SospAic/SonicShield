@@ -10,6 +10,7 @@ import '../../domain/scheduling/run_pause.dart';
 import '../../services/background_service_manager.dart';
 import '../../services/native_bridge.dart';
 import '../../services/permission_flow.dart';
+import '../../services/playback_service.dart';
 import '../../remote/endpoint_service.dart';
 import '../../services/run_master_service.dart';
 import 'quick_scripts_card.dart';
@@ -45,6 +46,55 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     await showComplianceGateOnce(context, ref);
   }
 
+  /// 一键停止「当前正在发生的动作」—— 声音与振动各停各的。
+  ///
+  /// 为什么两件都要做：用户点这个按钮的动机只有一个「**立刻安静下来**」，
+  /// 不会去区分"这是播放还是振动"。只停声音会让手机还在兜里震。
+  ///
+  /// 为什么放在 AppBar：它是**应急**入口 —— 列表滚到任何位置都得能一下点到，
+  /// 塞进卡片里就得先滚回去找。
+  ///
+  /// 空操作也如实说：一路都没在响时明确回「当前没有正在进行的动作」，
+  /// 而不是静默什么都不发生（本项目红线：失败/空操作必须可见）。
+  Future<void> _stopCurrentAction() async {
+    final messenger = ScaffoldMessenger.of(context);
+    var stoppedPlays = 0;
+    var playError = false;
+    var vibrateError = false;
+
+    try {
+      stoppedPlays = await PlaybackService.stopAllPlaying();
+    } on Object catch (e) {
+      // 停播放失败**不得**阻断停振动：两路独立，任何一路失败都要试另一路。
+      playError = true;
+      debugPrint('stopCurrentAction: 停止播放失败 $e');
+    }
+    try {
+      await NativeBridge.vibrateStop();
+    } on Object catch (e) {
+      // 桥不可用（桌面/测试）是预期内的，按"未执行"如实上报。
+      vibrateError = true;
+      debugPrint('stopCurrentAction: 停止振动失败 $e');
+    }
+
+    if (!mounted) return;
+    final parts = <String>[
+      if (stoppedPlays > 0) '声音 $stoppedPlays 路',
+      if (!vibrateError) '振动',
+    ];
+    final msg = parts.isEmpty
+        ? (playError || vibrateError
+            ? '停止失败：播放器与振动接口都不可用'
+            : '当前没有正在进行的动作')
+        : '已停止：${parts.join(' + ')}';
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(msg),
+        duration: const Duration(seconds: 2),
+      ));
+  }
+
   @override
   Widget build(BuildContext context) {
     final engine = ref.watch(engineStateProvider);
@@ -53,7 +103,19 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final next = state?.nextFireAt;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('声盾 SonicShield')),
+      appBar: AppBar(
+        title: const Text('声盾 SonicShield'),
+        actions: [
+          // R101（用户需求）：一键停止当前动作 —— 声音 + 振动。
+          // 常驻在 AppBar：应急入口，任何滚动位置都能一次点到。
+          IconButton(
+            key: const ValueKey<String>('stop_current_action'),
+            icon: const Icon(Icons.stop_circle_outlined),
+            tooltip: '停止当前动作（声音 + 振动）',
+            onPressed: _stopCurrentAction,
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(AppSpacing.lg),
         children: [

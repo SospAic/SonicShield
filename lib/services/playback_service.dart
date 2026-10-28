@@ -376,22 +376,40 @@ class PlaybackService {
     }
   }
 
-  /// 兜底静音：停播 + 复位循环模式，两步各自吞异常。
+  /// 兜底静音：**先关循环** → 停播 → 确认已停（不行就静音）。
   ///
-  /// 两步都要做 —— 只 `stop()` 不关 `LoopMode.one` 时，**同一个播放器**若还被
-  /// 复用会带着上一次的循环模式起播；反过来只关循环不停播则是"还在响"。
-  /// （R90-07 起 `play()` 每次新建播放器，复用风险已消除；本方法仍按
-  /// "每一步都不得阻断下一步"的纪律保留。）任何一步失败都不得阻断另一步。
+  /// R101（老板实测「铺满时长后还在响」）：R100 的顺序是 `stop()` → `setLoopMode(off)`，
+  /// 这个顺序在 `LoopMode.one` 下有个致命缝隙 —— 若 `stop()` 因平台抖动失败
+  /// （异常被吞），随后的 `setLoopMode(off)` 只会让它在**本轮循环播完时**停下，
+  /// 而不是立刻停。1.3 秒的音效因此还要再响一整轮，听感就是"该停没停"。
+  /// **先关循环**则即使 `stop()` 失败也不会续播下一轮。
+  ///
+  /// 第二道兜底：`stop()` 后仍 `playing` ⇒ `pause()`；还不行 ⇒ 音量归零。
+  /// 本项目红线是「失败必须可见、失控必须止住」——宁可哑掉，也不能一直响。
   Future<void> _hardStop(AudioPlayer player) async {
-    try {
-      await player.stop();
-    } on Object {
-      // 停不掉也要继续关循环模式：状态自愈。
-    }
     try {
       await player.setLoopMode(LoopMode.off);
     } on Object {
-      // 忽略：下一次 setFilePath 会重建音源。
+      // 关循环失败也要继续停播：下一步才是真正止声的那一步。
+    }
+    try {
+      await player.stop();
+    } on Object {
+      // 停不掉就交给下面的兜底。
+    }
+    try {
+      if (player.playing) {
+        await player.pause();
+      }
+    } on Object {
+      // 继续兜底。
+    }
+    try {
+      if (player.playing) {
+        await player.setVolume(0);
+      }
+    } on Object {
+      // 三条都失败：`finally` 的 `dispose()` 是最后一道保险。
     }
   }
 

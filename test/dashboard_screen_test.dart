@@ -611,4 +611,43 @@ void main() {
       expect(find.text('正在接受远程操作'), findsNothing);
     });
   });
+  // ══════════════════════════════════════════════════════════════════════
+  // DBS-10 · 一键停止当前动作（R101 用户需求）
+  // ══════════════════════════════════════════════════════════════════════
+
+  testWidgets('DBS-10 一键停止：AppBar 常驻按钮 → 停播放 + 停振动 + 如实提示',
+      (tester) async {
+    await pump(
+      tester,
+      last: const EngineState(running: true, pendingCount: 0),
+      stateStream:
+          Stream.value(const EngineState(running: true, pendingCount: 0)),
+    );
+
+    // 应急入口必须常驻 AppBar（列表滚到哪都能一次点到）。
+    final btn = find.byKey(const ValueKey<String>('stop_current_action'));
+    expect(btn, findsOneWidget);
+    expect(find.byTooltip('停止当前动作（声音 + 振动）'), findsOneWidget);
+
+    // 桩住原生通道，记录振动停止是否真的下发。
+    var vibrateCalls = 0;
+    _messenger.setMockMethodCallHandler(
+      const MethodChannel('sonic_shield/native'),
+      (call) async {
+        if (call.method == 'vibrateStop') vibrateCalls++;
+        return null;
+      },
+    );
+    addTearDown(() => _messenger.setMockMethodCallHandler(
+        const MethodChannel('sonic_shield/native'), null));
+
+    await tester.tap(btn);
+    await tester.pump();
+
+    expect(vibrateCalls, 1,
+        reason: '必须真的向原生下发 vibrateStop —— 只停声音会让手机还在兜里震');
+    // 空操作也必须如实回一句（不许静默什么都不发生）。
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.textContaining('停止'), findsWidgets);
+  });
 }

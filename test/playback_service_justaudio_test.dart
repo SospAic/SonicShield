@@ -141,9 +141,15 @@ void main() {
           reason: '激活期先把播放器音量恢复为 1.0（插件自身行为，非本服务）');
       expect(audio.volumes.last, closeTo(0.4, 1e-9),
           reason: '服务设的目标音量必须真的落到平台上');
-      // 非 loopFill：服务**不得**额外设置循环模式（平台上只有激活期那一次 off）。
-      // （收尾的 `setLoopMode(off)` 排在 `await player.stop()` 之后，平台已切到 idle ⇒ 观测不到。）
-      expect(audio.countOf('setLoopMode'), 1);
+      // 非 loopFill：服务**不得**额外开启循环；但 R101 起收尾的 `off` 会真正
+      // 转发到平台（`_hardStop` 改成"先关循环再停" ⇒ 关循环时播放器仍 active）。
+      // 旧顺序 `stop()` → `setLoopMode(off)` 时平台已 idle ⇒ off 只在 Dart 层生效，
+      // 平台侧仍是上一轮的模式 —— 那正是"铺满后还在响"的温床。
+      expect(audio.countOf('setLoopMode'), 2,
+          reason: '激活期归位 1 次 + R101 收尾真正关循环 1 次');
+      expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
+          reason: '非 loopFill 且文件比目标长 ⇒ 不该开循环');
+      expect(audio.loopModes.last, LoopModeMessage.off);
     });
 
     test('PA-02 maxDurationMs<=0 ⇒ 播完整段文件（target 取文件时长）', () async {
@@ -190,15 +196,17 @@ void main() {
       expect(r.ok, isTrue);
       // 短音效（50ms）要被循环填充到 220ms，而不是 50ms 就结束。
       expect(r.playedMs, greaterThanOrEqualTo(180));
-      // 观测序列：[0] = 激活期归位 off；[1] = loopFill 的 single-loop 填充。
-      // ⚠️ 收尾的 `setLoopMode(off)`（playback_service.dart:167）**结构性观测不到**：
-      //    它排在 `await player.stop()` 之后，此刻 `_platform` 已切到
-      //    `_IdleAudioPlayer`（纯 Dart 无操作）⇒ 不经过插件接口。
-      //    （已登记为"观测不到"而非"没执行"，见 docs/12 §79.5。）
+      // 观测序列：[0] = 激活期归位 off；[1] = loopFill 的 single-loop 填充；
+      // [2] = R101 收尾的 off —— **这次真的转发到了平台**。
+      // R100 的顺序是 `stop()` → `setLoopMode(off)`，那一刻平台已切到
+      // `_IdleAudioPlayer`（纯 Dart 无操作）⇒ off 只在 Dart 层生效，
+      // 平台侧仍停在 `one`：一旦 `stop()` 在真机上失效（老板实测「铺满后还在响」），
+      // 就没有任何一层能把它拦住。改成先关循环后，平台侧确实收到 off。
       expect(audio.loopModes, <LoopModeMessage>[
         LoopModeMessage.off,
         LoopModeMessage.one,
-      ], reason: 'loopFill 必须在起播前把循环模式设为 one（否则 50ms 音效 50ms 就结束）');
+        LoopModeMessage.off,
+      ], reason: '起播前设 one 填充，收尾必须把 off 真正关到平台（R101）');
     });
 
     test('PA-04b 短音效未传 loopFill ⇒ 仍自动循环填满目标时长（R100 老板需求）',
@@ -233,6 +241,31 @@ void main() {
       expect(r.playedMs, greaterThanOrEqualTo(100));
       expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
           reason: '文件比目标长时不该自动循环 —— 到点硬停即可');
+    });
+
+    test('PA-04d 自动填充到点：收尾必须把 off 真正关到平台（R101 回归锁）',
+        () async {
+      // 老板实测：「音效铺满时长后不会自动停止」。
+      // 根因：R100 的 `_hardStop` 是 `stop()` → `setLoopMode(off)`；若 `stop()`
+      // 在真机上失效（异常被吞 / 平台 loop 模式残留），随后的关循环只作用于
+      // Dart 层（平台已 idle）⇒ **没有任何一层真正拦住循环**。
+      audio.fileDuration = const Duration(milliseconds: 50);
+      final r = await PlaybackService().play(
+        path: p1,
+        channel: AudioChannel.media,
+        volume: 0.5,
+        maxDurationMs: 200,
+      );
+
+      expect(r.ok, isTrue);
+      expect(r.playedMs, greaterThanOrEqualTo(180),
+          reason: '50ms 文件必须被循环填到 200ms');
+      // 核心判据：**off 必须到达平台**（旧顺序下这里是 2 个元素，收尾 off 观测不到）。
+      expect(audio.loopModes, <LoopModeMessage>[
+        LoopModeMessage.off,
+        LoopModeMessage.one,
+        LoopModeMessage.off,
+      ], reason: '收尾的 off 必须转发到平台 —— 否则真机上 stop 一失败就会一直响');
     });
 
     test('PA-05 rampUpMs ⇒ 从 5% 起线性渐强，终点兑现目标音量', () async {
