@@ -150,9 +150,14 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     return at.isAfter(now) ? today : today.add(const Duration(days: 1));
   }
 
-  // 动作参数（随机时长/音量）
+  // 动作参数（随机次数/音量）
   double _volMin = 0.5, _volMax = 1.0;
   int _durMin = 3, _durMax = 15;
+  // R102：播放次数区间（撤销"铺满时长"后改按次数）。出厂默认随机 1–2 次。
+  int _repeatMin = 1, _repeatMax = 2;
+
+  /// 「立即执行」进行中（防连点：连点会重复跑同一任务）。
+  bool _runningNow = false;
   bool _alarmChannel = false;
   bool _loopFill = false;
   int _rampUpSec = 0;
@@ -414,6 +419,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
         _volMax = a.volumeMax;
         _durMin = a.durationSecMin;
         _durMax = a.durationSecMax;
+        _repeatMin = a.repeatMin;
+        _repeatMax = a.repeatMax;
         _alarmChannel = a.channel == AudioChannel.alarm;
         _rampUpSec = a.rampUpSec;
         _loopFill = a.loopFill;
@@ -483,6 +490,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           _volMax = p.volumeMax;
           _durMin = p.durationSecMin;
           _durMax = p.durationSecMax;
+          _repeatMin = p.repeatMin;
+          _repeatMax = p.repeatMax;
           _alarmChannel = p.channel == AudioChannel.alarm;
           _rampUpSec = p.rampUpSec;
           _loopFill = p.loopFill;
@@ -506,10 +515,33 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(AppSpacing.md),
-          child: FilledButton.icon(
-            icon: const Icon(Icons.save),
-            label: const Text('保存任务'),
-            onPressed: _save,
+          child: Row(
+            children: [
+              // R102（老板需求）：立即执行当前动作 —— 先保存再 runNow，
+              // 与调度走**同一条执行链**（所见即所得），且不 pop（方便调一次听一下）。
+              Expanded(
+                child: OutlinedButton.icon(
+                  key: const ValueKey<String>('task_run_now'),
+                  icon: _runningNow
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.play_arrow),
+                  label: const Text('立即执行'),
+                  onPressed: _runningNow ? null : _saveAndRunNow,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: const Text('保存任务'),
+                  onPressed: _save,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1000,17 +1032,28 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           _volMax = b;
         }),
       ),
+      // R102（老板改需求）：**撤销"短音效铺满时长"**，改成按**次数**播放。
+      // 旧「随机时长」字段不再暴露给用户（模型里保留，仅当文件时长未知时兜底），
+      // 因为"响多久"由音效本身 × 次数决定，用户真正想控制的是"响几回"。
       _RangeSliderTile(
-        label: '随机时长（秒）',
+        label: '播放次数',
         min: 1,
-        max: 120,
-        start: _durMin.toDouble(),
-        end: _durMax.toDouble(),
-        format: (v) => '${v.round()}s',
+        max: PlayAudioAction.maxRepeat.toDouble(),
+        start: _repeatMin.toDouble(),
+        end: _repeatMax.toDouble(),
+        format: (v) => '${v.round()} 次',
         onChanged: (a, b) => setState(() {
-          _durMin = a.round();
-          _durMax = b.round();
+          _repeatMin = a.round();
+          _repeatMax = b.round();
         }),
+      ),
+      const Padding(
+        padding: EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+        child: Text(
+          '每次触发在区间内随机取一个次数（出厂默认 1–2 次）；'
+          '播完即止，不再循环铺满。',
+          style: AppText.bodySmall,
+        ),
       ),
       SwitchListTile(
         title: const Text('闹钟通道（穿透勿扰/静音）'),
@@ -1577,6 +1620,48 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
     return widget.taskId == null ? '新建任务' : '编辑任务';
   }
 
+  /// 「立即执行当前动作」：先保存当前表单，再让引擎**立刻跑一次**这个任务。
+  ///
+  /// 为什么不直接调 `PlaybackService` / `NativeBridge`：动作类型有 10+ 种
+  /// （播放 / 振动 / TTS / 声景 / 指令集…），逐个实现"试执行"必然与真实执行
+  /// 路径漂移 —— 试执行的和保存后跑的不是同一套代码，这个按钮就失去验证意义。
+  /// 走 `runNow` 与调度**同一条执行链**，所见即所得。
+  ///
+  /// 为什么不 pop：用户点它是为了"调一次、听一下、再改"，弹回列表会打断节奏。
+  Future<void> _saveAndRunNow() async {
+    if (_runningNow) return;
+    final task = _buildTask();
+    if (task == null) return;
+    setState(() => _runningNow = true);
+    try {
+      final remote = widget.remoteTarget;
+      if (remote != null) {
+        // 远程模式：本机没有端点的执行权，只能先写过去；如实告知下一步。
+        final ok = await remote.save(task);
+        if (!mounted) return;
+        _toast(
+            context,
+            ok
+                ? '已写入端点；远程执行请在端点任务列表点「立即执行」'
+                : '端点未确认（离线或拒绝该定义），未写入');
+        return;
+      }
+      final repo = await ref.read(taskRepoProvider.future);
+      await repo.upsert(task);
+      invalidateTaskDerivedCaches(ref);
+      final r = await BackgroundServiceManager.instance.runNow(task.id);
+      if (!mounted) return;
+      _toast(
+          context,
+          r.ok ? '已执行：${task.name}' : '执行失败：${r.message}');
+    } on Object catch (e) {
+      // 失败必须可见：不吞异常、不假装成功。
+      if (mounted) _toast(context, '执行失败：$e');
+    } finally {
+      if (mounted) setState(() => _runningNow = false);
+    }
+  }
+
   /// 保存：远程模式走调用方注入的通道，本机模式写本地仓储并续算计划。
   ///
   /// BUG-100：加 in-flight 门闩。旧实现没有防护，连点「保存任务」时：
@@ -1735,6 +1820,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
           volumeMax: _volMax,
           durationSecMin: _durMin,
           durationSecMax: _durMax.clamp(_durMin, 120),
+          repeatMin: _repeatMin,
+          repeatMax: _repeatMax.clamp(_repeatMin, PlayAudioAction.maxRepeat),
           channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
           rampUpSec: _rampUpSec,
           loopFill: _loopFill,
@@ -1778,6 +1865,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
                     volumeMax: _volMax,
                     durationSecMin: _durMin,
                     durationSecMax: _durMax.clamp(_durMin, 120),
+                    repeatMin: _repeatMin,
+                    repeatMax: _repeatMax.clamp(_repeatMin, PlayAudioAction.maxRepeat),
                     channel:
                         _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
                   ),
@@ -1853,6 +1942,8 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
             volumeMax: _volMax,
             durationSecMin: _durMin,
             durationSecMax: _durMax.clamp(_durMin, 120),
+            repeatMin: _repeatMin,
+            repeatMax: _repeatMax.clamp(_repeatMin, PlayAudioAction.maxRepeat),
             channel: _alarmChannel ? AudioChannel.alarm : AudioChannel.media,
             rampUpSec: _rampUpSec,
             loopFill: _loopFill,

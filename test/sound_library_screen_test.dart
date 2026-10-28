@@ -216,6 +216,7 @@ class _FakePlayer extends PlaybackService {
     int fadeOutMs = 0,
     int rampUpMs = 0,
     bool loopFill = false,
+    int repeat = 1,
     PlayPriority priority = PlayPriority.normal,
   }) async {
     played.add(path);

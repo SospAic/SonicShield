@@ -205,10 +205,17 @@ class PlaybackService {
     int rampUpMs = 0, // 渐强唤醒：音量 5%→目标 线性爬升
     /// 显式要求**整段循环**（声景铺底）。
     ///
-    /// R100 起「文件比目标时长短」**自动**循环填充（老板需求：不许播完就静默），
-    /// 调用方不再需要为短音效传 true；此参数只用于「文件够长、但仍要整段循环」
-    /// 的场景（声景多轨铺底）。
+    /// R102 起「短音效铺满时长」已撤销（老板改需求：不要卡带式循环），
+    /// 改为按 [repeat] 播放指定次数；此参数只用于「文件够长、但仍要整段循环」
+    /// 的声景场景。
     bool loopFill = false,
+
+    /// 播放**次数**（R102）：`1` = 播一遍；`>1` 时用 `LoopMode.one` 连播 N 遍后硬停。
+    ///
+    /// 调用方按 `repeatMin..repeatMax` 随机取值（出厂默认 1–2 次）。
+    /// 与 [loopFill] 的区别：`loopFill` 是"一直循环到时长上限"，
+    /// [repeat] 是"就播这么多遍" —— 后者才是用户要的「响两下」。
+    int repeat = 1,
     PlayPriority priority = PlayPriority.normal, // ARCH-09：调用方约定见枚举注释
   }) async {
     final player = AudioPlayer();
@@ -250,7 +257,13 @@ class PlaybackService {
       // 盲目循环会让"只该响一遍"的长音频变成无限循环。此时退回旧行为
       // （等到 maxDurationMs 后硬停），已登记为已知限制。
       final fileMs = (player.duration ?? Duration.zero).inMilliseconds;
-      final autoFill = fileMs > 0 && maxDurationMs > 0 && fileMs < maxDurationMs;
+      // R102（老板改需求）：**撤销 R100 的"短音效自动铺满时长"**。
+      // 改为按**次数**播放：`repeat` 次（默认 1，调用方随机 1–2）。
+      // 理由：铺满会让 1.3 秒的音效连响 20+ 遍，听感是"卡带循环"；
+      // 用户要的是"这一下响两回"，不是"响满 30 秒"。
+      //
+      // `loopFill` 仍保留原语义（显式要求整段循环，声景铺底用）。
+      final needLoop = loopFill || repeat > 1;
       if (rampUpMs > 0) {
         await player.setVolume(volume * 0.05);
         unawaited(_rampUp(player, volume, rampUpMs));
@@ -260,17 +273,21 @@ class PlaybackService {
           unawaited(_fadeIn(player, volume, fadeInMs));
         }
       }
-      if (loopFill || autoFill) {
-        await player.setLoopMode(LoopMode.one); // 单曲循环填充到目标时长
+      if (needLoop) {
+        await player.setLoopMode(LoopMode.one); // 单曲循环，按次数收尾
       }
       await player.play();
 
-      // 3) 时长控制：目标就是 `maxDurationMs`（`<= 0` 表示不限制 ⇒ 播一遍文件）。
+      // 3) 时长控制：**自然时长优先** = 文件时长 × 次数。
       //
-      // R100 之前这里还有一档 `fileMs < maxDurationMs ? fileMs : ...`——
-      // 即"文件比目标短就按文件时长收尾"，剩下的时间静默。现在 `autoFill`
-      // 已把短音效循环到目标，那一档会让循环**白设**（50ms 的文件仍然 50ms 就停）。
-      final target = maxDurationMs <= 0 ? fileMs : maxDurationMs;
+      // `loopFill`（声景铺底，显式开关）仍按 `maxDurationMs` 铺满 —— 那是它原本
+      // 的语义；普通播放不再铺满，只播 `repeat` 遍。
+      // `maxDurationMs` 在次数模式下只在「文件时长未知」时兜底，**不再截断**
+      // （否则 60 秒的长音效配默认 3–15 秒护栏会被砍成 3 秒）。
+      final natural = fileMs > 0 ? fileMs * (repeat < 1 ? 1 : repeat) : 0;
+      final target = loopFill && maxDurationMs > 0
+          ? maxDurationMs
+          : (natural > 0 ? natural : (maxDurationMs > 0 ? maxDurationMs : 0));
       if (target > 0) {
         await _waitPlayWindow(Duration(milliseconds: target), gen, player);
       }

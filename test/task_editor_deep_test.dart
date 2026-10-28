@@ -502,7 +502,8 @@ void main() {
     );
     expect(chip('通知+播放'), findsOneWidget);
     expect(find.textContaining('随机音量：10% ~ 40%'), findsOneWidget);
-    expect(find.textContaining('随机时长（秒）：6s ~ 30s'), findsOneWidget);
+    // R102：撤销「铺满时长」，改为播放次数（出厂默认 1–2 次）。
+    expect(find.textContaining('播放次数：1 次 ~ 2 次'), findsOneWidget);
     expect(switchValue(tester, '闹钟通道（穿透勿扰/静音）'), isTrue);
     expect(find.text('渐强唤醒：40 秒渐强'), findsOneWidget);
   }, timeout: perTest);
@@ -791,7 +792,7 @@ void main() {
   // TEI-E · 动作区交互
   // ══════════════════════════════════════════════════════════════════════
 
-  testWidgets('TEI-E1 动作：随机音量与随机时长两条区间输入（R100：输入框 + 上下键）',
+  testWidgets('TEI-E1 动作：随机音量与播放次数两条区间输入（R100 输入框 / R102 改次数）',
       (tester) async {
     await pumpEditor(tester, remoteSave: (t) async => true);
     // R100：`_RangeSliderTile` 由滑块改成「起/止输入框 + 上下键」。
@@ -812,10 +813,10 @@ void main() {
     expect(textOf(tester, find.textContaining('随机音量：')), isNot(volBefore),
         reason: '输入起点应改变区间文案');
 
-    final durBefore = textOf(tester, find.textContaining('随机时长（秒）：'));
-    await typeStart('随机时长（秒）', '2');
-    expect(
-        textOf(tester, find.textContaining('随机时长（秒）：')), isNot(durBefore));
+    // R102：字段由「随机时长」改成「播放次数」（撤销铺满后按次数播）。
+    final repBefore = textOf(tester, find.textContaining('播放次数：'));
+    await typeStart('播放次数', '3');
+    expect(textOf(tester, find.textContaining('播放次数：')), isNot(repBefore));
 
     // 上下键路径：终点 -1 也要生效。
     final volEndDown =
@@ -1661,5 +1662,34 @@ void main() {
     await waitFor(tester,
         () => find.textContaining('音源库读取失败').evaluate().isNotEmpty,
         reason: '读失败必须可见（含错误原因），不允许静默无响应');
+  }, timeout: perTest);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // TEI-RUN · 立即执行当前动作（R102 用户需求）
+  // ══════════════════════════════════════════════════════════════════════
+
+  testWidgets('TEI-RUN 立即执行：底部按钮常驻；引擎未运行时必须如实报错',
+      (tester) async {
+    // 本机模式（不传 remoteSave）：远程模式的"立即执行"只能是写过去，
+    // 本机模式才真的走 `runNow`。
+    await pumpEditor(tester);
+
+    final btn = find.byKey(const ValueKey<String>('task_run_now'));
+    expect(btn, findsOneWidget, reason: '编辑动作时必须能一键试执行（不必回列表）');
+    expect(find.widgetWithText(OutlinedButton, '立即执行'), findsOneWidget);
+
+    await tester.tap(btn);
+    // 保存 + runNow 是异步链，单次 pump 等不到 SnackBar。
+    await waitFor(tester, () => find.byType(SnackBar).evaluate().isNotEmpty,
+        reason: '立即执行必须给出回执（成功/失败都要说）');
+
+    // 关键判据不是"成功"，而是**必须有明确回执** —— 成功说"已执行"，
+    // 失败说"执行失败：<原因>"。静默什么都不发生是不可接受的
+    // （用户会以为按钮坏了，或以为动作已经跑过）。
+    expect(find.byType(SnackBar), findsOneWidget);
+    final bar = tester.widget<SnackBar>(find.byType(SnackBar));
+    final txt = (bar.content as Text).data ?? '';
+    expect(txt, anyOf(contains('已执行'), contains('执行失败')),
+        reason: '立即执行必须有回执（实际：$txt）');
   }, timeout: perTest);
 }

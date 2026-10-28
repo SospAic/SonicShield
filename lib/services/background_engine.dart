@@ -929,6 +929,13 @@ Future<void> _engineBody(ServiceInstance service) async {
       fadeOutMs: p.fadeOutSec * 1000,
       rampUpMs: p.rampUpSec * 1000,
       loopFill: p.loopFill,
+      // R102：播放次数在 `[repeatMin, repeatMax]` 内随机（出厂默认 1–2）。
+      // 与「铺满时长」的区别：铺满是连响到时长用完（1.3s 音效响 20 遍），
+      // 次数是"就响这么多回"——这才是用户要的。
+      repeat: p.repeatMin >= p.repeatMax
+          ? p.repeatMin
+          : p.repeatMin +
+              math.Random().nextInt(p.repeatMax - p.repeatMin + 1),
     );
     await logs.append(
         source: source,

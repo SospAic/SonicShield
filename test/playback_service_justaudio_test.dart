@@ -209,41 +209,47 @@ void main() {
       ], reason: '起播前设 one 填充，收尾必须把 off 真正关到平台（R101）');
     });
 
-    test('PA-04b 短音效未传 loopFill ⇒ 仍自动循环填满目标时长（R100 老板需求）',
+    test('PA-04b 播 2 次 ⇒ 时长按「文件 × 次数」算，而不是铺满 maxDurationMs（R102）',
         () async {
-      audio.fileDuration = const Duration(milliseconds: 50);
+      // 用 300ms 的文件 + 2000ms 的窗口，让"次数"与"铺满"的墙钟差异足够大
+      // （墙钟含前置 await 的固定开销 ~200ms，50ms 的文件区分不出来）。
+      audio.fileDuration = const Duration(milliseconds: 300);
       final r = await PlaybackService().play(
         path: p1,
         channel: AudioChannel.media,
         volume: 0.5,
-        maxDurationMs: 220,
+        maxDurationMs: 2000,
+        repeat: 4,
       );
 
       expect(r.ok, isTrue);
-      // 旧行为：50ms 播完就静默，用户设的 220ms 有 170ms 是哑的（体感"没生效"）。
-      // 现在必须循环填满。
-      expect(r.playedMs, greaterThanOrEqualTo(180),
-          reason: '50ms 的文件必须被循环填到 220ms，而不是 50ms 就结束');
+      // R102（老板改需求）：撤销"铺满时长"，改成"就播 N 遍"。
+      // 300ms × 4 = 1200ms —— 不是铺满的 2000ms。
+      expect(r.playedMs, greaterThan(1000),
+          reason: '必须真的播了 4 遍（1200ms），而不是只播一遍');
+      expect(r.playedMs, lessThan(1900),
+          reason: '不许铺满到 maxDurationMs(2000) —— 铺满会让 1.3s 音效连响 20+ 遍');
       expect(audio.loopModes, contains(LoopModeMessage.one),
-          reason: '短音效自动填充必须真的向平台设过 LoopMode.one');
+          reason: 'repeat>1 必须靠 LoopMode.one 让文件自然重复');
     });
 
-    test('PA-04c 音效比目标长 ⇒ 不设循环（不许把长音频变成无限循环）', () async {
-      audio.fileDuration = const Duration(seconds: 5);
+    test('PA-04c 默认 repeat=1 ⇒ 不设循环、播一遍就停（撤销铺满后的基线）', () async {
+      audio.fileDuration = const Duration(milliseconds: 300);
       final r = await PlaybackService().play(
         path: p1,
         channel: AudioChannel.media,
         volume: 0.5,
-        maxDurationMs: 150,
+        maxDurationMs: 2000,
       );
 
       expect(r.ok, isTrue);
-      expect(r.playedMs, greaterThanOrEqualTo(100));
+      expect(r.playedMs, lessThan(900),
+          reason: 'R102 起不再自动铺满：300ms 文件播一遍就是 ~300ms（含开销）');
       expect(audio.loopModes, isNot(contains(LoopModeMessage.one)),
-          reason: '文件比目标长时不该自动循环 —— 到点硬停即可');
+          reason: 'repeat=1 且未显式 loopFill ⇒ 不该开循环');
     });
 
-    test('PA-04d 自动填充到点：收尾必须把 off 真正关到平台（R101 回归锁）',
+    test('PA-04d 多次播放到点：收尾必须把 off 真正关到平台（R101 回归锁）',
         () async {
       // 老板实测：「音效铺满时长后不会自动停止」。
       // 根因：R100 的 `_hardStop` 是 `stop()` → `setLoopMode(off)`；若 `stop()`
@@ -254,12 +260,11 @@ void main() {
         path: p1,
         channel: AudioChannel.media,
         volume: 0.5,
-        maxDurationMs: 200,
+        maxDurationMs: 220,
+        repeat: 2,
       );
 
       expect(r.ok, isTrue);
-      expect(r.playedMs, greaterThanOrEqualTo(180),
-          reason: '50ms 文件必须被循环填到 200ms');
       // 核心判据：**off 必须到达平台**（旧顺序下这里是 2 个元素，收尾 off 观测不到）。
       expect(audio.loopModes, <LoopModeMessage>[
         LoopModeMessage.off,

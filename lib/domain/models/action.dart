@@ -181,10 +181,20 @@ class PlayAudioAction extends ActionConfig {
     // R100 起：短音效（时长 < 目标）**自动**循环填充，此开关只用于
     // 「文件够长也要整段循环」的声景铺底场景（见 `PlaybackService.play`）。
     this.loopFill = false,
+    // R102（老板改需求）：**撤销"铺满时长"**，改为按**次数**播放。
+    // 出厂默认随机 1–2 次 —— 用户要的是"这一下响两回"，不是"响满 30 秒"。
+    this.repeatMin = 1,
+    this.repeatMax = 2,
   })  : assert(volumeMin >= 0 && volumeMin <= 1),
         assert(volumeMax >= 0 && volumeMax <= 1),
         assert(volumeMin <= volumeMax),
-        assert(durationSecMin <= durationSecMax);
+        assert(durationSecMin <= durationSecMax),
+        assert(repeatMin >= 1 && repeatMin <= maxRepeat),
+        assert(repeatMax >= 1 && repeatMax <= maxRepeat),
+        assert(repeatMin <= repeatMax);
+
+  /// 单次播放次数的上限（护栏：防止用户手滑输 999 把窗口拖成几分钟）。
+  static const int maxRepeat = 10;
 
   final double volumeMin;
   final double volumeMax;
@@ -197,6 +207,10 @@ class PlayAudioAction extends ActionConfig {
   final int rampUpSec;
   final bool loopFill;
 
+  /// 播放次数区间（R102）：物化时在 `[repeatMin, repeatMax]` 内随机取一次。
+  final int repeatMin;
+  final int repeatMax;
+
   factory PlayAudioAction.fromJson(Map<String, dynamic> j) {
     // BUG-123：区间方向/越界必须在**这里**归一 —— release 下构造函数 assert
     // 已被剥离，而 `durationSecMin > durationSecMax` 会让物化期
@@ -204,6 +218,8 @@ class PlayAudioAction extends ActionConfig {
     final vol = _rangeDouble(j['volumeMin'], j['volumeMax'], 0.6, 1.0, 0, 1);
     final dur = _rangeInt(
         j['durationSecMin'], j['durationSecMax'], 3, 15, 1, _maxActionDurationSec);
+    // R102：次数区间同款归一（旧 JSON 没有这两个字段 ⇒ 默认 1–2）。
+    final rep = _rangeInt(j['repeatMin'], j['repeatMax'], 1, 2, 1, maxRepeat);
     return PlayAudioAction(
       volumeMin: vol.min,
       volumeMax: vol.max,
@@ -217,6 +233,8 @@ class PlayAudioAction extends ActionConfig {
       respectDnd: j['respectDnd'] as bool? ?? true,
       rampUpSec: _clampInt(j['rampUpSec'], 0, 0, 3600),
       loopFill: j['loopFill'] as bool? ?? false,
+      repeatMin: rep.min,
+      repeatMax: rep.max,
     );
   }
 
@@ -233,6 +251,9 @@ class PlayAudioAction extends ActionConfig {
         'respectDnd': respectDnd,
         'rampUpSec': rampUpSec,
         'loopFill': loopFill,
+        // R102：播放次数区间（旧版本读到没有这两个键 ⇒ 默认 1–2）。
+        'repeatMin': repeatMin,
+        'repeatMax': repeatMax,
       };
 }
 
