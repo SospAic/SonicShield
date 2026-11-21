@@ -95,6 +95,28 @@ function Test-VmResourceCrash([string]$text) {
     return $false
 }
 
+# 压测层是墙钟预算：整机负载高时两次红都可能是测量噪声，不是真回归。
+# 与 gates.sh 的 machine_load()/perf_verdict() 同判据（阈值默认 60%）。
+function Get-MachineLoad {
+    try {
+        $raw = & typeperf '\Processor(_Total)\% Processor Time' -sc 3 2>$null
+        $vals = @()
+        foreach ($line in $raw) {
+            if ("$line" -match '"([0-9]+\.[0-9]+)"\s*$') { $vals += [double]$Matches[1] }
+        }
+        if ($vals.Count -gt 0) { return [int][math]::Round(($vals | Measure-Object -Average).Average) }
+    } catch { }
+    return -1
+}
+
+function Test-PerfVerdict([int]$before, [int]$after, [int]$suspect) {
+    if ($before -ge $suspect -or $after -ge $suspect) { return 'BLOCKED' }
+    return 'FAIL'
+}
+
+$LOAD_SUSPECT = if ($env:LOAD_SUSPECT) { [int]$env:LOAD_SUSPECT } else { 60 }
+$LOAD_START = Get-MachineLoad
+
 function Run-Gate([string]$name, [scriptblock]$cmd, [string]$expect) {
     Write-Host "`n=== 门禁: $name ===" -ForegroundColor Cyan
     & $cmd 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable out | Select-Object -Last 2
@@ -178,8 +200,29 @@ $ErrorActionPreference = 'Stop'
 if (($out -join "`n") -match "All tests passed") {
     Write-Host "[PASS] 压测层" -ForegroundColor Green
 } else {
-    Write-Host "[FAIL] 压测层" -ForegroundColor Red
-    $fail++
+    if ($env:PERF_RETRY -eq '0') {
+        Write-Host "[FAIL] 压测层（PERF_RETRY=0，未重跑确认）" -ForegroundColor Red
+        $fail++
+    } else {
+        Write-Host "[?] 压测层首次未过，单独重跑一次确认是噪声还是回归…" -ForegroundColor Yellow
+        $ErrorActionPreference = 'Continue'
+        flutter test --tags perf --concurrency=1 2>&1 | ForEach-Object { $_ -replace "`r", "`n" } |
+            Tee-Object -Variable out2 | Select-Object -Last 1
+        $ErrorActionPreference = 'Stop'
+        if (($out2 -join "`n") -match "All tests passed") {
+            Write-Host "[PASS] 压测层（重跑确认 ✅）" -ForegroundColor Green
+        } else {
+            $LOAD_NOW = Get-MachineLoad
+            $verdict = Test-PerfVerdict -before $LOAD_START -after $LOAD_NOW -suspect $LOAD_SUSPECT
+            if ($verdict -eq 'BLOCKED') {
+                Write-Host "[BLOCKED] 压测层：机器负载 ${LOAD_START}% → ${LOAD_NOW}%，墙钟预算测量无效（未执行，不是代码失败）" -ForegroundColor Yellow
+                $blocked = $true
+            } else {
+                Write-Host "[FAIL] 压测层（重跑仍未过，且机器负载正常 → 真回归）" -ForegroundColor Red
+                $fail++
+            }
+        }
+    }
 }
 
 # ---------- 门禁 4/4：覆盖率 ratchet（与 gates.sh 同源同阈值） ----------
