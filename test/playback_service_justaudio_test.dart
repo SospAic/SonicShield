@@ -356,6 +356,30 @@ void main() {
           reason: '_fadeOut 末步 = 0/20 = 0');
     });
 
+    test('PA-07b 目标音量 <1 时淡出不得先变响（从当前音量起步）', () async {
+      audio.fileDuration = const Duration(seconds: 2);
+      const target = 0.4;
+      final r = await PlaybackService().play(
+        path: p1,
+        channel: AudioChannel.media,
+        volume: target,
+        maxDurationMs: 160,
+        fadeOutMs: 120,
+      );
+
+      expect(r.ok, isTrue);
+      // 旧实现首步硬写 1.0 ⇒ 提醒音在结束前先突然变响。
+      // 取**首次**目标音量设置处；其后（含淡出）必须单调不增。
+      // 不能用 lastIndexOf：旧实现也会在 8/20 步经过 0.4，会从那里开始截取，
+      // 反而把更前面的 1.0 尖峰漏掉（首轮变异证伪实测踩到）。
+      final idx = audio.volumes.indexOf(target);
+      expect(idx, greaterThanOrEqualTo(0), reason: '服务必须真的设过目标音量');
+      final tail = audio.volumes.skip(idx + 1).toList();
+      expect(tail.every((v) => v <= target + 1e-9), isTrue,
+          reason: '淡出序列出现 >$target 的音量：$tail（旧 _fadeOut 固定从 1.0 起步）');
+      expect(audio.volumes.last, closeTo(0.0, 1e-9));
+    });
+
     test('PA-08 stop() 打断 ⇒ 如实报失败（不是"播完了"）且循环复位', () async {
       // 窗口标称 60s、文件更长（600s）⇒ "提前打断"与"等满窗口"之间留出 60s 的
       // 判别余量：即便覆盖率插桩把每个 `Future.delayed` 拉长数倍，也不会把两者

@@ -59,8 +59,12 @@ void main() {
   // 只认**代码**，注释里引用 `RcCmd.xxx` 不是发送、不是 case、不是登记。
   final protocol =
       stripComments(File('lib/remote/protocol.dart').readAsStringSync());
-  final endpoint =
-      stripComments(File('lib/remote/endpoint_service.dart').readAsStringSync());
+  // endpoint_policy.dart 是 endpoint_service.dart 的 `part`（同一库），
+  // 必须并入 endpoint 视图且从 others 中排除 —— 否则它会把端点内部引用
+  // 误算成"全项目发送方"，把缺口登记表判成腐烂（R108 拆分实测）。
+  final endpoint = stripComments(
+      File('lib/remote/endpoint_service.dart').readAsStringSync() +
+          File('lib/remote/endpoint_policy.dart').readAsStringSync());
   final permGate =
       stripComments(File('lib/remote/assist.dart').readAsStringSync());
 
@@ -72,6 +76,7 @@ void main() {
       final p = f.path.replaceAll(r'\', '/');
       if (p == 'lib/remote/protocol.dart' ||
           p == 'lib/remote/endpoint_service.dart' ||
+          p == 'lib/remote/endpoint_policy.dart' ||
           p == 'lib/remote/assist.dart') {
         continue;
       }

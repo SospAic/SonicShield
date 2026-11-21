@@ -504,10 +504,17 @@ class PlaybackService {
     }
   }
 
+  /// 从**当前音量**淡出，不从 1.0 起步。
+  ///
+  /// R103 登记隐患：旧实现首步固定写 `setVolume(1.0)`，当调用方目标音量 <1
+  /// （如 `volume: 0.3` 的提醒音）时，结束播放前会先**突然变响**再渐弱，
+  /// 与「渐出」语义相反。`p.volume` 是 just_audio 的本地当前值，
+  /// 由本文件所有 `setVolume()` 同步维护，不需要平台往返。
   Future<void> _fadeOut(AudioPlayer p, int ms) async {
     const steps = 20;
+    final start = p.volume.clamp(0.0, 1.0);
     for (var i = steps; i >= 0; i--) {
-      await p.setVolume(i / steps);
+      await p.setVolume(start * i / steps);
       await Future<void>.delayed(Duration(milliseconds: ms ~/ steps));
     }
   }

@@ -20,8 +20,11 @@ import 'package:sonic_shield/remote/protocol.dart';
 /// ⚠️ 端点服务本体依赖 MQTT/DB/插件实例，宿主无法实例化（既有做法）：
 /// 判定走纯函数穷举，接线用源码契约锁。
 void main() {
-  final endpointSrc =
-      File('lib/remote/endpoint_service.dart').readAsStringSync();
+  // endpoint_policy.dart 是 endpoint_service.dart 的 part（同一库）：R108 拆分后
+  // maxCmdTsPerEndpoint 等纯判据落在 part 文件里，必须并入源码视图，否则 WR-02
+  // 只凭 import 的常量恒真、接线侧断言被悄悄架空。
+  final endpointSrc = File('lib/remote/endpoint_service.dart').readAsStringSync() +
+      File('lib/remote/endpoint_policy.dart').readAsStringSync();
   final executorSrc =
       File('lib/remote/script_executor.dart').readAsStringSync();
 

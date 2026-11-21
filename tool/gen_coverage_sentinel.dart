@@ -45,12 +45,21 @@ import 'dart:io';
 const String _pkg = 'sonic_shield';
 const String _sentinelPath = 'test/coverage_sentinel_test.dart';
 
+/// `part of` 文件不是独立库，不能 import（analyze 报 import_of_non_library）。
+/// 它会在宿主文件中被一并加载，覆盖率分母不会漏算。
+bool isPartFile(String path) => File(path)
+    .readAsStringSync()
+    .split('\n')
+    .take(8)
+    .any((l) => l.trimLeft().startsWith('part of '));
+
 /// 枚举 `lib/` 下所有 `.dart`，返回**正斜杠**相对路径（跨平台稳定）。
 List<String> libDartFiles() => Directory('lib')
     .listSync(recursive: true)
     .whereType<File>()
     .map((f) => f.path.replaceAll(r'\', '/'))
     .where((p) => p.endsWith('.dart'))
+    .where((p) => !isPartFile(p))
     .toList()
   ..sort();
 
@@ -118,11 +127,18 @@ void main() {
 /// 这里**故意复制一份**而不是 import tool/ 下的脚本：
 /// 测试不应依赖 `tool/` 的实现细节。两份各自独立，若哪天分叉，
 /// COV-01 会因为"枚举结果对不上"而红 —— 这正是我们要的。
+bool isPartFileForTest(String path) => File(path)
+    .readAsStringSync()
+    .split('\n')
+    .take(8)
+    .any((l) => l.trimLeft().startsWith('part of '));
+
 List<String> libDartFilesForTest() => Directory('lib')
     .listSync(recursive: true)
     .whereType<File>()
     .map((f) => f.path.replaceAll(r'\', '/'))
     .where((p) => p.endsWith('.dart'))
+    .where((p) => !isPartFileForTest(p))
     .toList();
 ''';
 

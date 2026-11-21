@@ -172,9 +172,16 @@ void main() {
 /// 这里**故意复制一份**而不是 import tool/ 下的脚本：
 /// 测试不应依赖 `tool/` 的实现细节。两份各自独立，若哪天分叉，
 /// COV-01 会因为"枚举结果对不上"而红 —— 这正是我们要的。
+bool isPartFileForTest(String path) => File(path)
+    .readAsStringSync()
+    .split('\n')
+    .take(8)
+    .any((l) => l.trimLeft().startsWith('part of '));
+
 List<String> libDartFilesForTest() => Directory('lib')
     .listSync(recursive: true)
     .whereType<File>()
     .map((f) => f.path.replaceAll(r'\', '/'))
     .where((p) => p.endsWith('.dart'))
+    .where((p) => !isPartFileForTest(p))
     .toList();

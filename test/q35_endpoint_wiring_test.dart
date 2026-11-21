@@ -123,7 +123,10 @@ bool gateBeforeExec(String body, String gate, String exec) {
 }
 
 void main() {
-  final src = File('lib/remote/endpoint_service.dart').readAsStringSync();
+  // R108：纯判据已拆到同库 part 文件，源码视图必须并入，否则 Q1-03 的
+  // ensureSaltForDevice 真源与转发断言全部落到空串上（假红）。
+  final src = File('lib/remote/endpoint_service.dart').readAsStringSync() +
+      File('lib/remote/endpoint_policy.dart').readAsStringSync();
   final code = stripComments(src);
   // ⚠️ 剥注释后再做内容断言：`_connect` 的说明文字里**故意**写着
   // "没有 withCredentials"（那是本锁的理由），不剥会把说明当成违规（假红）。
