@@ -2715,6 +2715,7 @@ ONLY_DEVICE=1 WITH_DEVICE=1 DEV=adb-960f853-Kmi5Mk._adb-tls-connect._tcp \
 | 项 | 实测 |
 |---|---|
 | 门禁复跑（R105/R106 续作，2026-11-21；判据等价脚本） | ✅ analyze `No issues found!`；功能层 **3184 例通过 / 1 跳过**（`_pt/r106_func2.txt`，`FUNC_RC=0`）；压测 **24/24**；覆盖率 ratchet ✅ **99.66%（15322/15375）**（`_pt/ps_cov_out.txt`）；机器锁 **81/81**（`_pt/r106_locks2.txt`） |
+| 发布产物 | `releases/SonicShield-Android.apk` = **v1.9.18+41**（270,045,608 B，SHA256 `3a9f705dcdab2cd4a2ba0aa4101cf15ae864450f68902a69566b9e5cc1ebf821`，`aapt2` 实测 `versionCode=41` / `versionName=1.9.18`）；签名仍为 Android Debug（上架前须换正式 keystore）。 |
 | 1/4 analyze | `No issues found!` |
 | 2/4 功能层 | ✅ **3184 例通过 / 1 跳过**（`--exclude-tags perf`；R104 终态 3183 + R106 `CMP-08` 1 例；`_pt/r106_func2.txt`） |
 | 3/4 压测层 | ✅ **24 例全过**（`--tags perf --concurrency=1`） |

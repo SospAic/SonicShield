@@ -73,6 +73,7 @@
 - **真机验证清单**：新增 `docs/66-真机验证清单.md`，把震动静音 / 后台音效焦点 /
   通话 AEC 与码率 / 屏幕共享授权四项 `NO_DEVICE` 症状转为可打钩取证步骤
   （触发步骤 + dumpsys/logcat 抓取 + 判据 + 故障定位）。**四项未宣称实测通过**。
+- **发布产物**：`releases/SonicShield-Android.apk` 已重建为 **v1.9.18+41**（270,045,608 B，SHA256 `3a9f705dcdab2cd4a2ba0aa4101cf15ae864450f68902a69566b9e5cc1ebf821`；`aapt2` 实测 `versionCode=41` / `versionName=1.9.18`）。签名仍为 Android Debug（仓库未配置正式 keystore，沿用既有基线）；上架前须换正式签名。
 - **门禁入口对齐**：`scripts/gates.ps1` 压测层补齐与 `scripts/gates.sh` 同语义的首次失败重跑 +
   整机负载判定（负载 ≥60% 记 `BLOCKED/RC=3`，不是误报真回归）；`GEC` 10/10 复验通过。
 - **续作复验**：功能层 **3184 例通过 / 1 跳过**（R104 3183 + `CMP-08` 1 例，`_pt/r106_func2.txt`）；
