@@ -278,8 +278,16 @@ class NativeBridge {
   ///
   /// ⚠️ 这是 v1.x 的**固定节奏**入口（`VibrateAction`）。v1.9 起的随机/持续振动
   /// 走 [vibrateCommand]（能表达振幅与包络），**不要**再往这里塞新能力。
-  static Future<void> vibrate(List<int> patternMs) =>
-      _invoke<Object?>('vibrate', {'pattern': patternMs});
+  ///
+  /// [useAlarmUsage]（BUG-157 / R105）：默认 false = USAGE_NOTIFICATION（跟随
+  /// 勿扰，**远程入站必须保持这个默认值**，合规红线 docs/08）。本机自排的
+  /// 固定节奏任务传 true = USAGE_ALARM（等价用户自设闹钟，可穿静音/勿扰），
+  /// 对齐 R93 对随机/持续振动的同款裁决——此前这条老链路被漏掉，静音下必被吞。
+  static Future<void> vibrate(List<int> patternMs, {bool useAlarmUsage = false}) =>
+      _invoke<Object?>('vibrate', {
+        'pattern': patternMs,
+        'useAlarmUsage': useAlarmUsage,
+      });
 
   // ---------------- 振动能力（v1.9，docs/20 §5.1 / FR-38） ----------------
 

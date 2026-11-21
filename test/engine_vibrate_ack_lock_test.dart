@@ -169,4 +169,81 @@ void main() {
           reason: '顺序锁必须真的生效（先记成功再判断 = 假修复）');
     });
   });
+
+  // ══════════════════════════════════════════════════════════════════
+  // BUG-157 / R105：固定节奏链路 USAGE_ALARM（R93 漏修的老链路）
+  // ══════════════════════════════════════════════════════════════════
+  group('VIB-157 固定节奏链路按来源选 USAGE（源码契约锁）', () {
+    final kt = File('packages/native_bridge/android/src/main/kotlin/'
+            'com/sonicshield/native_bridge/NativeBridgePlugin.kt')
+        .readAsStringSync();
+    final bridge = File('lib/services/native_bridge.dart').readAsStringSync();
+
+    test('VIB-157-1 Kotlin vibrate 分支读取 useAlarmUsage 参数', () {
+      final i = kt.indexOf('"vibrate" -> {');
+      expect(i, greaterThanOrEqualTo(0), reason: '锚点丢失 → 锁空转');
+      final seg = kt.substring(i, (i + 1200).clamp(0, kt.length));
+      expect(seg.contains('call.argument<Boolean>("useAlarmUsage")'), isTrue,
+          reason: '原生不读参数 ⇒ Dart 传什么都被忽略，修复无效');
+      expect(RegExp(r'vibrate\(ctx,\s*pattern,\s*useAlarm\)').hasMatch(seg),
+          isTrue,
+          reason: '读到的参数必须透传给 vibrate()');
+    });
+
+    test('VIB-157-2 Kotlin vibrate() 默认 false 且透传 useAlarm 到 waveform', () {
+      final i = kt.indexOf('private fun vibrate(');
+      expect(i, greaterThanOrEqualTo(0));
+      final seg = kt.substring(i, (i + 400).clamp(0, kt.length));
+      expect(seg.contains('useAlarm: Boolean = false'), isTrue,
+          reason: '默认必须 false = 远程入站跟随勿扰（合规红线）');
+      expect(seg.contains('vibrateWaveform(ctx, pattern, null, -1, useAlarm)'),
+          isTrue,
+          reason: '必须把 useAlarm 透传，不能再写死 false');
+    });
+
+    test('VIB-157-3 Dart 桥接层 vibrate() 暴露可选参数，默认 false', () {
+      expect(
+          RegExp(r'static Future<void> vibrate\(List<int> patternMs,\s*'
+                  r'\{bool useAlarmUsage = false\}')
+              .hasMatch(bridge),
+          isTrue,
+          reason: '桥接层默认必须 false（远程入站合规）');
+      expect(bridge.contains("'useAlarmUsage': useAlarmUsage"), isTrue,
+          reason: '参数必须真正下发到 MethodChannel');
+    });
+
+    test('VIB-157-4 本机任务按 source 选 ALARM，远程保持 NOTIFICATION', () {
+      final i = engineSrc.indexOf("invokeMethod('vibrate'");
+      // 判定行在锚点**之前**（先算 useAlarmForFixed 再 invokeMethod），
+      // 故往前取一段；参数下发行在锚点之后，往后取一段。两者都要验。
+      final before = engineSrc.substring((i - 400).clamp(0, i), i);
+      final after = engineSrc.substring(i, (i + 400).clamp(0, engineSrc.length));
+      expect(before.contains('RemoteParity.enabled'), isTrue,
+          reason: 'R105 对齐：远程任务也走 ALARM，由单一真源控制');
+      expect(after.contains("'useAlarmUsage': useAlarmForFixed"), isTrue,
+          reason: '判定结果必须下发到原生');
+    });
+
+    test('VIB-157-5 R105 对齐：远程入口按 RemoteParity 走 USAGE_ALARM', () {
+      final mainSrc = File('lib/main.dart').readAsStringSync();
+      // 锚点要用赋值行 `..vibrateHandler =`，不能用裸 `vibrateHandler`
+      // （会命中第 104 行的文档注释，导致锁空转误判）。
+      final i = mainSrc.indexOf('..vibrateHandler =');
+      expect(i, greaterThanOrEqualTo(0), reason: '远程入口赋值锚点丢失');
+      final seg = mainSrc.substring(i, (i + 260).clamp(0, mainSrc.length));
+      expect(seg.contains('useAlarmUsage: RemoteParity.enabled'), isTrue,
+          reason: 'R105 远程=本机对齐：远程固定节奏也走 ALARM，'
+              '但必须由单一真源 RemoteParity 控制（可收回）');
+      expect(seg.contains('NativeBridge.vibrate(pattern)'), isFalse,
+          reason: '旧的无参数调用已不能表达对齐策略，必须显式带 useAlarmUsage');
+    });
+
+    test('VIB-157-6 RemoteParity 单一真源：对齐开关集中且默认 true', () {
+      final constSrc = File('lib/core/constants.dart').readAsStringSync();
+      expect(constSrc.contains('abstract final class RemoteParity'), isTrue,
+          reason: '必须集中成一个真源，不得散落各处硬编码');
+      expect(constSrc.contains('static const bool enabled = true'), isTrue,
+          reason: 'R105 裁决：远程=本机对齐，默认开启');
+    });
+  });
 }

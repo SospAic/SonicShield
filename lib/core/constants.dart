@@ -233,3 +233,35 @@ abstract final class PrefsKeys {
   /// 并集中到本类作为唯一真源。
   static const String powerMode = 'power_mode';
 }
+
+/// 远程能力对齐策略（R105 老板裁决：远程=本机）。
+///
+/// ## 背景
+/// v79~R104 期间，远程入站被多处硬编码夹紧（振动强制 `respectDnd=true`、
+/// 夜间豁免入站丢弃、forceRun 落 false、主开关不可远程写）——意图是防止
+/// "已配对对端绕过本机护栏"。老板 R105 裁决：**设备主人对自己的设备远程
+/// 下发命令等同于本机操作**，这些功能限制全部解除，远程与本机同权。
+///
+/// ## 保留的法律底线（与功能对齐无关，不可解除）
+/// 骚扰/恐吓他人、偷录隐私、未授权控制**他人**设备、隐蔽监控、免同意接通
+/// 摄像头麦克风 —— 这些是docs/08 §2 的违法用途，不属于"功能限制"，
+/// 本对齐**不触碰**它们：配对授权、采集可见指示、停止即停等依然生效。
+///
+/// ## 真源
+/// 所有原先"远程强制夹紧"的点改为读这里的常量，`true` = 尊重入站值
+/// （与本机同权）。集中成一个类是为了让"想收回功能红线"必须主动改这一处，
+/// 且机器锁可以只锁这一个真源，不散落。
+abstract final class RemoteParity {
+  /// 总开关：远程能力是否与本机同权。R105 裁决为 `true`。
+  static const bool enabled = true;
+
+  /// 入站振动是否允许 `respectDnd=false`（穿透系统勿扰）。
+  /// `true` = 尊重对端传入值；`false` = 一律强制 true（旧护栏）。
+  static bool get allowInboundDndOptOut => enabled;
+
+  /// 入站任务是否采信 `quietExempt`（夜间豁免）。
+  static bool get allowInboundQuietExempt => enabled;
+
+  /// 入站任务是否采信 `forceRun`（节假日刹车例外）。
+  static bool get allowInboundForceRun => enabled;
+}

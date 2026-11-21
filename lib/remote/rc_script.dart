@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../core/constants.dart';
 import '../domain/models/action.dart';
 
 /// 远程指令组（宏）模型：动作 + 时延的有序序列。
@@ -165,11 +166,19 @@ const Map<RcVibrateMode, List<RcVibrateField>> rcVibrateStartFields =
 List<RcVibrateField> rcVibrateStartFieldsFor(RcVibrateMode m) =>
     rcVibrateStartFields[m] ?? const <RcVibrateField>[];
 
+/// 入站振动 `respectDnd` 夹紧（顶层，供 [rcVibrateStartConfig] 与 [RcStep] 共用）。
+/// 对齐模式读入站显式 bool（可穿勿扰，与本机同权）；收紧模式恒 true。
+bool _clampInboundRespectDnd(Object? raw) {
+  if (!RemoteParity.allowInboundDndOptOut) return true;
+  if (raw is bool) return raw;
+  return false; // 与本机 Random/ContinuousVibrateAction 默认一致
+}
+
 /// `vibrate.start` 参数 → 执行动作（**端点侧**消费点，纯函数）。
 ///
 /// 与 [RcStep.vibrateConfig] 同一纪律：**先夹紧再构造**（`ActionConfig` 的区间
-/// 约束靠 `assert`，release 会被剥离），并**强制 `respectDnd = true`**（远程
-/// 路径不提供穿透系统勿扰的能力，docs/20 §11.3）。
+/// 约束靠 `assert`，release 会被剥离）。`respectDnd` 自 R105 起随 RemoteParity：
+/// 对齐模式读入站值（可穿勿扰），收紧模式恒 true。
 ///
 /// `fixed` = 恒定振动（强度 min==max、时长 min==max、无波动），
 /// 表达为 [ContinuousVibrateAction] 的**退化区间** —— 从而执行引擎零改动，
@@ -185,7 +194,7 @@ ActionConfig rcVibrateStartConfig(Map<String, dynamic> p) {
       durationSecMax: sec,
       amplitudeMin: amp,
       amplitudeMax: amp,
-      respectDnd: true,
+      respectDnd: _clampInboundRespectDnd(p['respectDnd']),
     );
   }
   return RcStep(RcStepKind.vibrate, {...p, 'mode': mode.name}).vibrateConfig();
@@ -299,7 +308,7 @@ class RcStep {
           amplitudeMax: amp.$2,
           maxPulses: _int(p, 'maxPulses', 1, VibrateLimits.maxPulses, 200),
           rampUpSec: _int(p, 'rampUpSec', 0, VibrateLimits.maxRampSec, 0),
-          respectDnd: _inboundRespectDnd,
+          respectDnd: _inboundRespectDnd(p['respectDnd']),
         );
 
       case RcVibrateMode.continuous:
@@ -318,7 +327,7 @@ class RcStep {
           dutyCyclePct: _int(p, 'dutyCyclePct', 10, 100, 100),
           rampUpSec: _int(p, 'rampUpSec', 0, VibrateLimits.maxRampSec, 0),
           rampDownSec: _int(p, 'rampDownSec', 0, VibrateLimits.maxRampSec, 0),
-          respectDnd: _inboundRespectDnd,
+          respectDnd: _inboundRespectDnd(p['respectDnd']),
         );
     }
   }
@@ -390,13 +399,11 @@ class RcStep {
 
   static String _pct(double v) => '${(v * 100).round()}%';
 
-  /// **入站振动一律遵循勿扰**（v1.9，docs/20 §11.3 第 4 条）。
+  /// 入站振动的 `respectDnd` 夹紧（R105：远程=本机对齐）。
   ///
-  /// `respectDnd=false` 会让原生侧改用 `USAGE_ALARM`，即**穿透系统勿扰**。
-  /// 允许已配对的对端打开它，等于让对端绕过本机的合规护栏 —— 与
-  /// `quietExempt`（§8.2 约束 1）是同一类问题，触碰项目红线（docs/08 §2）。
-  /// 本机任务仍可由用户自己关闭（UI 有显式警告），**但远程路径不提供这个能力**。
-  static const bool _inboundRespectDnd = true;
+  /// 对齐模式读入站显式 bool（可穿勿扰，与本机同权）；收紧模式恒 true。
+  /// 这是功能对齐，不触碰 docs/08 §2 法律底线。缺省值随 RemoteParity。
+  static bool _inboundRespectDnd(Object? raw) => _clampInboundRespectDnd(raw);
 
   static int _int(
       Map<String, dynamic> p, String k, int min, int max, int fallback) {

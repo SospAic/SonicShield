@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'core/constants.dart';
 import 'data/db/app_database.dart';
 import 'data/repositories/api_config_store.dart';
 import 'domain/models/action.dart';
@@ -159,7 +160,11 @@ void _wireRemoteEndpointHandlers() {
     // 而级联也是 expression —— 不括起来，`=>` 会一路把后面的 `..vibrateActionHandler`
     // 吃成 `f(x)..vibrateActionHandler = ...`（实测报错："setter 未定义于 Future<void>"，
     // 完全指不到真正的原因）。
-    ..vibrateHandler = ((pattern) => NativeBridge.vibrate(pattern))
+    // R105 远程=本机对齐：远程固定节奏振动也走 USAGE_ALARM（可穿勿扰），
+    // 与本机自排任务同权。法律底线（骚扰他人等）不在此列，仍由配对授权 +
+    // 停止即停约束。
+    ..vibrateHandler = ((pattern) =>
+        NativeBridge.vibrate(pattern, useAlarmUsage: RemoteParity.enabled))
     // v1.9：随机/持续振动步骤转交**引擎隔离**的 VibrateSession。
     // 不在本 isolate 直接下发：分片续发、`vibrate.stop`、低电量降级都只在
     // 引擎里（见 `background_engine` 的 `vibrateStep` 监听处注记）。

@@ -451,11 +451,21 @@ void main() {
   // 静默取到 null —— 表现是"振动功能没反应"，不是报错。
   // ===========================================================================
   group('NB-H · 振动与 FGS 入口（第四十轮）', () {
-    test('固定节奏 vibrate → 方法名与节奏数组原样下发', () async {
+    test('固定节奏 vibrate → 方法名与节奏数组原样下发，默认跟随勿扰', () async {
       installNative((_) => null);
       await NativeBridge.vibrate(const [0, 120, 60, 120]);
       expect(log.single.method, 'vibrate');
-      expect(log.single.arguments, {'pattern': [0, 120, 60, 120]});
+      // BUG-157 / R105：新增 useAlarmUsage 键，默认 false（远程入站合规）。
+      expect(log.single.arguments,
+          {'pattern': [0, 120, 60, 120], 'useAlarmUsage': false});
+    });
+
+    test('BUG-157 本机固定节奏 vibrate(useAlarmUsage:true) → 参数原样透传', () async {
+      installNative((_) => null);
+      await NativeBridge.vibrate(const [0, 200], useAlarmUsage: true);
+      expect(log.single.method, 'vibrate');
+      expect(log.single.arguments['useAlarmUsage'], isTrue,
+          reason: '本机自排任务要走 USAGE_ALARM；参数必须在 MethodChannel 层透传');
     });
 
     test('桥不可用时 vibrate / clearAlarms / 麦克风 FGS 入口都不得抛', () async {

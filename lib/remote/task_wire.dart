@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../core/constants.dart';
 import '../domain/models/action.dart';
 import '../domain/models/condition.dart';
 import '../domain/models/task.dart';
@@ -73,15 +74,21 @@ abstract final class TaskWire {
   /// 会让 `fold` 溢出成 `Infinity`，随后 `roll` 恒为 NaN —— 选中逻辑静默失效。
   static const maxActionSetWeight = 1e6;
 
-  /// **入站振动一律遵循系统勿扰**（v1.9，docs/20 §11.3 第 4 条）。
+  /// **入站振动的勿扰遵循策略**（R105：远程=本机对齐）。
   ///
-  /// `respectDnd=false` 会让原生侧改用 `USAGE_ALARM`，即**穿透系统勿扰**。
-  /// 允许已配对的对端打开它，等于让对端绕过本机的合规护栏 —— 与 `quietExempt`
-  /// （docs/20 §8.2 约束 1）是同一类问题，直接触碰项目红线（docs/08 §2）。
-  /// 本机任务仍可由用户自己关闭（编辑器有显式警告），**远程路径不提供这个能力**。
+  /// R105 老板裁决：设备主人对自己的设备远程下发命令等同本机操作，原
+  /// "入站一律强制 true"的功能限制解除。现在读 [RemoteParity] 单一真源：
+  /// `true` ⇒ 尊重对端传入的 `respectDnd`（可穿勿扰，与本机同权）。
   ///
-  /// ⚠️ 写成常量而不是"删掉键走默认"，是为了让"有人想接上它"必须**主动改常量名**。
-  static const bool inboundRespectDnd = true;
+  /// ⚠️ 这是**功能对齐**，不触碰 docs/08 §2 的法律底线（骚扰/偷录/
+  /// 未授权控制他人设备/隐蔽监控）——配对授权、停止即停等依然生效。
+  /// 想收回这条功能红线只需改 [RemoteParity.enabled] 一处。
+  /// 入站 `respectDnd` 缺省值（入站未提供或类型非法时用）。
+  /// 对齐模式下缺省 `false`（本机默认）；收紧模式下 `true`（强制跟随勿扰）。
+  /// ⚠️ 对齐模式下**不覆盖**入站显式值，只在缺失/畸形时兜底 —— 见
+  /// `_sanitizeActionMap` 两处调用点。
+  static bool get inboundRespectDndDefault =>
+      RemoteParity.allowInboundDndOptOut ? false : true;
 
   /// 入站动作定义是否**试图**关闭勿扰遵循（供端点写审计，不静默）。
   ///
@@ -107,6 +114,18 @@ abstract final class TaskWire {
   /// 只有**显式**的 `false` 才算"想关掉勿扰遵循"；缺失/畸形一律不算
   /// （后者在夹紧后同样是 `true`，不构成下放）。
   static bool _wantsNoDnd(Object? v) => v == false;
+
+  /// 夹紧入站 `respectDnd`：对齐模式尊重对端显式 bool（可穿勿扰），
+  /// 收紧模式一律强制 true。缺失/类型非法时用 [inboundRespectDndDefault] 兜底，
+  /// 绝不让畸形值原样进模型（docs/20 §11.3 自相矛盾配置的教训）。
+  static bool _clampRespectDnd(Object? raw) {
+    if (!RemoteParity.allowInboundDndOptOut) return true;
+    if (raw is bool) return raw;
+    return inboundRespectDndDefault;
+  }
+
+  /// 入站三态 `quietExempt`：bool 原样采信；缺失/畸形回落 null（跟随主开关）。
+  static bool? _triState(Object? raw) => raw is bool ? raw : null;
 
   // ---------------- D-7：任务动作 → 所需权限位（纯判定） ----------------
 
@@ -255,12 +274,17 @@ abstract final class TaskWire {
         // 副作用（**安全方向，已接受**）：对端更新任务会把该任务的豁免拉回"跟随主开关"
         // —— 若本机此前对它做过「强制豁免」的例外设置，会被这次远程更新抹掉。
         // 端点侧会为此写一条审计（见 `endpoint_service._upsertTask`），不静默。
-        quietExempt: null,
-        // ⚠️ 全局执行总开关的**任务级强制例外一律落 false**（v79）：与
-        // `quietExempt: null` 同理但更严 —— 它守护的是更粗的刹车（节假日自动
-        // 暂停）。若允许对端打开，等于让对端在"本机整体停摆"期间仍能强行触发
-        // 出声任务，直接触碰 docs/08 §2 红线。本机持有者可在任务编辑器自行开启。
-        forceRun: false,
+        // R105 远程=本机对齐：对齐模式下采信对端的三态豁免值（与本机任务
+        // 同权）；收紧模式（RemoteParity.enabled=false）维持旧护栏恒 null。
+        // 三态取值仍经 Task.fromDb 同款归一，非法值回落 null（跟随主开关）。
+        quietExempt: RemoteParity.allowInboundQuietExempt
+            ? _triState(j['quietExempt'])
+            : null,
+        // R105 对齐：forceRun 同样采信入站（本机持有者可在编辑器自行开启，
+        // 对端现在与本机同权）；收紧模式维持恒 false。
+        forceRun: RemoteParity.allowInboundForceRun
+            ? (j['forceRun'] == true)
+            : false,
         condition: _condition(j['condition']),
         priority: priority,
         createdAt: _epoch(j['createdAt']) ??
@@ -358,7 +382,7 @@ abstract final class TaskWire {
         m['maxPulses'] = _clampInt(m['maxPulses'], 1, maxPulseCount, 200);
         m['rampUpSec'] =
             _clampInt(m['rampUpSec'], 0, VibrateLimits.maxRampSec, 0);
-        m['respectDnd'] = inboundRespectDnd;
+        m['respectDnd'] = _clampRespectDnd(m['respectDnd']);
         return m;
       case 'continuousVibrate':
         final m = Map<String, dynamic>.from(j);
@@ -380,7 +404,7 @@ abstract final class TaskWire {
             _clampInt(m['rampUpSec'], 0, VibrateLimits.maxRampSec, 0);
         m['rampDownSec'] =
             _clampInt(m['rampDownSec'], 0, VibrateLimits.maxRampSec, 0);
-        m['respectDnd'] = inboundRespectDnd;
+        m['respectDnd'] = _clampRespectDnd(m['respectDnd']);
         return m;
       case 'composite':
         final primary = _asMap(j['primary']);

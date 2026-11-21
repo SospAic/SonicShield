@@ -21,7 +21,9 @@ import 'package:sonic_shield/remote/rc_script.dart';
 /// ## 修法
 /// 1. 本机自排的振动动作（模型默认 / 反击计划物化 / 编辑器新建）改为
 ///    `respectDnd = false`（USAGE_ALARM，等价"用户自己设的闹钟"）；
-/// 2. 远程入站**仍强制 true**（对端不得绕过本机勿扰，合规红线不动）；
+/// 2. ~~远程入站仍强制 true~~ **R105 更新**：老板裁决「远程=本机对齐」，
+///    远程入站改为尊重对端值、缺省 false（可穿勿扰）；法律底线（骚扰/偷录等）
+///    依然不动，见 VD-05；
 /// 3. `VibrateCaps` 增加 `ringerMode` / `dndActive`，让"调用成功却没震"
 ///    在审计日志里**可解释**（不再靠猜）。
 void main() {
@@ -69,17 +71,26 @@ void main() {
       }
     });
 
-    test('VD-05 远程入站仍强制 respectDnd=true（合规红线不动）', () {
-      // 对端下发振动不得绕过本机勿扰 —— 这条是 docs/08 的红线，
-      // R93 只放开"本机自排"，不放远程。随机/持续两种都验。
+    test('VD-05 R105 对齐：远程入站 respectDnd 缺省 false（可穿勿扰），显式 true 尊重', () {
+      // R93 只放开本机自排；R105 老板裁决「远程=本机对齐」后，远程缺省
+      // 与本机一致（false = USAGE_ALARM 可穿勿扰）。显式 true 仍被尊重。
+      // 这是功能对齐，docs/08 §2 法律底线（骚扰/偷录等）依然不动。
       final r = rcVibrateStartConfig(const {'mode': 'random'});
       expect(r, isA<RandomVibrateAction>());
-      expect((r as RandomVibrateAction).respectDnd, isTrue,
-          reason: '远程入站必须强制 true（对端不得绕过本机勿扰）');
+      expect((r as RandomVibrateAction).respectDnd, isFalse,
+          reason: 'R105 对齐：远程缺省与本机一致（false = 可穿勿扰）');
 
       final c = rcVibrateStartConfig(const {'mode': 'continuous'});
       expect(c, isA<ContinuousVibrateAction>());
-      expect((c as ContinuousVibrateAction).respectDnd, isTrue);
+      expect((c as ContinuousVibrateAction).respectDnd, isFalse);
+
+      // 对端显式要求跟随勿扰（true）仍必须被尊重 —— 对齐 ≠ 强制穿透。
+      final follow = rcVibrateStartConfig(const {
+        'mode': 'random',
+        'respectDnd': true
+      }) as RandomVibrateAction;
+      expect(follow.respectDnd, isTrue,
+          reason: '对齐模式尊重入站显式值，不强制穿透');
     });
   });
 

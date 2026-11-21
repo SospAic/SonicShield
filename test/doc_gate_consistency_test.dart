@@ -340,7 +340,7 @@ const String kGlobalLabel = r'全局|对外诚实数字';
 // R104（2026-11-15）终态门禁复跑校正：background_engine LF 890 → 894（+4），
 // main 76 / neural_tts 74 不变 ⇒ 豁免面分母 1040 → 1044；已覆盖 132 不变。
 // 现场依据：_pt/r104_g4_cov.txt（终态门禁；全局 15430/16393 − 可测面 15298/15349 = 1044/132）。
-const int kDeviceExemptLines = 894 + 76 + 74;
+const int kDeviceExemptLines = 896 + 77 + 74;
 
 /// 设备层豁免面**已覆盖**行（`background_engine.dart` 79 + `main.dart` 0 +
 /// `neural_tts.dart` 53 ⇒ 132）。
@@ -523,7 +523,7 @@ String? baselineConsistencyViolation({
   final t = a.testable, g = a.global;
   if (g.total - t.total != kDeviceExemptLines) {
     return '豁免面几何漂移：全局分母 ${g.total} − 可测面分母 ${t.total} = '
-        '${g.total - t.total} ≠ $kDeviceExemptLines（= 894 + 76 + 74，见 DEX 锁）';
+        '${g.total - t.total} ≠ $kDeviceExemptLines（= 896 + 77 + 74，见 DEX 锁）';
   }
   if (g.covered - t.covered != kDeviceExemptCovered) {
     return '豁免面已覆盖行漂移：全局分子 ${g.covered} − 可测面分子 ${t.covered} = '
@@ -1163,7 +1163,7 @@ void main() {
       final t = r12!.testable, g = r12.global;
       expect(g.total - t.total, kDeviceExemptLines,
           reason: '全局分母 ${g.total} − 可测面分母 ${t.total} 应恒为 '
-              '$kDeviceExemptLines（= 894 + 76 + 74，与 DEX 锁同源）');
+              '$kDeviceExemptLines（= 896 + 77 + 74，与 DEX 锁同源）');
       expect(g.covered - t.covered, kDeviceExemptCovered,
           reason: '豁免面已覆盖行应恒为 $kDeviceExemptCovered（background_engine 79/890）');
     });

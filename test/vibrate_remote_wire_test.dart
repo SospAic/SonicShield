@@ -116,20 +116,36 @@ void main() {
       expect(a.rampDownSec, inInclusiveRange(0, VibrateLimits.maxRampSec));
     });
 
-    test('VW-04 入站 respectDnd 一律强制 true（远程不得绕过本机勿扰护栏）', () {
+    test('VW-04 入站 respectDnd 尊重显式值、缺省与本机对齐（R105：可穿勿扰）', () {
       for (final kind in ['randomVibrate', 'continuousVibrate']) {
-        final a = parse({'kind': kind, 'respectDnd': false})!;
-        final respect = switch (a) {
+        final off = parse({'kind': kind, 'respectDnd': false})!;
+        final offRespect = switch (off) {
           final RandomVibrateAction v => v.respectDnd,
           final ContinuousVibrateAction v => v.respectDnd,
-          _ => fail('kind=$kind 解析成了 ${a.runtimeType}'),
+          _ => fail('kind=$kind 解析成了 ${off.runtimeType}'),
         };
-        expect(respect, isTrue,
-            reason: 'kind=$kind 让对端关掉了「遵循勿扰」—— 与 quietExempt 同类红线');
+        expect(offRespect, isFalse,
+            reason: 'kind=$kind 显式 false 应被采信 —— R105 远程功能对齐本机，'
+                '可穿勿扰属功能层红线（已解除），不涉及 docs/08 §2 法律底线');
+
+        final on = parse({'kind': kind, 'respectDnd': true})!;
+        final onRespect = switch (on) {
+          final RandomVibrateAction v => v.respectDnd,
+          final ContinuousVibrateAction v => v.respectDnd,
+          _ => fail('kind=$kind 解析成了 ${on.runtimeType}'),
+        };
+        expect(onRespect, isTrue, reason: 'kind=$kind 显式 true 同样被采信');
       }
-      // 缺失也必须是 true（fail-safe 一侧，不能因为"没写"就当成 false）。
-      expect((parse({'kind': 'randomVibrate'})! as RandomVibrateAction).respectDnd,
-          isTrue);
+      // 缺失与畸形走同一个缺省，且缺省 == 本机默认值（fail-open 到对齐侧）。
+      final missing =
+          (parse({'kind': 'randomVibrate'})! as RandomVibrateAction).respectDnd;
+      final malformed = (parse({
+            'kind': 'randomVibrate',
+            'respectDnd': 'no'
+          })! as RandomVibrateAction)
+          .respectDnd;
+      expect(missing, isFalse, reason: 'R105 对齐模式缺省可穿勿扰');
+      expect(malformed, missing, reason: '畸形值与缺省必须同判，不能各走一路');
     });
 
     test('VW-05 inboundDndDowngrade 能识别"试图关闭勿扰"，含嵌套动作', () {
@@ -138,7 +154,8 @@ void main() {
           isFalse);
       expect(TaskWire.inboundDndDowngrade({'kind': 'randomVibrate', 'respectDnd': false}),
           isTrue);
-      // 畸形值不算"想关"（夹紧后同样是 true，不构成下放）。
+      // 畸形值不算"想关"：夹紧后走 R105 对齐缺省 false，但审计只认显式 false。
+      // 这里识别的是「对端请求穿勿扰」这个意图本身，供端点写审计，不因夹紧而消失。
       expect(TaskWire.inboundDndDowngrade({'kind': 'randomVibrate', 'respectDnd': 'no'}),
           isFalse);
       // composite 的 primary 里藏一个 —— 不递归就漏。

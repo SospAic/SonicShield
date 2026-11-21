@@ -145,8 +145,11 @@ void main() {
   // =====================================================================
   // 2. 远程不可开启
   // =====================================================================
-  group('QE 远程不可开启', () {
-    test('QE-10 fromWire 丢弃入站 quietExempt / forceRun（核心锁）', () {
+  group('QE 远程能力（R105 对齐：任务级可远程设，主开关仍本机专属）', () {
+    test('QE-10 R105 对齐：fromWire 采信入站 quietExempt / forceRun（核心锁）', () {
+      // R105 老板裁决「远程=本机对齐」：设备主人对**自己设备**远程下发命令
+      // 等同本机操作，任务级豁免与总开关例外恢复与本机同权。
+      // 这是功能对齐，不是放开 docs/08 §2 法律底线（骚扰/偷录/隐蔽监控等）。
       final wire = <String, dynamic>{
         'id': 't1',
         'name': '对端任务',
@@ -158,18 +161,23 @@ void main() {
         'assetIds': <String>[],
         'cooldownSec': 300,
         'quietPolicy': 'skip',
-        // 对端**试图**打开豁免与总开关例外：
         'quietExempt': true,
         'forceRun': true,
       };
       final t = TaskWire.fromWire(wire);
       expect(t, isNotNull, reason: '合法定义不应因多一个字段而被拒');
-      expect(t!.quietExempt, isNull,
-          reason: '入站 quietExempt 必须被丢弃（落 null = 跟随本机主开关）—— '
-              '否则已配对的对端可绕过本机合规护栏');
-      expect(t.forceRun, isFalse,
-          reason: '入站 forceRun 必须被丢弃（落 false）—— '
-              '否则对端可在本机整体停摆期间强行触发任务');
+      expect(t!.quietExempt, isTrue,
+          reason: 'R105 对齐：入站 quietExempt 三态必须被采信（与本机同权）');
+      expect(t.forceRun, isTrue,
+          reason: 'R105 对齐：入站 forceRun 必须被采信');
+      // 三态非法值仍须回落 null（跟随主开关），不得让畸形值进模型。
+      final bad = TaskWire.fromWire(<String, dynamic>{
+        ...wire,
+        'quietExempt': 'yes',
+        'forceRun': 'yes',
+      });
+      expect(bad!.quietExempt, isNull, reason: '非法三态值回落 null');
+      expect(bad.forceRun, isFalse, reason: '非法 forceRun 回落 false');
     });
 
     test('QE-11 toWire 携带 quietExempt（供对端只读展示）', () {
@@ -190,24 +198,23 @@ void main() {
         createdAt: now,
         updatedAt: now,
       );
-      // 与 QE-10 合起来构成**非对称契约**：出站有、入站无视。
-      // 若有人"顺手把 fromWire 也接上"，QE-10 会红；
-      // 若有人从 toWire 删掉它，本条会红。
+      // R105 对齐后为**对称契约**：出站携带、入站采信（QE-10）。
+      // 若有人从 toWire 删掉它，本条会红 —— 对端界面就看不到本机豁免意向了。
       expect(TaskWire.toWire(t)['quietExempt'], isTrue);
     });
 
-    test('QE-12 源码扫描：task_wire 代码中不读取入站 quietExempt / forceRun', () {
+    test('QE-12 R105 源码扫描：入站采信必须受 RemoteParity 单一真源控制', () {
       final code = stripComments(_read('lib/remote/task_wire.dart'));
-      expect(code.contains("j['quietExempt']"), isFalse,
-          reason: '入站解析不得引用该键 —— 即使"读出来再强制置 false"也不允许，'
-              '因为下一个改动者很容易把那个 false 改成变量');
-      expect(code.contains('quietExempt: null'), isTrue,
-          reason: '必须是**显式** null（跟随本机主开关），而不是省略参数'
-              '（省略时靠默认值，读者看不出这是有意的安全决策）');
-      expect(code.contains("j['forceRun']"), isFalse,
-          reason: '入站解析不得引用 forceRun 键（远程不得给本机任务开总开关例外）');
-      expect(code.contains('forceRun: false'), isTrue,
-          reason: '必须是**显式** false，理由同上');
+      // R105 对齐：入站现在**要**读这两个键，但必须经 RemoteParity 条件控制，
+      // 使得改一处常量即可收回功能红线（不得散落硬编码）。
+      expect(code.contains("j['quietExempt']"), isTrue,
+          reason: 'R105 对齐模式必须读入站 quietExempt');
+      expect(code.contains('RemoteParity.allowInboundQuietExempt'), isTrue,
+          reason: '采信必须受单一真源控制，收紧模式改一处即恢复旧护栏');
+      expect(code.contains("j['forceRun']"), isTrue,
+          reason: 'R105 对齐模式必须读入站 forceRun');
+      expect(code.contains('RemoteParity.allowInboundForceRun'), isTrue,
+          reason: 'forceRun 采信同样受真源控制');
     });
 
     test('QE-13 源码扫描：远程侧不得出现主开关的**写入口**', () {

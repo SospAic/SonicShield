@@ -1273,7 +1273,16 @@ Future<void> _engineBody(ServiceInstance service) async {
           // `status: 'success'`：审计里躺着一条**成功的振动**，而机器抖都没抖。
           // 这正是项目红线"静默假成功"的又一形态（与 C-3 `volume.set`、
           // `playHandler` 空转同族）。
-          final ack = await native.invokeMethod('vibrate', {'pattern': v.patternMs});
+          // BUG-157 / R105：固定节奏链路补 USAGE_ALARM（复用 R93 裁决）。
+          // 对齐模式（RemoteParity.enabled=true）：本机与远程任务都走 ALARM，
+          // 可穿静音/勿扰 —— R105 老板裁决"远程=本机"。收紧模式才退回旧的
+          // "仅本机自排可穿、远程跟随勿扰"。此前这条老链路写死 NOTIFICATION，
+          // 静音下被系统吞掉 = 用户报"不震"。
+          final useAlarmForFixed = RemoteParity.enabled || source != 'remote';
+          final ack = await native.invokeMethod('vibrate', {
+            'pattern': v.patternMs,
+            'useAlarmUsage': useAlarmForFixed,
+          });
           if (ack == true) {
             await logs.append(
                 source: source,

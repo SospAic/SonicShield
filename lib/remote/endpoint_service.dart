@@ -2263,17 +2263,14 @@ class RcEndpointService {
     await tasks.upsert(task);
     final dropped = await occ.deletePendingForTask(task.id);
     final planned = await _rematerialize(task, occ);
-    // 远程更新会**清掉**该任务在本机的夜间豁免（入站 `quietExempt` 一律被丢弃、
-    // 置为「跟随主开关」，docs/20 §8.2 约束 1）。这是安全方向，但**不得静默** ——
-    // 用户会看到"夜间提醒突然不响了"，必须有一条能对上的日志。
-    // v79 三态：仅当本机此前是「强制豁免」（true）而被拉回「跟随/强制不豁免」时才算清除。
-    final exemptCleared = prev?.quietExempt == true && task.quietExempt != true;
-    // 同理：远程更新的任务 `forceRun` 恒为 false（`TaskWire.fromWire`），
-    // 若本机此前给它开过「暂停期间强制执行」，会被这次更新清除，同样不得静默。
-    final forceRunCleared = (prev?.forceRun ?? false) && !task.forceRun;
-    // 入站振动一律强制「遵循系统勿扰」（docs/20 §11.3 第 4 条）。
-    // 对端若试图关掉它，必须留痕 —— 否则用户只会发现"怎么半夜还会震"。
-    final dndForced = TaskWire.inboundDndDowngrade(j['action']);
+    // R105 远程=本机对齐：对齐模式下入站 quietExempt / forceRun 被采信，
+    // 不再无条件清除；仅收紧模式才保留旧"清除"语义。无论哪种都留痕。
+    const parity = RemoteParity.enabled;
+    final exemptChanged = prev != null && prev.quietExempt != task.quietExempt;
+    final forceRunChanged = prev != null && prev.forceRun != task.forceRun;
+    // 入站振动的勿扰遵循：对齐模式允许对端穿勿扰（与本机同权），留痕告知用户；
+    // 收紧模式强制 true 并对试图关闭者留痕。
+    final dndOptOut = TaskWire.inboundDndDowngrade(j['action']);
     await logs.append(
         source: 'remote',
         action: 'task.upsert',
@@ -2281,9 +2278,9 @@ class RcEndpointService {
         taskId: task.id,
         message: 'by ${peer.name} · ${existed ? '更新' : '新建'}'
             '「${task.name}」· 清理 $dropped 条旧计划 · 新计划 $planned 条'
-            '${exemptCleared ? ' · 夜间豁免已被本次远程更新清除' : ''}'
-            '${forceRunCleared ? ' · 全局执行总开关例外已被本次远程更新清除' : ''}'
-            '${dndForced ? ' · 对端请求关闭「遵循勿扰」已被拒绝（远程不得绕过本机护栏）' : ''}');
+            '${exemptChanged ? ' · 夜间豁免${parity ? '已按对端设置' : '已被清除'}（远程=本机对齐）' : ''}'
+            '${forceRunChanged ? ' · 全局执行总开关例外${parity ? '已按对端设置' : '已被清除'}' : ''}'
+            '${dndOptOut ? (parity ? ' · 对端请求穿透勿扰（已按对齐策略放行）' : ' · 对端请求关闭「遵循勿扰」已被拒绝') : ''}');
     await _send(
         RcMessage.now(RcEvt.task, {
           'for': msg.id,

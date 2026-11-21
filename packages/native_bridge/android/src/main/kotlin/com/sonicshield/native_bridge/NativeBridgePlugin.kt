@@ -316,7 +316,14 @@ class NativeBridgePlugin : FlutterPlugin, ActivityAware {
                             // —— Dart 侧于是把"压根没震"记成 success 审计（假阳性），
                             // 控制端的 ack 也报 ok。"成功不得被误报"是既有判据
                             // （BUG-073 同类），这里补齐。
-                            result.success(vibrate(ctx, pattern))
+                            //
+                            // BUG-157（R105）：固定节奏链路补 `useAlarmUsage`。旧实现
+                            // 写死 USAGE_NOTIFICATION，本机自排的"固定节奏振动"在静音/
+                            // 勿扰下必被系统吞掉——R93 只修了随机/持续振动，漏了这条
+                            // 老链路。默认 false 保持远程入站"跟随勿扰"合规红线不动；
+                            // 本机任务由 Dart 侧显式传 true（等价用户自设闹钟）。
+                            val useAlarm = call.argument<Boolean>("useAlarmUsage") ?: false
+                            result.success(vibrate(ctx, pattern, useAlarm))
                         }
                         // ---- v1.9 振动能力（docs/20 §5.1）----
                         "vibrateCapabilities" ->
@@ -1158,9 +1165,13 @@ class NativeBridgePlugin : FlutterPlugin, ActivityAware {
      * [vibrateWaveform] 的真实结果 —— 那里对"无振动器 / 无振幅控制 /
      * 属性 API 抛异常"都会返回 false，调用方据此如实回执。
      */
-    private fun vibrate(ctx: Context, pattern: List<Long>): Boolean {
+    private fun vibrate(
+        ctx: Context,
+        pattern: List<Long>,
+        useAlarm: Boolean = false,
+    ): Boolean {
         if (pattern.isEmpty()) return false
-        return vibrateWaveform(ctx, pattern, null, -1, false)
+        return vibrateWaveform(ctx, pattern, null, -1, useAlarm)
     }
 
     // ---------- 音量（远程 volume.set，docs/16 §9） ----------

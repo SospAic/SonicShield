@@ -103,22 +103,36 @@ void main() {
       expect(a.rampDownSec, lessThanOrEqualTo(VibrateLimits.maxRampSec));
     });
 
-    test('RV-06 入站振动一律遵循勿扰（对端不得绕过本机护栏）', () {
+    test('RV-06 R105 对齐：入站 respectDnd 尊重对端显式值，缺省 false', () {
+      // R105 老板裁决「远程=本机对齐」：远程指令组的振动步与本机同权。
       for (final mode in ['random', 'continuous']) {
-        final s = RcStep(RcStepKind.vibrate, {
+        // 显式 false（穿勿扰）被尊重。
+        final off = RcStep(RcStepKind.vibrate, {
           'mode': mode,
           'respectDnd': false,
         });
-        final respect = switch (s.vibrateConfig()) {
+        final offRespect = switch (off.vibrateConfig()) {
           final RandomVibrateAction a => a.respectDnd,
           final ContinuousVibrateAction a => a.respectDnd,
           final other => fail('mode=$mode 得到 ${other.runtimeType}'),
         };
-        expect(respect, isTrue, reason: 'mode=$mode 让对端关掉了「遵循勿扰」');
+        expect(offRespect, isFalse,
+            reason: 'mode=$mode 显式穿勿扰被尊重（与本机同权）');
+        // 显式 true（跟随勿扰）同样被尊重 —— 对齐 ≠ 强制穿透。
+        final on = RcStep(RcStepKind.vibrate, {
+          'mode': mode,
+          'respectDnd': true,
+        });
+        final onRespect = switch (on.vibrateConfig()) {
+          final RandomVibrateAction a => a.respectDnd,
+          final ContinuousVibrateAction a => a.respectDnd,
+          final other => fail('mode=$mode 得到 ${other.runtimeType}'),
+        };
+        expect(onRespect, isTrue, reason: '对齐模式尊重显式 true');
       }
-      // 缺失也必须是 true（不能因为"没写"就落成 false）。
+      // 缺省与本机默认一致（false = 可穿勿扰）。
       const dflt = RcStep(RcStepKind.vibrate, {'mode': 'random'});
-      expect((dflt.vibrateConfig() as RandomVibrateAction).respectDnd, isTrue);
+      expect((dflt.vibrateConfig() as RandomVibrateAction).respectDnd, isFalse);
     });
 
     test('RV-07 describe 给出人话（含时长与强度区间）', () {
@@ -247,7 +261,8 @@ void main() {
     test('RV-11 随机振动的规格键 == 模型 toJson 键（去掉 kind/respectDnd）', () {
       final modelKeys = (const RandomVibrateAction().toJson().keys.toSet())
         ..remove('kind')
-        // respectDnd 刻意不由远程暴露（RV-06 强制 true）。
+        // R105：respectDnd 由线格式层（TaskWire._clampRespectDnd）采信，
+        // 不进 RC 指令组的表单规格 —— 表单不暴露 ≠ 远程不能传。
         ..remove('respectDnd');
       final specKeys = {for (final f in rcVibrateRandomFields) f.key};
       expect(specKeys, modelKeys,
@@ -307,7 +322,8 @@ void main() {
       expect(a.amplitudeMin, 0.6);
       expect(a.amplitudeMax, 0.6);
       expect(a.jitterMs, 0, reason: '恒定振动不得有强度波动');
-      expect(a.respectDnd, isTrue, reason: '远程路径不得绕过系统勿扰');
+      expect(a.respectDnd, isFalse,
+          reason: 'R105 对齐：远程缺省与本机一致（false = 可穿勿扰）');
     });
 
     test('VS-02 fixed 越界先夹紧再构造（release 下 assert 被剥离）', () {
@@ -340,7 +356,7 @@ void main() {
       expect(a.durationSecMax, 10);
       expect(a.amplitudeMin, 0.4);
       expect(a.amplitudeMax, 1.0);
-      expect(a.respectDnd, isTrue);
+      expect(a.respectDnd, isFalse, reason: 'R105 对齐：缺省可穿勿扰');
     });
 
     test('VS-04 continuous 区间浮动（时长/强度/波动周期都生效）', () {
@@ -355,7 +371,7 @@ void main() {
       expect(a.durationSecMin, 10);
       expect(a.durationSecMax, 30);
       expect(a.jitterMs, 800);
-      expect(a.respectDnd, isTrue);
+      expect(a.respectDnd, isFalse, reason: 'R105 对齐：缺省可穿勿扰');
     });
 
     test('VS-05 未知/缺失 mode 归到 fixed（与 rcVibrateModeOf 一致，不抛）', () {
