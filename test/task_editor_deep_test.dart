@@ -1452,6 +1452,19 @@ void main() {
 
   testWidgets('TEI-G1 固定一次：日期选择器确认后真的回写日期并落库',
       (tester) async {
+    // R104 / 假设型护栏修复：原用例把日期写死成 2026-11-02、点 15、
+    // 期望 11-15。真实时间越过 11-03 后 initialDate 落在 firstDate
+    // 之前（showDatePicker 断言崩，见 BUG-156）；到 11-15 当天 6:05
+    // 又变成过去时刻被合规护栏拦下 ⇒ sent 为 null。改成相对日期：
+    // 基准取下月 10 号 23:00、目标取下月 15 号，整月必然在未来。
+    final now = DateTime.now();
+    final monthStart = DateTime(now.year, now.month + 1, 1);
+    final initialAt = DateTime(monthStart.year, monthStart.month, 10, 23);
+    final targetAt = DateTime(monthStart.year, monthStart.month, 15, 23);
+    String ymd(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+        '${d.day.toString().padLeft(2, '0')}';
+
     Task? sent;
     await pumpEditor(
       tester,
@@ -1462,34 +1475,84 @@ void main() {
       initialTask: task(
         id: 'x',
         triggerType: TriggerType.fixedOnce,
-        trigger: FixedOnceTrigger(at: DateTime(2026, 11, 2, 6, 5)),
+        trigger: FixedOnceTrigger(at: initialAt),
         actionType: ActionType.notify,
         action: const NotifyAction(title: 'a', body: 'b'),
       ),
     );
     final before = textOf(tester, find.textContaining('日期：'));
-    expect(before, contains('2026-11-02'));
+    expect(before, contains(ymd(initialAt)));
 
     await tester.tap(find.textContaining('日期：'));
     await tester.pumpAndSettle(); // 日历对话框
-    // 点一个与初始日期不同的日子（11 月，无重复数字：表头只显示初始日）。
+    // 下月整月都在可选区间内 ⇒ 15 号唯一、可选，且与 10 号不同。
     await tester.tap(find.text('15'));
     await tester.pump();
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
 
     final after = textOf(tester, find.textContaining('日期：'));
-    expect(after, contains('2026-11-15'), reason: '确认后日期必须真的回写');
+    expect(after, contains(ymd(targetAt)), reason: '确认后日期必须真的回写');
     expect(after, isNot(before));
 
     await tapSave(tester);
     final at = (sent!.trigger as FixedOnceTrigger).at;
-    expect(at.year, 2026);
-    expect(at.month, 11);
+    expect(at.year, targetAt.year);
+    expect(at.month, targetAt.month);
     expect(at.day, 15, reason: '保存产物必须携带选择器写回的那一天');
-    expect(at.hour, 6, reason: '日期换了，时刻必须原样保留');
+    expect(at.hour, 23, reason: '日期换了，时刻必须原样保留');
   }, timeout: perTest);
 
+  testWidgets('TEI-G1b 过期「固定一次」任务点日期选择器不崩（BUG-156 下界）',
+      (tester) async {
+    final past = DateTime.now().subtract(const Duration(days: 30));
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async => true,
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.fixedOnce,
+        trigger: FixedOnceTrigger(
+            at: DateTime(past.year, past.month, past.day, 6, 5)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    expect(textOf(tester, find.textContaining('日期：')), isNotEmpty);
+
+    // ★ 真实用户动作：修复前这一步直接抛 showDatePicker 的
+    // `initialDate >= firstDate` 断言，用户连改日期的机会都没有。
+    await tester.tap(find.textContaining('日期：'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DatePickerDialog), findsOneWidget,
+        reason: '过期任务也必须能打开日历改日期');
+    expect(tester.takeException(), isNull,
+        reason: 'BUG-156 复发：initialDate 早于 firstDate 导致断言崩');
+  }, timeout: perTest);
+
+  testWidgets('TEI-G1c 超远未来日期点日期选择器不崩（BUG-156 上界）',
+      (tester) async {
+    final far = DateTime.now().add(const Duration(days: 3650 + 400));
+    await pumpEditor(
+      tester,
+      remoteSave: (t) async => true,
+      initialTask: task(
+        id: 'x',
+        triggerType: TriggerType.fixedOnce,
+        trigger: FixedOnceTrigger(
+            at: DateTime(far.year, far.month, far.day, 6, 5)),
+        actionType: ActionType.notify,
+        action: const NotifyAction(title: 'a', body: 'b'),
+      ),
+    );
+    await tester.tap(find.textContaining('日期：'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DatePickerDialog), findsOneWidget,
+        reason: '超出 lastDate 的历史值也必须被夹进可选区间后正常打开');
+    expect(tester.takeException(), isNull);
+  }, timeout: perTest);
   testWidgets('TEI-G2 随机窗口：跨午夜开关可开可关（开→落库，再关→回 false）',
       (tester) async {
     Task? sent;

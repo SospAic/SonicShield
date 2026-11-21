@@ -85,7 +85,7 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                     keyboardType: TextInputType.number,
                     inputFormatters: [
                       FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(9),
+                      LengthLimitingTextInputFormatter(RcAssist.codeLength),
                     ],
                     style: AppText.headlineSmall.copyWith(letterSpacing: 4, fontFamily: 'monospace'),
                     decoration: const InputDecoration(
@@ -100,13 +100,20 @@ class _AssistJoinScreenState extends State<AssistJoinScreen> {
                     enabled: !busy,
                     textCapitalization: TextCapitalization.characters,
                     inputFormatters: [
-                      FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
-                      LengthLimitingTextInputFormatter(8),
+                      FilteringTextInputFormatter.allow(
+                          RegExp(RcAssist.passwordInputPattern)),
+                      // R104 / BUG-152,153：R94 把访问密码从 8 → 12 位时只改了
+                      // 协议与文案，这里的上限仍停在 8 ⇒ 合法 12 位密码永远
+                      // 输不满，join() 必定报「访问密码应为 12 位」，协助会话
+                      // 功能整体不可用。上限必须与 RcAssist._pwDigits 一致。
+                      LengthLimitingTextInputFormatter(RcAssist.passwordLength),
                     ],
                     style: AppText.headlineSmall.copyWith(letterSpacing: 4, fontFamily: 'monospace'),
                     decoration: const InputDecoration(
                       labelText: '访问密码（12 位）',
-                      hintText: 'ABCD EFGH',
+                      // 示例必须是 12 位且全在 Crockford 字母表内
+                      // （不含 I/L/O/U/0/1），否则会误导用户照抄非法字符。
+                      hintText: 'ABCD EFGH JKMN',
                       border: OutlineInputBorder(),
                     ),
                   ),

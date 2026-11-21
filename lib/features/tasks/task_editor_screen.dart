@@ -846,11 +846,23 @@ class _TaskEditorScreenState extends ConsumerState<TaskEditorScreen> {
               title: Text('日期：${_fmtDate(_fixedOnceDate)}'),
               subtitle: const Text('固定一次只在所选日期的该时刻触发'),
               onTap: () async {
+                // R104 / BUG-156：`showDatePicker` 内部断言
+                // `initialDate >= firstDate`。既有「固定一次」任务的日期一旦过期
+                // （历史/导入任务、或任务放久了），直接把 `_fixedOnceDate` 传进去
+                // 会在用户点开日历的瞬间抛断言、整页崩掉 —— 用户连改日期的机会
+                // 都没有。initialDate 只决定日历打开时定位到哪一天，夹进可选
+                // 区间即可；ListTile 标题仍展示任务真实日期，改选后照常回写。
+                final now = DateTime.now();
+                final first = now.subtract(const Duration(days: 1));
+                final last = now.add(const Duration(days: 3650));
+                final initial = _fixedOnceDate.isBefore(first)
+                    ? first
+                    : (_fixedOnceDate.isAfter(last) ? last : _fixedOnceDate);
                 final d = await showDatePicker(
                   context: ctx,
-                  initialDate: _fixedOnceDate,
-                  firstDate: DateTime.now().subtract(const Duration(days: 1)),
-                  lastDate: DateTime.now().add(const Duration(days: 3650)),
+                  initialDate: initial,
+                  firstDate: first,
+                  lastDate: last,
                 );
                 if (d != null) setState(() => _fixedOnceDate = d);
               },

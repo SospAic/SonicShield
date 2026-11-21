@@ -228,11 +228,17 @@ void main() {
       // 300ms × 4 = 1200ms —— 不是铺满的 2000ms。
       expect(r.playedMs, greaterThan(1000),
           reason: '必须真的播了 4 遍（1200ms），而不是只播一遍');
-      expect(r.playedMs, lessThan(1900),
-          reason: '不许铺满到 maxDurationMs(2000) —— 铺满会让 1.3s 音效连响 20+ 遍');
-      expect(audio.countOf('seek'), greaterThanOrEqualTo(3),
-          reason: 'repeat=4 必须真的重复播放（seek 回开头 3 次），'
-              '而不是靠 LoopMode.one —— 后者一旦 stop 失效就是无限播放');
+      // R104 / 护栏修复：旧的 `lessThan(1900)` 是**墙钟上界**，与本文件
+      // 开头写明的纪律「时长判据只用下界，上界只留足够宽的反挂死护栏」
+      // 直接矛盾。--coverage 满载下 1200ms 标称窗口实测膨胀到 2400ms，
+      // 功能完全正确却被误判成「铺满」。改用不依赖墙钟的平台动作计数：
+      // repeat=4 ⇒ passes=4 ⇒ 恰好 3 次 seek；若真铺满 2000ms 窗口，
+      // passes=7 ⇒ 6 次 seek。判据更严，且不受机器负载影响。
+      expect(audio.countOf('seek'), 3,
+          reason: '不许铺满到 maxDurationMs(2000)：铺满 = 6 次 seek，'
+              '按次数播放 = 恰好 3 次 seek');
+      expect(r.playedMs, lessThan(_playWallCeilingMs),
+          reason: '反挂死护栏（含前置 await，详见文件头说明）');
     });
 
     test('PA-04c 默认 repeat=1 ⇒ 不设循环、播一遍就停（撤销铺满后的基线）', () async {

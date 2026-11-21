@@ -23,7 +23,7 @@ class AppMeta {
   /// 🔴 第八十四轮用户基线：**禁止** `alpha+N` 之类预发布后缀表述；
   /// 版本号一律为纯 `x.y.z`，且**每轮迭代至少 +0.0.1**（不得同号复用）。
   /// 迭代日期改由 [buildDate] 承载（见 [displayVersion]）。
-  static const String version = '1.9.17';
+  static const String version = '1.9.18';
 
   /// 与 pubspec.yaml 的 `+N` **构建号**同步（第七十七轮基线新增）。
   ///
@@ -35,7 +35,7 @@ class AppMeta {
   /// 因此约定：**界面一律显示 [displayVersion]**（含构建号）；
   /// `test/version_consistency_test.dart` 强制 [buildNumber] 与 pubspec 一致、
   /// 并锁死界面不得再出现写死的版本号。
-  static const String buildNumber = '40';
+  static const String buildNumber = '41';
 
   /// 迭代日期（年月日），每次迭代随版本信息一起更新。
   ///
@@ -43,7 +43,7 @@ class AppMeta {
   /// 追加年月日**——让用户/远程回执能直接看到本轮构建日期，而不必靠 `+N`
   /// 反推。`test/version_consistency_test.dart` 强制其格式为 `YYYY-MM-DD`、
   /// 且 [displayVersion] 必须携带该日期。
-  static const String buildDate = '2026-10-28';
+  static const String buildDate = '2026-11-15';
 
   /// 面向用户的完整版本串，设置页「关于」区块显示的就是它。
   ///
@@ -117,6 +117,15 @@ class ComplianceGuardrails {
   /// 区间收窄到这里，`_load()` 也会把历史脏值（20/21）归一到 22。
   static const int minQuietStartHour = 22;
   static const int maxQuietStartHour = 23;
+
+  /// 结束小时的可调范围（与开始同纪律：**只能调窄，不能调宽**）。
+  ///
+  /// R104 / BUG-154：BUG-107 当年只把「开始」从 20..23 收到 22..23，
+  /// 结束却仍是 5..9 —— 选 8/9 会把默认 22:00–07:00 拉成 22:00–09:00，
+  /// 比默认更宽，与设置页「只能把窗口调窄」的承诺直接矛盾。
+  /// 上界钉在默认值 7；越界历史值由下拉候选项兜住显示（不改写库里的值）。
+  static const int minQuietEndHour = 5;
+  static const int maxQuietEndHour = defaultQuietEndHour;
 
   /// 系统音量百分比硬上限（media 通道）。
   static const double maxMediaVolumePercent = 100;

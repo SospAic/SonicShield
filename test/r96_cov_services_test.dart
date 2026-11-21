@@ -298,14 +298,28 @@ void main() {
     });
 
     test('COV-07 高优先级抢占在飞的低优先级：被抢占方如实报失败', () async {
+      // R104 / 用例适配 R102,R103：新语义下 total 优先取
+      // 「文件时长 × 次数」，maxDurationMs 只在文件时长未知时兜底。
+      // 本组 setUp 的 600 秒文件会让**抢占方自己**也播 600 秒，
+      // `await high` 永不返回 ⇒ 30s 确定性超时（不是偶发红）。
+      // 用短文件 + loopFill 造"低优先级在飞"的长窗口：low 的 total
+      // 取 maxDurationMs(60000)，high 的 total 取文件时长(300ms)。
+      audio.fileDuration = const Duration(milliseconds: 300);
       final svc = PlaybackService();
       final lowFut = svc.play(
         path: path,
         channel: AudioChannel.media,
         volume: 0.5,
         maxDurationMs: 60000,
+        loopFill: true,
         priority: PlayPriority.normal,
       );
+
+      // 等第一路真的起播再发抢占（与 COV-06 同一条纪律），
+      // 否则"在飞"只是台账上的假设而非可观测事实。
+      while (audio.countOf('play') == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
 
       final high = await svc.play(
         path: path,

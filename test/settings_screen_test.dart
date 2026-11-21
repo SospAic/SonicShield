@@ -438,12 +438,14 @@ void main() {
       SharedPreferences.setMockInitialValues({'quiet_start': 20});
       await pumpSettings(tester);
 
-      // 1 号下拉 = 结束（可选 5..9）
-      await pickQuietHour(tester, 1, '9:00');
-      await waitFor(tester, () => find.text('结束：9:00').evaluate().isNotEmpty,
-          reason: '标题应更新为 9:00');
+      // 1 号下拉 = 结束。R104 / BUG-154：候选区间由
+      // ComplianceGuardrails.minQuietEndHour..maxQuietEndHour 派生（5..7），
+      // 不再硬编码 5..9 —— 8/9 会把默认窗口调宽，违反页面「只能调窄」承诺。
+      await pickQuietHour(tester, 1, '6:00');
+      await waitFor(tester, () => find.text('结束：6:00').evaluate().isNotEmpty,
+          reason: '标题应更新为 6:00');
 
-      expect(await prefInt('quiet_end'), 9);
+      expect(await prefInt('quiet_end'), 6);
       expect(await prefInt('quiet_start'), 20, reason: '开始时段不应被动到');
     }, timeout: perTest);
 
@@ -455,7 +457,7 @@ void main() {
       // 既显示得出来，也不在"只是进页面看看"时改写库里的值。
       SharedPreferences.setMockInitialValues({
         'quiet_start': 21, // 低于合规下限 22
-        'quiet_end': 11, // 高于上限 9
+        'quiet_end': 11, // 高于上限 7（R104 起结束上界 = defaultQuietEndHour）
       });
       await pumpSettings(tester);
 

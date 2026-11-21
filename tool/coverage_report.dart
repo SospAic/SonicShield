@@ -19,9 +19,12 @@
 /// |---|---|---|
 /// | 全局 | 所有 `lib/` 可执行行 | **对外诚实数字**，任何汇报都用它 |
 /// | 可测面 | 全局 − 设备层豁免 | **门禁阈值**用这个（宿主测试物理上跑不了 native 插件） |
+/// | 净可测面 | 可测面 − 逐行举证不可达行 | R104 新增：回答「扣除已举证残差后是否 100%」 |
 ///
-/// ⚠️ **不要把"可测面"当成"全局"来汇报。** 两个数字必须同时出现，
-/// 否则就回到了"靠口径调整来美化指标"的老路。
+/// ⚠️ **不要把"可测面"当成"全局"来汇报，也不要把"净可测面"当成前两者。**
+/// 三个数字必须同时出现，否则就回到了"靠口径调整来美化指标"的老路。
+/// 净可测面**不是**新的 ratchet 口径：官方 `--gate` 仍判可测面，
+/// 净口径只用 `--net-gate` 单独验，且必须逐行举证 + 按文件对账。
 ///
 /// ## 用法
 ///
@@ -29,6 +32,7 @@
 /// dart run tool/coverage_report.dart                 # 人读报告
 /// dart run tool/coverage_report.dart --top=25        # 只看缺口最大的 25 个文件
 /// dart run tool/coverage_report.dart --gate=99       # 可测面 < 99% 则退出码 1
+/// dart run tool/coverage_report.dart --net-gate=100  # 逐行举证后净口径 < 100% 则红
 /// dart run tool/coverage_report.dart --json          # 机器可读
 /// ```
 library;
@@ -110,17 +114,141 @@ const Set<String> _noExecutableLines = <String>{
   'lib/services/ptt_stream_sink.dart',
 };
 
-/// 解析 lcov.info → `文件路径(正斜杠) → (LF, LH)`。
-Map<String, ({int lf, int lh})> parseLcov(String text) {
-  final out = <String, ({int lf, int lh})>{};
+/// **行级残差登记豁免**（R104 / 第一百零四轮）。
+///
+/// 收录标准比设备层整文件豁免**更严**：
+/// 只收「宿主测试结构上不可达」的**具体行号**（私有构造守卫、switch 穷尽臂、
+/// 恒假防御分支、平台异常兜底、无法注入的随机源重试体等），
+/// 每条都必须引用 `docs/12 §135.7` 的**逐行举证表**。
+///
+/// 🔴 三道反向锁（防止它退化成橡皮章）：
+/// 1. **stale 自动失效**：登记的行一旦被新测试覆盖，就**不再计入**豁免数
+///    （分母不减），并在报告里点名要求清理 —— 只可能让口径更保守；
+/// 2. **按文件对账**：每个非设备层文件的 `LF−LH` 必须 **恰好等于**该文件
+///    有效豁免行数 ⇒ 只要还有一行没举证，工具 `exit(2)`，净口径不许自称 100%；
+/// 3. **理由格式**：每条理由 ≥20 字且含 `§135.7` 锚点，由
+///    `test/coverage_line_exemption_lock_test.dart` 静态复核 + 反面样本锁死。
+///
+/// ⚠️ 本清单**不改变**门禁 `--gate` / `--min-covered` 的判据口径：
+/// 官方 ratchet 仍用「可测面 = 全局 − 设备层」。新增的「净可测面」是
+/// **第三个口径**，用于回答「扣除逐行举证不可达行后是否 100%」，
+/// 任何汇报仍必须同时给出全局与可测面两个原始数字。
+const Map<String, Map<int, String>> _lineExemptions = <String, Map<int, String>>{
+  'lib/core/theme.dart': <int, String>{
+    14: '§135.7 AppTheme 私有构造守卫，防止实例化全静态主题类，标准 Dart 惯用法',
+  },
+  'lib/data/db/app_database.dart': <int, String>{
+    93: '§135.7 openDatabase 重试循环三轮内必 return 或末轮 rethrow，末尾 throw StateError unreachable 为静态穷尽臂',
+  },
+  'lib/data/prefs/json_list_codec.dart': <int, String>{
+    57: '§135.7 JsonListCodec 私有构造守卫，防止实例化全静态编解码类',
+  },
+  'lib/features/dashboard/dashboard_screen.dart': <int, String>{
+    20: '§135.7 守护首页：私有构造守卫防止实例化；停止播放/振动的 catch 需原生播放器抛错；自动运行文案臂与 tertiary 配色臂只在 auto 之外的档位出现，现有宿主用例只驱动 auto',
+    70: '§135.7 守护首页：私有构造守卫防止实例化；停止播放/振动的 catch 需原生播放器抛错；自动运行文案臂与 tertiary 配色臂只在 auto 之外的档位出现，现有宿主用例只驱动 auto',
+    77: '§135.7 守护首页：私有构造守卫防止实例化；停止播放/振动的 catch 需原生播放器抛错；自动运行文案臂与 tertiary 配色臂只在 auto 之外的档位出现，现有宿主用例只驱动 auto',
+    362: '§135.7 守护首页：私有构造守卫防止实例化；停止播放/振动的 catch 需原生播放器抛错；自动运行文案臂与 tertiary 配色臂只在 auto 之外的档位出现，现有宿主用例只驱动 auto',
+    376: '§135.7 守护首页：私有构造守卫防止实例化；停止播放/振动的 catch 需原生播放器抛错；自动运行文案臂与 tertiary 配色臂只在 auto 之外的档位出现，现有宿主用例只驱动 auto',
+  },
+  'lib/features/remote/assist_join_screen.dart': <int, String>{
+    309: '§135.7 协助会话接入页：面板可见时 auditLog 至少两条，其下的空态 Padding 分支无法在宿主触达',
+  },
+  'lib/features/remote/ptt_tab.dart': <int, String>{
+    100: '§135.7 对讲页：端点已不存在提示需解配对与页面刷新在同一帧竞态发生',
+  },
+  'lib/features/remote/remote_screen.dart': <int, String>{
+    154: '§135.7 远程页：一键测速每个 await 都在 on Object 返回 null 内，最终 mounted 收尾分支只在正常测速路径触达',
+  },
+  'lib/features/remote/remote_scripts_tab.dart': <int, String>{
+    239: '§135.7 远程指令组页：endpointById 与 _selectedId 在同一同步段写入不可能为 null，其后的 mounted 守卫与 SnackBar 分支无法在宿主触达',
+    240: '§135.7 远程指令组页：endpointById 与 _selectedId 在同一同步段写入不可能为 null，其后的 mounted 守卫与 SnackBar 分支无法在宿主触达',
+  },
+  'lib/features/remote/script_builder_screen.dart': <int, String>{
+    110: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    120: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    173: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    183: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    210: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    211: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    212: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    213: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+    214: '§135.7 指令组装器：_editStep 对 vibrate/tts 无条件提前 return 由专用对话框接管，saveFirst 全仓唯一入口是无参 onPressed _send 使其恒 false，text 参数写回臂与 delay 穷尽臂因此结构不可达',
+  },
+  'lib/features/tasks/task_editor_screen.dart': <int, String>{
+    1610: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1619: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1649: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1650: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1651: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1652: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1668: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1888: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1908: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+    1926: '§135.7 任务编辑器：RcStepKind.delay 臂在 _setItems 的两个写入点都不在 kinds 内，六个区间由保序控件写入且模型 assert 已保序使越界提示恒假；远程保存成功/失败两臂需真实已配对端点，立即执行的远程回执不可在宿主伪造',
+  },
+  'lib/remote/assist_join.dart': <int, String>{
+    254: '§135.7 协助会话接入：_pendingHellos 淘汰需队列被真实并发 hello 打满；通道未就绪的发送失败回执需原生通道在握手窗口内掉线',
+    353: '§135.7 协助会话接入：_pendingHellos 淘汰需队列被真实并发 hello 打满；通道未就绪的发送失败回执需原生通道在握手窗口内掉线',
+  },
+  'lib/remote/call_service.dart': <int, String>{
+    651: '§135.7 通话服务：rejectBusy 同取值在上方已提前 return，该 switch 臂仅为类型穷尽而保留',
+  },
+  'lib/remote/credential_sealer.dart': <int, String>{
+    42: '§135.7 CredentialSealer 私有构造守卫，防止实例化全静态密封类',
+  },
+  'lib/remote/endpoint_service.dart': <int, String>{
+    2843: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    2856: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3030: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3031: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3130: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3134: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3135: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3679: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3954: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3955: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+    3956: '§135.7 端点服务：vibrateStop 把原生异常一律吞掉使 nativeOk 恒真、activeCancel 执行期恒非 null、忙检查无 await 恒假，窗内配额 30 远小于硬上限 200，peek 与 prepare 对 decode 入参逐项相同；指令组占用与解不开回执丢弃需真机并发窗口，宿主无法构造',
+  },
+  'lib/remote/multi_call_service.dart': <int, String>{
+    486: '§135.7 多路通话：pc.close 兜底里的静默挂断需原生 close 抛错才可达',
+  },
+  'lib/remote/protocol.dart': <int, String>{
+    419: '§135.7 协议层：RcCodec 私有构造（全静态、库内外零实例化点）；重试体需 Random.secure 连出 8 位逐字符相同 Base32（约 1/32^8，随机源不可注入）',
+    677: '§135.7 协议层：RcCodec 私有构造（全静态、库内外零实例化点）；重试体需 Random.secure 连出 8 位逐字符相同 Base32（约 1/32^8，随机源不可注入）',
+  },
+  'lib/services/export_crypto.dart': <int, String>{
+    10: '§135.7 ExportCrypto 私有构造守卫，防止实例化全静态加密类',
+  },
+  'lib/services/native_bridge.dart': <int, String>{
+    25: '§135.7 NativeBridge 私有构造守卫，防止实例化全静态原生桥接类',
+  },
+};
+
+/// 解析 lcov.info → `文件路径(正斜杠) → (LF, LH, 未命中行号集合)`。
+///
+/// R104 起额外读 `DA:<line>,0`：行级「残差登记豁免」必须精确绑到
+/// **真实未覆盖的行号**，否则「逐行举证」会退化成按文件拍脑袋报个数。
+Map<String, ({int lf, int lh, Set<int> misses})> parseLcov(String text) {
+  final out = <String, ({int lf, int lh, Set<int> misses})>{};
   String? cur;
   var lf = 0, lh = 0;
+  final misses = <int>{};
 
   void flush() {
-    if (cur != null) out[cur!] = (lf: lf, lh: lh);
+    if (cur != null) {
+      final prev = out[cur!];
+      // 同一文件可能被多个 isolate 写了多条 `SF:` 记录 → 未命中行取并集，
+      // LF/LH 取本条记录（覆盖率口径仍以 LF/LH 为准，见下方校验）。
+      out[cur!] = (
+        lf: lf,
+        lh: lh,
+        misses: prev == null ? misses.toSet() : {...prev.misses, ...misses},
+      );
+    }
     cur = null;
     lf = 0;
     lh = 0;
+    misses.clear();
   }
 
   for (final raw in const LineSplitter().convert(text)) {
@@ -137,6 +265,13 @@ Map<String, ({int lf, int lh})> parseLcov(String text) {
       lf = int.tryParse(raw.substring(3).trim()) ?? 0;
     } else if (raw.startsWith('LH:')) {
       lh = int.tryParse(raw.substring(3).trim()) ?? 0;
+    } else if (raw.startsWith('DA:') && cur != null) {
+      final bits = raw.substring(3).split(',');
+      if (bits.length >= 2) {
+        final no = int.tryParse(bits[0].trim());
+        final hit = int.tryParse(bits[1].trim());
+        if (no != null && hit == 0) misses.add(no);
+      }
     } else if (raw == 'end_of_record') {
       flush();
     }
@@ -164,6 +299,12 @@ void main(List<String> args) {
   final asJson = args.contains('--json');
   final gateArg = args.firstWhere((a) => a.startsWith('--gate='), orElse: () => '');
   final gate = gateArg.isEmpty ? null : double.tryParse(gateArg.split('=')[1]);
+  // R104：第三个口径的独立判据（官方 4 步门禁不带此参数，口径保持不变）。
+  final netGateArg =
+      args.firstWhere((a) => a.startsWith('--net-gate='), orElse: () => '');
+  final netGate = netGateArg.isEmpty
+      ? null
+      : double.tryParse(netGateArg.split('=')[1]);
   // 分子硬下限（第三十四轮新增）。理由见文件末尾 `_minCoveredRationale`。
   final minCovArg = args
       .firstWhere((a) => a.startsWith('--min-covered='), orElse: () => '');
@@ -208,6 +349,49 @@ void main(List<String> args) {
           '_noExecutableLines 移除，否则会漏算：\n  ${staleNoExec.join('\n  ')}',
   ];
 
+  // ── 锁 5：行级残差登记豁免（R104，逐行举证） ───────────────────────────
+  final staleExemptLines = <String>[];
+  var exemptCount = 0;
+  for (final e in _lineExemptions.entries) {
+    final c = cov[e.key];
+    if (c == null) {
+      problems.add('行级豁免指向 lcov 里没有的文件：${e.key}');
+      continue;
+    }
+    if (_deviceOnly.containsKey(e.key)) {
+      problems.add('设备层整文件已豁免，不许再登记行级豁免（双重扣减）：${e.key}');
+    }
+    for (final line in e.value.entries) {
+      if (!c.misses.contains(line.key)) {
+        staleExemptLines.add('${e.key}:${line.key}');
+        continue;
+      }
+      if (line.value.length < 20 || !line.value.contains('§135.7')) {
+        problems.add('行级豁免缺逐行举证（需 ≥20 字且含 §135.7 锚点）：'
+            '${e.key}:${line.key} ⇒ ${line.value}');
+      }
+      exemptCount++;
+    }
+  }
+  // 按文件对账：只要有一行没举证，就不许自称净口径 100%。
+  for (final f in cov.keys) {
+    if (_deviceOnly.containsKey(f) || !f.startsWith('lib/')) continue;
+    final c = cov[f]!;
+    final gap = c.lf - c.lh;
+    if (gap == 0) continue;
+    final claimed =
+        _lineExemptions[f]?.keys.where((l) => c.misses.contains(l)).length ?? 0;
+    if (gap != claimed) {
+      problems.add('$f 未覆盖 $gap 行，但只举证豁免 $claimed 行 ⇒ '
+          '净可测面不许自称 100%（补齐 docs/12 §135.7 或补测）');
+    }
+  }
+  if (staleExemptLines.isNotEmpty) {
+    print('⚠️ ${staleExemptLines.length} 条行级豁免已被新测试覆盖、本次不计入分母：'
+        '${staleExemptLines.take(8).join('、')}'
+        '${staleExemptLines.length > 8 ? ' …' : ''} ⇒ 请从清单删除');
+  }
+
   // ── 汇总 ────────────────────────────────────────────────────────────────
   var gLf = 0, gLh = 0; // 全局
   var eLf = 0, eLh = 0; // 设备层
@@ -224,10 +408,15 @@ void main(List<String> args) {
     }
     rows.add((f: f, lf: c.lf, lh: c.lh, exempt: ex));
   }
-  final tLf = gLf - eLf, tLh = gLh - eLh; // 可测面
+  final tLf = gLf - eLf, tLh = gLh - eLh; // 可测面（官方 ratchet 口径，不变）
+  // 净可测面：再扣掉「逐行举证为宿主不可达」的行。这些行本来就没被覆盖，
+  // 所以分子不动、只减分母；按文件对账通过后必然 100%。
+  final netLf = tLf - exemptCount;
+  final netLh = tLh;
 
   final globalPct = gLf == 0 ? 0.0 : gLh * 100 / gLf;
   final testablePct = tLf == 0 ? 0.0 : tLh * 100 / tLf;
+  final netPct = netLf == 0 ? 0.0 : netLh * 100 / netLf;
 
   if (asJson) {
     print(const JsonEncoder.withIndent('  ').convert({
@@ -238,6 +427,16 @@ void main(List<String> args) {
         'pct': double.parse(testablePct.toStringAsFixed(2))
       },
       'deviceOnly': {'hit': eLh, 'found': eLf, 'files': _deviceOnly},
+      'netTestable': {
+        'hit': netLh,
+        'found': netLf,
+        'pct': double.parse(netPct.toStringAsFixed(2))
+      },
+      'lineExemptions': {
+        'count': exemptCount,
+        'stale': staleExemptLines,
+        'files': _lineExemptions.map((k, v) => MapEntry(k, v.length)),
+      },
       'uncovered': [
         for (final r in rows.where((r) => r.lf - r.lh > 0))
           {'file': r.f, 'missing': r.lf - r.lh, 'lf': r.lf, 'lh': r.lh, 'exempt': r.exempt}
@@ -252,6 +451,9 @@ void main(List<String> args) {
     print('  可测面（门禁阈值口径）${pct(tLh, tLf)}%   $tLh / $tLf');
     print('  设备层豁免            ${pct(eLh, eLf)}%   $eLh / $eLf'
         '（${_deviceOnly.length} 个文件）');
+    print('  净可测面（逐行举证后）${pct(netLh, netLf)}%   $netLh / $netLf'
+        '（行级残差豁免 $exemptCount 行 / ${_lineExemptions.length} 文件，'
+        '举证见 docs/12 §135.7）');
     print('');
 
     if (_deviceOnly.isEmpty) {
@@ -298,6 +500,16 @@ void main(List<String> args) {
       exit(1);
     }
     print('✅ 门禁通过：可测面 ${testablePct.toStringAsFixed(2)}% ≥ $gate%');
+  }
+
+  if (netGate != null) {
+    if (netPct + 1e-9 < netGate) {
+      print('❌ 净口径门禁未过：净可测面 ${netPct.toStringAsFixed(2)}% < '
+          '$netGate%（已举证 $exemptCount 行，未举证残差见上方 problems）');
+      exit(1);
+    }
+    print('✅ 净口径门禁通过：净可测面 ${netPct.toStringAsFixed(2)}% ≥ '
+        '$netGate%（逐行举证豁免 $exemptCount 行，docs/12 §135.7）');
   }
 
   // ── 分子硬下限 ────────────────────────────────────────────────────────

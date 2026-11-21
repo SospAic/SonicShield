@@ -130,6 +130,19 @@ abstract final class RcAssist {
   static bool isValidPassword(String pw) =>
       pw.length == _pwDigits && pw.split('').every(_pwAlphabet.contains);
 
+  // R104 / BUG-152,153: UI input constraints MUST derive from protocol truth.
+  // R94 raised the password 8 -> 12 but assist_join_screen kept a hard-coded
+  // LengthLimitingTextInputFormatter(8): a valid 12-char password could never
+  // be fully typed, so join() always failed. The same field allowed
+  // [A-Za-z0-9], admitting I/L/O/U/0/1; normalizePassword silently drops
+  // those chars, so the user sees 12 chars yet still gets "should be 12".
+  static int get codeLength => _codeDigits;
+  static int get passwordLength => _pwDigits;
+
+  /// UI allow-list derived from the Crockford alphabet (no I/L/O/U/0/1).
+  static String get passwordInputPattern =>
+      '[${_pwAlphabet.toLowerCase()}$_pwAlphabet]';
+
   // ---------------- 派生链（R95 / P1-KDF） ----------------
 
   /// 密码 → 会话主密钥 的**慢 KDF**：PBKDF2-HMAC-SHA256 × 100k。

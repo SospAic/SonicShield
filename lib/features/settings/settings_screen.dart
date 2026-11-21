@@ -1008,10 +1008,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             trailing: DropdownButton<int>(
               value: _quietEnd,
               items: [
-                for (var h = 5; h <= 9; h++)
+                for (var h = ComplianceGuardrails.minQuietEndHour;
+                    h <= ComplianceGuardrails.maxQuietEndHour;
+                    h++)
                   DropdownMenuItem(value: h, child: Text('$h:00')),
-                // 同 `_quietStart`：越界的历史值必须能显示，否则断言崩。
-                if (_quietEnd < 5 || _quietEnd > 9)
+                // R104 / BUG-154：同 `_quietStart`，越界历史值必须能显示，否则断言崩；
+                // 用户一旦改选，就只能落在 5–7（只能调窄，不能调宽）。
+                if (_quietEnd < ComplianceGuardrails.minQuietEndHour ||
+                    _quietEnd > ComplianceGuardrails.maxQuietEndHour)
                   DropdownMenuItem(value: _quietEnd, child: Text('$_quietEnd:00')),
               ],
               onChanged: (v) {

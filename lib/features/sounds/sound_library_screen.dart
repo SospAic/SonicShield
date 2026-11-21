@@ -13,7 +13,8 @@ import '../../services/preset_import.dart';
 import '../../core/theme.dart';
 
 /// 音源库：SAF 导入（免存储权限）+ 一键导入内置预置音效库
-/// （60 条程序化合成，12 分类，见 tool/gen_sfx.dart）+ 单条试听。
+/// （78 条程序化合成，14 分类，见 tool/gen_sfx.dart 与
+/// assets/audio/presets_manifest.json）+ 单条试听。
 ///
 /// [embedded] = true 时作为「自动化」分组页的子 TAB 使用：保留「导入预置库」
 /// 操作（否则该能力在新 IA 下不可达），仅去掉标题与返回键。
@@ -138,7 +139,7 @@ class _SoundLibraryScreenState extends ConsumerState<SoundLibraryScreen> {
 
   /// 从 assets/audio/presets_manifest.json 批量导入预置音效（幂等）。
   ///
-  /// 60 条**一次事务**写完（BUG-047）：逐条 `insert` 除了 60 次平台往返，
+  /// 预置库全部条目**一次事务**写完（BUG-047）：逐条 `insert` 除了 N 次平台往返，
   /// 还会在第 k 条失败时留下 k-1 条"半套库"。
   ///
   /// 实现已下沉到 [importBundledPresets]（引擎的空库自愈与这里共用同一条

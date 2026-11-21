@@ -217,6 +217,19 @@ const List<FeaturePoint> featurePoints = <FeaturePoint>[
   FeaturePoint('FR-85', '远程桌面级控制（看 + 控）',
       evidenceFile: 'test/remote_desktop_lock_test.dart', token: 'RDP-01'),
 
+  // ── 第一百零四轮：全功能点仿真 + 缺陷闭环 + 覆盖率逐行举证 ──────────────
+  FeaturePoint('FR-86', '全 UI 交互点仿真与触发前后状态台账',
+      evidenceFile: 'test/r104_ui_inventory_lock_test.dart', token: 'UI-02'),
+  FeaturePoint('FR-87', '协助会话凭据输入约束派生自协议真源',
+      evidenceFile: 'test/r104_assist_password_limit_test.dart',
+      token: 'SIM-ASSIST-01'),
+  FeaturePoint('FR-88', '免打扰窗口只能调窄（结束上界护栏）',
+      evidenceFile: 'test/r104_defect_regression_test.dart', token: 'QW-02'),
+  FeaturePoint('FR-89', '过期固定一次任务日期可改不崩',
+      evidenceFile: 'test/task_editor_deep_test.dart', token: 'TEI-G1b'),
+  FeaturePoint('FR-90', '残差逐行举证登记与净可测面 100%',
+      evidenceFile: 'test/coverage_line_exemption_lock_test.dart', token: 'LNE-01'),
+
   // ── 2. 非功能需求 ─────────────────────────────────────────────────────
   FeaturePoint('NFR-01', '24h 执行成功率 ≥ 99%',
       evidenceFile: 'docs/09-测试计划与测试用例.md', token: 'LT-01',

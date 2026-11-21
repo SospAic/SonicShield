@@ -89,13 +89,19 @@ void main() {
 
   // =====================================================================
   group('全功能点用例库', () {
-    test('FP-00 能从 docs/02 解析出全部 74 个功能点（解析不到即红）', () {
+    test('FP-00 能从 docs/02 解析出全部功能点（解析不到即红）', () {
       expect(doc.existsSync(), isTrue, reason: 'docs/02-需求规格说明书.md 不存在 —— 本锁失去真源');
+      expect(docIds.isNotEmpty, isTrue,
+          reason: '解析出 0 个功能点 ⇒ 解析器失效，必须红而不是静默放行');
+      // 🔴 R104：原写死 `74` 是「需求数量不会变」的假设型护栏，新增
+      // FR-86~90 当场到期。计数改为随矩阵派生；集合的「遗漏/多出/死链」
+      // 由 FP-01 逐条判红，本例只保证「解析得到东西且规模对得上」。
       expect(
         docIds.length,
-        74,
-        reason: 'docs/02 解析到的功能点数是 ${docIds.length}，期望 74。'
-            '若需求规格确实增删了条目，必须同步改本测试与矩阵 —— 不许静默漂移。',
+        featurePoints.length,
+        reason: 'docs/02 解析到 ${docIds.length} 个功能点，矩阵 '
+            '${featurePoints.length} 个；逐条差异见 FP-01。'
+            '需求增删时同步更新 docs/02 与矩阵，不许静默漂移。',
       );
     });
 
