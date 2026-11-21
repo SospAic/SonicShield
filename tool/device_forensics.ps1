@@ -1,5 +1,6 @@
 param(
   [string]$Device = '',
+  [string]$Connect = '',
   [string]$OutDir = ''
 )
 
@@ -18,6 +19,19 @@ foreach ($c in $adbCandidates) {
   if (Get-Command $c -ErrorAction SilentlyContinue) { $adbBin = $c; break }
 }
 if ($null -eq $adbBin) { throw 'adb.exe not found. Install Android platform-tools.' }
+
+# Wireless debugging: adb server does not survive across shells, so connect and
+# collect in ONE process. Pair with `adb pair IP:pairPort CODE` first if needed.
+if (-not [string]::IsNullOrWhiteSpace($Connect)) {
+  & $adbBin kill-server 2>&1 | Out-Null
+  & $adbBin start-server 2>&1 | Out-Null
+  $connectOut = & $adbBin connect $Connect 2>&1 | Out-String
+  $Device = $Connect
+  Write-Output $connectOut
+  if ($connectOut -notmatch 'connected to') {
+    throw "adb connect failed: $connectOut"
+  }
+}
 
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
   $OutDir = Join-Path $root ('evidence\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
