@@ -82,6 +82,27 @@ Map<String, Object?> videoConstraintsFor(CallCaptureProfile p) =>
       },
     };
 
+/// 音频采集约束（`getUserMedia` 的 `audio` 字段），通话质量的**单一真源**。
+///
+/// ## 为什么显式声明而不是裸 `audio: true`
+///
+/// WebRTC 原生层（`webrtc::AudioProcessing`）默认开启 AEC/NS/AGC，但那是
+/// **实现默认**，不是跨平台契约：插件升级、OEM 定制 ROM、或平台侧默认变更
+/// 都可能让它悄悄关掉 —— 症状是"能通话但对方听到回声/背景噪声/忽大忽小"，
+/// 排查时没有任何编译或运行期报错。显式写成约束等于把这条行业基线**固化**:
+/// 支持就开启，不支持按 MDN 规则忽略（不会让通话起不来）。
+///
+/// - `echoCancellation`：消除扬声器→麦克风的回声（免提通话必备，本项目默认免提）；
+/// - `noiseSuppression`：压掉环境底噪；
+/// - `autoGainControl`：自动增益，避免忽大忽小。
+///
+/// 与 `videoConstraintsFor` 同族纯函数，便于宿主逐条断言。
+Map<String, Object?> audioConstraintsFor() => <String, Object?>{
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      'autoGainControl': true,
+    };
+
 /// 单路的发送（编码）档位。
 class CallSendProfile {
   const CallSendProfile({

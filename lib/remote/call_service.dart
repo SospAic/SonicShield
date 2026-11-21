@@ -917,7 +917,9 @@ class CallService {
       // 低端机编码线程直接吃满 CPU ⇒ 双方"爆卡"。`ideal` 而非精确值是为了
       // 避免"摄像头不支持该分辨率 ⇒ 整通电话起不来"。
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        // 显式 AEC/NS/AGC（单一真源）：固化 WebRTC 通话质量基线，防止
+        // 平台/OEM 默认漂移造成回声与噪声（见 audioConstraintsFor 文档）。
+        'audio': audioConstraintsFor(),
         'video': video ? videoConstraintsFor(callVideoCapture) : false,
       });
       // 免提（hands-free）：不切扬声器时 Android 会把通话声音送**听筒**，

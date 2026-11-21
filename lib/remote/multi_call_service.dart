@@ -514,7 +514,8 @@ class MultiCallService {
       // 与单路同源（docs/16 §10）：走 [videoConstraintsFor] 才有帧率上限，
       // 否则多路 + 无上限帧率会让低端机直接"爆卡"。
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        // 与单路同源：显式 AEC/NS/AGC，固化通话质量基线。
+        'audio': audioConstraintsFor(),
         'video': video ? videoConstraintsFor(callVideoCapture) : false,
       });
       // BUG-138：多路视频**必须开免提**。不开时 Android 把声音送到听筒，

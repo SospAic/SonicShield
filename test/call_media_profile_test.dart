@@ -41,6 +41,14 @@ void main() {
       expect(callVideoCapture.height, 480);
       expect(callVideoCapture.frameRate, 24);
     });
+
+    test('CMP-08 音频显式声明 AEC/NS/AGC（单一真源，防平台默认漂移）', () {
+      final a = audioConstraintsFor();
+      expect(a['echoCancellation'], isTrue,
+          reason: '免提通话必须消回声；平台默认可能漂移，须显式固化');
+      expect(a['noiseSuppression'], isTrue, reason: '环境底噪抑制');
+      expect(a['autoGainControl'], isTrue, reason: '音量忽大忽小是高频投诉');
+    });
   });
 
   group('CMP-B 发送档位阶梯（按并发视频路数）', () {

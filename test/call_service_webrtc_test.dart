@@ -264,7 +264,11 @@ void main() {
       final id = await svc.startCall(peer('EP0011'), store, video: false);
       expect(id, isNotNull);
       final constraints = rtc.constraintsOf('getUserMedia');
-      expect(constraints['audio'], isTrue);
+      // R106：音频改走 audioConstraintsFor() 单一真源，显式 AEC/NS/AGC。
+      final audio = constraints['audio'] as Map<String, Object?>;
+      expect(audio['echoCancellation'], isTrue);
+      expect(audio['noiseSuppression'], isTrue);
+      expect(audio['autoGainControl'], isTrue);
       expect(constraints['video'], isFalse);
       expect(rtc.called('enableSpeakerphone'), isTrue,
           reason: '不切扬声器 → Android 走听筒 → 用户报"听不到对方"');
